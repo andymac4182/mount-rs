@@ -14,12 +14,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use mount_rs_core::{
-    ErrorCode, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, S_IFBLK, S_IFCHR, S_IFDIR,
-    S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats, StatsFs,
+    ErrorCode, FileHandle, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, S_IFBLK, S_IFCHR,
+    S_IFDIR, S_IFIFO, S_IFLNK, S_IFMT, S_IFREG, S_IFSOCK, Stats, StatsFs,
 };
 
 use crate::handles::{
-    DirectorySnapshots, FileHandleTable, FileHandleTableOptions, cookie_verifier, same_verifier,
+    DirectorySnapshots, FileHandleTable, FileHandleTableOptions, HandleEntry, cookie_verifier,
+    same_verifier,
 };
 use crate::rpc::{
     AUTH_NONE, AUTH_SYS, AUTH_TOOWEAK, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH,
@@ -662,15 +663,31 @@ struct ExclusiveV4 {
     attrset: Vec<u32>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct OpenState {
     stateid: Stateid4,
     clientid: u64,
     file_id: u64,
     path: String,
+    handle: Arc<dyn FileHandle>,
     access: u32,
     deny: u32,
     owner: Vec<u8>,
+}
+
+impl fmt::Debug for OpenState {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OpenState")
+            .field("stateid", &self.stateid)
+            .field("clientid", &self.clientid)
+            .field("file_id", &self.file_id)
+            .field("path", &self.path)
+            .field("access", &self.access)
+            .field("deny", &self.deny)
+            .field("owner", &self.owner)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1620,13 +1637,23 @@ impl Nfs4Session {
         *self.destroyed.lock().expect("NFSv4 destroyed lock") = true;
         self.handles.clear();
         self.snapshots.clear();
-        let mut state = self.state.lock().expect("NFSv4 state lock");
-        state.clients.clear();
-        state.owners.clear();
-        state.sessions.clear();
-        state.opens.clear();
-        state.locks.clear();
-        state.exclusive_creates.clear();
+        let open_handles = {
+            let mut state = self.state.lock().expect("NFSv4 state lock");
+            state.clients.clear();
+            state.owners.clear();
+            state.sessions.clear();
+            let open_handles = state
+                .opens
+                .drain()
+                .map(|(_, open)| open.handle)
+                .collect::<Vec<_>>();
+            state.locks.clear();
+            state.exclusive_creates.clear();
+            open_handles
+        };
+        for handle in open_handles {
+            let _ = handle.close().await;
+        }
     }
 
     /// Handle one unframed RPC message.  The v4 service accepts only the
@@ -2425,6 +2452,22 @@ impl Nfs4Session {
     }
 
     async fn attr_bytes(&self, path: &str, requested: &[u32]) -> Result<Vec<u8>, u32> {
+        let stats = self
+            .stat_of(path)
+            .await
+            .map_err(|error| error_status(&error))?;
+        let entry = self.handles.bind(path, &stats);
+        self.attr_bytes_for(Some(path), &entry, &stats, requested)
+            .await
+    }
+
+    async fn attr_bytes_for(
+        &self,
+        path: Option<&str>,
+        entry: &HandleEntry,
+        stats: &Stats,
+        requested: &[u32],
+    ) -> Result<Vec<u8>, u32> {
         if bitmap_bits(requested).any(set_only_attr) {
             return Err(NFS4ERR_INVAL);
         }
@@ -2441,12 +2484,12 @@ impl Nfs4Session {
             })
             .collect();
         let requested_mask = bitmap_of(requested_bits.iter().copied());
-        let stats = self
-            .stat_of(path)
-            .await
-            .map_err(|error| error_status(&error))?;
-        let entry = self.handles.bind(path, &stats);
-        let fs = self.driver.statfs(path).await.unwrap_or_else(|_| StatsFs {
+        let fs = if let Some(path) = path {
+            self.driver.statfs(path).await.ok()
+        } else {
+            None
+        }
+        .unwrap_or_else(|| StatsFs {
             filesystem_type: 0,
             block_size: stats.blksize.max(1),
             blocks: 0,
@@ -2462,9 +2505,9 @@ impl Nfs4Session {
                     &mut values,
                     &supported_attrs(capabilities.statfs, capabilities.times),
                 ),
-                FATTR4_TYPE => values.u32(type_of(&stats)),
+                FATTR4_TYPE => values.u32(type_of(stats)),
                 FATTR4_FH_EXPIRE_TYPE => values.u32(FH4_PERSISTENT),
-                FATTR4_CHANGE => values.u64(stat_change(&stats)),
+                FATTR4_CHANGE => values.u64(stat_change(stats)),
                 FATTR4_SIZE => values.u64(stats.size),
                 FATTR4_LINK_SUPPORT => values.bool(self.driver.capabilities.hardlinks),
                 FATTR4_SYMLINK_SUPPORT => values.bool(self.driver.capabilities.symlinks),
@@ -2476,7 +2519,7 @@ impl Nfs4Session {
                 FATTR4_UNIQUE_HANDLES => values.bool(true),
                 FATTR4_LEASE_TIME => values.u32(DEFAULT_LEASE_SECONDS),
                 FATTR4_RDATTR_ERROR => values.u32(NFS4_OK),
-                FATTR4_FILEHANDLE => values.var_opaque(&self.handles.encode(&entry)),
+                FATTR4_FILEHANDLE => values.var_opaque(&self.handles.encode(entry)),
                 FATTR4_FILEID => values.u64(entry.fileid),
                 FATTR4_FILES_AVAIL => values.u64(fs.blocks_available),
                 FATTR4_FILES_FREE => values.u64(fs.blocks_free),
@@ -2509,6 +2552,16 @@ impl Nfs4Session {
         write_bitmap(&mut result, &requested_mask);
         result.var_opaque(&values.into_bytes());
         Ok(result.into_bytes())
+    }
+
+    fn open_handle_for_file_id(&self, file_id: u64) -> Option<Arc<dyn FileHandle>> {
+        self.state
+            .lock()
+            .expect("NFSv4 state lock")
+            .opens
+            .values()
+            .find(|open| open.file_id == file_id)
+            .map(|open| open.handle.clone())
     }
 
     async fn lookup(&self, name: &str, cursor: &mut Cursor) -> V4OpResult {
@@ -2552,13 +2605,31 @@ impl Nfs4Session {
     }
 
     async fn getattr(&self, mask: &[u32], cursor: &Cursor) -> V4OpResult {
-        let path = match self.current_path(cursor) {
-            Ok(path) => path,
-            Err(error) => return V4OpResult::new(OP_GETATTR, error_status(&error)),
-        };
-        match self.attr_bytes(&path, mask).await {
-            Ok(body) => V4OpResult::with_body(OP_GETATTR, NFS4_OK, body),
-            Err(status) => V4OpResult::new(OP_GETATTR, status),
+        match self.current_path(cursor) {
+            Ok(path) => match self.attr_bytes(&path, mask).await {
+                Ok(body) => V4OpResult::with_body(OP_GETATTR, NFS4_OK, body),
+                Err(status) => V4OpResult::new(OP_GETATTR, status),
+            },
+            Err(path_error) => {
+                let Some(handle) = cursor.current.as_deref() else {
+                    return V4OpResult::new(OP_GETATTR, error_status(&path_error));
+                };
+                let entry = match self.handles.decode(handle) {
+                    Ok(entry) => entry,
+                    Err(_) => return V4OpResult::new(OP_GETATTR, error_status(&path_error)),
+                };
+                let Some(open_handle) = self.open_handle_for_file_id(entry.fileid) else {
+                    return V4OpResult::new(OP_GETATTR, error_status(&path_error));
+                };
+                let stats = match open_handle.stat().await {
+                    Ok(stats) => stats,
+                    Err(error) => return V4OpResult::new(OP_GETATTR, error_status(&error)),
+                };
+                match self.attr_bytes_for(None, &entry, &stats, mask).await {
+                    Ok(body) => V4OpResult::with_body(OP_GETATTR, NFS4_OK, body),
+                    Err(status) => V4OpResult::new(OP_GETATTR, status),
+                }
+            }
         }
     }
 
@@ -2834,6 +2905,7 @@ impl Nfs4Session {
             Ok(stats) => stats,
             Err(error) => return V4OpResult::new(OP_REMOVE, error_status(&error)),
         };
+        let target_entry = self.handles.bind(&path, &target);
         let result = if target.mode & S_IFMT == S_IFDIR {
             self.driver.rmdir(&path).await
         } else {
@@ -2842,7 +2914,16 @@ impl Nfs4Session {
         if let Err(error) = result {
             return V4OpResult::new(OP_REMOVE, error_status(&error));
         }
-        self.handles.forget(&path);
+        if target.mode & S_IFMT == S_IFDIR {
+            self.handles.forget(&path);
+        } else if self.open_handle_for_file_id(target_entry.fileid).is_some() {
+            // Keep the opaque filehandle and backend descriptor alive for an
+            // outstanding OPEN; the namespace name is gone, so resolution by
+            // path must still fail while READ/GETATTR use the held handle.
+            self.handles.orphan(&path);
+        } else {
+            self.handles.forget(&path);
+        }
         self.forget_exclusive(&path);
         self.invalidate(&parent);
         let after = self
@@ -3577,20 +3658,24 @@ impl Nfs4Session {
             append: false,
             exclusive: matches!(args.create_mode, Some(EXCLUSIVE4 | EXCLUSIVE4_1)) && should_create,
         };
-        let handle = match self.driver.open_flags(&path, flags, mode & 0o7777).await {
-            Ok(handle) => handle,
-            Err(error) => return V4OpResult::new(OP_OPEN, error_status(&error)),
-        };
-        if let Err(error) = handle.close().await {
-            return V4OpResult::new(OP_OPEN, error_status(&error));
-        }
+        let mut handle = Some(
+            match self.driver.open_flags(&path, flags, mode & 0o7777).await {
+                Ok(handle) => handle,
+                Err(error) => return V4OpResult::new(OP_OPEN, error_status(&error)),
+            },
+        );
         let mut attrset = remembered_attrset.unwrap_or_default();
         if let Some(attrs) = args.create_attrs.as_ref()
             && should_create
         {
             attrset = match self.apply_attrs(&path, attrs).await {
                 Ok(applied) => applied,
-                Err(status) => return V4OpResult::new(OP_OPEN, status),
+                Err(status) => {
+                    if let Some(handle) = handle.take() {
+                        let _ = handle.close().await;
+                    }
+                    return V4OpResult::new(OP_OPEN, status);
+                }
             };
         } else if !should_create
             && args.create_mode == Some(UNCHECKED4)
@@ -3601,27 +3686,43 @@ impl Nfs4Session {
                 == Some(0)
         {
             if let Err(error) = self.driver.truncate(&path, 0).await {
+                if let Some(handle) = handle.take() {
+                    let _ = handle.close().await;
+                }
                 return V4OpResult::new(OP_OPEN, error_status(&error));
             }
             attrset = bitmap_of([FATTR4_SIZE]);
         }
         let stats = match self.stat_of(&path).await {
             Ok(stats) => stats,
-            Err(error) => return V4OpResult::new(OP_OPEN, error_status(&error)),
+            Err(error) => {
+                if let Some(handle) = handle.take() {
+                    let _ = handle.close().await;
+                }
+                return V4OpResult::new(OP_OPEN, error_status(&error));
+            }
         };
         let entry = self.handles.bind(&path, &stats);
         let clientid = cursor.clientid.unwrap_or(args.owner_clientid);
-        let stateid = {
-            let mut state = self.state.lock().expect("NFSv4 state lock");
-            let share_conflict = state.opens.values().any(|open| {
+        let share_conflict = self
+            .state
+            .lock()
+            .expect("NFSv4 state lock")
+            .opens
+            .values()
+            .any(|open| {
                 open.file_id == entry.fileid
                     && !(open.clientid == clientid && open.owner == args.owner)
                     && (open.deny & access != 0 || args.share_deny & open.access != 0)
             });
-            if share_conflict {
-                return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
+        if share_conflict {
+            if let Some(handle) = handle.take() {
+                let _ = handle.close().await;
             }
-
+            return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
+        }
+        let stateid = {
+            let mut state = self.state.lock().expect("NFSv4 state lock");
             let existing_key = state
                 .opens
                 .iter()
@@ -3661,6 +3762,7 @@ impl Nfs4Session {
                         clientid,
                         file_id: entry.fileid,
                         path: path.clone(),
+                        handle: handle.take().expect("new open backend handle"),
                         access,
                         deny: args.share_deny,
                         owner: args.owner.clone(),
@@ -3669,6 +3771,9 @@ impl Nfs4Session {
                 stateid
             }
         };
+        if let Some(handle) = handle {
+            let _ = handle.close().await;
+        }
         cursor.current = Some(self.handles.encode(&entry));
         cursor.stateid = stateid.clone();
         let after = self
@@ -3689,24 +3794,31 @@ impl Nfs4Session {
         if let Err(status) = self.validate_stateid(stateid, cursor, None) {
             return V4OpResult::new(OP_CLOSE, status);
         }
-        let mut state = self.state.lock().expect("NFSv4 state lock");
-        let Some(open) = state.opens.get(&stateid.other).cloned() else {
-            return V4OpResult::new(OP_CLOSE, NFS4ERR_BAD_STATEID);
+        let handle = {
+            let mut state = self.state.lock().expect("NFSv4 state lock");
+            let Some(open) = state.opens.get(&stateid.other).cloned() else {
+                return V4OpResult::new(OP_CLOSE, NFS4ERR_BAD_STATEID);
+            };
+            if state.locks.values().any(|lock| {
+                lock.clientid == open.clientid
+                    && lock.file_id == open.file_id
+                    && lock.open_other == open.stateid.other
+                    && !lock.ranges.is_empty()
+            }) {
+                return V4OpResult::new(OP_CLOSE, NFS4ERR_LOCKS_HELD);
+            }
+            state.locks.retain(|_, lock| {
+                !(lock.clientid == open.clientid
+                    && lock.file_id == open.file_id
+                    && lock.open_other == open.stateid.other)
+            });
+            state.opens.remove(&stateid.other).map(|open| open.handle)
         };
-        if state.locks.values().any(|lock| {
-            lock.clientid == open.clientid
-                && lock.file_id == open.file_id
-                && lock.open_other == open.stateid.other
-                && !lock.ranges.is_empty()
-        }) {
-            return V4OpResult::new(OP_CLOSE, NFS4ERR_LOCKS_HELD);
+        if let Some(handle) = handle
+            && let Err(error) = handle.close().await
+        {
+            return V4OpResult::new(OP_CLOSE, error_status(&error));
         }
-        state.locks.retain(|_, lock| {
-            !(lock.clientid == open.clientid
-                && lock.file_id == open.file_id
-                && lock.open_other == open.stateid.other)
-        });
-        state.opens.remove(&stateid.other);
         cursor.stateid = Stateid4::zero();
         let mut body = XdrWriter::with_capacity(16);
         write_stateid(&mut body, &invalid_stateid());
@@ -3724,12 +3836,15 @@ impl Nfs4Session {
             Ok(open) => open,
             Err(status) => return V4OpResult::new(OP_READ, status),
         };
-        let path = match open {
-            Some(open) => open.path,
-            None => match self.current_path(cursor) {
-                Ok(path) => path,
-                Err(error) => return V4OpResult::new(OP_READ, error_status(&error)),
-            },
+        let (path, held_handle) = match open {
+            Some(open) => (open.path, Some(open.handle)),
+            None => (
+                match self.current_path(cursor) {
+                    Ok(path) => path,
+                    Err(error) => return V4OpResult::new(OP_READ, error_status(&error)),
+                },
+                None,
+            ),
         };
         let offset = match offset(requested_offset, "read") {
             Ok(offset) => offset,
@@ -3739,23 +3854,34 @@ impl Nfs4Session {
             .unwrap_or(DEFAULT_MAX_READ)
             .min(DEFAULT_MAX_READ)
             .min(self.options.rtmax);
-        let handle = match self.driver.open_flags(&path, OpenFlags::READ_ONLY, 0).await {
-            Ok(handle) => handle,
-            Err(error) => return V4OpResult::new(OP_READ, error_status(&error)),
+        let close_after = held_handle.is_none();
+        let handle = match held_handle {
+            Some(handle) => handle,
+            None => match self.driver.open_flags(&path, OpenFlags::READ_ONLY, 0).await {
+                Ok(handle) => handle,
+                Err(error) => return V4OpResult::new(OP_READ, error_status(&error)),
+            },
         };
         let mut data = vec![0_u8; count];
-        let result = handle.read(&mut data, Some(offset)).await;
-        let _ = handle.close().await;
-        let read = match result {
-            Ok(read) => read,
+        let result = async {
+            let read = handle.read(&mut data, Some(offset)).await?;
+            data.truncate(read.min(data.len()));
+            let size = handle.stat().await.ok().map(|stats| stats.size);
+            Ok::<Option<u64>, FsError>(size)
+        }
+        .await;
+        if close_after {
+            let _ = handle.close().await;
+        }
+        let size = match result {
+            Ok(size) => size,
             Err(error) => return V4OpResult::new(OP_READ, error_status(&error)),
         };
-        data.truncate(read.min(data.len()));
-        let eof = self
-            .stat_of(&path)
-            .await
-            .map(|stats| offset.saturating_add(data.len() as u64) >= stats.size)
-            .unwrap_or(false);
+        let size = match size {
+            Some(size) => Some(size),
+            None => self.stat_of(&path).await.ok().map(|stats| stats.size),
+        };
+        let eof = size.is_some_and(|size| offset.saturating_add(data.len() as u64) >= size);
         let mut body = XdrWriter::with_capacity(data.len() + 8);
         body.bool(eof);
         body.var_opaque(&data);
@@ -3774,12 +3900,15 @@ impl Nfs4Session {
             Ok(open) => open,
             Err(status) => return V4OpResult::new(OP_WRITE, status),
         };
-        let path = match open {
-            Some(open) => open.path,
-            None => match self.current_path(cursor) {
-                Ok(path) => path,
-                Err(error) => return V4OpResult::new(OP_WRITE, error_status(&error)),
-            },
+        let (path, held_handle) = match open {
+            Some(open) => (open.path, Some(open.handle)),
+            None => (
+                match self.current_path(cursor) {
+                    Ok(path) => path,
+                    Err(error) => return V4OpResult::new(OP_WRITE, error_status(&error)),
+                },
+                None,
+            ),
         };
         if stable > FILE_SYNC4 {
             return V4OpResult::new(OP_WRITE, NFS4ERR_INVAL);
@@ -3797,15 +3926,21 @@ impl Nfs4Session {
             append: false,
             exclusive: false,
         };
-        let handle = match self.driver.open_flags(&path, flags, 0).await {
-            Ok(handle) => handle,
-            Err(error) => return V4OpResult::new(OP_WRITE, error_status(&error)),
+        let close_after = held_handle.is_none();
+        let handle = match held_handle {
+            Some(handle) => handle,
+            None => match self.driver.open_flags(&path, flags, 0).await {
+                Ok(handle) => handle,
+                Err(error) => return V4OpResult::new(OP_WRITE, error_status(&error)),
+            },
         };
         let result = handle.write(&data[..count], Some(offset)).await;
         let written = match result {
             Ok(written) => written.min(count),
             Err(error) => {
-                let _ = handle.close().await;
+                if close_after {
+                    let _ = handle.close().await;
+                }
                 return V4OpResult::new(OP_WRITE, error_status(&error));
             }
         };
@@ -3815,7 +3950,9 @@ impl Nfs4Session {
             UNSTABLE4 => Ok(()),
             _ => unreachable!("stable was checked above"),
         };
-        let _ = handle.close().await;
+        if close_after {
+            let _ = handle.close().await;
+        }
         if let Err(error) = sync_result {
             return V4OpResult::new(OP_WRITE, error_status(&error));
         }
