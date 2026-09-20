@@ -3,8 +3,9 @@
 use crate::{
     Request,
     constants::{
-        FUSE_BATCH_FORGET, FUSE_FORGET, FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION,
-        FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET, FUSE_INTERRUPT,
+        FUSE_KERNEL_MINOR_VERSION, FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK,
+        FUSE_RENAME2, FUSE_SETXATTR_EXT, FUSE_STATFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -68,6 +69,9 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         20 | 30 => Some(16),
         FUSE_INTERRUPT => Some(8),
         FUSE_POLL => Some(24),
+        FUSE_FALLOCATE => Some(32),
+        FUSE_LSEEK => Some(24),
+        FUSE_COPY_FILE_RANGE => Some(56),
         _ => None,
     };
     if exact.is_some_and(|size| body.len() != size) {
@@ -98,6 +102,7 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         9 | 13 => Some((8, 1)),
         12 => Some((8, 2)),
         8 | 35 => Some((16, 1)),
+        FUSE_RENAME2 => Some((16, 2)),
         _ => None,
     };
     if let Some((offset, count)) = names {
@@ -676,6 +681,15 @@ impl FuseSession {
                 // fixed wire body; libfuse treats ENOSYS as a successful
                 // default poll result and will not keep sending POLL calls.
                 Err(FsError::enosys("poll"))
+            }
+            FUSE_FALLOCATE | FUSE_RENAME2 | FUSE_LSEEK | FUSE_COPY_FILE_RANGE => {
+                // These operations have no corresponding FsDriver capability
+                // yet. Their wire bodies were validated before dispatch, so a
+                // well-formed request receives an explicit unsupported result
+                // without mutating handles, inodes, or backend contents.
+                Err(FsError::enosys(crate::constants::opcode_name(
+                    r.header.opcode,
+                )))
             }
             20 => {
                 let handle = self
