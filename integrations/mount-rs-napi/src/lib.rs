@@ -700,8 +700,7 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        Box::pin(async move { inner.load().await })
+        self.0.load()
     }
 
     fn acquire_writer<'a, 'b, 'async_trait>(
@@ -714,9 +713,7 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let owner = owner.to_owned();
-        Box::pin(async move { inner.acquire_writer(&owner, ttl).await })
+        self.0.acquire_writer(owner, ttl)
     }
 
     fn renew_writer<'a, 'b, 'async_trait>(
@@ -729,9 +726,7 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let lease = lease.clone();
-        Box::pin(async move { inner.renew_writer(&lease, ttl).await })
+        self.0.renew_writer(lease, ttl)
     }
 
     fn release_writer<'a, 'b, 'async_trait>(
@@ -743,9 +738,7 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let lease = lease.clone();
-        Box::pin(async move { inner.release_writer(&lease).await })
+        self.0.release_writer(lease)
     }
 
     fn publish<'a, 'b, 'async_trait>(
@@ -759,9 +752,7 @@ impl MetadataStore for DynMetadataStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let lease = lease.clone();
-        Box::pin(async move { inner.publish(expected_revision, &lease, namespace).await })
+        self.0.publish(expected_revision, lease, namespace)
     }
 
     fn flush<'a, 'async_trait>(
@@ -771,8 +762,7 @@ impl MetadataStore for DynMetadataStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        Box::pin(async move { inner.flush().await })
+        self.0.flush()
     }
 }
 
@@ -793,9 +783,7 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let bytes = bytes.to_vec();
-        Box::pin(async move { inner.put(&bytes).await })
+        self.0.put(bytes)
     }
 
     fn get<'a, 'b, 'async_trait>(
@@ -807,9 +795,7 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let id = id.clone();
-        Box::pin(async move { inner.get(&id).await })
+        self.0.get(id)
     }
 
     fn flush<'a, 'async_trait>(
@@ -819,8 +805,7 @@ impl BlockStore for DynBlockStore {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        Box::pin(async move { inner.flush().await })
+        self.0.flush()
     }
 
     fn delete<'a, 'b, 'async_trait>(
@@ -832,9 +817,7 @@ impl BlockStore for DynBlockStore {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let id = id.clone();
-        Box::pin(async move { inner.delete(&id).await })
+        self.0.delete(id)
     }
 }
 
@@ -857,8 +840,7 @@ impl FsDriver for MountDriver {
         'a: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        Box::pin(async move { inner.syncfs().await })
+        self.0.syncfs()
     }
 
     fn stat<'a, 'b, 'async_trait>(
@@ -870,9 +852,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.stat(&path).await })
+        self.0.stat(path)
     }
 
     fn lstat<'a, 'b, 'async_trait>(
@@ -884,9 +864,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.lstat(&path).await })
+        self.0.lstat(path)
     }
 
     fn statfs<'a, 'b, 'async_trait>(
@@ -898,9 +876,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.statfs(&path).await })
+        self.0.statfs(path)
     }
 
     fn readdir<'a, 'b, 'async_trait>(
@@ -912,9 +888,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.readdir(&path).await })
+        self.0.readdir(path)
     }
 
     fn open<'a, 'b, 'c, 'async_trait>(
@@ -929,10 +903,7 @@ impl FsDriver for MountDriver {
         'c: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        let flags = flags.to_owned();
-        Box::pin(async move { inner.open(&path, &flags, mode).await })
+        self.0.open(path, flags, mode)
     }
 
     fn open_flags<'a, 'b, 'async_trait>(
@@ -946,9 +917,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.open_flags(&path, flags, mode).await })
+        self.0.open_flags(path, flags, mode)
     }
 
     fn mkdir<'a, 'b, 'async_trait>(
@@ -961,9 +930,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.mkdir(&path, options).await })
+        self.0.mkdir(path, options)
     }
 
     fn rmdir<'a, 'b, 'async_trait>(
@@ -975,9 +942,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.rmdir(&path).await })
+        self.0.rmdir(path)
     }
 
     fn unlink<'a, 'b, 'async_trait>(
@@ -989,9 +954,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.unlink(&path).await })
+        self.0.unlink(path)
     }
 
     fn rename<'a, 'b, 'c, 'async_trait>(
@@ -1005,10 +968,7 @@ impl FsDriver for MountDriver {
         'c: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let old_path = old_path.to_owned();
-        let new_path = new_path.to_owned();
-        Box::pin(async move { inner.rename(&old_path, &new_path).await })
+        self.0.rename(old_path, new_path)
     }
 
     fn link<'a, 'b, 'c, 'async_trait>(
@@ -1022,10 +982,7 @@ impl FsDriver for MountDriver {
         'c: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let existing_path = existing_path.to_owned();
-        let new_path = new_path.to_owned();
-        Box::pin(async move { inner.link(&existing_path, &new_path).await })
+        self.0.link(existing_path, new_path)
     }
 
     fn symlink<'a, 'b, 'c, 'async_trait>(
@@ -1039,10 +996,7 @@ impl FsDriver for MountDriver {
         'c: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let target = target.to_owned();
-        let path = path.to_owned();
-        Box::pin(async move { inner.symlink(&target, &path).await })
+        self.0.symlink(target, path)
     }
 
     fn readlink<'a, 'b, 'async_trait>(
@@ -1054,9 +1008,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.readlink(&path).await })
+        self.0.readlink(path)
     }
 
     fn chmod<'a, 'b, 'async_trait>(
@@ -1069,9 +1021,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.chmod(&path, mode).await })
+        self.0.chmod(path, mode)
     }
 
     fn chown<'a, 'b, 'async_trait>(
@@ -1085,9 +1035,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.chown(&path, uid, gid).await })
+        self.0.chown(path, uid, gid)
     }
 
     fn lchown<'a, 'b, 'async_trait>(
@@ -1101,9 +1049,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.lchown(&path, uid, gid).await })
+        self.0.lchown(path, uid, gid)
     }
 
     fn truncate<'a, 'b, 'async_trait>(
@@ -1116,9 +1062,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.truncate(&path, length).await })
+        self.0.truncate(path, length)
     }
 
     fn has_utimens(&self) -> bool {
@@ -1137,13 +1081,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move {
-            inner
-                .utimens(&path, atime_ns, mtime_ns, follow_symlinks)
-                .await
-        })
+        self.0.utimens(path, atime_ns, mtime_ns, follow_symlinks)
     }
 
     fn utimes<'a, 'b, 'async_trait>(
@@ -1157,9 +1095,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.utimes(&path, atime_ms, mtime_ms).await })
+        self.0.utimes(path, atime_ms, mtime_ms)
     }
 
     fn lutimes<'a, 'b, 'async_trait>(
@@ -1173,9 +1109,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.lutimes(&path, atime_ms, mtime_ms).await })
+        self.0.lutimes(path, atime_ms, mtime_ms)
     }
 
     fn mknod<'a, 'b, 'async_trait>(
@@ -1189,9 +1123,7 @@ impl FsDriver for MountDriver {
         'b: 'async_trait,
         Self: 'async_trait,
     {
-        let inner = Arc::clone(&self.0);
-        let path = path.to_owned();
-        Box::pin(async move { inner.mknod(&path, mode, dev).await })
+        self.0.mknod(path, mode, dev)
     }
 }
 
