@@ -102,6 +102,7 @@ function errorView(error) {
     syscall: error?.syscall ?? null,
     path: error?.path ?? null,
     dest: error?.dest ?? null,
+    message: error?.message ?? null,
   };
 }
 
@@ -145,11 +146,21 @@ async function runRow({ label, syscall, expectedError, scenario, project = resul
 
     if (expected.error.code === "ENOSYS" || expected.error.code === "ENOTSUP") {
       assert.equal(expected.error.syscall, syscall, `${label}: syscall classification changed`);
+      assert.equal(
+        expected.error.errno,
+        -errors.ERRNO_CODES[expected.error.code],
+        `${label}: unsupported errno classification changed`,
+      );
       counts[expected.error.code]++;
       rows.push(`${label}=${expected.error.code}`);
       return;
     }
     assert.equal(expected.error.code, expectedError, `${label}: unexpected oracle error`);
+    assert.equal(
+      expected.error.errno,
+      -errors.ERRNO_CODES[expectedError],
+      `${label}: errno classification changed`,
+    );
     counts.PASS++;
     rows.push(`${label}=PASS(${expected.error.code})`);
   } finally {
@@ -197,6 +208,53 @@ const symlinkOpenRows = [
   },
 ];
 for (const row of symlinkOpenRows) await runRow(row);
+
+// Keep every symlink-gated conformance scenario visible even though this
+// adapter intentionally has no symlink representation. Each scenario is
+// reduced to the first operation that the upstream test needs; ENOSYS is a
+// result asserted against the pinned oracle, never a skipped test.
+const symlinkRows = [
+  {
+    label: "symlink readlink/stat prerequisite",
+    syscall: "symlink",
+    prepare: (pair) => writeFile(pair, "/target"),
+    scenario: async (fs) => fs.symlink("target", "/link"),
+  },
+  {
+    label: "symlinked directory traversal prerequisite",
+    syscall: "symlink",
+    prepare: (pair) => mkdir(pair, "/real"),
+    scenario: async (fs) => fs.symlink("real", "/alias"),
+  },
+  {
+    label: "dangling symlink lstat/readlink prerequisite",
+    syscall: "symlink",
+    scenario: async (fs) => fs.symlink("nowhere", "/dangling"),
+  },
+  {
+    label: "symlink loop prerequisite",
+    syscall: "symlink",
+    scenario: async (fs) => fs.symlink("loop-b", "/loop-a"),
+  },
+  {
+    label: "readlink regular-file error boundary",
+    syscall: "readlink",
+    prepare: (pair) => writeFile(pair, "/file"),
+    scenario: async (fs) => fs.readlink("/file"),
+  },
+  {
+    label: "unicode symlink size prerequisite",
+    syscall: "symlink",
+    scenario: async (fs) => fs.symlink("héllo→ø", "/unicode"),
+  },
+  {
+    label: "symlink existing-name refusal prerequisite",
+    syscall: "symlink",
+    prepare: (pair) => writeFile(pair, "/taken"),
+    scenario: async (fs) => fs.symlink("whatever", "/taken"),
+  },
+];
+for (const row of symlinkRows) await runRow(row);
 
 // The three hard-link conformance behaviors are kept together as full
 // scenarios. The first is the positive inode/nlink contract; the other two
@@ -256,6 +314,22 @@ await runRow({
 // ENOSYS helper; the Rust extension must match it, not invent EPERM.
 const mknodRows = [
   {
+    label: "mknod FIFO/socket creation boundary",
+    syscall: "mknod",
+    scenario: async (fs) => {
+      await mknodOperation(fs, "/fifo", 0o010644, 0);
+      await mknodOperation(fs, "/sock", 0o140600, 0);
+    },
+  },
+  {
+    label: "mknod character/block device boundary",
+    syscall: "mknod",
+    scenario: async (fs) => {
+      await mknodOperation(fs, "/char", 0o020666, (1 << 8) | 3);
+      await mknodOperation(fs, "/block", 0o060660, 7 << 8);
+    },
+  },
+  {
     label: "mknod regular/no-type fallback",
     syscall: "mknod",
     scenario: async (fs) => {
@@ -268,6 +342,24 @@ const mknodRows = [
     syscall: "mknod",
     scenario: async (fs) => {
       await mknodOperation(fs, "/directory", 0o040755, 0);
+    },
+  },
+  {
+    label: "mknod ordinary-name lifecycle boundary",
+    syscall: "mknod",
+    scenario: async (fs) => {
+      await mknodOperation(fs, "/fifo", 0o010644, 0);
+      await fs.rename("/fifo", "/moved");
+      await fs.unlink("/moved");
+    },
+  },
+  {
+    label: "mknod existing-name/missing-parent boundary",
+    syscall: "mknod",
+    prepare: (pair) => writeFile(pair, "/taken"),
+    scenario: async (fs) => {
+      await mknodOperation(fs, "/taken", 0o010644, 0);
+      await mknodOperation(fs, "/nowhere/fifo", 0o010644, 0);
     },
   },
 ];
@@ -347,7 +439,7 @@ await runRow({
   },
 });
 
-assert.equal(rows.length, 14, "remaining-skip inventory changed without updating this test");
+assert.equal(rows.length, 25, "remaining-skip inventory changed without updating this test");
 assert.equal(counts.PASS + counts.ENOSYS + counts.ENOTSUP, rows.length);
 console.log(
   `mount-rs Unstorage remaining-skip parity: PASS (${rows.length} rows: ` +
