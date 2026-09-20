@@ -139,7 +139,9 @@ async fn composition_round_trip(
 ) -> Result<(Vec<u8>, u64)> {
     let storage = FoundationDbStorage::from_cluster_file(
         cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix).with_durable(true),
+        FoundationDbStorageOptions::new(volume_prefix)
+            .with_durable(true)
+            .with_persisted_lease_oracle(),
     )?;
     let metadata = storage.metadata();
     let blocks = TrackedRustFsBlocks::new(config, block_prefix, created);
@@ -209,7 +211,9 @@ async fn verify_reopen(
 ) -> Result<()> {
     let storage = FoundationDbStorage::from_cluster_file(
         cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix).with_durable(true),
+        FoundationDbStorageOptions::new(volume_prefix)
+            .with_durable(true)
+            .with_persisted_lease_oracle(),
     )?;
     let metadata = storage.metadata();
     let blocks = TrackedRustFsBlocks::new(config, block_prefix, created);
@@ -234,12 +238,14 @@ async fn verify_concurrent_acquire(cluster_file: &str, volume_prefix: &str) -> R
     let first = FoundationDbStorage::from_cluster_file(
         cluster_file,
         FoundationDbStorageOptions::new(format!("{volume_prefix}/concurrent-acquire"))
-            .with_durable(true),
+            .with_durable(true)
+            .with_persisted_lease_oracle(),
     )?;
     let second = FoundationDbStorage::from_cluster_file(
         cluster_file,
         FoundationDbStorageOptions::new(format!("{volume_prefix}/concurrent-acquire"))
-            .with_durable(true),
+            .with_durable(true)
+            .with_persisted_lease_oracle(),
     )?;
     let first_metadata = first.metadata();
     let second_metadata = second.metadata();
@@ -276,11 +282,15 @@ async fn verify_concurrent_acquire(cluster_file: &str, volume_prefix: &str) -> R
 async fn verify_cas_and_fencing(cluster_file: &str, volume_prefix: &str) -> Result<()> {
     let first = FoundationDbStorage::from_cluster_file(
         cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix).with_durable(true),
+        FoundationDbStorageOptions::new(volume_prefix)
+            .with_durable(true)
+            .with_persisted_lease_oracle(),
     )?;
     let second = FoundationDbStorage::from_cluster_file(
         cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix).with_durable(true),
+        FoundationDbStorageOptions::new(volume_prefix)
+            .with_durable(true)
+            .with_persisted_lease_oracle(),
     )?;
     let first_metadata = first.metadata();
     let second_metadata = second.metadata();
