@@ -12,8 +12,9 @@ use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use std::collections::BTreeSet;
 use std::env;
+use std::path::{Path, PathBuf};
 
-const PAYLOAD: &[u8] = b"mount-rs/provider-matrix\0payload\xff";
+const PAYLOAD: &[u8] = b"mount-rs\0provider\xff";
 const CHUNK_SIZE: usize = 7;
 
 type MatrixResult<T> = Result<T, String>;
@@ -40,6 +41,40 @@ fn safe_run_id() -> String {
         configured
     } else {
         format!("pid-{}", std::process::id())
+    }
+}
+
+fn sqlite_paths(label: &str) -> (PathBuf, PathBuf) {
+    let stem = format!("mount-rs-provider-matrix-{}-{label}", safe_run_id());
+    (
+        env::temp_dir().join(format!("{stem}-metadata.sqlite")),
+        env::temp_dir().join(format!("{stem}-blocks.sqlite")),
+    )
+}
+
+fn cleanup_sqlite_path(path: &Path) -> MatrixResult<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let candidate = if suffix.is_empty() {
+            path.to_owned()
+        } else {
+            PathBuf::from(format!("{}{}", path.display(), suffix))
+        };
+        match std::fs::remove_file(candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err("sqlite-cleanup".to_owned()),
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_sqlite_paths(paths: &(PathBuf, PathBuf)) -> MatrixResult<()> {
+    let metadata = cleanup_sqlite_path(&paths.0);
+    let blocks = cleanup_sqlite_path(&paths.1);
+    match (metadata, blocks) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(blocks_error)) => Err(format!("{error};{blocks_error}")),
     }
 }
 
@@ -89,6 +124,71 @@ async fn exercise_sdk_split(
     let filesystem =
         open_sdk_split(metadata, blocks, format!("provider-matrix-sdk-{label}")).await?;
     exercise_sdk(filesystem).await
+}
+
+async fn run_sqlite_split(label: &str) -> MatrixResult<()> {
+    let paths = sqlite_paths(label);
+    let result = exercise_sdk_split_reopen(
+        StoreConfig::Sqlite {
+            path: paths.0.clone(),
+        },
+        StoreConfig::Sqlite {
+            path: paths.1.clone(),
+        },
+        label,
+    )
+    .await;
+    let cleanup = cleanup_sqlite_paths(&paths);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error};{cleanup_error}")),
+    }
+}
+
+async fn run_sqlite_direct() -> MatrixResult<()> {
+    let path = env::temp_dir().join(format!(
+        "mount-rs-provider-matrix-{}-direct.sqlite",
+        safe_run_id()
+    ));
+    let result = async {
+        let first = Filesystem::sqlite(path.clone()).await.map_err(fs_code)?;
+        exercise_sdk(first).await?;
+
+        let reopened = Filesystem::sqlite(path.clone()).await.map_err(fs_code)?;
+        let view = Loopback::from_arc(reopened.driver());
+        let result = async {
+            let actual = view
+                .read_file("/provider-matrix/value")
+                .await
+                .map_err(fs_code)?;
+            if actual != PAYLOAD {
+                return Err("reopen-readback-mismatch".to_owned());
+            }
+            let stat = view.stat("/provider-matrix/value").await.map_err(fs_code)?;
+            if stat.size != PAYLOAD.len() as u64 {
+                return Err("reopen-size-mismatch".to_owned());
+            }
+            view.syncfs().await.map_err(fs_code)
+        }
+        .await;
+        let shutdown = reopened.shutdown().await.map_err(fs_code);
+        match (result, shutdown) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(format!("reopen-shutdown-{error}")),
+            (Err(error), Err(shutdown_error)) => {
+                Err(format!("{error};reopen-shutdown-{shutdown_error}"))
+            }
+        }
+    }
+    .await;
+    let cleanup = cleanup_sqlite_path(&path);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error};{cleanup_error}")),
+    }
 }
 
 async fn open_sdk_split(
@@ -216,20 +316,47 @@ async fn run_r2_with_metadata(
     metadata: StoreConfig,
     config: &R2Config,
     label: &str,
+    reopen: bool,
 ) -> MatrixResult<()> {
     let prefix = format!("mount-rs-provider-matrix/{}/{label}", safe_run_id());
     let (_, protected) = list_r2_prefix(config, &prefix).await?;
-    let result = exercise_sdk_split_reopen(
-        metadata,
-        r2_blocks_config(config, prefix.clone()),
-        &format!("{label}-reopen"),
-    )
-    .await;
+    let result = if reopen {
+        exercise_sdk_split_reopen(
+            metadata,
+            r2_blocks_config(config, prefix.clone()),
+            &format!("{label}-reopen"),
+        )
+        .await
+    } else {
+        exercise_sdk_split(metadata, r2_blocks_config(config, prefix.clone()), label).await
+    };
     let cleanup = cleanup_r2_prefix(config, &prefix, &protected).await;
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
         (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error};{cleanup_error}")),
+    }
+}
+
+async fn run_r2_with_sqlite_metadata(config: &R2Config, label: &str) -> MatrixResult<()> {
+    let metadata_path = env::temp_dir().join(format!(
+        "mount-rs-provider-matrix-{}-{label}-metadata.sqlite",
+        safe_run_id()
+    ));
+    let result = run_r2_with_metadata(
+        StoreConfig::Sqlite {
+            path: metadata_path.clone(),
+        },
+        config,
+        label,
+        true,
+    )
+    .await;
+    let cleanup = cleanup_sqlite_path(&metadata_path);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
         (Err(error), Err(cleanup_error)) => Err(format!("{error};{cleanup_error}")),
     }
 }
@@ -323,19 +450,9 @@ async fn main() {
             exercise_sdk_split(StoreConfig::Memory, StoreConfig::Memory, "memory-memory").await
         })
         .await;
+    report.case("sqlite", run_sqlite_direct()).await;
     report
-        .case("sqlite/sqlite", async {
-            exercise_sdk_split(
-                StoreConfig::Sqlite {
-                    path: ":memory:".into(),
-                },
-                StoreConfig::Sqlite {
-                    path: ":memory:".into(),
-                },
-                "sqlite-sqlite",
-            )
-            .await
-        })
+        .case("sqlite/sqlite", run_sqlite_split("sqlite-sqlite"))
         .await;
 
     let pglite_url = ["PGLITE_DATABASE_URL", "MOUNT_RS_PGLITE_URL"]
@@ -362,19 +479,13 @@ async fn main() {
             report
                 .case(
                     "memory/r2",
-                    run_r2_with_metadata(StoreConfig::Memory, config, "memory-r2"),
+                    run_r2_with_metadata(StoreConfig::Memory, config, "memory-r2", false),
                 )
                 .await;
             report
                 .case(
                     "sqlite/r2",
-                    run_r2_with_metadata(
-                        StoreConfig::Sqlite {
-                            path: ":memory:".into(),
-                        },
-                        config,
-                        "sqlite-r2",
-                    ),
+                    run_r2_with_sqlite_metadata(config, "sqlite-r2"),
                 )
                 .await;
         } else {
