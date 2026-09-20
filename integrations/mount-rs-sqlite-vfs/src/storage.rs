@@ -7,8 +7,10 @@
 //! R2 blocks plus a fenced metadata store, or PGlite metadata/blocks.  The
 //! provider pair is still responsible for its own durability declaration.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
+use std::os::raw::{c_int, c_void};
+use std::ptr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -20,8 +22,12 @@ use mount_rs_core::storage::{
 };
 use mount_rs_core::types::{S_IFDIR, S_IFREG, Stats, now_ms};
 use mount_rs_core::{ErrorCode, FsError};
+use rusqlite::ffi;
 
-use crate::{AccessMode, Backend, FileKind, LockLevel, OpenOptions, VfsError, VfsFile};
+use crate::{
+    AccessMode, Backend, FileKind, LockLevel, OpenOptions, VfsError, VfsFile, WalCapability,
+    WalScope,
+};
 
 /// Version of the storage bridge state/layout contract.
 pub const STORAGE_BRIDGE_VERSION: u32 = 1;
@@ -235,6 +241,7 @@ where
                 options,
                 state: Mutex::new(VolumeState::default()),
                 next_handle: AtomicU64::new(1),
+                wal_regions: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -267,16 +274,35 @@ where
     B: BlockStore + 'static,
     E: BlockingExecutor,
 {
+    fn wal_capability(&self) -> WalCapability {
+        WalCapability {
+            scope: WalScope::ProcessLocal,
+            durable: self.provider_is_durable(),
+        }
+    }
+
     fn open(&self, name: &[u8], options: OpenOptions) -> Result<Box<dyn VfsFile>, VfsError> {
+        if options.wal_scope != WalScope::Disabled && options.wal_scope != WalScope::ProcessLocal {
+            return Err(VfsError::Unsupported(
+                "storage bridge only supports process-local WAL",
+            ));
+        }
         if !options.create && !self.volume.file_exists(name)? {
             return Err(VfsError::NotFound);
         }
         let bytes = self.volume.load_file(name)?;
         let handle_id = self.volume.next_handle_id()?;
+        let is_wal_file = name.ends_with(b"-wal");
+        let wal_connection = (options.wal_scope == WalScope::ProcessLocal
+            && options.kind == FileKind::MainDatabase)
+            .then(|| self.volume.wal_connection(name, handle_id))
+            .transpose()?;
         Ok(Box::new(StorageFile {
             volume: Arc::clone(&self.volume),
             name: name.to_vec(),
             kind: options.kind,
+            wal_scope: options.wal_scope,
+            is_wal_file,
             read_only: options.read_only,
             delete_on_close: options.delete_on_close,
             bytes,
@@ -286,6 +312,7 @@ where
             associated_owner: None,
             owns_volume: false,
             can_write: false,
+            wal_connection,
         }))
     }
 
@@ -334,6 +361,7 @@ where
     options: StorageOptions,
     state: Mutex<VolumeState>,
     next_handle: AtomicU64,
+    wal_regions: Mutex<HashMap<Vec<u8>, Arc<ProcessWalRegion>>>,
 }
 
 #[derive(Default)]
@@ -347,6 +375,216 @@ struct WriterState {
     lease: WriterLease,
     revision: u64,
     namespace: Option<Namespace>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProcessShmLockMode {
+    None,
+    Shared,
+    Exclusive,
+}
+
+#[derive(Default)]
+struct ProcessShmSlot {
+    shared: BTreeSet<u64>,
+    exclusive: Option<u64>,
+}
+
+struct ProcessWalState {
+    region_size: Option<usize>,
+    regions: Vec<Box<[u8]>>,
+    slots: [ProcessShmSlot; ffi::SQLITE_SHM_NLOCK as usize],
+}
+
+struct ProcessWalRegion {
+    state: Mutex<ProcessWalState>,
+}
+
+struct ProcessWalConnection {
+    region: Arc<ProcessWalRegion>,
+    id: u64,
+    held: [ProcessShmLockMode; ffi::SQLITE_SHM_NLOCK as usize],
+}
+
+impl ProcessWalRegion {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ProcessWalState {
+                region_size: None,
+                regions: Vec::new(),
+                slots: std::array::from_fn(|_| ProcessShmSlot::default()),
+            }),
+        }
+    }
+}
+
+impl ProcessWalConnection {
+    fn new(region: Arc<ProcessWalRegion>, id: u64) -> Self {
+        Self {
+            region,
+            id,
+            held: [ProcessShmLockMode::None; ffi::SQLITE_SHM_NLOCK as usize],
+        }
+    }
+
+    fn map(
+        &mut self,
+        page: usize,
+        page_size: usize,
+        extend: bool,
+    ) -> Result<*mut c_void, VfsError> {
+        let mut state = self
+            .region
+            .state
+            .lock()
+            .map_err(|_| VfsError::Other("process-local WAL state lock poisoned".to_owned()))?;
+        if page_size == 0 {
+            return Err(VfsError::InvalidInput("WAL shared-memory region is empty"));
+        }
+        if let Some(existing) = state.region_size
+            && existing != page_size
+        {
+            return Err(VfsError::InvalidInput(
+                "WAL shared-memory region size changed",
+            ));
+        }
+        state.region_size = Some(page_size);
+        if page >= state.regions.len() {
+            if !extend {
+                return Ok(ptr::null_mut());
+            }
+            state
+                .regions
+                .resize_with(page + 1, || vec![0_u8; page_size].into_boxed_slice());
+        }
+        Ok(state.regions[page].as_mut_ptr().cast::<c_void>())
+    }
+
+    fn lock(&mut self, offset: usize, number: usize, flags: c_int) -> Result<(), VfsError> {
+        let locking = flags & ffi::SQLITE_SHM_LOCK != 0;
+        let mode = if flags & ffi::SQLITE_SHM_SHARED != 0 {
+            ProcessShmLockMode::Shared
+        } else {
+            ProcessShmLockMode::Exclusive
+        };
+        let end = offset
+            .checked_add(number)
+            .ok_or(VfsError::InvalidInput("WAL lock range overflows"))?;
+        if end > self.held.len() {
+            return Err(VfsError::InvalidInput("WAL lock range is outside SQLite"));
+        }
+        let mut state = self
+            .region
+            .state
+            .lock()
+            .map_err(|_| VfsError::Other("process-local WAL state lock poisoned".to_owned()))?;
+        if !locking {
+            for index in offset..end {
+                if self.held[index] != mode {
+                    if self.held[index] == ProcessShmLockMode::None {
+                        continue;
+                    }
+                    return Err(VfsError::InvalidInput(
+                        "WAL lock unlock mode does not match the held mode",
+                    ));
+                }
+            }
+            for index in offset..end {
+                match mode {
+                    ProcessShmLockMode::Shared => {
+                        state.slots[index].shared.remove(&self.id);
+                    }
+                    ProcessShmLockMode::Exclusive => {
+                        if state.slots[index].exclusive == Some(self.id) {
+                            state.slots[index].exclusive = None;
+                        }
+                    }
+                    ProcessShmLockMode::None => {}
+                }
+                self.held[index] = ProcessShmLockMode::None;
+            }
+            return Ok(());
+        }
+
+        for index in offset..end {
+            let slot = &state.slots[index];
+            match mode {
+                ProcessShmLockMode::Shared => {
+                    if slot.exclusive.is_some() && slot.exclusive != Some(self.id) {
+                        return Err(VfsError::Busy);
+                    }
+                    if slot.exclusive == Some(self.id) {
+                        return Err(VfsError::InvalidInput(
+                            "WAL shared lock cannot replace an exclusive lock",
+                        ));
+                    }
+                }
+                ProcessShmLockMode::Exclusive => {
+                    if slot.exclusive.is_some() && slot.exclusive != Some(self.id) {
+                        return Err(VfsError::Busy);
+                    }
+                    if slot.exclusive == Some(self.id) {
+                        continue;
+                    }
+                    if slot.shared.iter().any(|owner| *owner != self.id) {
+                        return Err(VfsError::Busy);
+                    }
+                    if slot.shared.contains(&self.id) {
+                        return Err(VfsError::InvalidInput(
+                            "WAL exclusive lock cannot replace a shared lock",
+                        ));
+                    }
+                }
+                ProcessShmLockMode::None => unreachable!(),
+            }
+        }
+        for index in offset..end {
+            match mode {
+                ProcessShmLockMode::Shared => {
+                    state.slots[index].shared.insert(self.id);
+                }
+                ProcessShmLockMode::Exclusive => {
+                    state.slots[index].exclusive = Some(self.id);
+                }
+                ProcessShmLockMode::None => unreachable!(),
+            }
+            self.held[index] = mode;
+        }
+        Ok(())
+    }
+
+    fn barrier(&mut self) {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn unmap(&mut self) -> Result<(), VfsError> {
+        let mut state = self
+            .region
+            .state
+            .lock()
+            .map_err(|_| VfsError::Other("process-local WAL state lock poisoned".to_owned()))?;
+        for index in 0..self.held.len() {
+            match self.held[index] {
+                ProcessShmLockMode::Shared => {
+                    state.slots[index].shared.remove(&self.id);
+                }
+                ProcessShmLockMode::Exclusive => {
+                    if state.slots[index].exclusive == Some(self.id) {
+                        state.slots[index].exclusive = None;
+                    }
+                }
+                ProcessShmLockMode::None => {}
+            }
+            self.held[index] = ProcessShmLockMode::None;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ProcessWalConnection {
+    fn drop(&mut self) {
+        let _ = self.unmap();
+    }
 }
 
 impl<M, B, E> StorageVolume<M, B, E>
@@ -454,6 +692,25 @@ where
                 value.checked_add(1)
             })
             .map_err(|_| VfsError::InvalidInput("storage file handle id overflow"))
+    }
+
+    fn wal_connection(
+        &self,
+        database_name: &[u8],
+        handle_id: u64,
+    ) -> Result<ProcessWalConnection, VfsError> {
+        let database_name = database_name
+            .strip_suffix(b"-wal")
+            .unwrap_or(database_name)
+            .to_vec();
+        let mut regions = self
+            .wal_regions
+            .lock()
+            .map_err(|_| VfsError::Other("storage WAL registry lock poisoned".to_owned()))?;
+        let region = regions
+            .entry(database_name)
+            .or_insert_with(|| Arc::new(ProcessWalRegion::new()));
+        Ok(ProcessWalConnection::new(Arc::clone(region), handle_id))
     }
 
     fn ensure_healthy_state(state: &VolumeState) -> Result<(), VfsError> {
@@ -762,6 +1019,8 @@ where
     volume: Arc<StorageVolume<M, B, E>>,
     name: Vec<u8>,
     kind: FileKind,
+    wal_scope: WalScope,
+    is_wal_file: bool,
     read_only: bool,
     delete_on_close: bool,
     bytes: Vec<u8>,
@@ -771,6 +1030,7 @@ where
     associated_owner: Option<u64>,
     owns_volume: bool,
     can_write: bool,
+    wal_connection: Option<ProcessWalConnection>,
 }
 
 impl<M, B, E> Drop for StorageFile<M, B, E>
@@ -780,6 +1040,9 @@ where
     E: BlockingExecutor,
 {
     fn drop(&mut self) {
+        if let Some(connection) = self.wal_connection.as_mut() {
+            let _ = connection.unmap();
+        }
         if self.delete_on_close {
             let _ = self.volume.delete_file(&self.name);
         }
@@ -814,14 +1077,43 @@ where
                 | FileKind::TempJournal
                 | FileKind::SubJournal
                 | FileKind::MasterJournal
-        )
+        ) || self.is_wal_file
+    }
+
+    fn process_local_wal(&self) -> bool {
+        self.wal_scope == WalScope::ProcessLocal && self.wal_connection.is_some()
+    }
+
+    fn ensure_process_wal_owner(&mut self) -> Result<u64, VfsError> {
+        if let Some(owner) = self.associated_owner {
+            self.volume.ensure_owner(owner)?;
+            return Ok(owner);
+        }
+        if let Some(owner) = self.volume.current_owner()? {
+            self.volume.ensure_owner(owner)?;
+            self.associated_owner = Some(owner);
+            return Ok(owner);
+        }
+        self.volume.acquire_owner(self.handle_id)?;
+        self.owns_volume = true;
+        self.associated_owner = Some(self.handle_id);
+        Ok(self.handle_id)
     }
 
     fn ensure_associated_owner(&mut self) -> Result<u64, VfsError> {
+        if self.wal_scope == WalScope::ProcessLocal
+            && self.kind != FileKind::MainDatabase
+            && self.needs_volume_owner()
+        {
+            return self.ensure_process_wal_owner();
+        }
         let owner = match self.associated_owner {
             Some(owner) => owner,
             None => {
-                let owner = self.volume.current_owner()?.ok_or(VfsError::Busy)?;
+                let owner = match self.volume.current_owner()? {
+                    Some(owner) => owner,
+                    None => return Err(VfsError::Busy),
+                };
                 self.associated_owner = Some(owner);
                 owner
             }
@@ -841,9 +1133,41 @@ where
         }
     }
 
-    fn ensure_main_write_authority(&self) -> Result<(), VfsError> {
-        if self.kind == FileKind::MainDatabase && self.owns_volume && self.can_write {
-            self.volume.ensure_owner(self.handle_id)
+    fn ensure_main_lock_owner(&mut self) -> Result<(), VfsError> {
+        if self.kind != FileKind::MainDatabase {
+            return Err(VfsError::Busy);
+        }
+        if self.process_local_wal() {
+            if self.owns_volume {
+                self.volume.ensure_owner(self.handle_id)?;
+            }
+            Ok(())
+        } else {
+            self.ensure_main_owner()
+        }
+    }
+
+    fn ensure_main_write_authority(&mut self) -> Result<u64, VfsError> {
+        if self.kind != FileKind::MainDatabase || !self.can_write {
+            return Err(VfsError::Busy);
+        }
+        if self.process_local_wal() {
+            if self.owns_volume {
+                self.volume.ensure_owner(self.handle_id)?;
+                return Ok(self.handle_id);
+            }
+            if let Some(owner) = self.volume.current_owner()? {
+                self.volume.ensure_owner(owner)?;
+                self.associated_owner = Some(owner);
+                return Ok(owner);
+            }
+            self.volume.acquire_owner(self.handle_id)?;
+            self.owns_volume = true;
+            return Ok(self.handle_id);
+        }
+        if self.owns_volume {
+            self.volume.ensure_owner(self.handle_id)?;
+            Ok(self.handle_id)
         } else {
             Err(VfsError::Busy)
         }
@@ -852,6 +1176,11 @@ where
     fn ensure_main_shared(&mut self) -> Result<(), VfsError> {
         if self.kind != FileKind::MainDatabase {
             return Err(VfsError::Busy);
+        }
+        if self.process_local_wal() {
+            self.bytes = self.volume.load_file(&self.name)?;
+            self.level = LockLevel::Shared;
+            return Ok(());
         }
         if self.owns_volume {
             self.volume.ensure_owner(self.handle_id)?;
@@ -872,6 +1201,16 @@ where
             }
         }
     }
+
+    fn publish_wal_write(&mut self) -> Result<(), VfsError> {
+        if !self.is_wal_file || !self.dirty {
+            return Ok(());
+        }
+        let owner = self.ensure_associated_owner()?;
+        self.volume.commit_file(&self.name, &self.bytes, owner)?;
+        self.dirty = false;
+        Ok(())
+    }
 }
 
 impl<M, B, E> VfsFile for StorageFile<M, B, E>
@@ -880,13 +1219,61 @@ where
     B: BlockStore + 'static,
     E: BlockingExecutor,
 {
+    fn shm_map(
+        &mut self,
+        page: usize,
+        page_size: usize,
+        extend: bool,
+    ) -> Result<*mut c_void, VfsError> {
+        if self.wal_scope != WalScope::ProcessLocal {
+            return Err(VfsError::Unsupported("process-local WAL shared memory"));
+        }
+        self.wal_connection
+            .as_mut()
+            .ok_or(VfsError::Unsupported(
+                "WAL shared memory is main-database only",
+            ))?
+            .map(page, page_size, extend)
+    }
+
+    fn shm_lock(&mut self, offset: usize, number: usize, flags: c_int) -> Result<(), VfsError> {
+        if self.wal_scope != WalScope::ProcessLocal {
+            return Err(VfsError::Unsupported("process-local WAL locks"));
+        }
+        self.wal_connection
+            .as_mut()
+            .ok_or(VfsError::Unsupported("WAL locks are main-database only"))?
+            .lock(offset, number, flags)
+    }
+
+    fn shm_barrier(&mut self) {
+        if let Some(connection) = self.wal_connection.as_mut() {
+            connection.barrier();
+        }
+    }
+
+    fn shm_unmap(&mut self, _delete: bool) -> Result<(), VfsError> {
+        if let Some(connection) = self.wal_connection.as_mut() {
+            connection.unmap()
+        } else {
+            Ok(())
+        }
+    }
+
     fn read_at(&mut self, output: &mut [u8], offset: u64) -> Result<usize, VfsError> {
+        if self.is_wal_file && !self.dirty {
+            self.bytes = self.volume.load_file(&self.name)?;
+        }
         if self.kind == FileKind::MainDatabase {
             // SQLite may probe the header before its first xLock callback.  The
             // bytes cached by xOpen are used only for that bootstrap probe;
             // lock acquisition below reloads under the provider lease before
             // any transaction-visible read is allowed.
-            if self.owns_volume || self.level >= LockLevel::Shared {
+            if self.process_local_wal() {
+                if self.level >= LockLevel::Shared {
+                    self.volume.ensure_healthy()?;
+                }
+            } else if self.owns_volume || self.level >= LockLevel::Shared {
                 self.ensure_main_owner()?;
             }
         } else if self.needs_volume_owner() {
@@ -905,7 +1292,7 @@ where
     fn write_at(&mut self, input: &[u8], offset: u64) -> Result<(), VfsError> {
         self.ensure_writable()?;
         if self.kind == FileKind::MainDatabase {
-            self.ensure_main_write_authority()?;
+            let _ = self.ensure_main_write_authority()?;
         } else if self.needs_volume_owner() {
             self.ensure_associated_owner()?;
         }
@@ -919,13 +1306,14 @@ where
         }
         self.bytes[offset..end].copy_from_slice(input);
         self.dirty = true;
+        self.publish_wal_write()?;
         Ok(())
     }
 
     fn truncate(&mut self, size: u64) -> Result<(), VfsError> {
         self.ensure_writable()?;
         if self.kind == FileKind::MainDatabase {
-            self.ensure_main_write_authority()?;
+            let _ = self.ensure_main_write_authority()?;
         } else if self.needs_volume_owner() {
             self.ensure_associated_owner()?;
         }
@@ -933,14 +1321,14 @@ where
             .map_err(|_| VfsError::InvalidInput("SQLite truncate size overflows usize"))?;
         self.bytes.resize(size, 0);
         self.dirty = true;
+        self.publish_wal_write()?;
         Ok(())
     }
 
     fn sync(&mut self, _data_only: bool) -> Result<(), VfsError> {
         self.ensure_writable()?;
         let owner = if self.kind == FileKind::MainDatabase {
-            self.ensure_main_write_authority()?;
-            Some(self.handle_id)
+            Some(self.ensure_main_write_authority()?)
         } else if self.needs_volume_owner() {
             Some(self.ensure_associated_owner()?)
         } else {
@@ -956,8 +1344,10 @@ where
     }
 
     fn size(&mut self) -> Result<u64, VfsError> {
-        if self.kind == FileKind::MainDatabase && self.level >= LockLevel::Shared {
-            self.ensure_main_owner()?;
+        if self.kind == FileKind::MainDatabase {
+            if self.level >= LockLevel::Shared && !self.process_local_wal() {
+                self.ensure_main_owner()?;
+            }
         } else if self.needs_volume_owner() && self.level >= LockLevel::Shared {
             self.ensure_associated_owner()?;
         }
@@ -975,14 +1365,16 @@ where
             self.level = LockLevel::Shared;
         } else if level >= LockLevel::Shared && self.needs_volume_owner() {
             if self.kind == FileKind::MainDatabase {
-                self.ensure_main_owner()?;
+                if !self.process_local_wal() {
+                    self.ensure_main_owner()?;
+                }
             } else {
                 self.ensure_associated_owner()?;
             }
         }
         if level >= LockLevel::Reserved && self.level < LockLevel::Reserved {
             if self.kind == FileKind::MainDatabase {
-                self.ensure_main_owner()?;
+                self.ensure_main_lock_owner()?;
                 self.can_write = true;
             } else if self.needs_volume_owner() {
                 self.ensure_associated_owner()?;
@@ -991,7 +1383,7 @@ where
         }
         if level >= LockLevel::Pending {
             if self.kind == FileKind::MainDatabase {
-                self.ensure_main_owner()?;
+                self.ensure_main_lock_owner()?;
             } else if self.needs_volume_owner() {
                 self.ensure_associated_owner()?;
             }
@@ -999,7 +1391,7 @@ where
         }
         if level >= LockLevel::Exclusive {
             if self.kind == FileKind::MainDatabase {
-                self.ensure_main_owner()?;
+                self.ensure_main_lock_owner()?;
             } else if self.needs_volume_owner() {
                 self.ensure_associated_owner()?;
             }

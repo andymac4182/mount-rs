@@ -1,5 +1,6 @@
 //! A mount-free SQLite VFS boundary for storage implementations that can make
-//! SQLite's synchronous durability and locking contract explicit.
+//! SQLite's synchronous durability, locking, and (when explicitly enabled)
+//! WAL shared-memory contract explicit.
 //!
 //! This crate deliberately does not adapt [`mount_rs_core::FsDriver`] or any
 //! other async filesystem trait.  SQLite invokes a VFS synchronously and its
@@ -11,8 +12,8 @@
 //! implementation used for engine and fault tests.  It is also useful as a
 //! reference backend, but it is not evidence that an arbitrary remote or
 //! async backend is suitable for SQLite hosting.  It supports rollback
-//! journaling on Unix and Windows; WAL/shared-memory mode remains explicitly
-//! unsupported by this VFS.
+//! journaling on Unix and Windows. WAL is opt-in and capability-gated by the
+//! backend's shared-memory scope.
 
 #![cfg_attr(
     not(any(target_os = "macos", target_os = "linux", target_os = "windows")),
@@ -23,7 +24,7 @@
 compile_error!("mount-rs-sqlite-vfs currently supports macOS, Linux, and Windows only");
 
 use std::collections::HashMap;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, OsString};
 use std::fmt;
 use std::fs::{self, File, OpenOptions as StdOpenOptions};
 use std::io;
@@ -129,6 +130,7 @@ pub struct OpenOptions {
     pub delete_on_close: bool,
     pub kind: FileKind,
     pub raw_flags: c_int,
+    pub wal_scope: WalScope,
 }
 
 impl OpenOptions {
@@ -155,6 +157,7 @@ impl OpenOptions {
             delete_on_close: flags & ffi::SQLITE_OPEN_DELETEONCLOSE != 0,
             kind,
             raw_flags: flags,
+            wal_scope: WalScope::Disabled,
         }
     }
 }
@@ -200,24 +203,82 @@ impl LockLevel {
     }
 }
 
+/// The strongest shared-memory scope a WAL implementation promises.
+///
+/// `ProcessLocal` is deliberately weaker than `HostLocal`: it is valid only
+/// for connections sharing one backend's process state. It must never be used
+/// as evidence that another process or host can safely open the same database.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WalScope {
+    /// WAL is disabled and requests fail explicitly.
+    Disabled,
+    /// Shared memory and lock state are shared only inside one process.
+    ProcessLocal,
+    /// File-backed shared memory and OS-visible locks work across processes on
+    /// one host and one supported local filesystem.
+    HostLocal,
+    /// A provider-coordinated distributed shared-memory implementation.
+    /// This is reserved for a future provider contract.
+    Distributed,
+}
+
+impl WalScope {
+    fn supports(self, requested: Self) -> bool {
+        self >= requested
+    }
+
+    fn enabled(self) -> bool {
+        self != Self::Disabled
+    }
+}
+
+/// Backend WAL capability and durability declaration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalCapability {
+    pub scope: WalScope,
+    /// Whether the backend can substantiate durable WAL/database bytes when
+    /// the VFS requests full synchronization.
+    pub durable: bool,
+}
+
+impl WalCapability {
+    pub const fn unsupported() -> Self {
+        Self {
+            scope: WalScope::Disabled,
+            durable: false,
+        }
+    }
+}
+
 /// Options that describe the durability envelope advertised by a VFS.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct VfsOptions {
     /// Refuse `PRAGMA synchronous=OFF` and `NORMAL`.  This is enabled by
     /// default because the backend contract below promises full sync only.
     pub require_full_sync: bool,
+    /// Explicitly request a WAL shared-memory scope. The default keeps the
+    /// existing rollback-only behavior.
+    pub wal_scope: WalScope,
 }
 
 impl Default for VfsOptions {
     fn default() -> Self {
         Self {
             require_full_sync: true,
+            wal_scope: WalScope::Disabled,
         }
     }
 }
 
 /// Synchronous filesystem boundary required by SQLite.
 pub trait Backend: Send + Sync + 'static {
+    /// Describe the strongest WAL shared-memory scope this backend can
+    /// actually coordinate.  The conservative default keeps existing
+    /// rollback-only backends fail-closed.
+    fn wal_capability(&self) -> WalCapability {
+        WalCapability::unsupported()
+    }
+
     /// Open a file.  `name` is the SQLite filename without its trailing NUL.
     fn open(&self, name: &[u8], options: OpenOptions) -> Result<Box<dyn VfsFile>, VfsError>;
 
@@ -256,6 +317,30 @@ pub trait VfsFile: Send {
     fn unlock(&mut self, level: LockLevel) -> Result<(), VfsError>;
     fn check_reserved_lock(&mut self) -> Result<bool, VfsError>;
 
+    /// Map one SQLite WAL shared-memory region.  A successful pointer must
+    /// remain valid until the corresponding unmap or file close.
+    fn shm_map(
+        &mut self,
+        _region: usize,
+        _region_size: usize,
+        _extend: bool,
+    ) -> Result<*mut c_void, VfsError> {
+        Err(VfsError::Unsupported("WAL shared-memory mapping"))
+    }
+
+    /// Apply one legal SQLite WAL shared-memory lock operation.
+    fn shm_lock(&mut self, _offset: usize, _number: usize, _flags: c_int) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("WAL shared-memory locking"))
+    }
+
+    /// Publish memory barriers between WAL-index accesses.
+    fn shm_barrier(&mut self) {}
+
+    /// Release this file's shared-memory mapping and locks.
+    fn shm_unmap(&mut self, _delete: bool) -> Result<(), VfsError> {
+        Err(VfsError::Unsupported("WAL shared-memory unmapping"))
+    }
+
     fn sector_size(&self) -> c_int {
         4096
     }
@@ -283,7 +368,7 @@ impl fmt::Debug for SqliteVfs {
 }
 
 impl SqliteVfs {
-    /// Register a rollback-journal-only VFS under `name`.
+    /// Register a VFS with the default rollback-journal-only policy under `name`.
     ///
     /// SQLite's global registry retains each successful registration until
     /// [`Self::close`] is called. Closing permits the name to be reused, but a
@@ -307,6 +392,15 @@ impl SqliteVfs {
         }
 
         let name_string = name.to_str().expect("validated VFS name").to_owned();
+        let capability = backend.wal_capability();
+        if !capability.scope.supports(options.wal_scope) {
+            return Err(VfsError::Unsupported("requested WAL shared-memory scope"));
+        }
+        if options.wal_scope.enabled() && options.require_full_sync && !capability.durable {
+            return Err(VfsError::Unsupported(
+                "WAL full synchronization requires a durable backend",
+            ));
+        }
         let registry = registered_vfs_registry();
         let mut registry = registry
             .lock()
@@ -619,7 +713,7 @@ struct VfsFileHandle {
     base: ffi::sqlite3_file,
     file: Option<Box<dyn VfsFile>>,
     level: LockLevel,
-    reject_wal: bool,
+    wal_scope: WalScope,
     require_full_sync: bool,
     file_lease: Option<FileLease>,
 }
@@ -724,10 +818,11 @@ unsafe extern "C" fn x_open(
             Ok(operation) => operation,
             Err(error) => return map_error(error, ffi::SQLITE_CANTOPEN),
         };
-        let options = OpenOptions::from_sqlite(flags);
-        if options.raw_flags & ffi::SQLITE_OPEN_WAL != 0 {
+        let mut options = OpenOptions::from_sqlite(flags);
+        if options.raw_flags & ffi::SQLITE_OPEN_WAL != 0 && !app.options.wal_scope.enabled() {
             return ffi::SQLITE_CANTOPEN;
         }
+        options.wal_scope = app.options.wal_scope;
 
         let temporary_name;
         let name = if z_name.is_null() {
@@ -756,7 +851,7 @@ unsafe extern "C" fn x_open(
             },
             file: Some(file),
             level: LockLevel::None,
-            reject_wal: true,
+            wal_scope: app.options.wal_scope,
             require_full_sync: app.options.require_full_sync,
             file_lease: Some(file_lease),
         };
@@ -979,12 +1074,22 @@ unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
+        let mut unmap_error = None;
+        if file.wal_scope.enabled()
+            && let Ok(_operation) = file.begin_operation()
+            && let Some(file_impl) = file.file.as_mut()
+            && let Err(error) = file_impl.shm_unmap(false)
+        {
+            unmap_error = Some(error);
+        }
         let file_impl = file.file.take();
         let file_lease = file.file_lease.take();
         drop(file_impl);
         drop(file_lease);
         file.base.pMethods = ptr::null();
-        ffi::SQLITE_OK
+        unmap_error.map_or(ffi::SQLITE_OK, |error| {
+            map_error(error, ffi::SQLITE_IOERR_SHMOPEN)
+        })
     })
 }
 
@@ -1243,7 +1348,7 @@ unsafe extern "C" fn x_file_control(
                 } else {
                     CStr::from_ptr(value_pointer).to_bytes()
                 };
-                if file.reject_wal
+                if file.wal_scope == WalScope::Disabled
                     && pragma.eq_ignore_ascii_case(b"journal_mode")
                     && value.eq_ignore_ascii_case(b"wal")
                 {
@@ -1292,32 +1397,108 @@ unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c
     })
 }
 
-// This VFS intentionally has no shared-memory implementation.  Returning the
-// documented SHM I/O errors makes a WAL request fail closed; do not replace
-// these with no-op success on one platform.
 unsafe extern "C" fn x_shm_map(
-    _file: *mut ffi::sqlite3_file,
-    _page: c_int,
-    _page_size: c_int,
-    _extend: c_int,
-    _output: *mut *mut c_void,
+    file: *mut ffi::sqlite3_file,
+    page: c_int,
+    page_size: c_int,
+    extend: c_int,
+    output: *mut *mut c_void,
 ) -> c_int {
-    ffi::SQLITE_IOERR_SHMMAP
+    catch_code(|| unsafe {
+        if page < 0 || page_size <= 0 || output.is_null() {
+            return ffi::SQLITE_MISUSE;
+        }
+        *output = ptr::null_mut();
+        let Some(file) = file_from_base(file) else {
+            return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_SHMMAP),
+        };
+        let Some(file_impl) = file.file.as_mut() else {
+            return ffi::SQLITE_MISUSE;
+        };
+        match file_impl.shm_map(page as usize, page_size as usize, extend != 0) {
+            Ok(mapped) => {
+                *output = mapped;
+                ffi::SQLITE_OK
+            }
+            Err(error) => map_error(error, ffi::SQLITE_IOERR_SHMMAP),
+        }
+    })
 }
 
 unsafe extern "C" fn x_shm_lock(
-    _file: *mut ffi::sqlite3_file,
-    _offset: c_int,
-    _number: c_int,
-    _flags: c_int,
+    file: *mut ffi::sqlite3_file,
+    offset: c_int,
+    number: c_int,
+    flags: c_int,
 ) -> c_int {
-    ffi::SQLITE_IOERR_SHMLOCK
+    catch_code(|| unsafe {
+        let legal = ffi::SQLITE_SHM_LOCK
+            | ffi::SQLITE_SHM_UNLOCK
+            | ffi::SQLITE_SHM_SHARED
+            | ffi::SQLITE_SHM_EXCLUSIVE;
+        let operation = flags & (ffi::SQLITE_SHM_LOCK | ffi::SQLITE_SHM_UNLOCK);
+        let mode = flags & (ffi::SQLITE_SHM_SHARED | ffi::SQLITE_SHM_EXCLUSIVE);
+        if offset < 0
+            || number <= 0
+            || offset > ffi::SQLITE_SHM_NLOCK - number
+            || flags & !legal != 0
+            || !matches!(operation, ffi::SQLITE_SHM_LOCK | ffi::SQLITE_SHM_UNLOCK)
+            || !matches!(mode, ffi::SQLITE_SHM_SHARED | ffi::SQLITE_SHM_EXCLUSIVE)
+        {
+            return ffi::SQLITE_MISUSE;
+        }
+        let Some(file) = file_from_base(file) else {
+            return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_SHMLOCK),
+        };
+        let Some(file_impl) = file.file.as_mut() else {
+            return ffi::SQLITE_MISUSE;
+        };
+        match file_impl.shm_lock(offset as usize, number as usize, flags) {
+            Ok(()) => ffi::SQLITE_OK,
+            Err(error) => map_error(error, ffi::SQLITE_IOERR_SHMLOCK),
+        }
+    })
 }
 
-unsafe extern "C" fn x_shm_barrier(_file: *mut ffi::sqlite3_file) {}
+unsafe extern "C" fn x_shm_barrier(file: *mut ffi::sqlite3_file) {
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        let Some(file) = file_from_base(file) else {
+            return;
+        };
+        let Ok(_operation) = file.begin_operation() else {
+            return;
+        };
+        if let Some(file_impl) = file.file.as_mut() {
+            file_impl.shm_barrier();
+        }
+    }));
+}
 
-unsafe extern "C" fn x_shm_unmap(_file: *mut ffi::sqlite3_file, _delete: c_int) -> c_int {
-    ffi::SQLITE_IOERR_SHMOPEN
+unsafe extern "C" fn x_shm_unmap(file: *mut ffi::sqlite3_file, delete: c_int) -> c_int {
+    catch_code(|| unsafe {
+        let Some(file) = file_from_base(file) else {
+            return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_SHMOPEN),
+        };
+        let Some(file_impl) = file.file.as_mut() else {
+            return ffi::SQLITE_MISUSE;
+        };
+        match file_impl.shm_unmap(delete != 0) {
+            Ok(()) => ffi::SQLITE_OK,
+            Err(error) => map_error(error, ffi::SQLITE_IOERR_SHMOPEN),
+        }
+    })
 }
 
 unsafe extern "C" fn x_fetch(
@@ -1442,6 +1623,13 @@ impl HostDirectory {
 }
 
 impl Backend for HostDirectory {
+    fn wal_capability(&self) -> WalCapability {
+        WalCapability {
+            scope: WalScope::HostLocal,
+            durable: true,
+        }
+    }
+
     fn open(&self, name: &[u8], options: OpenOptions) -> Result<Box<dyn VfsFile>, VfsError> {
         let path = self.resolve(name)?;
         if let Some(parent) = path.parent()
@@ -1471,6 +1659,9 @@ impl Backend for HostDirectory {
             locks,
             delete_on_close: options.delete_on_close,
             path,
+            writable: !options.read_only,
+            wal_scope: options.wal_scope,
+            shm: None,
         }))
     }
 
@@ -1542,10 +1733,503 @@ struct HostFile {
     locks: Option<LockFiles>,
     delete_on_close: bool,
     path: PathBuf,
+    writable: bool,
+    wal_scope: WalScope,
+    shm: Option<HostShm>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShmLockMode {
+    None,
+    Shared,
+    Exclusive,
+}
+
+struct HostShm {
+    path: PathBuf,
+    file: File,
+    dms: File,
+    dms_held: bool,
+    writable: bool,
+    region_size: Option<usize>,
+    mapped: Vec<Option<HostMappedRegion>>,
+    locks: Vec<File>,
+    held: [ShmLockMode; ffi::SQLITE_SHM_NLOCK as usize],
+}
+
+struct HostMappedRegion {
+    output: *mut c_void,
+    #[cfg(unix)]
+    len: usize,
+    #[cfg(windows)]
+    view: *mut c_void,
+    #[cfg(windows)]
+    mapping: *mut c_void,
+}
+
+// The mapping is owned by HostShm and is only exposed while that HostFile is
+// alive. Every callback that can reach it holds &mut self, and Drop unmaps it
+// before the backing file is released.
+unsafe impl Send for HostMappedRegion {}
+
+impl HostShm {
+    fn open(path: &Path, writable: bool) -> Result<Self, VfsError> {
+        let shm_path = append_path_suffix(path, "-shm");
+        let mut options = StdOpenOptions::new();
+        options.read(true).write(writable).create(writable);
+        let file = options.open(&shm_path).map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                VfsError::NotFound
+            } else {
+                VfsError::io("open SQLite WAL shared memory", error)
+            }
+        })?;
+        let dms_path = append_path_suffix(&shm_path, ".mount-rs-wal-dms-lock");
+        let dms = StdOpenOptions::new()
+            .read(true)
+            .write(writable)
+            .create(writable)
+            .truncate(false)
+            .open(&dms_path)
+            .map_err(|error| VfsError::io("open SQLite WAL DMS lock", error))?;
+        match lock_file(&dms, true) {
+            Ok(()) => {
+                if !writable {
+                    let _ = unlock_file(&dms);
+                    return Err(VfsError::Unsupported(
+                        "read-only SQLite WAL shared memory cannot initialize",
+                    ));
+                }
+                if let Err(error) = file.set_len(3) {
+                    let _ = unlock_file(&dms);
+                    return Err(VfsError::io("initialize SQLite WAL shared memory", error));
+                }
+                unlock_file(&dms)?;
+            }
+            Err(VfsError::Busy) => {}
+            Err(error) => return Err(error),
+        }
+        lock_file(&dms, false)?;
+        let mut locks = Vec::with_capacity(ffi::SQLITE_SHM_NLOCK as usize);
+        for index in 0..ffi::SQLITE_SHM_NLOCK {
+            let mut lock_options = StdOpenOptions::new();
+            lock_options
+                .read(true)
+                .write(writable)
+                .create(writable)
+                .truncate(false);
+            locks.push(
+                lock_options
+                    .open(append_path_suffix(
+                        &shm_path,
+                        &format!(".mount-rs-wal-lock-{index}"),
+                    ))
+                    .map_err(|error| VfsError::io("open SQLite WAL lock", error))?,
+            );
+        }
+        Ok(Self {
+            path: shm_path,
+            file,
+            dms,
+            dms_held: true,
+            writable,
+            region_size: None,
+            mapped: Vec::new(),
+            locks,
+            held: [ShmLockMode::None; ffi::SQLITE_SHM_NLOCK as usize],
+        })
+    }
+
+    fn map(
+        &mut self,
+        region: usize,
+        region_size: usize,
+        extend: bool,
+    ) -> Result<*mut c_void, VfsError> {
+        if region_size == 0 {
+            return Err(VfsError::InvalidInput("WAL shared-memory region is empty"));
+        }
+        if let Some(existing) = self.region_size
+            && existing != region_size
+        {
+            return Err(VfsError::InvalidInput(
+                "WAL shared-memory region size changed",
+            ));
+        }
+        self.region_size = Some(region_size);
+        if region < self.mapped.len()
+            && let Some(mapped) = &self.mapped[region]
+        {
+            return Ok(mapped.output);
+        }
+        let offset = region
+            .checked_mul(region_size)
+            .ok_or(VfsError::InvalidInput("WAL shared-memory offset overflows"))?;
+        let end = offset
+            .checked_add(region_size)
+            .ok_or(VfsError::InvalidInput("WAL shared-memory size overflows"))?;
+        let length = self
+            .file
+            .metadata()
+            .map_err(|error| VfsError::io("stat SQLite WAL shared memory", error))?
+            .len();
+        if length < end as u64 {
+            if !extend {
+                return Ok(ptr::null_mut());
+            }
+            if !self.writable {
+                return Err(VfsError::Io {
+                    operation: "extend read-only SQLite WAL shared memory",
+                    source: io::Error::new(io::ErrorKind::PermissionDenied, "read-only"),
+                });
+            }
+            self.file
+                .set_len(end as u64)
+                .map_err(|error| VfsError::io("extend SQLite WAL shared memory", error))?;
+        }
+        let mapped = map_host_region(&self.file, offset, region_size, self.writable)?;
+        if self.mapped.len() <= region {
+            self.mapped.resize_with(region + 1, || None);
+        }
+        let output = mapped.output;
+        self.mapped[region] = Some(mapped);
+        Ok(output)
+    }
+
+    fn lock(&mut self, offset: usize, number: usize, flags: c_int) -> Result<(), VfsError> {
+        let mode = if flags & ffi::SQLITE_SHM_SHARED != 0 {
+            ShmLockMode::Shared
+        } else {
+            ShmLockMode::Exclusive
+        };
+        let locking = flags & ffi::SQLITE_SHM_LOCK != 0;
+        let end = offset
+            .checked_add(number)
+            .ok_or(VfsError::InvalidInput("WAL lock range overflows"))?;
+        if end > self.held.len() {
+            return Err(VfsError::InvalidInput("WAL lock range is outside SQLite"));
+        }
+        if !locking {
+            for index in offset..end {
+                if self.held[index] == ShmLockMode::None {
+                    continue;
+                }
+                if self.held[index] != mode {
+                    return Err(VfsError::InvalidInput(
+                        "WAL lock unlock mode does not match the held mode",
+                    ));
+                }
+            }
+            for index in offset..end {
+                if self.held[index] != ShmLockMode::None {
+                    unlock_file(&self.locks[index])?;
+                    self.held[index] = ShmLockMode::None;
+                }
+            }
+            return Ok(());
+        }
+
+        for index in offset..end {
+            if self.held[index] != ShmLockMode::None && self.held[index] != mode {
+                return Err(VfsError::Busy);
+            }
+        }
+        let mut acquired = Vec::new();
+        for index in offset..end {
+            if self.held[index] == mode {
+                continue;
+            }
+            let result = lock_file(&self.locks[index], mode == ShmLockMode::Exclusive);
+            if let Err(error) = result {
+                for acquired_index in acquired {
+                    let _ = unlock_file(&self.locks[acquired_index]);
+                }
+                return Err(error);
+            }
+            acquired.push(index);
+        }
+        for index in acquired {
+            self.held[index] = mode;
+        }
+        Ok(())
+    }
+
+    fn barrier(&mut self) {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+    }
+
+    fn unmap(&mut self, delete: bool) -> Result<(), VfsError> {
+        let mut first_error = None;
+        for mapped in self.mapped.iter_mut().filter_map(Option::take) {
+            if let Err(error) = unmap_host_region(mapped)
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        for index in 0..self.held.len() {
+            if self.held[index] != ShmLockMode::None {
+                if let Err(error) = unlock_file(&self.locks[index])
+                    && first_error.is_none()
+                {
+                    first_error = Some(error);
+                }
+                self.held[index] = ShmLockMode::None;
+            }
+        }
+        self.region_size = None;
+        let dms_released = if self.dms_held {
+            self.dms_held = false;
+            match unlock_file(&self.dms) {
+                Ok(()) => true,
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if delete && dms_released {
+            match lock_file(&self.dms, true) {
+                Ok(()) => {
+                    if let Err(error) = remove_wal_artifact(&self.path)
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                    for index in 0..self.locks.len() {
+                        if let Err(error) = remove_wal_artifact(&append_path_suffix(
+                            &self.path,
+                            &format!(".mount-rs-wal-lock-{index}"),
+                        )) && first_error.is_none()
+                        {
+                            first_error = Some(error);
+                        }
+                    }
+                    if let Err(error) = remove_wal_artifact(&append_path_suffix(
+                        &self.path,
+                        ".mount-rs-wal-dms-lock",
+                    )) && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                    if let Err(error) = unlock_file(&self.dms)
+                        && first_error.is_none()
+                    {
+                        first_error = Some(error);
+                    }
+                }
+                Err(VfsError::Busy) => {}
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Drop for HostShm {
+    fn drop(&mut self) {
+        let _ = self.unmap(false);
+    }
+}
+
+fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name: OsString = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+#[cfg(unix)]
+fn map_host_region(
+    file: &File,
+    offset: usize,
+    length: usize,
+    writable: bool,
+) -> Result<HostMappedRegion, VfsError> {
+    let offset = libc::off_t::try_from(offset)
+        .map_err(|_| VfsError::InvalidInput("WAL shared-memory offset exceeds off_t"))?;
+    let protection = if writable {
+        libc::PROT_READ | libc::PROT_WRITE
+    } else {
+        libc::PROT_READ
+    };
+    let mapped = unsafe {
+        libc::mmap(
+            ptr::null_mut(),
+            length,
+            protection,
+            libc::MAP_SHARED,
+            file.as_raw_fd(),
+            offset,
+        )
+    };
+    if mapped == libc::MAP_FAILED {
+        return Err(VfsError::io(
+            "map SQLite WAL shared memory",
+            io::Error::last_os_error(),
+        ));
+    }
+    Ok(HostMappedRegion {
+        output: mapped,
+        len: length,
+    })
+}
+
+#[cfg(unix)]
+fn unmap_host_region(mapped: HostMappedRegion) -> Result<(), VfsError> {
+    let result = unsafe { libc::munmap(mapped.output, mapped.len) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(VfsError::io(
+            "unmap SQLite WAL shared memory",
+            io::Error::last_os_error(),
+        ))
+    }
+}
+
+#[cfg(windows)]
+const WINDOWS_ALLOCATION_GRANULARITY: u64 = 64 * 1024;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+#[allow(non_snake_case)]
+unsafe extern "system" {
+    fn CreateFileMappingW(
+        file: *mut c_void,
+        attributes: *mut c_void,
+        protect: u32,
+        maximum_size_high: u32,
+        maximum_size_low: u32,
+        name: *const u16,
+    ) -> *mut c_void;
+    fn MapViewOfFile(
+        mapping: *mut c_void,
+        access: u32,
+        offset_high: u32,
+        offset_low: u32,
+        bytes: usize,
+    ) -> *mut c_void;
+    fn UnmapViewOfFile(address: *const c_void) -> i32;
+    fn CloseHandle(handle: *mut c_void) -> i32;
+}
+
+#[cfg(windows)]
+fn map_host_region(
+    file: &File,
+    offset: usize,
+    length: usize,
+    writable: bool,
+) -> Result<HostMappedRegion, VfsError> {
+    const PAGE_READONLY: u32 = 0x02;
+    const PAGE_READWRITE: u32 = 0x04;
+    const FILE_MAP_READ: u32 = 0x0004;
+    const FILE_MAP_ALL_ACCESS: u32 = 0x001f_ffff;
+
+    let offset = offset as u64;
+    let base = offset / WINDOWS_ALLOCATION_GRANULARITY * WINDOWS_ALLOCATION_GRANULARITY;
+    let delta = usize::try_from(offset - base)
+        .map_err(|_| VfsError::InvalidInput("WAL shared-memory offset exceeds usize"))?;
+    let view_length = delta
+        .checked_add(length)
+        .ok_or(VfsError::InvalidInput("WAL shared-memory view overflows"))?;
+    let maximum = base
+        .checked_add(view_length as u64)
+        .ok_or(VfsError::InvalidInput(
+            "WAL shared-memory mapping overflows",
+        ))?;
+    let maximum_low = maximum as u32;
+    let maximum_high = (maximum >> 32) as u32;
+    let mapping = unsafe {
+        CreateFileMappingW(
+            file.as_raw_handle(),
+            ptr::null_mut(),
+            if writable {
+                PAGE_READWRITE
+            } else {
+                PAGE_READONLY
+            },
+            maximum_high,
+            maximum_low,
+            ptr::null(),
+        )
+    };
+    if mapping.is_null() {
+        return Err(VfsError::io(
+            "create SQLite WAL shared-memory mapping",
+            io::Error::last_os_error(),
+        ));
+    }
+    let view = unsafe {
+        MapViewOfFile(
+            mapping,
+            if writable {
+                FILE_MAP_ALL_ACCESS
+            } else {
+                FILE_MAP_READ
+            },
+            (base >> 32) as u32,
+            base as u32,
+            view_length,
+        )
+    };
+    if view.is_null() {
+        unsafe { CloseHandle(mapping) };
+        return Err(VfsError::io(
+            "map SQLite WAL shared memory",
+            io::Error::last_os_error(),
+        ));
+    }
+    let output = unsafe { (view.cast::<u8>()).add(delta).cast::<c_void>() };
+    Ok(HostMappedRegion {
+        output,
+        view,
+        mapping,
+    })
+}
+
+#[cfg(windows)]
+fn unmap_host_region(mapped: HostMappedRegion) -> Result<(), VfsError> {
+    let unmapped = unsafe { UnmapViewOfFile(mapped.view) } != 0;
+    let closed = unsafe { CloseHandle(mapped.mapping) } != 0;
+    if unmapped && closed {
+        Ok(())
+    } else {
+        Err(VfsError::io(
+            "unmap SQLite WAL shared memory",
+            io::Error::last_os_error(),
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn remove_wal_artifact(path: &Path) -> Result<(), VfsError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(VfsError::io("delete SQLite WAL shared memory", error)),
+    }
+}
+
+#[cfg(windows)]
+fn remove_wal_artifact(path: &Path) -> Result<(), VfsError> {
+    match remove_file_with_retries(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(VfsError::io("delete SQLite WAL shared memory", error)),
+    }
 }
 
 impl Drop for HostFile {
     fn drop(&mut self) {
+        self.shm.take();
         if let Some(locks) = self.locks.as_mut() {
             let _ = locks.unlock_all();
         }
@@ -1556,6 +2240,50 @@ impl Drop for HostFile {
 }
 
 impl VfsFile for HostFile {
+    fn shm_map(
+        &mut self,
+        region: usize,
+        region_size: usize,
+        extend: bool,
+    ) -> Result<*mut c_void, VfsError> {
+        if self.wal_scope != WalScope::HostLocal {
+            return Err(VfsError::Unsupported("HostLocal WAL shared memory"));
+        }
+        if self.shm.is_none() {
+            self.shm = Some(HostShm::open(&self.path, self.writable)?);
+        }
+        self.shm
+            .as_mut()
+            .expect("WAL shared memory initialized")
+            .map(region, region_size, extend)
+    }
+
+    fn shm_lock(&mut self, offset: usize, number: usize, flags: c_int) -> Result<(), VfsError> {
+        if self.wal_scope != WalScope::HostLocal {
+            return Err(VfsError::Unsupported("HostLocal WAL locks"));
+        }
+        if self.shm.is_none() {
+            self.shm = Some(HostShm::open(&self.path, self.writable)?);
+        }
+        self.shm
+            .as_mut()
+            .expect("WAL shared memory initialized")
+            .lock(offset, number, flags)
+    }
+
+    fn shm_barrier(&mut self) {
+        if let Some(shm) = self.shm.as_mut() {
+            shm.barrier();
+        }
+    }
+
+    fn shm_unmap(&mut self, delete: bool) -> Result<(), VfsError> {
+        let Some(mut shm) = self.shm.take() else {
+            return Ok(());
+        };
+        shm.unmap(delete)
+    }
+
     fn read_at(&mut self, output: &mut [u8], offset: u64) -> Result<usize, VfsError> {
         #[cfg(unix)]
         let result = self.file.read_at(output, offset);
@@ -2010,20 +2738,20 @@ mod tests {
     }
 
     #[test]
-    fn rollback_vfs_rejects_shared_memory_callbacks() {
+    fn rollback_vfs_rejects_invalid_shared_memory_callbacks() {
         let mut mapped = ptr::null_mut();
         assert_eq!(
             unsafe { x_shm_map(ptr::null_mut(), 0, 1, 0, &mut mapped) },
-            ffi::SQLITE_IOERR_SHMMAP
+            ffi::SQLITE_MISUSE
         );
         assert_eq!(
             unsafe { x_shm_lock(ptr::null_mut(), 0, 1, 0) },
-            ffi::SQLITE_IOERR_SHMLOCK
+            ffi::SQLITE_MISUSE
         );
         unsafe { x_shm_barrier(ptr::null_mut()) };
         assert_eq!(
             unsafe { x_shm_unmap(ptr::null_mut(), 0) },
-            ffi::SQLITE_IOERR_SHMOPEN
+            ffi::SQLITE_MISUSE
         );
         assert!(mapped.is_null());
     }

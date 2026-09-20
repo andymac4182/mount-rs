@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_sqlite_vfs::{
     AccessMode, Backend, HostDirectory, LockLevel, OpenOptions, SqliteVfs, VfsError, VfsFile,
-    VfsOptions,
+    VfsOptions, WalScope,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -39,6 +39,17 @@ fn host_vfs_with_options(root: &Path, suffix: &str, options: VfsOptions) -> Sqli
         options,
     )
     .expect("register VFS")
+}
+
+fn host_wal_vfs(root: &Path, suffix: &str) -> SqliteVfs {
+    host_vfs_with_options(
+        root,
+        suffix,
+        VfsOptions {
+            require_full_sync: false,
+            wal_scope: WalScope::HostLocal,
+        },
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -279,6 +290,7 @@ fn rollback_journal_matrix_records_modes_sync_and_reopen_ledger() {
                 // and EXTRA.  The backend still performs its declared sync;
                 // this option only permits SQLite to request NORMAL.
                 require_full_sync: false,
+                wal_scope: mount_rs_sqlite_vfs::WalScope::Disabled,
             },
         );
         let database = format!("{label}.db");
@@ -433,6 +445,211 @@ fn wal_request_is_rejected_instead_of_falling_back() {
     fs::remove_dir_all(root).expect("cleanup");
 }
 
+#[test]
+fn host_wal_round_trip_reader_writer_checkpoint_and_reopen() {
+    let root = temp_root("wal-host");
+    let vfs = host_wal_vfs(&root, "wal_host");
+    let flags = flags();
+    let first = vfs.open("wal.db", flags).expect("open writer");
+    let mode: String = first
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .expect("enable WAL");
+    assert_eq!(mode.to_ascii_uppercase(), "WAL");
+    first
+        .execute_batch(
+            "PRAGMA synchronous=NORMAL;
+             CREATE TABLE records(id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+             INSERT INTO records(id, body) VALUES (1, x'0001ff');",
+        )
+        .expect("create WAL schema");
+    assert_eq!(
+        first
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .unwrap()
+            .to_ascii_uppercase(),
+        "WAL"
+    );
+    assert_eq!(
+        first
+            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+
+    let second = vfs.open("wal.db", flags).expect("open reader");
+    assert!(root.join("wal.db-wal").exists(), "WAL file was not created");
+    assert!(
+        root.join("wal.db-shm").exists(),
+        "WAL shared-memory file was not created"
+    );
+    second
+        .execute_batch("PRAGMA synchronous=NORMAL;")
+        .expect("configure reader");
+    second
+        .execute_batch("BEGIN;")
+        .expect("begin reader snapshot");
+    let before: i64 = second
+        .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+        .expect("read snapshot");
+    assert_eq!(before, 1);
+    first
+        .execute(
+            "INSERT INTO records(id, body) VALUES (2, ?1)",
+            [vec![9_u8, 8, 7]],
+        )
+        .expect("WAL writer commit");
+    let during: i64 = second
+        .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+        .expect("read stable snapshot");
+    assert_eq!(during, 1);
+    second
+        .execute_batch("ROLLBACK;")
+        .expect("end reader snapshot");
+    let checkpoint: (i64, i64, i64) = first
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("checkpoint WAL");
+    assert!(checkpoint.0 >= 0);
+    assert!(checkpoint.1 >= checkpoint.2);
+    drop(second);
+    drop(first);
+
+    let reopened = vfs.open("wal.db", flags).expect("reopen WAL database");
+    let reopened_mode: String = reopened
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("query reopened WAL mode");
+    assert_eq!(reopened_mode.to_ascii_uppercase(), "WAL");
+    let mut rows = reopened
+        .prepare("SELECT id, body FROM records ORDER BY id")
+        .expect("prepare reopened ledger");
+    let ledger = rows
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .expect("query reopened ledger")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect reopened ledger");
+    drop(rows);
+    assert_eq!(ledger, vec![(1, vec![0, 1, 255]), (2, vec![9, 8, 7])]);
+    let integrity: String = reopened
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("reopened WAL integrity");
+    assert_eq!(integrity, "ok");
+    drop(reopened);
+    vfs.close().expect("close WAL VFS");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn host_wal_cross_process_reader_writer_checkpoint_and_reopen() {
+    if std::env::var_os("MOUNT_RS_SQLITE_VFS_WAL_CHILD").is_some() {
+        return;
+    }
+    let root = temp_root("wal-process");
+    let vfs = host_wal_vfs(&root, "wal_process_parent");
+    let first = vfs
+        .open("process-wal.db", flags())
+        .expect("open WAL writer");
+    let mode: String = first
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .expect("enable process WAL");
+    assert_eq!(mode.to_ascii_uppercase(), "WAL");
+    first
+        .execute_batch(
+            "PRAGMA synchronous=NORMAL;
+             CREATE TABLE records(id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+             INSERT INTO records(id, body) VALUES (1, x'0001ff');",
+        )
+        .expect("create process WAL schema");
+    drop(first);
+
+    let reader = vfs
+        .open("process-wal.db", flags())
+        .expect("open process reader");
+    reader
+        .execute_batch("PRAGMA synchronous=NORMAL; BEGIN;")
+        .expect("begin process reader snapshot");
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .expect("read process snapshot"),
+        1
+    );
+
+    let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+        .arg("--exact")
+        .arg("child_process_wal_writer")
+        .arg("--nocapture")
+        .env("MOUNT_RS_SQLITE_VFS_WAL_CHILD", "1")
+        .env("MOUNT_RS_SQLITE_VFS_WAL_ROOT", &root)
+        .status()
+        .expect("spawn WAL child");
+    assert!(status.success(), "WAL child status: {status}");
+
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .expect("read stable process snapshot"),
+        1
+    );
+    reader
+        .execute_batch("ROLLBACK;")
+        .expect("end process reader snapshot");
+    drop(reader);
+
+    let checkpoint = vfs
+        .open("process-wal.db", flags())
+        .expect("open checkpoint connection");
+    let checkpoint_result: (i64, i64, i64) = checkpoint
+        .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("checkpoint process WAL");
+    assert!(checkpoint_result.0 >= 0);
+    assert!(checkpoint_result.1 >= checkpoint_result.2);
+    drop(checkpoint);
+
+    let reopened = vfs
+        .open("process-wal.db", flags())
+        .expect("reopen process WAL");
+    assert_eq!(
+        reopened
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .expect("query process WAL reopen mode")
+            .to_ascii_uppercase(),
+        "WAL"
+    );
+    reopened
+        .execute_batch("PRAGMA synchronous=NORMAL;")
+        .expect("configure process WAL reopen synchronous");
+    assert_eq!(
+        reopened
+            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .expect("query process WAL reopen synchronous"),
+        1
+    );
+    assert_ledger(
+        &reopened,
+        &[
+            LedgerRow {
+                id: 1,
+                body: vec![0, 1, 255],
+            },
+            LedgerRow {
+                id: 2,
+                body: vec![9, 8, 7],
+            },
+        ],
+        "process WAL reopen",
+    );
+    drop(reopened);
+    vfs.close().expect("close process WAL VFS");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
 #[cfg(target_os = "windows")]
 #[test]
 fn windows_native_locks_preserve_rollback_state_transitions() {
@@ -444,6 +661,7 @@ fn windows_native_locks_preserve_rollback_state_transitions() {
         delete_on_close: false,
         kind: mount_rs_sqlite_vfs::FileKind::MainDatabase,
         raw_flags: 0,
+        wal_scope: mount_rs_sqlite_vfs::WalScope::Disabled,
     };
     let mut reader = backend.open(b"locks.db", options).expect("reader");
     let mut writer = backend.open(b"locks.db", options).expect("writer");
@@ -633,6 +851,37 @@ fn child_process_lock_attempt() {
         message.contains("busy") || message.contains("locked"),
         "{message}"
     );
+}
+
+#[test]
+fn child_process_wal_writer() {
+    if std::env::var_os("MOUNT_RS_SQLITE_VFS_WAL_CHILD").is_none() {
+        return;
+    }
+    let root =
+        PathBuf::from(std::env::var_os("MOUNT_RS_SQLITE_VFS_WAL_ROOT").expect("WAL child root"));
+    let vfs = host_wal_vfs(&root, "wal_process_child");
+    let connection = vfs
+        .open("process-wal.db", flags())
+        .expect("child WAL connection");
+    assert_eq!(
+        connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+            .expect("query child WAL mode")
+            .to_ascii_uppercase(),
+        "WAL"
+    );
+    connection
+        .execute_batch("PRAGMA synchronous=NORMAL;")
+        .expect("configure child WAL synchronous");
+    connection
+        .execute(
+            "INSERT INTO records(id, body) VALUES (2, ?1)",
+            [vec![9_u8, 8, 7]],
+        )
+        .expect("child WAL writer commit");
+    drop(connection);
+    vfs.close().expect("close child WAL VFS");
 }
 
 struct BlockingBackend {

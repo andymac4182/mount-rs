@@ -13,7 +13,7 @@ use mount_rs_memory::{ManualClock, MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_sqlite_vfs::{
     Backend, FileKind, InlineExecutor, LockLevel, OpenOptions, SqliteVfs, StorageBackend,
-    StorageOptions, VfsError, VfsOptions,
+    StorageOptions, VfsError, VfsOptions, WalScope,
 };
 use rusqlite::{Connection, OpenFlags};
 
@@ -311,9 +311,34 @@ fn storage_matrix_vfs(backend: Arc<dyn Backend>, label: &str) -> SqliteVfs {
             // EXTRA. The StorageBackend still performs its declared sync;
             // this policy only permits SQLite to request NORMAL.
             require_full_sync: false,
+            wal_scope: WalScope::Disabled,
         },
     )
     .expect("register storage matrix VFS")
+}
+
+fn storage_wal_vfs(backend: Arc<dyn Backend>, label: &str) -> SqliteVfs {
+    storage_wal_vfs_with_policy(backend, label, false)
+}
+
+fn durable_storage_wal_vfs(backend: Arc<dyn Backend>, label: &str) -> SqliteVfs {
+    storage_wal_vfs_with_policy(backend, label, true)
+}
+
+fn storage_wal_vfs_with_policy(
+    backend: Arc<dyn Backend>,
+    label: &str,
+    require_full_sync: bool,
+) -> SqliteVfs {
+    SqliteVfs::with_options(
+        &vfs_name(label),
+        backend,
+        VfsOptions {
+            require_full_sync,
+            wal_scope: WalScope::ProcessLocal,
+        },
+    )
+    .expect("register storage WAL VFS")
 }
 
 fn memory_matrix_backend(
@@ -736,6 +761,275 @@ fn durable_sqlite_storage_backend_runs_complete_rollback_matrix_and_reopens() {
 }
 
 #[test]
+fn memory_storage_backend_runs_process_local_wal_as_volatile_evidence() {
+    let metadata = MemoryMetadataStore::new();
+    let blocks = MemoryBlockStore::new();
+    let backend = memory_matrix_backend(metadata.clone(), blocks.clone(), "memory-wal-first");
+    assert!(!backend.provider_is_durable());
+    let vfs = storage_wal_vfs(Arc::new(backend), "memory_wal_first");
+    let writer = vfs.open("wal.db", flags()).expect("open memory WAL writer");
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .expect("enable memory WAL");
+    assert_eq!(mode.to_ascii_uppercase(), "WAL");
+    writer
+        .execute_batch(
+            "PRAGMA synchronous=NORMAL;
+             CREATE TABLE records(id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+             INSERT INTO records(id, body) VALUES (1, x'0001ff');",
+        )
+        .expect("create memory WAL schema");
+    assert_eq!(
+        writer
+            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .expect("query memory WAL synchronous"),
+        1
+    );
+    let reader = vfs.open("wal.db", flags()).expect("open memory WAL reader");
+    reader
+        .execute_batch("BEGIN;")
+        .expect("begin memory snapshot");
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    writer
+        .execute(
+            "INSERT INTO records(id, body) VALUES (2, ?1)",
+            [vec![9_u8, 8, 7]],
+        )
+        .expect("memory WAL writer commit");
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    reader
+        .execute_batch("ROLLBACK;")
+        .expect("end memory snapshot");
+    let checkpoint: (i64, i64, i64) = writer
+        .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("memory WAL checkpoint");
+    assert!(checkpoint.0 >= 0);
+    drop(reader);
+    drop(writer);
+    vfs.close().expect("close memory WAL VFS");
+
+    let reopened_backend = memory_matrix_backend(metadata, blocks, "memory-wal-reopen");
+    assert!(!reopened_backend.provider_is_durable());
+    let reopened_vfs = storage_wal_vfs(Arc::new(reopened_backend), "memory_wal_reopen");
+    let reopened = reopened_vfs
+        .open("wal.db", flags())
+        .expect("reopen memory WAL");
+    let reopened_mode: String = reopened
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("query memory WAL mode");
+    assert_eq!(reopened_mode.to_ascii_uppercase(), "WAL");
+    let ledger: Vec<(i64, Vec<u8>)> = reopened
+        .prepare("SELECT id, body FROM records ORDER BY id")
+        .expect("prepare memory WAL ledger")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query memory WAL ledger")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect memory WAL ledger");
+    assert_eq!(ledger, vec![(1, vec![0, 1, 255]), (2, vec![9, 8, 7])]);
+    let integrity: String = reopened
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("memory WAL integrity");
+    assert_eq!(integrity, "ok");
+    drop(reopened);
+    reopened_vfs.close().expect("close reopened memory WAL VFS");
+}
+
+#[test]
+fn durable_sqlite_storage_backend_runs_process_local_wal_and_reopens() {
+    let root = temp_root("durable-wal");
+    let backend = sqlite_matrix_backend(&root, "durable-wal-first");
+    assert!(backend.provider_is_durable());
+    let vfs = durable_storage_wal_vfs(Arc::new(backend), "durable_wal_first");
+    let writer = vfs
+        .open("wal.db", flags())
+        .expect("open durable WAL writer");
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+        .expect("enable durable WAL");
+    assert_eq!(mode.to_ascii_uppercase(), "WAL");
+    writer
+        .execute_batch("PRAGMA synchronous=FULL;")
+        .expect("set durable WAL synchronous");
+    assert_eq!(
+        writer
+            .query_row("PRAGMA synchronous", [], |row| row.get::<_, i64>(0))
+            .expect("query durable WAL synchronous"),
+        2
+    );
+    writer
+        .execute_batch(
+            "CREATE TABLE records(id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+             INSERT INTO records(id, body) VALUES (1, x'0001ff');",
+        )
+        .expect("create durable WAL schema");
+    let reader = vfs
+        .open("wal.db", flags())
+        .expect("open durable WAL reader");
+    reader
+        .execute_batch("BEGIN;")
+        .expect("begin durable snapshot");
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    writer
+        .execute(
+            "INSERT INTO records(id, body) VALUES (2, ?1)",
+            [vec![9_u8, 8, 7]],
+        )
+        .expect("durable WAL writer commit");
+    assert_eq!(
+        reader
+            .query_row("SELECT count(*) FROM records", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+    reader
+        .execute_batch("ROLLBACK;")
+        .expect("end durable snapshot");
+    let checkpoint: (i64, i64, i64) = writer
+        .query_row("PRAGMA wal_checkpoint(FULL)", [], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })
+        .expect("durable WAL checkpoint");
+    assert!(checkpoint.0 >= 0);
+    drop(reader);
+    drop(writer);
+    vfs.close().expect("close durable WAL VFS");
+
+    let reopened_backend = sqlite_matrix_backend(&root, "durable-wal-reopen");
+    assert!(reopened_backend.provider_is_durable());
+    let reopened_vfs = durable_storage_wal_vfs(Arc::new(reopened_backend), "durable_wal_reopen");
+    let reopened = reopened_vfs
+        .open("wal.db", flags())
+        .expect("reopen durable WAL");
+    let ledger: Vec<(i64, Vec<u8>)> = reopened
+        .prepare("SELECT id, body FROM records ORDER BY id")
+        .expect("prepare durable WAL ledger")
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .expect("query durable WAL ledger")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("collect durable WAL ledger");
+    assert_eq!(ledger, vec![(1, vec![0, 1, 255]), (2, vec![9, 8, 7])]);
+    let integrity: String = reopened
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("durable WAL integrity");
+    assert_eq!(integrity, "ok");
+    drop(reopened);
+    reopened_vfs
+        .close()
+        .expect("close reopened durable WAL VFS");
+    fs::remove_dir_all(root).expect("cleanup durable WAL");
+}
+
+#[test]
+fn process_local_wal_block_fault_fails_closed_and_reopens_last_published_ledger() {
+    let clock = Arc::new(ManualClock::new(3_000));
+    let metadata = MemoryMetadataStore::with_clock(clock.clone());
+    let fail_flush = Arc::new(AtomicBool::new(false));
+    let blocks = FaultBlockStore {
+        inner: MemoryBlockStore::new(),
+        fail_flush: Arc::clone(&fail_flush),
+    };
+    let options = |owner: &str| {
+        StorageOptions::volatile_for_tests(owner, 4096)
+            .expect("fault WAL options")
+            .with_lease_ttl(std::time::Duration::from_millis(10))
+            .expect("short fault WAL lease")
+    };
+    let backend = Arc::new(
+        StorageBackend::new(metadata.clone(), blocks.clone(), options("wal-fault-first"))
+            .expect("fault WAL bridge"),
+    );
+    let vfs = storage_wal_vfs(backend, "wal_fault_first");
+    let connection = vfs.open("fault-wal.db", flags()).expect("open fault WAL");
+    connection
+        .execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE records(value INTEGER);
+             INSERT INTO records VALUES (0);",
+        )
+        .expect("initial WAL publication");
+    fail_flush.store(true, Ordering::SeqCst);
+    let error = connection
+        .execute("INSERT INTO records VALUES (1)", [])
+        .expect_err("WAL block barrier fault must reach SQLite");
+    assert!(!error.to_string().is_empty());
+    drop(connection);
+    vfs.close().expect("close failed WAL VFS");
+
+    clock.advance_ms(1_000);
+    fail_flush.store(false, Ordering::SeqCst);
+    let backend = Arc::new(
+        StorageBackend::new(metadata, blocks, options("wal-fault-reopen"))
+            .expect("restart WAL bridge"),
+    );
+    let vfs = storage_wal_vfs(backend, "wal_fault_reopen");
+    let connection = vfs.open("fault-wal.db", flags()).expect("reopen fault WAL");
+    let count: i64 = connection
+        .query_row("SELECT count(*) FROM records", [], |row| row.get(0))
+        .expect("reopen fault WAL rows");
+    assert_eq!(count, 1);
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .expect("reopen fault WAL integrity");
+    assert_eq!(integrity, "ok");
+    drop(connection);
+    vfs.close().expect("close reopened fault WAL VFS");
+}
+
+#[test]
+fn storage_backend_rejects_host_local_wal_without_a_host_mapping() {
+    let backend = Arc::new(memory_backend("wal-capability"));
+    let result = SqliteVfs::with_options(
+        &vfs_name("wal_capability_reject"),
+        backend,
+        VfsOptions {
+            require_full_sync: false,
+            wal_scope: WalScope::HostLocal,
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(VfsError::Unsupported("requested WAL shared-memory scope"))
+    ));
+
+    let result = SqliteVfs::with_options(
+        &vfs_name("wal_durability_reject"),
+        Arc::new(memory_backend("wal-durability-capability")),
+        VfsOptions {
+            require_full_sync: true,
+            wal_scope: WalScope::ProcessLocal,
+        },
+    );
+    assert!(matches!(
+        result,
+        Err(VfsError::Unsupported(
+            "WAL full synchronization requires a durable backend"
+        ))
+    ));
+}
+
+#[test]
 fn failed_block_barrier_is_not_acknowledged_and_restart_reopens_old_integrity() {
     let clock = Arc::new(ManualClock::new(1_000));
     let metadata = MemoryMetadataStore::with_clock(clock.clone());
@@ -862,6 +1156,7 @@ fn unrelated_handle_cannot_write_while_another_handle_owns_shared() {
         delete_on_close: false,
         kind: FileKind::MainDatabase,
         raw_flags: 0,
+        wal_scope: WalScope::Disabled,
     };
     let mut first = backend.open(b"authority.db", options).expect("first open");
     first.lock(LockLevel::Shared).expect("first shared lock");
