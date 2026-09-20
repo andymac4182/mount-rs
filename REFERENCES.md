@@ -42,3 +42,12 @@ Copy-on-write remains future work as specified in [REQUIREMENTS.md](REQUIREMENTS
 Before reusing implementation code, inspect its license and preserve any
 required attribution. A reference project's claims are not evidence that
 mount-rs satisfies its own durability or platform acceptance gates.
+
+## End-of-primary-work review
+
+- [Erlang gen_statem behaviour](https://www.erlang.org/doc/system/statem.html):
+  review after the primary uses are implemented and verified, as requested.
+  Consider lessons from explicit state/event transitions, postponed events,
+  timeout lifecycles, and replies for storage coordination and communication.
+  Record applicable lessons, concrete code/test gaps, and reasons not to adopt
+  unsuitable patterns; this does not require Erlang or a new runtime dependency.

@@ -223,6 +223,25 @@ for the pinned mountx behavioral oracle.
   Additional systems such as NBD or HA require an explicit scope decision;
   copy-on-write remains the future requirement below.
 
+## End-of-primary-work review and distributed cache follow-on
+
+After completing and verifying the primary filesystem uses and integrations,
+review the [Erlang gen_statem guide](https://www.erlang.org/doc/system/statem.html)
+for additional lessons about storage coordination and communication. Record
+source-backed findings and any proposed follow-up changes before final handoff.
+
+Track a **distributed cache** as a feature to complete after the primary uses.
+When that phase is reached, discuss its scope and design with the user before
+implementation. Do not silently choose a cache service, consistency model, or
+topology, or start it while primary acceptance remains incomplete.
+
+That discussion should settle metadata versus immutable-block caching,
+coherence/invalidation and versioning, ownership/fencing, eviction and capacity,
+failure/partition behavior, authentication, deployment/dependency cost, and
+benchmarks. Distinguish disposable cached data from authoritative durable
+storage; preserve SQLite locking, fsync, and recovery guarantees. The feature
+is deferred pending that discussion, not implemented or implicitly waived.
+
 ## Future requirement: copy-on-write
 
 Track copy-on-write as future work, not a current feature or a requirement to
