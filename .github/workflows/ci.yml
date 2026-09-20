@@ -339,10 +339,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y fuse3
           test -c /dev/fuse
+          test -r /dev/fuse
+          test -w /dev/fuse
+          command -v fusermount3
       - name: Verify real Node addon mounted I/O and cleanup
         env:
           MOUNT_RS_NAPI_NATIVE_MOUNT: '1'
         run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/native.mjs"], check=True, timeout=180)'
+      - name: Verify structural-driver native mount lifecycle on Linux FUSE
+        if: runner.os == 'Linux'
+        env:
+          MOUNT_RS_NAPI_STRUCTURAL_NATIVE_MOUNT: '1'
+          MOUNT_RS_NAPI_STRUCTURAL_TRANSPORT: fuse
+        run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
       - name: Verify structural-driver native mount lifecycle on macOS
         if: runner.os == 'macOS'
         env:
