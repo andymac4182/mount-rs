@@ -203,6 +203,128 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
 }
 
 #[test]
+#[cfg(target_os = "linux")]
+#[ignore = "requires an opt-in Linux FUSE setup and Python sqlite3"]
+fn cli_fuse_sqlite_config_recovers_after_mount_service_crash() {
+    require_opt_in("MOUNT_RS_CLI_NATIVE_FUSE");
+
+    let mountpoint = unique_mountpoint();
+    let config_path = mountpoint.with_extension("sqlite-config.json");
+    let database_path = mountpoint.with_extension("sqlite-backend.db");
+    let (uid, gid) = effective_test_identity();
+    fs::create_dir(&mountpoint).expect("create disposable SQLite FUSE mountpoint");
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "version": 1,
+  "mountpoint": "{}",
+  "transport": "fuse",
+  "driver": {{
+    "kind": "sqlite",
+    "database": "{}",
+    "uid": {},
+    "gid": {}
+  }}
+}}"#,
+            mountpoint.display(),
+            database_path.display(),
+            uid,
+            gid
+        ),
+    )
+    .expect("write SQLite FUSE config");
+
+    let child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["mount", "--config"])
+        .arg(&config_path)
+        .args(["--quiet"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn SQLite FUSE mount-rs subprocess");
+    let mut child_guard = NativeChildGuard::new(child, mountpoint.clone(), "fuse");
+
+    let (line_sender, line_receiver) = mpsc::channel::<String>();
+    let stdout = child_guard
+        .child_mut()
+        .stdout
+        .take()
+        .expect("capture SQLite FUSE CLI stdout");
+    let stdout_thread = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = line_sender.send(line);
+        }
+    });
+    let stderr = child_guard
+        .child_mut()
+        .stderr
+        .take()
+        .expect("capture SQLite FUSE CLI stderr");
+    let stderr_thread = thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>()
+    });
+
+    let mut output = Vec::new();
+    assert!(
+        wait_for_mount(child_guard.child_mut(), &line_receiver, &mut output, "fuse"),
+        "SQLite FUSE subprocess did not mount; output: {output:?}"
+    );
+    assert!(
+        is_mounted_at(&mountpoint),
+        "kernel did not report SQLite FUSE mount"
+    );
+
+    let fixture_result = run_sqlite_delete_fixture(&mountpoint);
+
+    // Abruptly terminate the actual mount service after committed SQLite
+    // activity. Cleanup is explicit and bounded because a crashed FUSE
+    // userspace server can leave the kernel mount behind.
+    // SAFETY: this is the subprocess spawned by this test.
+    let kill_result = unsafe { libc::kill(child_guard.id() as libc::pid_t, libc::SIGKILL) };
+    assert_eq!(kill_result, 0, "SIGKILL SQLite FUSE mount service");
+    let status = wait_for_exit(child_guard.child_mut());
+    assert!(
+        !status.success(),
+        "SIGKILLed SQLite FUSE mount service unexpectedly succeeded: {status}"
+    );
+
+    stdout_thread
+        .join()
+        .expect("join SQLite FUSE stdout reader");
+    let stderr_lines = stderr_thread
+        .join()
+        .expect("join SQLite FUSE stderr reader");
+    output.extend(line_receiver.try_iter());
+
+    let cleanup_result = cleanup_native_mount_bounded(&mountpoint);
+    assert!(
+        fixture_result.is_ok(),
+        "SQLite FUSE fixture failed: {fixture_result:?}; stdout={output:?}; stderr={stderr_lines:?}"
+    );
+    assert!(
+        cleanup_result.is_ok(),
+        "SQLite FUSE crash cleanup failed: {cleanup_result:?}; stdout={output:?}; stderr={stderr_lines:?}"
+    );
+    assert!(
+        !is_mounted_at(&mountpoint),
+        "SQLite FUSE mount remained after bounded crash cleanup"
+    );
+    child_guard.disarm();
+
+    // A fresh CLI process must reopen the same provider state after the
+    // service crash. This cycle uses normal SIGINT cleanup.
+    run_configured_mount_cycle(&config_path, &mountpoint, "fuse", verify_sqlite_reopen);
+
+    fs::remove_dir(&mountpoint).expect("remove disposable SQLite FUSE mountpoint");
+    fs::remove_file(&config_path).expect("remove disposable SQLite FUSE config");
+    fs::remove_file(&database_path).expect("remove disposable SQLite backend");
+}
+
+#[test]
 #[cfg(target_os = "macos")]
 #[ignore = "requires opt-in macOS NFS access; see the test command in the CLI README"]
 fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
@@ -236,7 +358,7 @@ fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
     .expect("write extension-free macOS NFS config");
 
     let payload = b"macos-nfs-config";
-    run_configured_mount_cycle(&config_path, &mountpoint, |target| {
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
         let path = target.join("config-persistent-bytes");
         fs::write(&path, payload)?;
         let first_read = fs::read(&path)?;
@@ -255,7 +377,7 @@ fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
     // Reuse the same config and host-driver backing directory in a fresh CLI
     // process. This verifies persistence across the first SIGINT/unmount, not
     // just a second file descriptor in one mounted process.
-    run_configured_mount_cycle(&config_path, &mountpoint, |target| {
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
         let path = target.join("config-persistent-bytes");
         let mut reopened = std::fs::File::open(&path)?;
         let mut bytes = Vec::new();
@@ -309,19 +431,23 @@ fn cli_nfs_sqlite_config_binary_hosts_sqlite_and_reopens() {
     )
     .expect("write SQLite NFS config");
 
-    run_configured_mount_cycle(&config_path, &mountpoint, |target| {
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", |target| {
         run_sqlite_delete_fixture(target)
     });
-    run_configured_mount_cycle(&config_path, &mountpoint, verify_sqlite_reopen);
+    run_configured_mount_cycle(&config_path, &mountpoint, "nfs", verify_sqlite_reopen);
 
     fs::remove_dir(&mountpoint).expect("remove disposable SQLite NFS mountpoint");
     fs::remove_file(&config_path).expect("remove disposable SQLite NFS config");
     fs::remove_file(&database_path).expect("remove disposable SQLite backend");
 }
 
-#[cfg(target_os = "macos")]
-fn run_configured_mount_cycle<F>(config_path: &std::path::Path, mountpoint: &std::path::Path, io: F)
-where
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn run_configured_mount_cycle<F>(
+    config_path: &std::path::Path,
+    mountpoint: &std::path::Path,
+    transport: &'static str,
+    io: F,
+) where
     F: FnOnce(&std::path::Path) -> std::io::Result<()>,
 {
     let child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
@@ -331,8 +457,8 @@ where
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn config-backed mount-rs NFS subprocess");
-    let mut child_guard = NativeChildGuard::new(child, mountpoint.to_path_buf(), "nfs");
+        .expect("spawn config-backed mount-rs subprocess");
+    let mut child_guard = NativeChildGuard::new(child, mountpoint.to_path_buf(), transport);
 
     let (line_sender, line_receiver) = mpsc::channel::<String>();
     let stdout = child_guard
@@ -358,14 +484,19 @@ where
     });
 
     let mut output = Vec::new();
-    let ready = wait_for_mount(child_guard.child_mut(), &line_receiver, &mut output, "nfs");
+    let ready = wait_for_mount(
+        child_guard.child_mut(),
+        &line_receiver,
+        &mut output,
+        transport,
+    );
     assert!(
         ready,
-        "config-backed macOS NFS did not mount; output: {output:?}"
+        "config-backed {transport} did not mount; output: {output:?}"
     );
     assert!(
         is_mounted_at(mountpoint),
-        "macOS did not report the config-backed NFS mount"
+        "kernel did not report the config-backed {transport} mount"
     );
     let io_result = io(mountpoint);
 
@@ -375,12 +506,12 @@ where
     let signal_result = unsafe { libc::kill(child_guard.id() as libc::pid_t, libc::SIGINT) };
     assert_eq!(
         signal_result, 0,
-        "send SIGINT to config-backed mount-rs NFS"
+        "send SIGINT to config-backed mount-rs {transport}"
     );
     let status = wait_for_exit(child_guard.child_mut());
     assert!(
         status.success(),
-        "config-backed macOS NFS CLI did not exit cleanly: {status}"
+        "config-backed {transport} CLI did not exit cleanly: {status}"
     );
 
     stdout_thread.join().expect("join CLI stdout reader");
@@ -388,20 +519,20 @@ where
     output.extend(line_receiver.try_iter());
     assert!(
         io_result.is_ok(),
-        "macOS NFS byte I/O failed: {io_result:?}"
+        "config-backed {transport} I/O failed: {io_result:?}"
     );
     assert!(
         output.iter().any(|line| line.contains("unmounted")),
-        "config-backed macOS NFS did not report unmount: {output:?}"
+        "config-backed {transport} did not report unmount: {output:?}"
     );
     assert!(
         !is_mounted_at(mountpoint),
-        "config-backed macOS NFS remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
+        "config-backed {transport} remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
     );
     child_guard.disarm();
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_sqlite_delete_fixture(target: &std::path::Path) -> std::io::Result<()> {
     let script =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sqlite_hosting.py");
@@ -413,7 +544,7 @@ fn run_sqlite_delete_fixture(target: &std::path::Path) -> std::io::Result<()> {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn verify_sqlite_reopen(target: &std::path::Path) -> std::io::Result<()> {
     run_python_fixture(
         SQLITE_REOPEN_DRIVER,
@@ -423,7 +554,7 @@ fn verify_sqlite_reopen(target: &std::path::Path) -> std::io::Result<()> {
     )
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_python_fixture(
     program: &str,
     script: &std::path::Path,
@@ -472,7 +603,7 @@ fn run_python_fixture(
     }
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const SQLITE_DELETE_DRIVER: &str = r#"
 import runpy
 import sys
@@ -481,7 +612,7 @@ fixture = runpy.run_path(sys.argv[1])
 fixture["run_case"](Path(sys.argv[2]), "DELETE")
 "#;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const SQLITE_REOPEN_DRIVER: &str = r#"
 import sqlite3
 import sys
@@ -498,7 +629,7 @@ finally:
     db.close()
 "#;
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn effective_test_identity() -> (u32, u32) {
     let uid = std::env::var("SUDO_UID")
         .ok()
@@ -587,32 +718,95 @@ impl Drop for NativeChildGuard {
 }
 
 fn cleanup_native_mount(mountpoint: &std::path::Path, transport: &str) {
-    if !is_mounted_at(mountpoint) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = transport;
+        if let Err(error) = cleanup_native_mount_bounded(mountpoint) {
+            eprintln!("bounded native mount cleanup failed: {error}");
+        }
         return;
     }
 
-    #[cfg(target_os = "linux")]
-    let candidates = if transport == "fuse" {
-        vec![
-            ("fusermount3", vec!["-u"]),
-            ("fusermount", vec!["-u"]),
-            ("umount", Vec::new()),
-        ]
-    } else {
-        vec![("umount", Vec::new())]
-    };
     #[cfg(target_os = "macos")]
-    let candidates = if transport == "nfs" {
-        vec![("umount", vec!["-f"])]
-    } else {
-        vec![("umount", Vec::new())]
-    };
-
-    for (program, args) in candidates {
-        let result = Command::new(program).args(args).arg(mountpoint).status();
-        if result.is_ok_and(|status| status.success()) || !is_mounted_at(mountpoint) {
-            break;
+    {
+        if !is_mounted_at(mountpoint) {
+            return;
         }
+
+        let candidates = if transport == "nfs" {
+            vec![("umount", vec!["-f"])]
+        } else {
+            vec![("umount", Vec::new())]
+        };
+
+        for (program, args) in candidates {
+            let result = Command::new(program).args(args).arg(mountpoint).status();
+            if result.is_ok_and(|status| status.success()) || !is_mounted_at(mountpoint) {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn cleanup_native_mount_bounded(mountpoint: &std::path::Path) -> Result<(), String> {
+    if !is_mounted_at(mountpoint) {
+        return Ok(());
+    }
+
+    let candidates = [
+        ("fusermount3", &["-u"] as &[&str]),
+        ("fusermount", &["-u"] as &[&str]),
+        ("umount", &[] as &[&str]),
+    ];
+    for (program, args) in candidates {
+        let mut child = match Command::new(program)
+            .args(args)
+            .arg(mountpoint)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    if !is_mounted_at(mountpoint) {
+                        return Ok(());
+                    }
+                    break;
+                }
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break;
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("poll {program} cleanup: {error}"));
+                }
+            }
+        }
+        if !is_mounted_at(mountpoint) {
+            return Ok(());
+        }
+    }
+
+    if is_mounted_at(mountpoint) {
+        Err(format!(
+            "FUSE mount remains at {} after bounded exact-path cleanup",
+            mountpoint.display()
+        ))
+    } else {
+        Ok(())
     }
 }
 

@@ -50,6 +50,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | Planned; approval needed | User / Main |
+| W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
 
 ## Decisions and external prerequisites
 
@@ -227,6 +228,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [ ] W12.4 Run integrity checks and acknowledged-commit recovery across every
   supported metadata/block combination and operating system.
 - [ ] W12.5 Explicitly reject unsupported safety modes and document constraints.
+- [ ] W12.6 Run the new Linux CLI SQLite-backed FUSE SIGKILL/reopen test in
+  hosted CI. Implementation and bounded cleanup are added; main independently
+  passed both shared macOS NFS lifecycle regressions, formatting and Clippy.
+  Linux execution is not yet verified on this macOS host.
 
 ## W13 — FSKit
 
@@ -383,6 +388,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W24.2 Build and deploy Vercel marketing site using verified capability claims.
 - [ ] W24.3 Verify public DNS, HTTPS and actual deployment, and record ownership/
   operational handoff. This backlog entry does not authorize spending now.
+
+## W25 — Actual AWS S3 integration
+
+- [ ] W25.1 Connect AWS MCP (not exposed in current tool inventory) and resolve
+  account/region; user requested an isolated S3 testing setup.
+- [ ] W25.2 Provision private test bucket, narrowly scoped access, and test-data
+  cleanup/retention policy. Keep credentials outside chat and source control.
+- [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
+  tests with restart/reopen, ranges, conditional immutable writes and cleanup.
+  AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance.
 
 ## Recent landed chunks
 

@@ -156,10 +156,12 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 120s cargo test --locked -p mount-rs-auto --test native_fuse -- --ignored --nocapture
-      - name: Verify CLI subprocess mount and signal-triggered unmount
+      - name: Verify CLI mounts, SQLite service crash recovery and cleanup
         env:
           MOUNT_RS_CLI_NATIVE_FUSE: '1'
-        run: timeout 180s cargo test --locked -p mount-rs-cli --test native_lifecycle -- --ignored --nocapture
+        run: |
+          python3 -c 'import sqlite3; print(sqlite3.sqlite_version)'
+          timeout 240s cargo test --locked -p mount-rs-cli --test native_lifecycle -- --ignored --nocapture
       - name: Verify mounted memory and persisted backend operations
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
