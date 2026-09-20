@@ -191,6 +191,7 @@ jobs:
       - run: cargo test --workspace --all-targets --all-features --locked
 
   node:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -215,6 +216,18 @@ jobs:
         run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - run: pnpm --dir integrations/mount-rs-napi build
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
+      - name: Verify storage benchmark harness and smoke workload
+        timeout-minutes: 5
+        run: |
+          node benchmarks/storage/test.mjs
+          MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node benchmarks/storage/runner.mjs --smoke --output artifacts/storage-smoke.json
+      - name: Preserve storage benchmark samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-smoke-${{ matrix.os }}
+          path: artifacts/storage-smoke.json
+          if-no-files-found: warn
       - name: Install native Node mount prerequisites on Linux
         if: runner.os == 'Linux'
         run: |
@@ -227,6 +240,7 @@ jobs:
         run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/native.mjs"], check=True, timeout=180)'
       - run: pnpm --dir tests/upstream install --frozen-lockfile
       - name: Run the unmodified upstream driver conformance suite
+        timeout-minutes: 5
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir tests/upstream test
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-kv-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-http-parity.mjs
@@ -240,7 +254,9 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
       - run: pnpm --dir tests/pglite install --frozen-lockfile
-      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
+      - name: Verify PGlite integration and restart recovery
+        timeout-minutes: 10
+        run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.os }}

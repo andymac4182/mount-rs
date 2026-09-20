@@ -84,8 +84,13 @@ locking, or power-loss durability. Native macOS acceptance currently covers
 DELETE journaling; unsupported modes remain acceptance gaps.
 
 Architectural inspiration and benchmark references are listed in
-[`REFERENCES.md`](REFERENCES.md). ComputeSDK-aligned benchmark implementation
-and acceptance are tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
+[`REFERENCES.md`](REFERENCES.md). The dependency-light
+[`storage benchmark runner`](benchmarks/storage/README.md) measures
+ComputeSDK-aligned write/full-read/delete workloads with payload validation,
+raw samples, and explicit backend/cleanup status. Run
+`MOUNTX_SOURCE=/path/to/pinned/mountx node benchmarks/storage/runner.mjs --smoke`.
+Remote, mounted-path, and small-operation dispatch performance acceptance
+remains tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
 
 The CLI can be run with `cargo run -p mount-rs-cli -- --help` or `-- probe`.
 

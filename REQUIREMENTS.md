@@ -57,8 +57,11 @@ updates or workload deviations.
   requirement. Do not emulate snapshots with full copies and present that as
   implemented copy-on-write performance.
 
-Benchmark implementation and measured results remain pending; this section
-records the requested work, not completed evidence.
+The direct-API runner is implemented in `benchmarks/storage`. Local memory,
+SQLite, split SQLite, and pinned TypeScript memory workloads have been exercised.
+This does not close the full benchmark requirement: remote backends, platform
+coverage, mounted-path workloads, and the separate dispatch review still need
+their own evidence.
 
 ### Dispatch and dependency performance acceptance
 
