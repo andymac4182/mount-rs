@@ -49,7 +49,7 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         3 => Some(16),
         4 => Some(88),
         5 | 17 | 38 => Some(0),
-        14 | 27 => Some(8),
+        14 | 27 | 34 => Some(8),
         15 | 28 | 44 => Some(40),
         18 | 25 | 29 => Some(24),
         20 | 30 => Some(16),
@@ -81,6 +81,46 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Apply the Linux `access(2)` permission check to driver metadata. FUSE
+/// supplies the calling uid/gid in the request header, while the driver
+/// supplies the file owner, group, and mode. Supplementary groups are not
+/// guessed because this session does not negotiate or receive them.
+fn check_access(stats: &Stats, uid: u32, gid: u32, mask: u32) -> Result<()> {
+    const R_OK: u32 = 4;
+    const W_OK: u32 = 2;
+    const X_OK: u32 = 1;
+    const ALLOWED: u32 = R_OK | W_OK | X_OK;
+
+    if mask & !ALLOWED != 0 {
+        return Err(FsError::new(ErrorCode::Einval));
+    }
+    if mask == 0 {
+        return Ok(());
+    }
+
+    // POSIX root bypasses read/write permission bits. Execute still needs at
+    // least one execute bit, matching access(2)'s root rule.
+    if uid == 0 {
+        if mask & X_OK != 0 && stats.mode & 0o111 == 0 {
+            return Err(FsError::new(ErrorCode::Eacces));
+        }
+        return Ok(());
+    }
+
+    let permissions = if uid == stats.uid {
+        (stats.mode >> 6) & 0o7
+    } else if gid == stats.gid {
+        (stats.mode >> 3) & 0o7
+    } else {
+        stats.mode & 0o7
+    };
+    if permissions & mask == mask {
+        Ok(())
+    } else {
+        Err(FsError::new(ErrorCode::Eacces))
+    }
 }
 fn attr(id: u64, s: &Stats) -> Vec<u8> {
     let mut b = Vec::with_capacity(88);
@@ -547,6 +587,19 @@ impl FuseSession {
                     body.extend(value.to_le_bytes());
                 }
                 Ok(body)
+            }
+            34 => {
+                let path = self.inodes.require_path(r.header.nodeid)?;
+                // ACCESS follows symbolic links. Drivers that only expose
+                // lstat retain the explicit fallback used by this transport.
+                let stats = match self.driver.stat(path).await {
+                    Err(error) if error.code == ErrorCode::Enosys => {
+                        self.driver.lstat(path).await?
+                    }
+                    result => result?,
+                };
+                check_access(&stats, r.header.uid, r.header.gid, u32_at(r.body, 0)?)?;
+                Ok(vec![])
             }
             20 => {
                 let handle = self
