@@ -1228,6 +1228,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Local `myroot` SSO credentials are expired; secure local test authentication
   and least-privilege test access remain pending. MCP provisioning is not a
   Rust integration test result.
+- [x] AWS MCP OAuth was revalidated on 2026-09-21 for account `106427005394`: `HeadBucket`, location/public-access/ownership/encryption reads, a unique-prefix `PutObject`/`HeadObject`/`ListObjectsV2` probe, `DeleteObject`, and post-delete empty-prefix verification all passed. The Rust shell harness remains pending because the local `aws` CLI cannot inherit MCP-managed OAuth credentials; no live Rust-service acceptance is claimed from this probe.
 - [ ] W25.2 Provision private test bucket, narrowly scoped access, and test-data
   cleanup/retention policy. Keep credentials outside chat and source control.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
