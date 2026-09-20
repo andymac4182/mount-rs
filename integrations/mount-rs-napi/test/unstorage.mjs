@@ -41,7 +41,10 @@ function makeStore() {
 const store = makeStore()
 store.metadata.set("raw:string", {
   size: 1234,
+  atime: new Date(1_700_000_000_000),
   mtime: new Date(1_700_000_001_000),
+  ctime: new Date(1_700_000_002_000),
+  birthtime: new Date(1_699_999_999_000),
 })
 const fs = createUnstorageDriver(store)
 assert.equal(fs.capabilities.handles, true)
@@ -63,7 +66,10 @@ await pending.close()
 assert.equal((await fs.stat("/bytes.bin")).size, bytes.byteLength)
 const metadataStats = await fs.stat("/raw/string")
 assert.equal(metadataStats.size, 1234)
+assert.equal(metadataStats.atimeMs, 1_700_000_000_000)
 assert.equal(metadataStats.mtimeMs, 1_700_000_001_000)
+assert.equal(metadataStats.ctimeMs, 1_700_000_002_000)
+assert.equal(metadataStats.birthtimeMs, 1_699_999_999_000)
 assert.equal(new TextDecoder().decode(await fs.readFile("/raw/string")), "hello from a raw string")
 assert.equal(new TextDecoder().decode(await fs.readFile("/raw/object")), '{"answer":42}')
 assert.deepEqual(
@@ -96,7 +102,6 @@ await fs.shutdown()
 await fs.shutdown()
 await readOnly.shutdown()
 await failing.shutdown()
-
 
 if (process.env.MOUNTX_SOURCE) {
   // Keep the capability-limited, oracle-backed matrix in the root test tree
