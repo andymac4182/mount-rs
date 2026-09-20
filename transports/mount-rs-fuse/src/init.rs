@@ -104,10 +104,41 @@ pub struct InitReply {
     pub max_stack_depth: u32,
 }
 
+/// Project the joined flag space onto the versioned INIT wire fields.
+///
+/// `flags2` and `FUSE_INIT_EXT` were introduced together in protocol 7.36.
+/// Keeping this normalization at the wire boundary prevents a manually built
+/// reply from advertising an extension that its negotiated minor cannot carry,
+/// and mirrors the normalization performed by [`negotiate`].
+fn split_wire_flags(minor: u32, flags: u64) -> (u32, u32) {
+    let (mut low, mut high) = split_init_flags(flags);
+    let init_ext = FUSE_INIT_EXT as u32;
+    if minor < 36 {
+        low &= !init_ext;
+        high = 0;
+    } else if high != 0 {
+        low |= init_ext;
+    } else {
+        low &= !init_ext;
+    }
+    (low, high)
+}
+
+fn join_wire_flags(minor: u32, flags: u32, flags2: u32) -> u64 {
+    let init_ext = FUSE_INIT_EXT as u32;
+    if minor < 36 {
+        return u64::from(flags & !init_ext);
+    }
+    if flags & init_ext == 0 || flags2 == 0 {
+        return u64::from(flags & !init_ext);
+    }
+    join_init_flags(flags, flags2)
+}
+
 impl InitReply {
     /// Convert the negotiated reply to the public wire-codec representation.
     pub fn as_wire(&self) -> FuseInitOut {
-        let (flags, flags2) = split_init_flags(self.flags);
+        let (flags, flags2) = split_wire_flags(self.minor, self.flags);
         FuseInitOut {
             major: self.major,
             minor: self.minor,
@@ -130,7 +161,7 @@ impl InitReply {
             major: value.major,
             minor: value.minor,
             max_readahead: value.max_readahead,
-            flags: join_init_flags(value.flags, value.flags2),
+            flags: join_wire_flags(value.minor, value.flags, value.flags2),
             max_background: value.max_background,
             congestion_threshold: value.congestion_threshold,
             max_write: value.max_write,
