@@ -70,6 +70,7 @@ const trace = [
     atime_ms: 3_333_000,
     mtime_ms: 4_444_000,
   },
+  { op: "lchown", path: "/work/current", uid: 777, gid: 778 },
   { op: "lstat", path: "/work/current" },
   { op: "readlink", path: "/work/current" },
   { op: "stat", path: "/work/current" },
@@ -212,6 +213,9 @@ async function execute(fs, handles, command) {
       return null;
     case "chown":
       await fs.chown(command.path, command.uid, command.gid);
+      return null;
+    case "lchown":
+      await fs.lchown(command.path, command.uid, command.gid);
       return null;
     case "link":
       await fs.link(command.existing_path, command.new_path);
