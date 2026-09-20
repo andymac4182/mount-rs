@@ -13,9 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use mount_rs_core::FsDriver;
+#[cfg(target_os = "linux")]
 use tokio::process::Command;
 use tokio::sync::{Mutex, Notify};
 use tokio::task::JoinHandle;
+#[cfg(target_os = "linux")]
 use tokio::time::timeout;
 
 use crate::constants::{P9_IOHDRSZ, P9_MIN_MSIZE};
@@ -79,6 +81,11 @@ pub fn p9_client_probe() -> P9ClientProbe {
                     kernel_release().unwrap_or_else(|| "<unknown release>".to_owned())
                 )
             });
+        }
+        if !transport {
+            missing.push(
+                "the 9pnet_fd transport is unavailable; load it with modprobe 9pnet_fd".to_owned(),
+            );
         }
     }
     P9ClientProbe {
@@ -215,36 +222,8 @@ impl P9Mount {
     }
 
     async fn unmount_once(&self) -> io::Result<()> {
-        if !is_mounted_at(&self.mountpoint)? {
-            return self.state.finish_resources().await;
-        }
-        let first = run_command("umount", &[self.mountpoint.as_os_str()], self.state.timeout).await;
-        let detached = match first {
-            Ok(status) if status.success() => !is_mounted_at(&self.mountpoint)?,
-            Ok(_) | Err(_) => false,
-        };
-        if detached {
-            return self.state.finish_resources().await;
-        }
-
-        // v9fs implements forced cancellation. Lazy detach is the final
-        // kernel-side fallback, but the mount table remains the authority.
-        for args in [
-            vec![std::ffi::OsStr::new("-f"), self.mountpoint.as_os_str()],
-            vec![std::ffi::OsStr::new("-l"), self.mountpoint.as_os_str()],
-        ] {
-            let _ = run_command("umount", &args, self.state.timeout).await;
-            if !is_mounted_at(&self.mountpoint)? {
-                return self.state.finish_resources().await;
-            }
-        }
-        Err(io::Error::new(
-            io::ErrorKind::TimedOut,
-            format!(
-                "could not unmount 9P mount at {}",
-                self.mountpoint.display()
-            ),
-        ))
+        unmount_path(&self.mountpoint, self.state.timeout).await?;
+        self.state.finish_resources().await
     }
 }
 
@@ -257,7 +236,7 @@ impl MountState {
             }
         }
         if let Some(directory) = &self.socket_dir {
-            match std::fs::remove_dir_all(directory) {
+            match std::fs::remove_dir(directory) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),
@@ -547,33 +526,61 @@ where
             return Err(error);
         }
     };
-    let output = Command::new("mount")
+    let mut mount_command = Command::new("mount");
+    mount_command
+        .kill_on_drop(true)
         .args(["-i", "-t", "9p", "-o", &mount_options, "--"])
         .arg(&source)
-        .arg(&mountpoint)
-        .output()
-        .await;
+        .arg(&mountpoint);
+    let output = if let Some(limit) = options.unmount_timeout {
+        match timeout(limit, mount_command.output()).await {
+            Ok(output) => output,
+            Err(_) => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "mount -t 9p timed out",
+            )),
+        }
+    } else {
+        mount_command.output().await
+    };
     let output = match output {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
-            let _ = server.close().await;
-            if let Some(task) = serve_task {
-                let _ = task.await;
-            }
-            cleanup_socket_directory(socket_dir.as_deref());
-            return Err(io::Error::other(format!(
+            let mount_error = io::Error::other(format!(
                 "mount -t 9p failed ({}): {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
-            )));
+            ));
+            let cleanup = cleanup_failed_mount(
+                &mountpoint,
+                &server,
+                serve_task,
+                socket_dir,
+                options.unmount_timeout,
+            )
+            .await;
+            return match cleanup {
+                Ok(()) => Err(mount_error),
+                Err(cleanup_error) => Err(io::Error::other(format!(
+                    "{mount_error}; cleanup failed: {cleanup_error}"
+                ))),
+            };
         }
         Err(error) => {
-            let _ = server.close().await;
-            if let Some(task) = serve_task {
-                let _ = task.await;
-            }
-            cleanup_socket_directory(socket_dir.as_deref());
-            return Err(error);
+            let cleanup = cleanup_failed_mount(
+                &mountpoint,
+                &server,
+                serve_task,
+                socket_dir,
+                options.unmount_timeout,
+            )
+            .await;
+            return match cleanup {
+                Ok(()) => Err(error),
+                Err(cleanup_error) => Err(io::Error::other(format!(
+                    "{error}; cleanup failed: {cleanup_error}"
+                ))),
+            };
         }
     };
     let _ = output;
@@ -584,15 +591,22 @@ where
     }) {
         Some(connection) => connection,
         None => {
-            let _ = run_command("umount", &[mountpoint.as_os_str()], options.unmount_timeout).await;
-            let _ = server.close().await;
-            if let Some(task) = serve_task {
-                let _ = task.await;
-            }
-            cleanup_socket_directory(socket_dir.as_deref());
-            return Err(io::Error::other(
-                "mount succeeded but no 9P connection arrived",
-            ));
+            let cleanup = cleanup_failed_mount(
+                &mountpoint,
+                &server,
+                serve_task,
+                socket_dir,
+                options.unmount_timeout,
+            )
+            .await;
+            return match cleanup {
+                Ok(()) => Err(io::Error::other(
+                    "mount succeeded but no 9P connection arrived",
+                )),
+                Err(cleanup_error) => Err(io::Error::other(format!(
+                    "mount succeeded but no 9P connection arrived; cleanup failed: {cleanup_error}"
+                ))),
+            };
         }
     };
     drop(_adoption);
@@ -648,6 +662,7 @@ fn check_option_value(name: &str, value: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 async fn run_command(
     command: &str,
     args: &[&std::ffi::OsStr],
@@ -674,6 +689,71 @@ async fn run_command(
         child.wait().await?
     };
     Ok(status)
+}
+
+#[cfg(target_os = "linux")]
+async fn unmount_path(path: &Path, limit: Option<Duration>) -> io::Result<()> {
+    if !is_mounted_at(path)? {
+        return Ok(());
+    }
+    let first = run_command("umount", &[path.as_os_str()], limit).await;
+    let detached = match first {
+        Ok(status) if status.success() => !is_mounted_at(path)?,
+        Ok(_) | Err(_) => false,
+    };
+    if detached {
+        return Ok(());
+    }
+
+    // v9fs implements forced cancellation. Lazy detach is the final
+    // kernel-side fallback, but the mount table remains the authority.
+    for args in [
+        vec![std::ffi::OsStr::new("-f"), path.as_os_str()],
+        vec![std::ffi::OsStr::new("-l"), path.as_os_str()],
+    ] {
+        let _ = run_command("umount", &args, limit).await;
+        if !is_mounted_at(path)? {
+            return Ok(());
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!("could not unmount 9P mount at {}", path.display()),
+    ))
+}
+
+#[cfg(target_os = "linux")]
+async fn cleanup_failed_mount(
+    mountpoint: &Path,
+    server: &P9Server,
+    serve_task: Option<JoinHandle<io::Result<()>>>,
+    socket_dir: Option<PathBuf>,
+    timeout: Option<Duration>,
+) -> io::Result<()> {
+    let unmount_result = unmount_path(mountpoint, timeout).await;
+    let server_result = server.close().await;
+    if let Some(task) = serve_task {
+        let _ = task.await;
+    }
+    let still_mounted = is_mounted_at(mountpoint).unwrap_or(true);
+    if unmount_result.is_ok() && server_result.is_ok() && !still_mounted {
+        cleanup_socket_directory(socket_dir.as_deref());
+    }
+    unmount_result?;
+    if still_mounted {
+        return Err(io::Error::other(
+            "9P mount remains live; refusing recursive cleanup",
+        ));
+    }
+    server_result
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn unmount_path(_path: &Path, _limit: Option<Duration>) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "native 9P mounts are available on Linux only",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -756,7 +836,7 @@ fn create_private_socket_directory() -> io::Result<PathBuf> {
 #[cfg(target_os = "linux")]
 fn cleanup_socket_directory(directory: Option<&Path>) {
     if let Some(directory) = directory {
-        let _ = std::fs::remove_dir_all(directory);
+        let _ = std::fs::remove_dir(directory);
     }
 }
 
@@ -767,11 +847,6 @@ fn is_mounted_at(path: &Path) -> io::Result<bool> {
     Ok(parse_mount_table(&table)
         .iter()
         .any(|entry| entry.target == target))
-}
-
-#[cfg(not(target_os = "linux"))]
-fn is_mounted_at(_path: &Path) -> io::Result<bool> {
-    Ok(false)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

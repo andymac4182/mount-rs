@@ -187,5 +187,5 @@ async fn unix_listener_accepts_rootless_protocol_and_removes_socket_on_close() {
         .expect("Unix serve task exits cleanly");
     assert!(!socket.exists(), "server close removes its Unix socket");
     let _ = client.shutdown().await;
-    std::fs::remove_dir_all(directory).expect("remove test directory");
+    std::fs::remove_dir(directory).expect("remove test directory");
 }
