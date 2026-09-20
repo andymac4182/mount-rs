@@ -1091,6 +1091,17 @@ fn failed_block_barrier_is_not_acknowledged_and_restart_reopens_old_integrity() 
     assert!(!error.to_string().is_empty());
     drop(connection);
 
+    // A provider barrier failure poisons this bridge.  A later SQLite
+    // connection through the same registration must fail to open rather than
+    // observing an in-memory or partially published namespace.  Recovery is
+    // only allowed after the bridge is rebuilt below.
+    assert!(
+        vfs.open("fault.db", flags()).is_err(),
+        "failed storage bridge must reject a subsequent SQLite open"
+    );
+    vfs.close()
+        .expect("close failed block-barrier VFS registration");
+
     // The failed bridge stays failed closed. A restart after provider lease
     // expiry must reopen the last published namespace, not a partial write.
     clock.advance_ms(1_000);
@@ -1150,6 +1161,16 @@ fn failed_metadata_publication_does_not_expose_partial_blocks_after_restart() {
         .expect_err("failed metadata publication must reach SQLite");
     assert!(!error.to_string().is_empty());
     drop(connection);
+
+    // Metadata publication is the namespace visibility boundary.  Once it
+    // fails, the existing registration must stay closed to new SQLite
+    // handles until a fresh bridge is constructed.
+    assert!(
+        vfs.open("publish.db", flags()).is_err(),
+        "failed storage bridge must reject a subsequent SQLite open"
+    );
+    vfs.close()
+        .expect("close failed metadata-publication VFS registration");
 
     clock.advance_ms(1_000);
     fail_publish.store(false, Ordering::SeqCst);

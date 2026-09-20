@@ -201,9 +201,12 @@ each of the volatile memory and durable SQLite metadata/block provider pairs
 fresh providers over persisted files. It covers fixed
 chunk publication, durable reopen/integrity, exact per-handle authorization,
 stale-reader promotion rejection, separate-process durable lease checking, and
-faults injected before block-barrier completion and metadata publication. The
-unit suite also verifies that `InlineExecutor` completes a future that yields
-`Pending` and wakes its parked thread.
+faults injected before block-barrier completion and metadata publication. Each
+of those provider failures is also checked through the SQLite boundary: the
+existing registration rejects a subsequent open instead of exposing an
+uncertain namespace, and only a freshly rebuilt bridge may reopen the last
+published database. The unit suite also verifies that `InlineExecutor`
+completes a future that yields `Pending` and wakes its parked thread.
 
 With `tokio-executor`, the unit suite additionally drives a yielding future
 from a multi-thread Tokio runtime through `TokioExecutor`. The
@@ -218,10 +221,13 @@ broader claim:
   including lease fencing and failure behavior;
 - multi-process lease fencing across provider instances and restart after
   expired leases for every remote provider;
-- injected block, metadata-publication, network, and process-crash faults;
+- injected network and process-crash faults (block-barrier and
+  metadata-publication failures are covered by the fail-closed bridge tests);
 - actual power-loss/restart durability on each target filesystem and storage
   service;
-- WAL/shared-memory support, which remains intentionally unsupported;
+- distributed WAL/shared-memory support, which remains intentionally
+  unsupported (process-local and host-local scopes are capability-gated
+  separately);
 - concurrent-reader locking, which remains intentionally sacrificed by the
   conservative exclusive-volume policy.
 

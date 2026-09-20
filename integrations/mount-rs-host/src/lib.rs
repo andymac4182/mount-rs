@@ -107,6 +107,8 @@ impl HostFs {
         let error_path = real.clone();
         let target = target.to_owned();
         let target_error = target.clone();
+        #[cfg(windows)]
+        let root = self.root.as_ref().clone();
         run_blocking(move || {
             #[cfg(unix)]
             let result = {
@@ -117,17 +119,8 @@ impl HostFs {
             let result = {
                 let directory = kind
                     .map(|kind| kind == HostSymlinkType::Directory)
-                    .unwrap_or_else(|| {
-                        real.parent()
-                            .unwrap_or(Path::new("/"))
-                            .join(&target)
-                            .is_dir()
-                    });
-                if directory {
-                    std::os::windows::fs::symlink_dir(&target, &real)
-                } else {
-                    std::os::windows::fs::symlink_file(&target, &real)
-                }
+                    .unwrap_or_else(|| windows_symlink_target_is_directory(&root, &real, &target));
+                windows::symlink(&target, &real, directory)
             };
             #[cfg(not(any(unix, windows)))]
             let result = {
@@ -286,6 +279,34 @@ fn symlink_segments(target: &Path) -> (bool, Vec<String>) {
                 .collect(),
         )
     }
+}
+
+#[cfg(windows)]
+fn windows_symlink_target_is_directory(root: &Path, link: &Path, target: &str) -> bool {
+    let target_path = Path::new(target);
+    let (absolute, segments) = symlink_segments(target_path);
+    let probe = if absolute {
+        let mut probe = root.to_owned();
+        let mut depth = 0_usize;
+        for segment in segments {
+            match segment.as_str() {
+                "." => {}
+                ".." if depth > 0 => {
+                    let _ = probe.pop();
+                    depth -= 1;
+                }
+                ".." => return false,
+                segment => {
+                    probe.push(segment);
+                    depth += 1;
+                }
+            }
+        }
+        probe
+    } else {
+        link.parent().unwrap_or(root).join(target_path)
+    };
+    probe.is_dir()
 }
 
 #[cfg(windows)]

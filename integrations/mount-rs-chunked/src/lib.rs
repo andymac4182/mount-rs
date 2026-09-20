@@ -13,8 +13,8 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::{
-    BlockExtent, BlockStore, FileLayout, InodeId, MetadataStore, Namespace, NodeData, NodeMetadata,
-    WriterLease,
+    BlockExtent, BlockStore, FileLayout, InodeId, MetadataStore, NAMESPACE_FORMAT_VERSION,
+    Namespace, NodeData, NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
@@ -26,7 +26,6 @@ use std::time::Duration;
 
 const BLOCK_SIZE: u64 = 4096;
 const MAX_SYMLINK_DEPTH: usize = 40;
-const FORMAT_VERSION: u32 = 1;
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 
@@ -1669,7 +1668,11 @@ where
 }
 
 fn initial_namespace(options: &ChunkedOptions) -> Result<Namespace> {
-    from_config(&options.chunker.config())?;
+    // Capture the serialized configuration once. Besides avoiding needless
+    // work, this makes validation and persistence one logical decision for a
+    // custom chunker whose config is computed at runtime.
+    let default_chunker = options.chunker.config();
+    from_config(&default_chunker)?;
     let timestamp = now_ms();
     let root_mode = S_IFDIR | (options.root_mode & 0o7777);
     let mut nodes = BTreeMap::new();
@@ -1698,13 +1701,13 @@ fn initial_namespace(options: &ChunkedOptions) -> Result<Namespace> {
         },
     );
     Ok(Namespace {
-        format_version: FORMAT_VERSION,
+        format_version: NAMESPACE_FORMAT_VERSION,
         root: 1,
         next_inode: 2,
         default_uid: options.uid,
         default_gid: options.gid,
         umask: options.umask,
-        default_chunker: options.chunker.config(),
+        default_chunker,
         nodes,
     })
 }

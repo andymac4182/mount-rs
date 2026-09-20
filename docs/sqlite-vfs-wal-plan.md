@@ -149,6 +149,13 @@ fails closed; it does not silently fall back to rollback or expose a partial
 publication. Existing failed-state behavior remains in force after a provider
 failure until the backend is explicitly rebuilt/reopened.
 
+The rollback storage-bridge acceptance gate now exercises this boundary
+through SQLite itself: after an injected block-barrier or metadata-publication
+failure, a second open through the same VFS registration is rejected. The
+last published database is only reopened after a fresh bridge is constructed;
+this prevents a failed registration from being mistaken for a recoverable
+in-memory view.
+
 The current generic provider contract is sufficient for process-local WAL
 because the local SHM lock table can serialize the SQLite engine while the
 provider lease serializes durable publication. It is not sufficient for

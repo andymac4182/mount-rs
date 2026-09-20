@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{
     ErrorCode, FsDriver, MemoryFs,
-    storage::{BlockId, BlockStore, MetadataStore},
+    storage::{BlockId, BlockStore, MetadataStore, NAMESPACE_FORMAT_VERSION, NodeData},
 };
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
@@ -269,6 +269,105 @@ async fn shared_inode_handles_match_memoryfs_across_links_rename_and_unlink() {
 }
 
 #[tokio::test]
+async fn fixed_chunk_metadata_survives_partial_rewrite_truncate_extend_and_reopen() {
+    timeout(OP_TIMEOUT, async {
+        let directory = tempdir().unwrap();
+        let metadata_path = directory.path().join("metadata.sqlite");
+        let blocks_path = directory.path().join("blocks.sqlite");
+
+        let first = ChunkedFs::open(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            SqliteBlockStore::open(&blocks_path).unwrap(),
+            ChunkedOptions::fixed("layout-first", 4).unwrap(),
+        )
+        .await
+        .unwrap();
+        let first_loopback = mount_rs_core::Loopback::new(first.clone());
+        let file = first.open("/payload", "w+", 0o600).await.unwrap();
+        file.write(b"abcdefghij", Some(0)).await.unwrap();
+        file.write(b"XYZZ", Some(3)).await.unwrap();
+        file.truncate(6).await.unwrap();
+        file.truncate(11).await.unwrap();
+        file.write(b"tail", Some(7)).await.unwrap();
+        file.sync().await.unwrap();
+        file.close().await.unwrap();
+
+        let expected = b"abcXYZ\0tail";
+        assert_eq!(
+            first_loopback.read_file("/payload").await.unwrap(),
+            expected
+        );
+        first.shutdown().await.unwrap();
+
+        let metadata = SqliteMetadataStore::open(&metadata_path).unwrap();
+        let loaded = metadata.load().await.unwrap();
+        assert!(
+            loaded.revision >= 6,
+            "each acknowledged mutation is versioned"
+        );
+        let namespace = loaded.namespace.clone().unwrap();
+        assert_eq!(namespace.format_version, NAMESPACE_FORMAT_VERSION);
+        assert_eq!(namespace.default_chunker.algorithm, "fixed-size");
+        assert_eq!(namespace.default_chunker.version, 1);
+        assert_eq!(namespace.default_chunker.parameters["chunk_size"], 4);
+        let payload = namespace
+            .nodes
+            .values()
+            .find(|node| {
+                node.stats.ino != namespace.root && node.stats.size == expected.len() as u64
+            })
+            .expect("persisted payload inode");
+        let NodeData::File(layout) = &payload.data else {
+            panic!("persisted payload must remain a file layout");
+        };
+        assert_eq!(layout.chunker, namespace.default_chunker);
+        assert!(layout.extents.iter().all(|extent| {
+            extent.file_offset % 4 == 0 && extent.block_offset == 0 && extent.length <= 4
+        }));
+        loaded.validate().unwrap();
+        drop(metadata);
+
+        // The persisted namespace default, rather than a new opener's
+        // requested default, must control files created after a reopen.
+        let reopened = ChunkedFs::open(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            SqliteBlockStore::open(&blocks_path).unwrap(),
+            ChunkedOptions::fixed("layout-second", 1024).unwrap(),
+        )
+        .await
+        .unwrap();
+        let reopened_loopback = mount_rs_core::Loopback::new(reopened.clone());
+        assert_eq!(
+            reopened_loopback.read_file("/payload").await.unwrap(),
+            expected
+        );
+        reopened_loopback
+            .write_file("/new", b"12345")
+            .await
+            .unwrap();
+        let reopened_namespace = reopened
+            .metadata_store()
+            .load()
+            .await
+            .unwrap()
+            .namespace
+            .unwrap();
+        let new_file = reopened_namespace
+            .nodes
+            .values()
+            .find(|node| node.stats.size == 5)
+            .expect("new file inode after reopen");
+        let NodeData::File(new_layout) = &new_file.data else {
+            panic!("new file must remain a file layout");
+        };
+        assert_eq!(new_layout.chunker.parameters["chunk_size"], 4);
+        reopened.shutdown().await.unwrap();
+    })
+    .await
+    .expect("fixed chunk persistence test timed out");
+}
+
+#[tokio::test]
 async fn sqlite_writer_instances_fence_single_owner_across_connections() {
     timeout(OP_TIMEOUT, async {
         let directory = tempdir().unwrap();
@@ -366,6 +465,70 @@ async fn sqlite_writer_instances_fence_single_owner_across_connections() {
     })
     .await
     .expect("SQLite writer fencing test timed out");
+}
+
+#[tokio::test]
+async fn fenced_writer_cannot_publish_after_a_blocked_partial_write() {
+    timeout(OP_TIMEOUT, async {
+        let clock = Arc::new(mount_rs_memory::ManualClock::new(0));
+        let metadata = MemoryMetadataStore::with_clock(clock.clone());
+        let blocks = BlockingBlockStore::new();
+        let fs = ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            ChunkedOptions::fixed("stale-owner", 4)
+                .unwrap()
+                .with_lease_ttl(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let handle = fs.open("/payload", "w+", 0o600).await.unwrap();
+        let entered = blocks.entered.notified();
+        let write_task = tokio::spawn(async move { handle.write(b"stale", Some(1)).await });
+
+        timeout(OP_TIMEOUT, entered)
+            .await
+            .expect("partial write did not reach the block provider");
+        assert!(clock.advance_ms(1_000));
+        let replacement = metadata
+            .acquire_writer("replacement-owner", Duration::from_secs(10))
+            .await
+            .unwrap();
+        let revision_before_release = metadata.load().await.unwrap().revision;
+
+        blocks.release.notify_one();
+        let error = timeout(OP_TIMEOUT, write_task)
+            .await
+            .expect("fenced write timed out")
+            .expect("fenced write task panicked")
+            .expect_err("stale writer unexpectedly acknowledged a write");
+        assert_eq!(error.code, ErrorCode::Estale);
+        assert_eq!(
+            metadata.load().await.unwrap().revision,
+            revision_before_release
+        );
+        assert!(fs.failed());
+
+        metadata.release_writer(&replacement).await.unwrap();
+        let fresh = ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            ChunkedOptions::fixed("fresh-owner", 64).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mount_rs_core::Loopback::new(fresh.clone())
+                .read_file("/payload")
+                .await
+                .unwrap(),
+            b""
+        );
+        fresh.shutdown().await.unwrap();
+        let _ = fs.shutdown().await;
+    })
+    .await
+    .expect("stale publication test timed out");
 }
 
 #[derive(Clone)]

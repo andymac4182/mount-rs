@@ -1,7 +1,7 @@
 //! Windows filesystem primitives matching Node/libuv's win/fs.c conventions.
 //! ABI declarations are local so the host crate needs no new lockfile entries.
 
-use std::ffi::c_void;
+use std::ffi::{OsStr, c_void};
 use std::fs::{self, File};
 use std::io;
 use std::os::windows::ffi::OsStrExt;
@@ -13,6 +13,8 @@ use mount_rs_core::{OpenFlags, Stats, StatsFs};
 type Handle = *mut c_void;
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const SYMBOLIC_LINK_FLAG_DIRECTORY: u32 = 0x1;
+const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: u32 = 0x2;
 const READ_ATTRIBUTES: u32 = 0x80;
 const WRITE_ATTRIBUTES: u32 = 0x100;
 const READONLY: u32 = 1;
@@ -93,6 +95,7 @@ unsafe extern "system" {
         attributes: u32,
         template: Handle,
     ) -> Handle;
+    fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> i32;
     fn GetFileInformationByHandle(handle: Handle, info: *mut HandleInfo) -> i32;
     fn GetFileInformationByHandleEx(
         handle: Handle,
@@ -119,7 +122,7 @@ unsafe extern "system" {
     fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
-fn open_raw(path: &Path, access: u32, disposition: u32, attributes: u32) -> io::Result<File> {
+fn wide_host_path(path: &Path) -> io::Result<Vec<u16>> {
     // Normalize separators before using extended-length paths (which disable
     // Win32 slash normalization). Preserve non-Unicode filenames as UTF-16.
     let absolute = std::path::absolute(path)?;
@@ -141,6 +144,57 @@ fn open_raw(path: &Path, access: u32, disposition: u32, attributes: u32) -> io::
         wide = prefix.encode_utf16().chain(rest.iter().copied()).collect();
     }
     wide.push(0);
+    Ok(wide)
+}
+
+fn wide_link_target(target: &str) -> io::Result<Vec<u16>> {
+    // A symlink target is intentionally not made absolute: relative targets
+    // are resolved by Windows relative to the link's parent. The host driver
+    // rewrites targets during rooted traversal, just as mountx does.
+    let mut wide: Vec<u16> = OsStr::new(target).encode_wide().collect();
+    if wide.contains(&0) {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    for unit in &mut wide {
+        if *unit == u16::from(b'/') {
+            *unit = u16::from(b'\\');
+        }
+    }
+    wide.push(0);
+    Ok(wide)
+}
+
+pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<()> {
+    let link = wide_host_path(path)?;
+    let target = wide_link_target(target)?;
+    let type_flag = if directory {
+        SYMBOLIC_LINK_FLAG_DIRECTORY
+    } else {
+        0
+    };
+    let mut flags = type_flag | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    // Windows 10 Developer Mode supports this flag without elevation. Older
+    // Windows versions reject the flag itself; libuv retries without it so
+    // the ordinary elevated symlink behavior remains available.
+    loop {
+        // SAFETY: both buffers are NUL-terminated UTF-16 and remain alive for
+        // the synchronous CreateSymbolicLinkW call.
+        if unsafe { CreateSymbolicLinkW(link.as_ptr(), target.as_ptr(), flags) } != 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if flags & SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE != 0
+            && error.raw_os_error() == Some(87)
+        {
+            flags &= !SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+            continue;
+        }
+        return Err(error);
+    }
+}
+
+fn open_raw(path: &Path, access: u32, disposition: u32, attributes: u32) -> io::Result<File> {
+    let wide = wide_host_path(path)?;
     // SAFETY: NUL-terminated UTF-16 path and null optional arguments; all share
     // modes match libuv, including deleting/renaming a live handle.
     let handle = unsafe {

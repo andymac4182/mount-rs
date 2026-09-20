@@ -1,6 +1,6 @@
 // Live platform oracle: Node's own Win32/libuv implementation, never a mock.
 import * as fs from "node:fs"
-const [operation, path] = process.argv.slice(2)
+const [operation, path, modeArg] = process.argv.slice(2)
 if (operation === "mode") console.log(fs.statSync(path).mode & 0o777)
 else if (operation === "stat") {
   const s = fs.statSync(path, { bigint: true })
@@ -24,4 +24,46 @@ else if (operation === "stat") {
   const size = fs.fstatSync(fd).size
   fs.closeSync(fd)
   console.log(`${size},${code}`)
+} else if (operation === "read-create-mode") {
+  const mode = Number.parseInt(modeArg, 8)
+  const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_CREAT, mode)
+  let code
+  try { fs.writeSync(fd, Buffer.from("x")) } catch (error) { code = error.code }
+  const stats = fs.fstatSync(fd)
+  fs.closeSync(fd)
+  console.log(`${stats.size},${code},${stats.mode & 0o777}`)
+} else if (operation === "hard-links") {
+  fs.writeFileSync(path, "payload")
+  const first = `${path}.first`
+  const second = `${path}.second`
+  const moved = `${path}.moved`
+  fs.linkSync(path, first)
+  fs.linkSync(path, second)
+  const before = [path, first, second].map((entry) => fs.statSync(entry))
+  fs.unlinkSync(first)
+  const afterUnlink = fs.statSync(path)
+  fs.renameSync(path, moved)
+  const afterRename = fs.statSync(moved)
+  console.log([
+    before.every((stats) => stats.ino === before[0].ino),
+    ...before.map((stats) => stats.nlink),
+    afterUnlink.nlink,
+    afterRename.nlink,
+    afterRename.ino === before[0].ino,
+  ].join(","))
+  fs.unlinkSync(second)
+  fs.unlinkSync(moved)
+} else if (operation === "handle-lifecycle") {
+  const fd = fs.openSync(path, "w+")
+  fs.writeSync(fd, Buffer.from("a"))
+  const moved = `${path}.moved`
+  fs.renameSync(path, moved)
+  fs.writeSync(fd, Buffer.from("b"))
+  const data = fs.readFileSync(moved, "utf8")
+  fs.unlinkSync(moved)
+  const size = fs.fstatSync(fd).size
+  fs.closeSync(fd)
+  let missing
+  try { fs.statSync(moved) } catch (error) { missing = error.code }
+  console.log(`${data},${size},${missing}`)
 } else throw new Error(`Unknown oracle operation: ${operation}`)
