@@ -298,6 +298,9 @@ patch):
 | Schrodinger | W01 napi-rs FUSE READLINK/STATFS codecs | `integrations/mount-rs-napi/**` | Integrated as `054fb95`; pinned protocol differential, declarations/artifacts, typecheck, build and full N-API suite passed; scoped Clippy retains the known pre-existing lint exclusion |
 | Pasteur | W01 Node SDK CLI native integration | `examples/node-cli/**` | Integrated as `8e1f218`; opt-in macOS NFS mount/read/write/unmount/persistence passed; Linux FUSE and unavailable-platform paths remain explicit skips |
 | Pascal | W01 Rust FUSE READLINK/STATFS wire/session behavior | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `08731ed`; full FUSE suite and strict scoped Clippy passed; native kernel/session acceptance remains separate |
+| Nietzsche | W01 napi-rs FUSE BATCH_FORGET/INTERRUPT codecs | `integrations/mount-rs-napi/**` | Integrated as `4dc90d5`; generated bindings, pinned-oracle protocol-minor tests, typecheck, build and full N-API suite passed; scoped Clippy retains the known pre-existing lint exclusion |
+| Nash the 2nd | W01 Rust FUSE forget/interrupt validation | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `7934062`; strict BATCH_FORGET validation, fail-closed INTERRUPT semantics, 48 package tests and strict scoped Clippy passed; native kernel cancellation remains open |
+| Kant | W01 Unstorage remaining capability parity | `tests/unstorage/**` | Integrated as `b13350f`; 25 oracle rows passed with 4 supported, 21 explicit ENOSYS classifications, 0 ENOTSUP mismatches and 0 skips |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -527,6 +530,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   suite, and macOS NFS Node CLI mount/read/write/unmount/persistence test all
   passed. Hosted Linux FUSE, hosted Windows, FSKit, live R2/PGlite and the
   remaining FUSE session/mount surfaces remain open.
+- [x] The second W01 rotation is integrated: `7934062` validates FUSE
+  `BATCH_FORGET` and fail-closed `INTERRUPT` sessions; `4dc90d5` exposes the
+  matching napi-rs codecs and pinned-oracle tests; and `b13350f` replaces the
+  remaining Unstorage capability skips with exact supported/`ENOSYS` assertions.
+  The full locked Rust workspace, oracle-enabled N-API suite, 25-row Unstorage
+  packet and previous native Node CLI acceptance all passed. Hosted Linux and
+  Windows, FSKit, live R2/PGlite, and kernel-level cancellation remain open.
 - [x] The three implementation packets were published sequentially to
   `origin/main`; their verified implementation ref before the tracker-only
   publication was `bcf465334273c8701161c0fb35be7bfc4ddfb538`, followed by
