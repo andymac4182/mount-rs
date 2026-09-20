@@ -270,6 +270,9 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 - [x] Migrate npm packages to `@mount-rs/core` and `@mount-rs/virtual-fs`,
   including loaders, dependencies, imports and distribution checks. No registry
   publication or namespace-ownership verification is implied.
+- [x] Harden the scoped `@mount-rs/core` distribution metadata and generated
+  platform-package loaders (`4fa908e`); aggregate, pack, loader and consumer
+  checks pass. Publication and native artifact qualification remain open.
 - [x] Land shared cancellation-safe shutdown, provider-reference release ordering,
   panic/error retry and Windows numeric flags. Main passed 12 native binding
   tests, strict Clippy, rebuilt-addon/oracle-enabled Node suite, consumer tests
