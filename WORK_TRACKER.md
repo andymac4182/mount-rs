@@ -110,7 +110,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
-| W05 | Cloudflare R2 | Live provider tests passed; CLI gate added, credentialed execution pending | Main |
+| W05 | Cloudflare R2 | Live provider and configuration-driven CLI gates passed; broader benchmark/release evidence remains | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
@@ -238,10 +238,12 @@ complete.
   and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
   oracle, with per-run snapshot cleanup. CLI/native and benchmarks remain open.
 - [ ] W05.4 Record service identity and revision without recording credentials.
-- [ ] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
-  R2 endpoint with scoped S3 credentials. The opt-in runner now validates the
-  endpoint, proves both block prefixes contain objects, and removes only its
-  owned prefix; credentialed execution and a cleanup readback remain open.
+- [x] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
+  R2 endpoint with scoped S3 credentials. On 2026-09-20, the live gate passed
+  both PGlite-metadata/R2-block and SQLite-metadata/R2-block drives, ranged
+  reads, auth isolation, graceful reopen, object-presence checks and owned
+  prefix cleanup. The runner now counts returned `Contents` because R2 may
+  omit AWS's optional `KeyCount`; it does not weaken the cleanup gate.
 - [x] W05.5 Fix live Node factory expected-byte assertion and guarantee unique
   cloud fixture keys with exact cleanup. Main reran the full PGlite/R2 script
   successfully: actual R2 Node factory and DELETE/HEAD cleanup, independent
@@ -822,3 +824,4 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `afc55cb` / `c9088aa` / `8cf0c5d` | TanStack Start site and Vercel output hardening | Production deployment and custom-domain DNS/HTTPS verified; broader project release readiness remains open |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
+| working tree | Cloudflare R2 CLI object-count compatibility | Live bucket-scoped gate passed after counting R2 `Contents`; cleanup readback passed |

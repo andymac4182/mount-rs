@@ -77,6 +77,9 @@ cleanup_r2() {
         echo "CLOUDFLARE_R2_CLEANUP_FAILED prefix=$MOUNT_RS_CLI_REMOTE_PREFIX" >&2
         return 1
       }
+  # Cloudflare R2 may omit AWS's optional KeyCount field while still
+  # returning Contents. Count the returned objects instead of treating
+  # a missing KeyCount as an empty prefix.
   remaining=$(AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
     AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
     AWS_DEFAULT_REGION=auto \
@@ -85,12 +88,12 @@ cleanup_r2() {
         --bucket "$R2_BUCKET" \
         --prefix "$MOUNT_RS_CLI_REMOTE_PREFIX/" \
         --endpoint-url "$endpoint_without_slash" \
-        --query 'KeyCount' --output text) || {
+        --query 'length(Contents || `[]`)' --output text) || {
           echo "CLOUDFLARE_R2_CLEANUP_VERIFY_FAILED prefix=$MOUNT_RS_CLI_REMOTE_PREFIX" >&2
           return 1
         }
   case "$remaining" in
-    0|None) ;;
+    0) ;;
     *)
       echo "CLOUDFLARE_R2_CLEANUP_INCOMPLETE prefix=$MOUNT_RS_CLI_REMOTE_PREFIX count=$remaining" >&2
       return 1
@@ -167,9 +170,9 @@ for block_prefix in pglite-r2-blocks sqlite-r2-blocks; do
         --bucket "$R2_BUCKET" \
         --prefix "$MOUNT_RS_CLI_REMOTE_PREFIX/$block_prefix/" \
         --endpoint-url "$endpoint_without_slash" \
-        --query 'KeyCount' --output text)
+        --query 'length(Contents || `[]`)' --output text)
   case "$object_count" in
-    ''|0|None)
+    ''|0)
       echo "Cloudflare R2 CLI test found no objects under $block_prefix" >&2
       exit 1
       ;;
