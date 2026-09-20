@@ -7,6 +7,16 @@ import { aggregateArtifacts, NATIVE_TARGETS } from "../scripts/aggregate-artifac
 const inputDir = await mkdtemp(join(tmpdir(), "mount-rs-native-artifacts-"));
 const before = await readFile(new URL("../package.json", import.meta.url), "utf8");
 
+assert.deepEqual(
+  NATIVE_TARGETS.find(({ platformArchABI }) => platformArchABI === "win32-x64-msvc"),
+  {
+    platformArchABI: "win32-x64-msvc",
+    artifact: "mount-rs.win32-x64-msvc.node",
+    packageName: "@mount-rs/core-win32-x64-msvc",
+  },
+  "Windows MSVC must remain part of the published native target matrix",
+);
+
 try {
   const existingDir = await mkdtemp(join(tmpdir(), "mount-rs-existing-stage-"));
   try {

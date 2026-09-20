@@ -10,7 +10,7 @@ const packageRoot = fileURLToPath(new URL("..", import.meta.url));
 const napiCommand = fileURLToPath(new URL("../node_modules/.bin/napi", import.meta.url));
 
 /**
- * The four native artifacts uploaded by the CI node matrix. Keep this list in
+ * The five native artifacts uploaded by the CI node matrix. Keep this list in
  * the same target order as package.json so the validation also checks that an
  * aggregate job cannot silently omit one architecture.
  */
@@ -34,6 +34,11 @@ export const NATIVE_TARGETS = Object.freeze([
     platformArchABI: "linux-x64-gnu",
     artifact: "mount-rs.linux-x64-gnu.node",
     packageName: "@mount-rs/core-linux-x64-gnu",
+  }),
+  Object.freeze({
+    platformArchABI: "win32-x64-msvc",
+    artifact: "mount-rs.win32-x64-msvc.node",
+    packageName: "@mount-rs/core-win32-x64-msvc",
   }),
 ]);
 

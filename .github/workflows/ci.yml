@@ -122,7 +122,7 @@ jobs:
           sudo env MOUNT_RS_9P_NATIVE_TEST=1 timeout 180s "$native_test" --ignored --nocapture
 
   aggregate-native:
-    needs: node
+    needs: [node, windows-node]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,7 +140,7 @@ jobs:
       - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
       - name: Check packaging validation regressions
         run: node integrations/mount-rs-napi/test/distribution-aggregate.mjs
-      - name: Validate all four native distribution packages without publishing
+      - name: Validate all five native distribution packages without publishing
         run: pnpm --dir integrations/mount-rs-napi run aggregate:artifacts -- --input-dir "$RUNNER_TEMP/mount-rs-native-artifacts"
 
   native-fuse:
@@ -250,6 +250,14 @@ jobs:
           pnpm --dir integrations/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
           pnpm --dir integrations/mount-rs-virtual-fs test
           pnpm --dir integrations/mount-rs-virtual-fs typecheck
+
+      - name: Verify Windows package distribution
+        run: node integrations/mount-rs-napi/test/distribution.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-win32-x64-msvc
+          path: integrations/mount-rs-napi/mount-rs.win32-x64-msvc.node
+          if-no-files-found: error
 
   node:
     timeout-minutes: 45
