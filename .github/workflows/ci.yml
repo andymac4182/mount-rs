@@ -5,6 +5,28 @@ on:
   pull_request:
 
 jobs:
+  aggregate-native:
+    needs: node
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: ${{ runner.temp }}/mount-rs-native-artifacts
+          merge-multiple: true
+      - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - name: Check packaging validation regressions
+        run: node integrations/mount-rs-napi/test/distribution-aggregate.mjs
+      - name: Validate all four native distribution packages without publishing
+        run: pnpm --dir integrations/mount-rs-napi run aggregate:artifacts -- --input-dir "$RUNNER_TEMP/mount-rs-native-artifacts"
+
   native-fuse:
     runs-on: ubuntu-latest
     timeout-minutes: 15
