@@ -165,6 +165,8 @@ The Rust implementation has useful, tested FUSE pieces:
 
 The oracle FUSE barrel also exports constants, init, inodes, mount, notify,
 protocol, record, and session, including a broad request/reply body codec.
+- The N-API FUSE codec now adds raw-layout `IOCTL` request/reply support: the 32-byte request header, declared input payload, 16-byte reply, signed result and protocol-context fields are differentially tested against the pinned oracle, including malformed/trailing inputs. The post-publication full N-API suite passed; this remains focused codec evidence rather than full session/native-mount parity.
+
 The N-API package still does not expose the complete request/reply body codec,
 init negotiation, session, or native mount objects. Therefore this packet
 proves focused body/inode components only, not full FUSE transport parity.
