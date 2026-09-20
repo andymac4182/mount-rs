@@ -132,6 +132,17 @@ fn patterned_bytes(length: usize) -> Vec<u8> {
         .collect()
 }
 
+fn expected_composition_bytes() -> Vec<u8> {
+    let mut expected = patterned_bytes(4096 * 3 + 113);
+    let patch = patterned_bytes(257);
+    expected[4096 + 37..4096 + 37 + patch.len()].copy_from_slice(&patch);
+    expected.truncate(4096 + 19);
+    expected.resize(4096 * 3 + 29, 0);
+    let tail = patterned_bytes(193);
+    expected[4096 * 2 + 73..4096 * 2 + 73 + tail.len()].copy_from_slice(&tail);
+    expected
+}
+
 async fn composition_round_trip(
     cluster_file: &str,
     config: &R2Config,
@@ -158,8 +169,9 @@ async fn composition_round_trip(
 
     let loopback = Loopback::new(filesystem.clone());
     let file = loopback.open("/binary", "w+", 0o640).await?;
-    let mut expected = patterned_bytes(4096 * 3 + 113);
-    file.write(&expected, Some(0)).await?;
+    let initial = patterned_bytes(4096 * 3 + 113);
+    let mut expected = initial.clone();
+    file.write(&initial, Some(0)).await?;
 
     let patch = patterned_bytes(257);
     file.write(&patch, Some(4096 + 37)).await?;
@@ -431,7 +443,38 @@ async fn verify_exact_rustfs_cleanup(
             })?;
     }
 
-    blocks.delete_created().await?;
+    let created_is_empty = blocks
+        .created
+        .lock()
+        .expect("created block set is not poisoned")
+        .is_empty();
+    if created_is_empty {
+        // A fresh post-restart client does not inherit the first process's
+        // in-memory block-ID ledger. Listing only the exact owned prefix keeps
+        // cleanup scoped while still proving the restart process can reap the
+        // blocks it reopened.
+        let owned = object_store
+            .list_with_delimiter(Some(&ObjectPath::from(block_prefix)))
+            .await
+            .map_err(|error| {
+                mount_rs_core::backend_error(format!("list restart block prefix: {error}"))
+            })?;
+        assert!(
+            owned.common_prefixes.is_empty(),
+            "restart cleanup found unexpected nested prefixes: {:?}",
+            owned.common_prefixes
+        );
+        for object in owned.objects {
+            object_store
+                .delete(&object.location)
+                .await
+                .map_err(|error| {
+                    mount_rs_core::backend_error(format!("delete restart block: {error}"))
+                })?;
+        }
+    } else {
+        blocks.delete_created().await?;
+    }
 
     let owned = object_store
         .list_with_delimiter(Some(&ObjectPath::from(block_prefix)))
@@ -505,9 +548,43 @@ async fn run_real_composition() -> Result<()> {
     verify_cas_and_fencing(&cluster_file, &volume_prefix).await?;
 
     let blocks = TrackedRustFsBlocks::new(&config, block_prefix, created);
+    let defer_cleanup = env::var_os("MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP").is_some();
+    if !defer_cleanup {
+        verify_exact_rustfs_cleanup(&config, &combo_prefix, blocks.inner.prefix(), &blocks).await?;
+    }
+    drop(network);
+    println!(
+        "FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision={revision} volume_prefix={volume_prefix} cleanup_deferred={defer_cleanup}"
+    );
+    Ok(())
+}
+
+async fn run_real_restart_reopen() -> Result<()> {
+    let cluster_file = required_env("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE");
+    let config = local_rustfs_config();
+    let combo_prefix = required_env("RUSTFS_COMBO_PREFIX");
+    let volume_prefix = format!("{combo_prefix}/foundationdb-metadata");
+    let block_prefix = format!("{combo_prefix}/rustfs-blocks");
+    let created = Arc::new(Mutex::new(BTreeSet::new()));
+
+    let network = unsafe { foundationdb::boot() };
+    verify_reopen(
+        &cluster_file,
+        &config,
+        &volume_prefix,
+        &block_prefix,
+        &expected_composition_bytes(),
+        Arc::clone(&created),
+    )
+    .await?;
+    // Re-run the metadata CAS and lease-fence checks after the service restart;
+    // this is distinct from the first process's pre-restart evidence.
+    verify_cas_and_fencing(&cluster_file, &volume_prefix).await?;
+
+    let blocks = TrackedRustFsBlocks::new(&config, block_prefix, created);
     verify_exact_rustfs_cleanup(&config, &combo_prefix, blocks.inner.prefix(), &blocks).await?;
     drop(network);
-    println!("FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision={revision} volume_prefix={volume_prefix}");
+    println!("FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS volume_prefix={volume_prefix}");
     Ok(())
 }
 
@@ -517,4 +594,12 @@ async fn foundationdb_rustfs_chunked_composition() {
         .await
         .expect("FoundationDB + RustFS composition exceeded its bounded timeout")
         .expect("FoundationDB + RustFS composition failed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn foundationdb_rustfs_chunked_restart_reopen() {
+    tokio::time::timeout(TEST_TIMEOUT, run_real_restart_reopen())
+        .await
+        .expect("FoundationDB + RustFS restart reopen exceeded its bounded timeout")
+        .expect("FoundationDB + RustFS restart reopen failed");
 }
