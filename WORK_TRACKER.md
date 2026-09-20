@@ -1,11 +1,18 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `decb71f`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `3f52b44`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
 retain detailed results. A passing component test is not end-to-end acceptance.
+
+Latest hosted evidence: [CI run 35499717435](https://github.com/andymac4182/mount-rs/actions/runs/35499717435)
+at `37e9ba1` passed RustFS, Ozone, Linux Rust, Linux x64/arm64 Node,
+Windows Node, and Linux native FUSE/NFS/9P/WebDAV jobs. Windows Rust failed
+the HostFs lexical-root and directory-open tests; macOS jobs remain queued.
+This evidence predates `3f52b44` and does not qualify that newer revision.
+Its separate fault-injection workflow also passed (run `35499717417`).
 
 ## How to read and maintain this tracker
 
