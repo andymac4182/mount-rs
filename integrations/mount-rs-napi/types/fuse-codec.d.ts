@@ -13,11 +13,13 @@ import type {
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
   NativeFuseGetattrIn,
+  NativeFuseGetxattrIn,
   NativeFuseGetxattrOut,
   NativeFuseInHeader,
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseInterruptIn,
+  NativeFuseListxattrIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
   NativeFuseNotification,
@@ -33,6 +35,7 @@ import type {
   NativeFuseReadIn,
   NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
+  NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
@@ -52,11 +55,13 @@ export type {
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
   NativeFuseGetattrIn,
+  NativeFuseGetxattrIn,
   NativeFuseGetxattrOut,
   NativeFuseInHeader,
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseInterruptIn,
+  NativeFuseListxattrIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
   NativeFuseNotification,
@@ -72,6 +77,7 @@ export type {
   NativeFuseReadIn,
   NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
+  NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
@@ -150,6 +156,14 @@ export declare const FUSE_STATFS: number
 export declare const FUSE_INTERRUPT: number
 export declare const FUSE_BATCH_FORGET: number
 export declare const FUSE_POLL: number
+export declare const FUSE_SETXATTR: number
+export declare const FUSE_GETXATTR: number
+export declare const FUSE_LISTXATTR: number
+export declare const FUSE_REMOVEXATTR: number
+export declare const FUSE_SETXATTR_EXT: bigint
+export declare const FUSE_SETXATTR_ACL_KILL_SGID: number
+export declare const XATTR_CREATE: number
+export declare const XATTR_REPLACE: number
 export declare const FATTR_MODE: number
 export declare const FATTR_SIZE: number
 export declare const FATTR_ATIME: number
@@ -223,6 +237,14 @@ export declare function decodeFlushIn(body: Uint8Array): NativeFuseFlushIn
 export declare function encodeFlushIn(value: NativeFuseFlushIn): Buffer
 export declare function decodeFsyncIn(body: Uint8Array): NativeFuseFsyncIn
 export declare function encodeFsyncIn(value: NativeFuseFsyncIn): Buffer
+export declare function decodeSetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseSetxattrIn
+export declare function encodeSetxattrIn(value: NativeFuseSetxattrIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeGetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetxattrIn
+export declare function encodeGetxattrIn(value: NativeFuseGetxattrIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeListxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseListxattrIn
+export declare function encodeListxattrIn(value: NativeFuseListxattrIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeRemovexattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseNameIn
+export declare function encodeRemovexattrIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseReadIn
 export declare function encodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeReadOut(body: Uint8Array): NativeFuseRawData
