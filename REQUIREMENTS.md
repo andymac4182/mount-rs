@@ -12,6 +12,8 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
   napi-rs Node bindings.
 - Verify memfs, SQLite, Cloudflare R2, and real PGlite integrations. Local
   object-store tests do not replace authenticated live R2 verification.
+- Implement and verify FoundationDB and TiDB backing stores as separate
+  integration crates, including the end-to-end acceptance below.
 - Verify supported macOS and Linux configurations, including native operations
   and the Node package. Commit and push validated work chunks to `origin/main`.
 - **Safely host SQLite database files on mount-rs filesystems.** This is distinct
@@ -27,6 +29,28 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 - **Add and run aligned storage benchmarks.** Use the ComputeSDK storage suite
   below as the workload reference; record reproducible results alongside, not
   instead of, correctness and durability evidence.
+
+### FoundationDB and TiDB backing-store acceptance
+
+- Provide separate `mount-rs-foundationdb` and `mount-rs-tidb` integration
+  crates with minimal justified dependencies; keep database clients out of
+  core crates. Each exposes metadata and block stores that can be selected
+  independently and composed with other providers.
+- Preserve atomic metadata publication, compare-and-swap, fenced ownership,
+  immutable blocks, and explicit durability barriers. Handle transaction
+  conflicts, retries, cancellation, and ambiguous commit outcomes without
+  duplicate effects or falsely acknowledging durability. Document and test
+  provider key/value/transaction limits and chunk-size constraints.
+- Expose provider selection through Rust, napi-rs Node factories, and the
+  config-file CLI, with credential environment references and no secret output.
+- Run shared filesystem contract, split-provider, concurrency/fencing,
+  reconnect/restart, and failure-recovery integration tests against actual
+  FoundationDB and actual TiDB. Emulators or MySQL-compatible substitutes alone
+  do not prove these integrations. Include mounted SQLite-hosting tests and
+  benchmark lanes with explicit remote-service prerequisites.
+- Verify macOS and Linux client/build support, including FoundationDB native
+  client requirements. Document reproducible local/CI service setup and
+  distinguish missing services or credentials from passing tests.
 
 ### Storage benchmark acceptance
 
