@@ -58,6 +58,8 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   cargo test --locked -p mount-rs-pglite configured_pglite_state_survives_reconnect -- --ignored --nocapture
 
+cargo test --locked -p mount-rs-pglite readiness_handshake_does_not_consume_bounded_connection_slot -- --ignored --nocapture
+
 cargo test --locked -p mount-rs-pglite split_stores_enforce_durability_fencing_cas_and_immutable_blocks -- --ignored --nocapture
 cargo test --locked -p mount-rs-pglite close_is_shared_cancellation_safe -- --ignored --nocapture
 

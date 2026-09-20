@@ -602,14 +602,18 @@ impl BlockStore for PgliteBlockStore {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::net::{SocketAddr, TcpStream};
+    use std::io::{BufRead, BufReader};
     use std::process::{Child, Command, Stdio};
-    use std::thread;
-    use std::time::Duration;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread::{self, JoinHandle};
+    use std::time::{Duration, Instant};
+
+    const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
     pub(crate) struct PgliteServer {
         child: Child,
         connection_string: String,
+        stdout_reader: Option<JoinHandle<()>>,
     }
 
     impl PgliteServer {
@@ -632,27 +636,111 @@ pub(crate) mod test_support {
                 .arg(script)
                 .env("PGLITE_PORT", port.to_string())
                 .env("PGLITE_MAX_CONNECTIONS", max_connections.to_string())
-                .stdout(Stdio::null())
+                .stdout(Stdio::piped())
                 .stderr(Stdio::null())
                 .spawn()
                 .unwrap_or_else(|error| panic!("start node PGlite helper: {error}"));
-            let address = SocketAddr::from(([127, 0, 0, 1], port));
-            for _ in 0..300 {
-                if TcpStream::connect_timeout(&address, Duration::from_millis(50)).is_ok() {
-                    return Self {
-                        child,
-                        connection_string: format!(
-                            "postgresql://postgres:postgres@127.0.0.1:{port}/postgres?sslmode=disable"
-                        ),
-                    };
+
+            let stdout = child
+                .stdout
+                .take()
+                .unwrap_or_else(|| panic!("PGlite helper did not expose a readiness stdout pipe"));
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let stdout_reader = thread::spawn(move || {
+                let mut stdout = BufReader::new(stdout);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match stdout.read_line(&mut line) {
+                        Ok(0) => {
+                            let _ = ready_tx.send(Ok(None));
+                            return;
+                        }
+                        Ok(_) => {
+                            if ready_tx.send(Ok(Some(line.clone()))).is_err() {
+                                return;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = ready_tx.send(Err(error));
+                            return;
+                        }
+                    }
                 }
-                if let Ok(Some(status)) = child.try_wait() {
-                    panic!("PGlite helper exited before becoming ready: {status}");
+            });
+
+            let deadline = Instant::now() + STARTUP_TIMEOUT;
+            let mut endpoint = None;
+            let mut startup_error = None;
+            while endpoint.is_none() && startup_error.is_none() {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    startup_error = Some(format!(
+                        "PGlite helper startup exceeded {STARTUP_TIMEOUT:?}"
+                    ));
+                    break;
                 }
-                thread::sleep(Duration::from_millis(50));
+                match ready_rx.recv_timeout(remaining) {
+                    Ok(Ok(Some(line))) => {
+                        if let Some(value) = line.strip_prefix("PGLITE_READY ") {
+                            endpoint = Some(value.trim().to_owned());
+                        }
+                    }
+                    Ok(Ok(None)) => {
+                        startup_error = Some("PGlite helper exited before PGLITE_READY".to_owned());
+                    }
+                    Ok(Err(error)) => {
+                        startup_error = Some(format!("read PGlite helper readiness: {error}"));
+                    }
+                    Err(RecvTimeoutError::Timeout) => {
+                        startup_error = Some(format!(
+                            "PGlite helper startup exceeded {STARTUP_TIMEOUT:?}"
+                        ));
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        startup_error =
+                            Some("PGlite helper readiness reader disconnected".to_owned());
+                    }
+                }
             }
-            let _ = child.kill();
-            panic!("timed out waiting for PGlite helper on {address}");
+
+            let endpoint = match (endpoint, startup_error) {
+                (Some(endpoint), None) => endpoint,
+                (_, Some(error)) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    panic!("{error}");
+                }
+                _ => unreachable!("PGlite startup ended without readiness or an error"),
+            };
+            let announced_port = match endpoint
+                .strip_prefix("127.0.0.1:")
+                .and_then(|value| value.parse::<u16>().ok())
+            {
+                Some(port) => port,
+                None => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = stdout_reader.join();
+                    panic!("PGlite helper reported invalid readiness endpoint: {endpoint}");
+                }
+            };
+            if announced_port != port {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_reader.join();
+                panic!(
+                    "PGlite helper readiness endpoint did not match the reserved port: {endpoint}"
+                );
+            }
+            Self {
+                child,
+                connection_string: format!(
+                    "postgresql://postgres:postgres@127.0.0.1:{port}/postgres?sslmode=disable"
+                ),
+                stdout_reader: Some(stdout_reader),
+            }
         }
 
         pub(crate) fn connection_string(&self) -> &str {
@@ -664,6 +752,9 @@ pub(crate) mod test_support {
         fn drop(&mut self) {
             let _ = self.child.kill();
             let _ = self.child.wait();
+            if let Some(stdout_reader) = self.stdout_reader.take() {
+                let _ = stdout_reader.join();
+            }
         }
     }
 }
@@ -906,6 +997,33 @@ mod tests {
                     .unwrap();
             reopened_metadata.close().await.unwrap();
             reopened_blocks.close().await.unwrap();
+        });
+    }
+
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn readiness_handshake_does_not_consume_bounded_connection_slot() {
+        // With one slot, a readiness connection would compete directly with
+        // the first real client. The successful first connection proves that
+        // PGLITE_READY itself did not enter the server's bounded set; the
+        // immediate reopen proves the real client released its slot.
+        let server = PgliteServer::start_with_max_connections(1);
+        let connection_string = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let first =
+                PgliteMetadataStore::connect_with_key(connection_string, "readiness-slot-first")
+                    .await
+                    .expect("first real connection should fit after readiness");
+            first.close().await.unwrap();
+            let reopened =
+                PgliteMetadataStore::connect_with_key(connection_string, "readiness-slot-reopened")
+                    .await
+                    .expect("closing the real connection should release its slot");
+            reopened.close().await.unwrap();
         });
     }
 }
