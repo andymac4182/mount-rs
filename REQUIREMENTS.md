@@ -465,6 +465,20 @@ is deferred pending that discussion, not implemented or implicitly waived.
 - Keep this launch work tracked alongside engineering delivery. No domain has
   been registered and no marketing deployment is implied by this requirement.
 
+## Deferred feature: user-configurable lifecycle hooks
+
+Provide hooks that users can register to run after file/folder lifecycle events
+and drive, server or connection lifecycle events, including starting, stopping,
+dropped connections and reconnection. Track this as W29 for later implementation,
+not as an existing capability or a diversion from primary acceptance work.
+
+Define the event catalog, payloads, drive/path filters, registration/removal and
+Rust/Node/CLI/HTTP integration before implementing. Specify ordering, retries,
+delivery guarantees, timeouts, error isolation, bounded backpressure and shutdown
+draining. Distinguish operation completion from durable commit, prevent recursive
+hook loops, and preserve SQLite, transaction and fencing guarantees. Include
+integration and fault-injection tests for success, failure and recovery paths.
+
 ## Future requirement: copy-on-write
 
 Track copy-on-write as future work, not a current feature or a requirement to

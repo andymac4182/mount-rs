@@ -54,6 +54,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
 | W27 | Native Windows support and CI | CI added; qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Arendt |
+| W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 
 ## Decisions and external prerequisites
 
@@ -487,6 +488,30 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W28.5 Require bounded PR fault suites and broader scheduled matrices on
   Linux/macOS/Windows; publish coverage and remaining gaps, not an unbounded
   claim that every possible fault has been tested.
+
+## W29 — User-configurable lifecycle hooks (later)
+
+- [ ] W29.1 Define an extensible event catalog for files/folders: creation,
+  opening/closing, writes, truncation, metadata changes, rename/move and deletion;
+  and drive/server/connection lifecycle: starting, started, stopping, stopped,
+  connection opened, dropped, reconnecting, reconnected and failed. Distinguish
+  requested operations, successful completion and failure events.
+- [ ] W29.2 Design registration, filtering by drive/path/event, removal and
+  event payloads for user-supplied after-event hooks. Review Rust, Node, CLI
+  configuration and mount-free HTTP integration surfaces; keep integrations
+  separate from core and dependency costs minimal.
+- [ ] W29.3 Specify ordering, concurrency, delivery/retry/deduplication behavior,
+  cancellation, bounded queues/backpressure and shutdown draining. Clearly
+  define after-write versus after-durable-commit; do not imply exactly-once
+  delivery or crash-surviving hooks without an implemented durable mechanism.
+- [ ] W29.4 Define hook timeouts, error isolation, reentrancy/recursive-event
+  prevention and permissions. Hooks must not silently corrupt file operations,
+  SQLite durability, lease/fencing or transaction outcomes. Redact credentials
+  and avoid exposing file contents by default.
+- [ ] W29.5 Implement the agreed API later and test event payloads/order,
+  registration/removal, hook failures, connection drops/reconnects, startup and
+  shutdown, concurrent operations and process failures across supported entry
+  points/backends/platforms. Integrate W28 fault injection and document gaps.
 
 ## Recent landed chunks
 
