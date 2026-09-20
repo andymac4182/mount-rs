@@ -25,6 +25,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const PERSISTED_BYTES: &[u8] = b"mount-rs TiDB persisted sentinel";
 
+type SchemaColumn = (String, String, String, Option<u64>, Option<String>);
+
 fn tidb_url() -> String {
     std::env::var("MOUNT_RS_TIDB_URL")
         .ok()
@@ -96,7 +98,7 @@ async fn assert_binary_identity_schema(url: &str) {
         .get_conn()
         .await
         .expect("could not connect for the TiDB schema identity check");
-    let columns: Vec<(String, String, String, Option<u64>, Option<String>)> = connection
+    let columns: Vec<SchemaColumn> = connection
         .exec(
             "SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH, COLLATION_NAME
              FROM information_schema.columns
