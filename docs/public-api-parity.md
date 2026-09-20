@@ -7,7 +7,7 @@ edit and refreshed against the current source, tests, and the pinned oracle:
 - repository baseline when the deleted file was recovered:
   `ac2161d27f4a6805b87580fbee20c1302e9cd9df`
 - current local integration baseline observed during this packet:
-  `ef7ae63`
+  `6eac0d4`
 - oracle checkout: `/tmp/mountx-source.uWiHfX`
 - oracle revision: `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`
 
