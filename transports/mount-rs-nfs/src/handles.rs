@@ -225,6 +225,34 @@ impl FileHandleTable {
         }
     }
 
+    /// Remove a name without invalidating the opaque handle for the object.
+    ///
+    /// NFSv3 has no OPEN operation, so a server that wants POSIX unlink
+    /// semantics must keep the backend object alive independently of the
+    /// namespace name.  The caller owns that backend lifetime; this method
+    /// only makes the filehandle path-less while retaining its identity for
+    /// a held backend handle.  A new object is never allowed to inherit the
+    /// old inode key after the last name is removed.
+    pub fn orphan(&self, path: &str) -> Option<HandleEntry> {
+        let mut state = self.state.lock().expect("handle table lock");
+        let id = state.by_path.get(path).copied()?;
+        detach_preserve_locked(&mut state, id, path);
+        let key = state
+            .by_id
+            .get(&id)
+            .filter(|entry| entry.paths.is_empty())
+            .and_then(|entry| entry.key.clone());
+        if let Some(key) = key {
+            state.by_key.remove(&key);
+        }
+        state.by_id.get(&id).map(|entry| HandleEntry {
+            id: entry.id,
+            fileid: entry.fileid,
+            key: entry.key.clone(),
+            path: path.to_owned(),
+        })
+    }
+
     /// Move all remembered names below `old_path` to `new_path` after a
     /// successful driver rename. The driver remains the authority for whether
     /// the operation was legal; this only preserves handle identity.
@@ -462,6 +490,22 @@ mod tests {
         assert_eq!(table.decode(&foreign).unwrap_err().code, ErrorCode::Estale);
         table.forget("/file");
         assert_eq!(table.decode(&handle).unwrap_err().code, ErrorCode::Estale);
+    }
+
+    #[test]
+    fn orphan_keeps_identity_but_not_a_resolvable_path() {
+        let table = FileHandleTable::default();
+        let entry = table.bind("/doomed", &stats(12));
+        let handle = table.encode(&entry);
+
+        let orphan = table.orphan("/doomed").expect("orphaned entry");
+        assert_eq!(orphan.id, entry.id);
+        assert_eq!(table.decode(&handle).unwrap().fileid, 12);
+        assert_eq!(table.resolve(&handle).unwrap_err().code, ErrorCode::Estale);
+
+        let replacement = table.bind("/doomed", &stats(13));
+        assert_ne!(replacement.id, entry.id);
+        assert_eq!(table.decode(&handle).unwrap().fileid, 12);
     }
 
     #[test]
