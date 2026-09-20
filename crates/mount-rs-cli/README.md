@@ -108,6 +108,21 @@ mount capability available, run:
 
 That test starts the actual `mount-rs` binary, waits for the kernel mount,
 sends SIGINT, checks the CLI's `unmounted` report, and checks
-`/proc/self/mounts` after exit. It is not run on macOS: this crate's native
-FUSE lifecycle is Linux-only, while macOS native NFS still depends on the
-host's mount_nfs privacy/ownership policy and is not asserted by this test.
+`/proc/self/mounts` after exit. macOS has a separate opt-in NFS lifecycle
+check. With the built-in `/sbin/mount_nfs` available and the terminal/process
+already allowed by its ownership and Privacy policy, run:
+
+    MOUNT_RS_CLI_NATIVE_NFS=1 cargo test -p mount-rs-cli --test native_lifecycle -- --ignored --nocapture
+
+The macOS check writes an extension-free config file for the actual binary,
+mounts the configured host driver through native NFS, writes and reopens
+bytes, sends SIGINT, verifies the unmount, then remounts the same config and
+backing directory in a fresh child to verify persistence before removing the
+test file. It is ignored in ordinary test runs, but explicitly running the
+ignored test without `MOUNT_RS_CLI_NATIVE_NFS=1` fails rather than silently
+passing. The test never invokes `sudo`, installs a helper, or changes host
+configuration. SQLite hosting is tested separately by the CLI/config/provider
+suites; this host-backed lifecycle pass does not satisfy the separate SQLite
+native-NFS acceptance requirement. The host-backed case keeps the NFS
+server's backing-directory ownership aligned with the unprivileged macOS
+kernel client.

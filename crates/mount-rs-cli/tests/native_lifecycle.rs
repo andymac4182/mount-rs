@@ -1,11 +1,14 @@
 //! Opt-in native lifecycle acceptance.
 //!
-//! The ordinary CLI suite is deliberately mount-free. This ignored test is a
-//! separate Linux-only check for a real FUSE kernel mount and Ctrl-C cleanup.
+//! The ordinary CLI suite is deliberately mount-free. These ignored tests are
+//! a separate set of opt-in checks for real native kernel mounts and Ctrl-C
+//! cleanup.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -14,16 +17,14 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[test]
+#[cfg(target_os = "linux")]
 #[ignore = "requires an opt-in Linux FUSE setup; see the test command in the CLI README"]
 fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
-    if std::env::var("MOUNT_RS_CLI_NATIVE_FUSE").ok().as_deref() != Some("1") {
-        eprintln!("set MOUNT_RS_CLI_NATIVE_FUSE=1 to opt into native FUSE acceptance");
-        return;
-    }
+    require_opt_in("MOUNT_RS_CLI_NATIVE_FUSE");
 
     let mountpoint = unique_mountpoint();
     fs::create_dir(&mountpoint).expect("create disposable native mountpoint");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+    let child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
         .args([
             "mount",
             "--transport",
@@ -36,15 +37,24 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn mount-rs FUSE subprocess");
+    let mut child_guard = NativeChildGuard::new(child, mountpoint.clone(), "fuse");
 
     let (line_sender, line_receiver) = mpsc::channel::<String>();
-    let stdout = child.stdout.take().expect("capture CLI stdout");
+    let stdout = child_guard
+        .child_mut()
+        .stdout
+        .take()
+        .expect("capture CLI stdout");
     let stdout_thread = thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let _ = line_sender.send(line);
         }
     });
-    let stderr = child.stderr.take().expect("capture CLI stderr");
+    let stderr = child_guard
+        .child_mut()
+        .stderr
+        .take()
+        .expect("capture CLI stderr");
     let stderr_thread = thread::spawn(move || {
         BufReader::new(stderr)
             .lines()
@@ -53,7 +63,7 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
     });
 
     let mut output = Vec::new();
-    let ready = wait_for_mount(&mut child, &line_receiver, &mut output);
+    let ready = wait_for_mount(child_guard.child_mut(), &line_receiver, &mut output, "fuse");
     assert!(ready, "FUSE subprocess did not mount; output: {output:?}");
     assert!(
         is_mounted_at(&mountpoint),
@@ -64,9 +74,9 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
     // which calls the transport's real unmount operation before exiting.
     // SAFETY: the child is the live subprocess just spawned above, and no
     // other process identifier is used.
-    let signal_result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    let signal_result = unsafe { libc::kill(child_guard.id() as libc::pid_t, libc::SIGINT) };
     assert_eq!(signal_result, 0, "send SIGINT to mount-rs");
-    let status = wait_for_exit(&mut child);
+    let status = wait_for_exit(child_guard.child_mut());
     assert!(status.success(), "CLI did not exit cleanly: {status}");
 
     stdout_thread.join().expect("join CLI stdout reader");
@@ -80,16 +90,15 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
         !is_mounted_at(&mountpoint),
         "mountpoint remained mounted after CLI exit; stdout={output:?}, stderr={stderr_lines:?}"
     );
+    child_guard.disarm();
     fs::remove_dir(&mountpoint).expect("remove disposable native mountpoint");
 }
 
 #[test]
+#[cfg(target_os = "linux")]
 #[ignore = "requires an opt-in Linux FUSE setup; see the test command in the CLI README"]
 fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
-    if std::env::var("MOUNT_RS_CLI_NATIVE_FUSE").ok().as_deref() != Some("1") {
-        eprintln!("set MOUNT_RS_CLI_NATIVE_FUSE=1 to opt into native FUSE acceptance");
-        return;
-    }
+    require_opt_in("MOUNT_RS_CLI_NATIVE_FUSE");
 
     let mountpoint = unique_mountpoint();
     let config_path = mountpoint.with_extension("json");
@@ -111,7 +120,7 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
     )
     .expect("write native config file");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+    let child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
         .args(["mount", "--config"])
         .arg(&config_path)
         .args(["--quiet"])
@@ -119,15 +128,24 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn config-backed mount-rs FUSE subprocess");
+    let mut child_guard = NativeChildGuard::new(child, mountpoint.clone(), "fuse");
 
     let (line_sender, line_receiver) = mpsc::channel::<String>();
-    let stdout = child.stdout.take().expect("capture CLI stdout");
+    let stdout = child_guard
+        .child_mut()
+        .stdout
+        .take()
+        .expect("capture CLI stdout");
     let stdout_thread = thread::spawn(move || {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
             let _ = line_sender.send(line);
         }
     });
-    let stderr = child.stderr.take().expect("capture CLI stderr");
+    let stderr = child_guard
+        .child_mut()
+        .stderr
+        .take()
+        .expect("capture CLI stderr");
     let stderr_thread = thread::spawn(move || {
         BufReader::new(stderr)
             .lines()
@@ -136,7 +154,7 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
     });
 
     let mut output = Vec::new();
-    let ready = wait_for_mount(&mut child, &line_receiver, &mut output);
+    let ready = wait_for_mount(child_guard.child_mut(), &line_receiver, &mut output, "fuse");
     assert!(
         ready,
         "config-backed subprocess did not mount; output: {output:?}"
@@ -159,9 +177,9 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
     // The config was consumed by the actual binary; now exercise the same
     // native SIGINT/unmount path as the baseline lifecycle test.
     // SAFETY: the child is the live subprocess just spawned above.
-    let signal_result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    let signal_result = unsafe { libc::kill(child_guard.id() as libc::pid_t, libc::SIGINT) };
     assert_eq!(signal_result, 0, "send SIGINT to config-backed mount-rs");
-    let status = wait_for_exit(&mut child);
+    let status = wait_for_exit(child_guard.child_mut());
     assert!(
         status.success(),
         "config-backed CLI did not exit cleanly: {status}"
@@ -179,8 +197,259 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
         !is_mounted_at(&mountpoint),
         "config-backed mount remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
     );
+    child_guard.disarm();
     fs::remove_dir(&mountpoint).expect("remove disposable native mountpoint");
     fs::remove_file(&config_path).expect("remove disposable native config");
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "requires opt-in macOS NFS access; see the test command in the CLI README"]
+fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
+    require_opt_in("MOUNT_RS_CLI_NATIVE_NFS");
+
+    let mountpoint = unique_mountpoint();
+    let stem = mountpoint
+        .file_name()
+        .expect("unique mountpoint has a file name")
+        .to_string_lossy();
+    let config_path = std::env::temp_dir().join(format!("{stem}-config"));
+    let backing_path = std::env::temp_dir().join(format!("{stem}-backing"));
+    fs::create_dir(&mountpoint).expect("create disposable macOS NFS mountpoint");
+    fs::create_dir(&backing_path).expect("create disposable host-driver backing directory");
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "version": 1,
+  "mountpoint": "{}",
+  "transport": "nfs",
+  "driver": {{
+    "kind": "host",
+    "root": "{}"
+  }}
+}}"#,
+            mountpoint.display(),
+            backing_path.display()
+        ),
+    )
+    .expect("write extension-free macOS NFS config");
+
+    let payload = b"macos-nfs-config";
+    run_configured_mount_cycle(&config_path, &mountpoint, |target| {
+        let path = target.join("config-persistent-bytes");
+        fs::write(&path, payload)?;
+        let first_read = fs::read(&path)?;
+        if first_read != payload {
+            return Err(std::io::Error::other("initial NFS byte read mismatch"));
+        }
+        let mut reopened = std::fs::File::open(&path)?;
+        let mut second_read = Vec::new();
+        reopened.read_to_end(&mut second_read)?;
+        if second_read != payload {
+            return Err(std::io::Error::other("reopened NFS byte read mismatch"));
+        }
+        Ok(())
+    });
+
+    // Reuse the same config and host-driver backing directory in a fresh CLI
+    // process. This verifies persistence across the first SIGINT/unmount, not
+    // just a second file descriptor in one mounted process.
+    run_configured_mount_cycle(&config_path, &mountpoint, |target| {
+        let path = target.join("config-persistent-bytes");
+        let mut reopened = std::fs::File::open(&path)?;
+        let mut bytes = Vec::new();
+        reopened.read_to_end(&mut bytes)?;
+        if bytes != payload {
+            return Err(std::io::Error::other("reopened process lost NFS bytes"));
+        }
+        fs::remove_file(path)
+    });
+
+    fs::remove_dir(&mountpoint).expect("remove disposable macOS NFS mountpoint");
+    fs::remove_file(&config_path).expect("remove disposable macOS NFS config");
+    fs::remove_dir(&backing_path).expect("remove disposable host-driver backing directory");
+}
+
+#[cfg(target_os = "macos")]
+fn run_configured_mount_cycle<F>(config_path: &std::path::Path, mountpoint: &std::path::Path, io: F)
+where
+    F: FnOnce(&std::path::Path) -> std::io::Result<()>,
+{
+    let child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["mount", "--config"])
+        .arg(config_path)
+        .args(["--quiet"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn config-backed mount-rs NFS subprocess");
+    let mut child_guard = NativeChildGuard::new(child, mountpoint.to_path_buf(), "nfs");
+
+    let (line_sender, line_receiver) = mpsc::channel::<String>();
+    let stdout = child_guard
+        .child_mut()
+        .stdout
+        .take()
+        .expect("capture CLI stdout");
+    let stdout_thread = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = line_sender.send(line);
+        }
+    });
+    let stderr = child_guard
+        .child_mut()
+        .stderr
+        .take()
+        .expect("capture CLI stderr");
+    let stderr_thread = thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>()
+    });
+
+    let mut output = Vec::new();
+    let ready = wait_for_mount(child_guard.child_mut(), &line_receiver, &mut output, "nfs");
+    assert!(
+        ready,
+        "config-backed macOS NFS did not mount; output: {output:?}"
+    );
+    assert!(
+        is_mounted_at(mountpoint),
+        "macOS did not report the config-backed NFS mount"
+    );
+    let io_result = io(mountpoint);
+
+    // The test is opt-in and uses only the child CLI's normal SIGINT path. It
+    // never invokes sudo or installs/configures a host NFS helper.
+    // SAFETY: the child is the live subprocess just spawned above.
+    let signal_result = unsafe { libc::kill(child_guard.id() as libc::pid_t, libc::SIGINT) };
+    assert_eq!(
+        signal_result, 0,
+        "send SIGINT to config-backed mount-rs NFS"
+    );
+    let status = wait_for_exit(child_guard.child_mut());
+    assert!(
+        status.success(),
+        "config-backed macOS NFS CLI did not exit cleanly: {status}"
+    );
+
+    stdout_thread.join().expect("join CLI stdout reader");
+    let stderr_lines = stderr_thread.join().expect("join CLI stderr reader");
+    output.extend(line_receiver.try_iter());
+    assert!(
+        io_result.is_ok(),
+        "macOS NFS byte I/O failed: {io_result:?}"
+    );
+    assert!(
+        output.iter().any(|line| line.contains("unmounted")),
+        "config-backed macOS NFS did not report unmount: {output:?}"
+    );
+    assert!(
+        !is_mounted_at(mountpoint),
+        "config-backed macOS NFS remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
+    );
+    child_guard.disarm();
+}
+
+fn require_opt_in(variable: &str) {
+    assert_eq!(
+        std::env::var(variable).ok().as_deref(),
+        Some("1"),
+        "set {variable}=1 to opt into this native acceptance test"
+    );
+}
+
+struct NativeChildGuard {
+    child: Option<std::process::Child>,
+    mountpoint: PathBuf,
+    transport: &'static str,
+}
+
+impl NativeChildGuard {
+    fn new(child: std::process::Child, mountpoint: PathBuf, transport: &'static str) -> Self {
+        Self {
+            child: Some(child),
+            mountpoint,
+            transport,
+        }
+    }
+
+    fn child_mut(&mut self) -> &mut std::process::Child {
+        self.child
+            .as_mut()
+            .expect("native mount child is still owned")
+    }
+
+    fn id(&self) -> u32 {
+        self.child
+            .as_ref()
+            .expect("native mount child is still owned")
+            .id()
+    }
+
+    fn disarm(&mut self) {
+        self.child.take();
+    }
+}
+
+impl Drop for NativeChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            if child.try_wait().ok().flatten().is_none() {
+                // A panic before the explicit lifecycle path must still give
+                // the CLI a chance to unmount its native mount.
+                #[cfg(unix)]
+                {
+                    // SAFETY: this is the subprocess owned by this guard.
+                    let _ = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+                }
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                while std::time::Instant::now() < deadline {
+                    match child.try_wait() {
+                        Ok(Some(_)) | Err(_) => break,
+                        Ok(None) => thread::sleep(Duration::from_millis(50)),
+                    }
+                }
+            }
+            if child.try_wait().ok().flatten().is_none() {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+        cleanup_native_mount(&self.mountpoint, self.transport);
+    }
+}
+
+fn cleanup_native_mount(mountpoint: &std::path::Path, transport: &str) {
+    if !is_mounted_at(mountpoint) {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    let candidates = if transport == "fuse" {
+        vec![
+            ("fusermount3", vec!["-u"]),
+            ("fusermount", vec!["-u"]),
+            ("umount", Vec::new()),
+        ]
+    } else {
+        vec![("umount", Vec::new())]
+    };
+    #[cfg(target_os = "macos")]
+    let candidates = if transport == "nfs" {
+        vec![("umount", vec!["-f"])]
+    } else {
+        vec![("umount", Vec::new())]
+    };
+
+    for (program, args) in candidates {
+        let result = Command::new(program).args(args).arg(mountpoint).status();
+        if result.is_ok_and(|status| status.success()) || !is_mounted_at(mountpoint) {
+            break;
+        }
+    }
 }
 
 fn unique_mountpoint() -> PathBuf {
@@ -198,12 +467,13 @@ fn wait_for_mount(
     child: &mut std::process::Child,
     receiver: &mpsc::Receiver<String>,
     output: &mut Vec<String>,
+    expected_transport: &str,
 ) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while std::time::Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => {
-                let mounted = strip_ansi(&line).contains("mounted fuse");
+                let mounted = strip_ansi(&line).contains(&format!("mounted {expected_transport}"));
                 output.push(line);
                 if mounted {
                     return true;
@@ -212,12 +482,14 @@ fn wait_for_mount(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
-        if child.try_wait().expect("poll FUSE subprocess").is_some() {
+        if child
+            .try_wait()
+            .expect("poll native mount subprocess")
+            .is_some()
+        {
             break;
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
     false
 }
 
@@ -255,6 +527,7 @@ fn strip_ansi(value: &str) -> String {
     plain
 }
 
+#[cfg(target_os = "linux")]
 fn is_mounted_at(target: &std::path::Path) -> bool {
     let target = target.to_string_lossy();
     fs::read_to_string("/proc/self/mounts")
@@ -266,4 +539,20 @@ fn is_mounted_at(target: &std::path::Path) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn is_mounted_at(target: &std::path::Path) -> bool {
+    let Ok(output) = Command::new("mount").output() else {
+        return false;
+    };
+    let canonical_target = fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let table = String::from_utf8_lossy(&output.stdout);
+    mount_rs_nfs::parse_mount_table(mount_rs_nfs::NfsPlatform::Macos, &table)
+        .iter()
+        .any(|entry| {
+            let entry_target = std::path::Path::new(&entry.target);
+            entry_target == target
+                || fs::canonicalize(entry_target).is_ok_and(|path| path == canonical_target)
+        })
 }
