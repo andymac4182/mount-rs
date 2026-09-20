@@ -115,7 +115,7 @@ complete.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Verifying | Main |
+| W01 | Core and mountx parity | Active simple-first parity slice; not complete | Jason / Main |
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
@@ -176,6 +176,13 @@ complete.
   before publishing. This authorization is not release-readiness evidence.
 
 ## W01 — Core and mountx behavioral parity
+
+Current priority is simple-to-complex execution. Close the mount-free
+in-memory Rust/Node/oracle contract first, then add persistence, remote
+providers, transports, and native mounts only as separate later gates. A
+passing remote/provider or native test cannot close a simpler parity gap, and
+the W01 stream must remain open until its skipped behavior is classified and
+the applicable oracle-backed cases are covered.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
