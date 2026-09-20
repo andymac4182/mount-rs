@@ -25,7 +25,7 @@ cases still require audit.
 - FUSE framing, inode mapping, and driver-backed lookup, attributes, file I/O,
   create, sync, statfs, metadata changes, directory/link mutation requests,
   READDIRPLUS and lookup-reference accounting. Session integration tests run
-  without a kernel mount; native lifecycle work is in progress.
+  without a kernel mount; separate Linux kernel tests also exercise mounts.
 - Workspace-integrated 9P2000.L, NFSv3, WebDAV, and S3 gateway crates with
   userspace protocol and loopback network tests.
 - Seeded differential traces: five seeds, each with 621 operations against the TypeScript memory
@@ -35,6 +35,35 @@ cases still require audit.
   Expanded seeds also caught a symlink-resolved directory rename error mismatch;
   descendant checks now use resolved paths. Snapshot restore rejects inconsistent
   inode graphs before making them available to filesystem operations.
+- Core independent metadata/block contracts and fixed-size chunker with persisted
+  algorithm/version/configuration. Separate volatile memory and SQLite providers
+  now implement fenced writer leases, revision CAS and immutable blocks. The
+  composed chunked driver and mixed-store acceptance are still in progress;
+  existing Node factories still use transitional snapshot persistence.
+
+## Revision-specific verification checkpoints
+
+- `3ebf501`: [CI run 35481387472](https://github.com/andymac4182/mount-rs/actions/runs/35481387472)
+  passed all eight jobs: Rust on macOS/Linux, Node on both platforms and both
+  arm64/x64 architectures, actual Linux FUSE mounts, and aggregation/packaging
+  of all four native artifacts. Packaging checks do not publish to npm.
+- `81f890b`: [CI run 35480606094](https://github.com/andymac4182/mount-rs/actions/runs/35480606094)
+  passed actual kernel-mounted file operations over memory, SQLite persistence,
+  local object storage, and real PGlite, including backend connection reopen.
+  Local object storage is not live Cloudflare R2 evidence.
+- `bac1fcc`: SQLite split-store local tests cover independent database files,
+  reopen, stale/expired writer rejection, monotonic fences, revision conflicts,
+  immutable bytes and database integrity. `9082196` adds five passing local
+  volatile-store tests; neither checkpoint by itself proves composed-driver safety.
+- Actual SQLite-process testing was added at `a252361`: DELETE and WAL modes,
+  FULL synchronous, competing processes, forced dirty-page spills, killed writers,
+  reopen and integrity checks. The host-filesystem control passed. The first
+  Linux mounted run failed during contender setup under a correctly held lock;
+  `2eda510` moves contender setup before the writer starts. Mounted acceptance
+  remains pending the corrected CI result. Mount-service crashes, backend faults,
+  power loss and the final split-store architecture are not covered by this probe.
+- `4150b5d` adds an explicit native Linux 9P CI job. Its prerequisites and actual
+  mounted I/O must pass; ordinary userspace tests do not substitute for that job.
 
 ## Still required before the overall porting goal is complete
 
