@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "http": {
+    "host": "127.0.0.1",
+    "port": 0,
+    "max_request_bytes": 8388608,
+    "read_chunk_bytes": 65536,
+    "drain_timeout_ms": 5000,
+    "drives": [
+      {
+        "id": "memory",
+        "token": {"env": "MOUNT_RS_MEMORY_TOKEN"},
+        "driver": {"kind": "memory"}
+      },
+      {
+        "id": "sqlite",
+        "token": {"env": "MOUNT_RS_SQLITE_TOKEN"},
+        "driver": {
+          "kind": "sqlite",
+          "database": "./state/http.sqlite"
+        }
+      }
+    ]
+  }
+}

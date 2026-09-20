@@ -175,6 +175,7 @@ impl Default for CliOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Mount(CliOptions),
+    ServeHttp(PathBuf),
     Probe,
     ValidateConfig(PathBuf),
     Help,
@@ -267,6 +268,34 @@ where
             return config_path
                 .map(Command::ValidateConfig)
                 .ok_or_else(|| ParseError::new("validate-config requires --config <path>"));
+        }
+        if first_argument && raw == "serve-http" {
+            let mut config_path = None;
+            while let Some(raw) = args.next() {
+                let raw = raw.to_string_lossy().into_owned();
+                if raw == "--help" || raw == "-h" {
+                    return Ok(Command::Help);
+                }
+                let Some(name) = raw.strip_prefix("--") else {
+                    return Err(ParseError::new("serve-http accepts only --config <path>"));
+                };
+                let (name, inline_value) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_owned())),
+                    None => (name, None),
+                };
+                if name != "config" {
+                    return Err(ParseError::new("serve-http accepts only --config <path>"));
+                }
+                if config_path.is_some() {
+                    return Err(ParseError::new(
+                        "serve-http accepts only one --config <path>",
+                    ));
+                }
+                config_path = Some(PathBuf::from(value("config", inline_value, &mut args)?));
+            }
+            return config_path
+                .map(Command::ServeHttp)
+                .ok_or_else(|| ParseError::new("serve-http requires --config <path>"));
         }
         if first_argument && raw == "mount" {
             first_argument = false;
@@ -520,7 +549,7 @@ pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     let output = format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),
@@ -607,6 +636,21 @@ mod tests {
             parse(&["mount-rs", "mount"]),
             Command::Mount(CliOptions::default())
         );
+    }
+
+    #[test]
+    fn serve_http_requires_only_a_config_path() {
+        assert_eq!(
+            parse(&["mount-rs", "serve-http", "--config", "http.json"]),
+            Command::ServeHttp(PathBuf::from("http.json"))
+        );
+        assert_eq!(
+            parse(&["mount-rs", "serve-http", "--config=http.json"]),
+            Command::ServeHttp(PathBuf::from("http.json"))
+        );
+        assert_eq!(parse(&["mount-rs", "serve-http", "--help"]), Command::Help);
+        let error = parse_args(["mount-rs", "serve-http"]).unwrap_err();
+        assert!(error.message().contains("requires --config"));
     }
 
     #[test]

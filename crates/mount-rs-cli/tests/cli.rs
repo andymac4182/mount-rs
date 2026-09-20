@@ -15,6 +15,7 @@ fn help_and_version_paths_are_pure() {
     ));
     assert!(help_text(Color::disabled()).contains("--transport"));
     assert!(help_text(Color::disabled()).contains("--sqlite-single-host"));
+    assert!(help_text(Color::disabled()).contains("serve-http --config"));
 }
 
 #[test]

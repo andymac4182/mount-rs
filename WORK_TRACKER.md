@@ -411,8 +411,14 @@ against [libuv's Windows implementation](https://github.com/libuv/libuv/blob/v1.
   tests locally. Listener completion is cached under one mutex, with a
   deterministic cancellation-after-join regression. Hosted, Node/CLI, remote
   backend, and distributed-cache acceptance remain open.
-- [ ] W17.1 Implement a separately packaged server and drive registry/config;
+- [x] W17.1 Implement a separately packaged server and drive registry/config;
   expose several named drives, including unmounted drives.
+  CLI `serve-http --config` reuses provider factories with per-drive env-token
+  references. Main tested the exact staged snapshot: 38 unit, 7 CLI, 2 real
+  HTTP subprocess and 1 native-artifact tests passed; 2 native-mount tests
+  remained opt-in/ignored. Tests cover memory/SQLite/split-store isolation,
+  forced-process SQLite reopen, volatile-store loss, and Unix SIGINT shutdown.
+  Portable HTTP coverage now runs on Windows CI; no Windows runtime pass yet.
 - [ ] W17.2 Define discovery, routing, filesystem operations, streaming/ranges,
   stable errors and lifecycle; share the actual native/API drive namespace.
 - [ ] W17.3 Add per-drive authorization/isolation, limits and deployment/TLS guidance.

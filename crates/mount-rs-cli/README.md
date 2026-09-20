@@ -96,6 +96,33 @@ relative to the config file. An omitted splitstore owner gets a
 process-and-instance-specific writer-fence owner; explicit owners are
 validated before provider construction.
 
+## Unmounted HTTP service
+
+Run the HTTP service with a dedicated configuration file:
+
+    mount-rs serve-http --config crates/mount-rs-cli/examples/config-http.json
+
+An HTTP config has the same top-level `version` as native configs and an
+`http` object instead of native mount fields. The `http.drives` array is
+required and must contain at least one named drive. Every drive has an `id`, a
+bearer-token environment reference, and one of the existing `driver` shapes
+(`memory`, `host`, `sqlite`, or `splitstore`). Relative paths are resolved
+relative to the HTTP config file, just as they are for native configs. The
+service defaults to loopback (`127.0.0.1`), an ephemeral port (`0`), bounded
+request/chunk sizes, and a five-second shutdown drain; all values can be
+overridden in the `http` object.
+
+The token value is read from the named environment variable only when the
+service starts and is never printed or stored in the config. Each token is
+authorized only for its configured drive. The service is unmounted: it does
+not create a FUSE, 9P, or NFS mount, and it does not add a distributed cache.
+The readiness line reports the selected address and drive IDs. Ctrl-C closes
+HTTP connections within the configured drain bound and then shuts down the
+configured providers.
+
+See `examples/config-http.json` for a memory drive and a durable SQLite drive
+with isolated tokens.
+
 For a SQLite database hosted through this process's loopback NFS server, add
 `--sqlite-single-host` with `--transport nfs` or `--transport auto`. The flag
 selects the NFSv3 single-host profile: a hard mount and local-only locking

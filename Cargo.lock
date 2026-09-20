@@ -1024,6 +1024,7 @@ dependencies = [
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-host",
+ "mount-rs-http",
  "mount-rs-memory",
  "mount-rs-nfs",
  "mount-rs-pglite",

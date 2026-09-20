@@ -2,6 +2,7 @@
 
 use std::fmt::{self, Display, Formatter};
 use std::future::Future;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -12,13 +13,16 @@ use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{ErrorCode, FsDriver, FsError, MemoryFs, MemoryOptions, Result as FsResult};
 use mount_rs_host::{HostFs, HostFsOptions};
+use mount_rs_http::{
+    DriveConfig as HttpDriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions,
+};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteFs, SqliteMetadataStore, open_sqlite};
 
 use crate::color::Color;
 use crate::config::{
-    ConfigError, redact_diagnostic, resolve_cli_options, unique_default_owner,
-    validate_config_file, validate_owner,
+    ConfigError, HttpServiceConfig, load_config, redact_diagnostic, resolve_cli_options,
+    unique_default_owner, validate_config_file, validate_owner,
 };
 use crate::parser::{
     CliOptions, Command, DriverChoice, ParseError, TransportChoice, help_text, parse_args,
@@ -314,11 +318,132 @@ where
             println!("valid config: {}", path.display());
             Ok(())
         }
+        Command::ServeHttp(path) => serve_http_command(&path).await,
         Command::Mount(options) => {
             let options = resolve_cli_options(options)?;
             mount_command(options).await
         }
     }
+}
+
+async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
+    let spec = load_config(config_path)?;
+    let http = spec.http.as_ref().ok_or_else(|| {
+        CliError::usage(format!(
+            "config {} does not contain an http section",
+            config_path.display()
+        ))
+    })?;
+    let (uid, gid) = effective_identity();
+    let mut runtimes = Vec::with_capacity(http.drives.len());
+    let mut registry = DriveRegistry::new();
+
+    for drive in &http.drives {
+        let options = drive.driver.to_options();
+        let runtime = match DriverRuntime::open(&options, uid, gid).await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = shutdown_runtimes(&runtimes).await;
+                return Err(error);
+            }
+        };
+        runtimes.push(runtime);
+        let token = match std::env::var(&drive.token.name) {
+            Ok(token) => token,
+            Err(_) => {
+                let _ = shutdown_runtimes(&runtimes).await;
+                return Err(CliError::runtime(format!(
+                    "missing environment variable {}",
+                    drive.token.name
+                )));
+            }
+        };
+        let configured = match HttpDriveConfig::new(
+            drive.id.clone(),
+            runtimes
+                .last()
+                .expect("HTTP runtime was pushed before configuration")
+                .driver(),
+            token,
+        ) {
+            Ok(configured) => configured,
+            Err(error) => {
+                let _ = shutdown_runtimes(&runtimes).await;
+                return Err(CliError::usage(format!(
+                    "invalid HTTP drive '{}': {error}",
+                    drive.id
+                )));
+            }
+        };
+        if let Err(error) = registry.register(configured) {
+            let _ = shutdown_runtimes(&runtimes).await;
+            return Err(CliError::usage(format!(
+                "invalid HTTP drive '{}': {error}",
+                drive.id
+            )));
+        }
+    }
+
+    let server_options = http_server_options(http);
+    let mut ctrl_c = match CtrlCHandler::install().await {
+        Ok(handler) => handler,
+        Err(error) => {
+            let _ = shutdown_runtimes(&runtimes).await;
+            return Err(error);
+        }
+    };
+    let server = match HttpServer::start(registry, server_options).await {
+        Ok(server) => server,
+        Err(error) => {
+            let _ = shutdown_runtimes(&runtimes).await;
+            return Err(http_error(error));
+        }
+    };
+
+    let drive_ids = http
+        .drives
+        .iter()
+        .map(|drive| drive.id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!("http listening at {} (drives: {drive_ids})", server.url());
+    println!("Press Ctrl-C to stop.");
+    if let Err(error) = std::io::stdout().flush() {
+        let _ = server.close().await;
+        let _ = shutdown_runtimes(&runtimes).await;
+        return Err(io_error(error));
+    }
+
+    let signal_result = ctrl_c.wait().await;
+    let close_result = server.close().await.map_err(http_error);
+    let shutdown_result = shutdown_runtimes(&runtimes).await.map_err(CliError::from);
+    signal_result?;
+    close_result?;
+    shutdown_result?;
+    println!("http stopped");
+    Ok(())
+}
+
+fn http_server_options(config: &HttpServiceConfig) -> HttpServerOptions {
+    HttpServerOptions {
+        host: config.host.clone(),
+        port: config.port,
+        max_request_bytes: config.max_request_bytes,
+        read_chunk_bytes: config.read_chunk_bytes,
+        drain_timeout: Duration::from_millis(config.drain_timeout_ms),
+    }
+}
+
+async fn shutdown_runtimes(runtimes: &[DriverRuntime]) -> FsResult<()> {
+    let mut first_error = None;
+    for runtime in runtimes.iter().rev() {
+        if let Err(error) = runtime.shutdown().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
 }
 
 async fn mount_command(options: CliOptions) -> Result<(), CliError> {
@@ -573,6 +698,10 @@ fn render_probe(probe: &mount_rs_auto::AutoProbe, color: Color) -> String {
 }
 
 fn auto_error(error: AutoMountError) -> CliError {
+    CliError::runtime(error.to_string())
+}
+
+fn http_error(error: HttpServerError) -> CliError {
     CliError::runtime(error.to_string())
 }
 

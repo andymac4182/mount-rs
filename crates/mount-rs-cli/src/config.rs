@@ -4,6 +4,7 @@
 //! support. That keeps the CLI's direct dependency surface small while still
 //! allowing every object in the public schema to reject unknown fields.
 
+use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
@@ -17,6 +18,11 @@ use crate::parser::{CliOptions, CliOverrides, DriverChoice, TransportChoice};
 
 pub const CONFIG_VERSION: u64 = 1;
 pub const DEFAULT_CHUNK_SIZE_BYTES: usize = 64 * 1024;
+const DEFAULT_HTTP_HOST: &str = "127.0.0.1";
+const DEFAULT_HTTP_PORT: u16 = 0;
+const DEFAULT_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
+const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 5_000;
 
 /// Generate a process-and-instance-specific owner for writer fencing. A
 /// constant or PID-only default would let a restarted process, or a later
@@ -96,6 +102,24 @@ pub struct ConfigSpec {
     pub root_uid: Option<u32>,
     pub root_gid: Option<u32>,
     pub storage: Option<SplitStorageConfig>,
+    pub(crate) http: Option<HttpServiceConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HttpServiceConfig {
+    pub host: String,
+    pub port: u16,
+    pub max_request_bytes: usize,
+    pub read_chunk_bytes: usize,
+    pub drain_timeout_ms: u64,
+    pub drives: Vec<HttpDriveConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HttpDriveConfig {
+    pub id: String,
+    pub token: EnvReference,
+    pub driver: ConfigSpec,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +182,12 @@ pub fn resolve_cli_options(raw: CliOptions) -> Result<CliOptions, ConfigError> {
     };
 
     let spec = load_config(&config_path)?;
+    if spec.http.is_some() {
+        return Err(ConfigError::at(
+            "config.http",
+            "is only valid with 'serve-http --config <path>'",
+        ));
+    }
     let mut resolved = spec.to_options();
     resolved.config = Some(config_path);
     apply_explicit_overrides(&mut resolved, &raw);
@@ -188,6 +218,7 @@ fn parse_config_value(value: &Value, base_dir: &Path) -> Result<ConfigSpec, Conf
             "allow_other",
             "sqlite_single_host",
             "driver",
+            "http",
         ],
         "config",
     )?;
@@ -213,38 +244,47 @@ fn parse_config_value(value: &Value, base_dir: &Path) -> Result<ConfigSpec, Conf
     };
 
     if let Some(driver) = object.get("driver") {
-        parse_driver(driver, base_dir, &mut spec)?;
+        parse_driver(driver, base_dir, &mut spec, "config.driver")?;
+    }
+    if let Some(http) = object.get("http") {
+        spec.http = Some(parse_http(http, base_dir)?);
+        if has_native_fields(&spec) {
+            return Err(ConfigError::at(
+                "config.http",
+                "cannot be combined with native mount fields",
+            ));
+        }
     }
     validate_spec(&spec)
 }
 
-fn parse_driver(value: &Value, base_dir: &Path, spec: &mut ConfigSpec) -> Result<(), ConfigError> {
-    let object = object(value, "config.driver")?;
-    let kind = required_string(object, "kind", "config.driver")?;
+fn parse_driver(
+    value: &Value,
+    base_dir: &Path,
+    spec: &mut ConfigSpec,
+    path: &str,
+) -> Result<(), ConfigError> {
+    let object = object(value, path)?;
+    let kind = required_string(object, "kind", path)?;
     match kind {
         "memory" => {
-            reject_unknown(object, &["kind"], "config.driver")?;
+            reject_unknown(object, &["kind"], path)?;
             spec.driver = Some(DriverChoice::Memory);
         }
         "host" => {
-            reject_unknown(object, &["kind", "root"], "config.driver")?;
+            reject_unknown(object, &["kind", "root"], path)?;
             spec.driver = Some(DriverChoice::Host);
-            spec.root = Some(required_path(object, "root", "config.driver", base_dir)?);
+            spec.root = Some(required_path(object, "root", path, base_dir)?);
         }
         "sqlite" => {
-            reject_unknown(object, &["kind", "database", "uid", "gid"], "config.driver")?;
+            reject_unknown(object, &["kind", "database", "uid", "gid"], path)?;
             spec.driver = Some(DriverChoice::Sqlite);
-            spec.database = Some(required_path(
-                object,
-                "database",
-                "config.driver",
-                base_dir,
-            )?);
-            spec.root_uid = optional_u32(object, "uid", "config.driver")?;
-            spec.root_gid = optional_u32(object, "gid", "config.driver")?;
+            spec.database = Some(required_path(object, "database", path, base_dir)?);
+            spec.root_uid = optional_u32(object, "uid", path)?;
+            spec.root_gid = optional_u32(object, "gid", path)?;
             if spec.root_uid.is_some() != spec.root_gid.is_some() {
                 return Err(ConfigError::at(
-                    "config.driver",
+                    path,
                     "uid and gid must be supplied together",
                 ));
             }
@@ -254,20 +294,20 @@ fn parse_driver(value: &Value, base_dir: &Path, spec: &mut ConfigSpec) -> Result
             if object.contains_key("storage") {
                 // The structured form cannot be mixed with legacy SQLite
                 // path fields or irrelevant host-driver fields.
-                reject_unknown(object, &["kind", "storage"], "config.driver")?;
+                reject_unknown(object, &["kind", "storage"], path)?;
                 spec.storage = Some(parse_storage(
                     object
                         .get("storage")
-                        .ok_or_else(|| ConfigError::at("config.driver.storage", "is missing"))?,
+                        .ok_or_else(|| ConfigError::at(&format!("{path}.storage"), "is missing"))?,
                     base_dir,
                 )?);
             } else {
-                reject_unknown(object, &["kind", "database", "blocks"], "config.driver")?;
-                spec.database = optional_path(object, "database", "config.driver", base_dir)?;
-                spec.blocks = optional_path(object, "blocks", "config.driver", base_dir)?;
+                reject_unknown(object, &["kind", "database", "blocks"], path)?;
+                spec.database = optional_path(object, "database", path, base_dir)?;
+                spec.blocks = optional_path(object, "blocks", path, base_dir)?;
                 if spec.database.is_some() != spec.blocks.is_some() {
                     return Err(ConfigError::at(
-                        "config.driver",
+                        path,
                         "legacy splitstore database and blocks must be supplied together",
                     ));
                 }
@@ -275,10 +315,129 @@ fn parse_driver(value: &Value, base_dir: &Path, spec: &mut ConfigSpec) -> Result
         }
         _ => {
             return Err(ConfigError::at(
-                "config.driver.kind",
+                &format!("{path}.kind"),
                 format!("unknown driver '{kind}'"),
             ));
         }
+    }
+    Ok(())
+}
+
+fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, ConfigError> {
+    let object = object(value, "config.http")?;
+    reject_unknown(
+        object,
+        &[
+            "host",
+            "port",
+            "max_request_bytes",
+            "read_chunk_bytes",
+            "drain_timeout_ms",
+            "drives",
+        ],
+        "config.http",
+    )?;
+    let host = object
+        .get("host")
+        .map(|value| required_value_string(value, "config.http.host"))
+        .transpose()?
+        .unwrap_or_else(|| DEFAULT_HTTP_HOST.to_owned());
+    if host.is_empty() || host.chars().any(char::is_whitespace) {
+        return Err(ConfigError::at(
+            "config.http.host",
+            "must be non-empty and contain no whitespace",
+        ));
+    }
+    let port = optional_u16(object, "port", "config.http")?.unwrap_or(DEFAULT_HTTP_PORT);
+    let max_request_bytes = object
+        .get("max_request_bytes")
+        .map(|value| positive_usize(value, "config.http.max_request_bytes"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_MAX_REQUEST_BYTES);
+    let read_chunk_bytes = object
+        .get("read_chunk_bytes")
+        .map(|value| positive_usize(value, "config.http.read_chunk_bytes"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_READ_CHUNK_BYTES);
+    let drain_timeout_ms = object
+        .get("drain_timeout_ms")
+        .map(|value| positive_u64(value, "config.http.drain_timeout_ms"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_DRAIN_TIMEOUT_MS);
+    let drives = object
+        .get("drives")
+        .ok_or_else(|| ConfigError::at("config.http.drives", "is required"))?
+        .as_array()
+        .ok_or_else(|| ConfigError::at("config.http.drives", "must be an array"))?;
+    if drives.is_empty() {
+        return Err(ConfigError::at(
+            "config.http.drives",
+            "must contain at least one drive",
+        ));
+    }
+    let mut ids = BTreeSet::new();
+    let mut parsed_drives = Vec::with_capacity(drives.len());
+    for (index, drive) in drives.iter().enumerate() {
+        let path = format!("config.http.drives[{index}]");
+        let parsed = parse_http_drive(drive, base_dir, &path)?;
+        if !ids.insert(parsed.id.clone()) {
+            return Err(ConfigError::at(
+                &format!("{path}.id"),
+                "duplicates another configured drive id",
+            ));
+        }
+        parsed_drives.push(parsed);
+    }
+    Ok(HttpServiceConfig {
+        host,
+        port,
+        max_request_bytes,
+        read_chunk_bytes,
+        drain_timeout_ms,
+        drives: parsed_drives,
+    })
+}
+
+fn parse_http_drive(
+    value: &Value,
+    base_dir: &Path,
+    path: &str,
+) -> Result<HttpDriveConfig, ConfigError> {
+    let object = object(value, path)?;
+    reject_unknown(object, &["id", "token", "driver"], path)?;
+    let id = required_value_string(
+        object
+            .get("id")
+            .ok_or_else(|| ConfigError::at(&format!("{path}.id"), "is required"))?,
+        &format!("{path}.id"),
+    )?;
+    validate_http_drive_id(&id, &format!("{path}.id"))?;
+    let token = required_env_reference(object, "token", &format!("{path}.token"))?;
+    let driver_value = object
+        .get("driver")
+        .ok_or_else(|| ConfigError::at(&format!("{path}.driver"), "is required"))?;
+    let mut driver = ConfigSpec::default();
+    parse_driver(
+        driver_value,
+        base_dir,
+        &mut driver,
+        &format!("{path}.driver"),
+    )?;
+    validate_spec(&driver)?;
+    Ok(HttpDriveConfig { id, token, driver })
+}
+
+fn validate_http_drive_id(id: &str, path: &str) -> Result<(), ConfigError> {
+    if id.is_empty()
+        || id.len() > 64
+        || id
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')))
+    {
+        return Err(ConfigError::at(
+            path,
+            "must be 1-64 ASCII letters, digits, '-', '_' or '.'",
+        ));
     }
     Ok(())
 }
@@ -453,6 +612,24 @@ fn validate_spec(spec: &ConfigSpec) -> Result<ConfigSpec, ConfigError> {
     Ok(spec.clone())
 }
 
+fn has_native_fields(spec: &ConfigSpec) -> bool {
+    spec.mountpoint.is_some()
+        || spec.transport.is_some()
+        || spec.quiet.is_some()
+        || spec.verbose.is_some()
+        || spec.read_only.is_some()
+        || spec.empty.is_some()
+        || spec.allow_other.is_some()
+        || spec.sqlite_single_host.is_some()
+        || spec.driver.is_some()
+        || spec.root.is_some()
+        || spec.database.is_some()
+        || spec.blocks.is_some()
+        || spec.root_uid.is_some()
+        || spec.root_gid.is_some()
+        || spec.storage.is_some()
+}
+
 fn apply_explicit_overrides(resolved: &mut CliOptions, raw: &CliOptions) {
     let overrides = &raw.overrides;
     if overrides.mountpoint {
@@ -577,7 +754,7 @@ pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), Conf
 }
 
 impl ConfigSpec {
-    fn to_options(&self) -> CliOptions {
+    pub(crate) fn to_options(&self) -> CliOptions {
         CliOptions {
             mountpoint: self.mountpoint.clone(),
             transport: self.transport.unwrap_or(TransportChoice::Auto),
@@ -787,6 +964,40 @@ fn positive_usize(value: &Value, path: &str) -> Result<usize, ConfigError> {
         return Err(ConfigError::at(path, "must be greater than zero"));
     }
     Ok(value)
+}
+
+fn positive_u64(value: &Value, path: &str) -> Result<u64, ConfigError> {
+    let value = value
+        .as_u64()
+        .ok_or_else(|| ConfigError::at(path, "must be a positive unsigned integer"))?;
+    if value == 0 {
+        return Err(ConfigError::at(path, "must be greater than zero"));
+    }
+    Ok(value)
+}
+
+fn optional_u16(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+) -> Result<Option<u16>, ConfigError> {
+    object
+        .get(key)
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                ConfigError::at(
+                    &format!("{path}.{key}"),
+                    "must be an unsigned integer in the u16 range",
+                )
+            })?;
+            u16::try_from(value).map_err(|_| {
+                ConfigError::at(
+                    &format!("{path}.{key}"),
+                    "must be an unsigned integer in the u16 range",
+                )
+            })
+        })
+        .transpose()
 }
 
 fn required_env_reference(
@@ -1177,5 +1388,112 @@ mod tests {
         assert!(!message.contains("another"));
         assert!(!message.contains("third"));
         assert!(message.contains("[REDACTED]"));
+    }
+
+    #[test]
+    fn http_config_reuses_driver_shapes_for_multiple_named_drives() {
+        let spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "http": {
+                    "port": 0,
+                    "max_request_bytes": 4096,
+                    "read_chunk_bytes": 1024,
+                    "drain_timeout_ms": 250,
+                    "drives": [
+                        {
+                            "id": "memory",
+                            "token": {"env": "MOUNT_RS_MEMORY_TOKEN"},
+                            "driver": {"kind": "memory"}
+                        },
+                        {
+                            "id": "sqlite",
+                            "token": {"env": "MOUNT_RS_SQLITE_TOKEN"},
+                            "driver": {
+                                "kind": "sqlite",
+                                "database": "state/sqlite.db",
+                                "uid": 501,
+                                "gid": 20
+                            }
+                        }
+                    ]
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap();
+        let http = spec.http.as_ref().expect("HTTP config");
+        assert_eq!(http.host, "127.0.0.1");
+        assert_eq!(http.port, 0);
+        assert_eq!(http.max_request_bytes, 4096);
+        assert_eq!(http.read_chunk_bytes, 1024);
+        assert_eq!(http.drain_timeout_ms, 250);
+        assert_eq!(http.drives.len(), 2);
+        assert_eq!(http.drives[0].token.name, "MOUNT_RS_MEMORY_TOKEN");
+        assert_eq!(
+            http.drives[1].driver.database,
+            Some("/tmp/config/state/sqlite.db".into())
+        );
+        assert_eq!(http.drives[1].driver.root_uid, Some(501));
+    }
+
+    #[test]
+    fn http_config_rejects_duplicate_or_unsafe_drive_ids() {
+        let duplicate = parse_config_str(
+            r#"{
+                "version": 1,
+                "http": {
+                    "drives": [
+                        {"id": "same", "token": {"env": "TOKEN_A"}, "driver": {"kind": "memory"}},
+                        {"id": "same", "token": {"env": "TOKEN_B"}, "driver": {"kind": "memory"}}
+                    ]
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(duplicate.message().contains("duplicates another"));
+
+        let unsafe_id = parse_config_str(
+            r#"{
+                "version": 1,
+                "http": {
+                    "drives": [
+                        {"id": "../escape", "token": {"env": "TOKEN"}, "driver": {"kind": "memory"}}
+                    ]
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(unsafe_id.message().contains("1-64 ASCII"));
+    }
+
+    #[test]
+    fn native_mount_config_cannot_silently_consume_http_settings() {
+        let path = std::env::temp_dir().join(format!(
+            "mount-rs-cli-http-config-{}-{}.json",
+            std::process::id(),
+            unique_default_owner()
+        ));
+        std::fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "http": {
+                    "drives": [
+                        {"id": "memory", "token": {"env": "TOKEN"}, "driver": {"kind": "memory"}}
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let raw = match parse_args(["mount-rs", "--config", path.to_str().unwrap()]).unwrap() {
+            Command::Mount(options) => options,
+            other => panic!("expected mount, got {other:?}"),
+        };
+        let error = resolve_cli_options(raw).unwrap_err();
+        assert!(error.message().contains("serve-http"));
+        let _ = std::fs::remove_file(path);
     }
 }
