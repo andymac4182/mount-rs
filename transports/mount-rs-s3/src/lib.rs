@@ -4,6 +4,7 @@
 //! [`S3Session`] is useful for embedding the protocol in another HTTP runtime;
 //! [`S3Server`] provides the bundled Tokio/Axum listener.
 
+pub mod chunked;
 pub mod constants;
 pub mod protocol;
 pub mod server;
@@ -11,6 +12,15 @@ pub mod session;
 pub mod sigv4;
 pub mod xml;
 
+pub use chunked::{
+    AwsChunkedDecoder, AwsChunkedParams, CHUNK_ALGORITHM, CHUNK_SIGNATURE_PARAMETER,
+    CHUNKED_MAX_DECLARED_SIZE, CHUNKED_MAX_FRAME, CHUNKED_MAX_HEADER_BYTES, CHUNKED_MAX_HEX_DIGITS,
+    CHUNKED_MAX_TRAILER_BYTES, ChunkedError, ChunkedLimits, ChunkedRefusal, ChunkedSignature,
+    ChunkedTrailer, StreamingPayloadKind, TRAILER_ALGORITHM, TRAILER_SIGNATURE_HEADER,
+    chunk_string_to_sign, chunked_signing_key, decode_aws_chunked, is_chunked_error,
+    sign_chunk as sign_chunked, sign_trailer as sign_trailer_chunked, streaming_payload_kind,
+    trailer_string_to_sign,
+};
 pub use constants::{
     AWS_CHUNKED_ENCODING, MAX_KEY_BYTES, MAX_KEYS, MAX_PART_SIZE, MAX_PARTS, MAX_PARTS_PER_PAGE,
     MAX_XML_BYTES, MIN_PART_SIZE, MULTIPART_PREFIX, OBJECT_CONTENT_TYPE, S3Error, S3Failure,
