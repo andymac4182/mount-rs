@@ -11,6 +11,15 @@ const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
 
+assert.equal(packageJson.license, "Apache-2.0");
+for (const name of ["LICENSE", "THIRD_PARTY_NOTICES.md"]) {
+  const canonical = await readFile(new URL(`../../${name}`, packageDirectory), "utf8");
+  for (const directory of [packageDirectory, new URL("../mount-rs-virtual-fs/", packageDirectory)]) {
+    assert.equal(await readFile(new URL(name, directory), "utf8"), canonical,
+      `${directory.pathname}${name} must preserve the repository license/notice`);
+  }
+}
+
 assert.deepEqual(packageJson.exports, {
   ".": {
     types: "./index.d.ts",
@@ -47,7 +56,7 @@ const { stdout } = await execFileAsync(
 );
 const report = JSON.parse(stdout.trim());
 const files = new Set(report.files.map(({ path }) => path));
-for (const required of ["index.js", "index.d.ts", "package.json", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "types/memory.d.ts"]) {
+for (const required of ["LICENSE", "THIRD_PARTY_NOTICES.md", "index.js", "index.d.ts", "package.json", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "types/memory.d.ts"]) {
   assert.equal(files.has(required), true, `package is missing ${required}`);
 }
 for (const required of ["nfs.cjs", "p9.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "types/nfs-codec.d.ts", "types/p9-codec.d.ts"]) {

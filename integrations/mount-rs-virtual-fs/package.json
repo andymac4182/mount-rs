@@ -25,6 +25,8 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "index.d.ts",
     "src",
     "types",

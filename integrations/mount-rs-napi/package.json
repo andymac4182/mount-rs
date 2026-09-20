@@ -54,6 +54,8 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "index.js",
     "index.d.ts",
     "postlude.cjs",
