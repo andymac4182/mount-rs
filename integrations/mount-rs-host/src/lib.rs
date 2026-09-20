@@ -710,9 +710,10 @@ impl FileHandle for HostHandle {
                 .map_err(|error| fs_error_from_io(error, "read", path.clone()))?
                 .is_dir()
             {
-                return Err(FsError::new(ErrorCode::Eisdir)
-                    .with_syscall("read")
-                    .with_path(path.clone()));
+                // Node's FileHandle.read() reports EISDIR with its syscall,
+                // but does not attach the handle's path. Keep path context
+                // for closed handles and backend failures below.
+                return Err(FsError::new(ErrorCode::Eisdir).with_syscall("read"));
             }
             let start = position.unwrap_or(state.position);
             let mut bytes = vec![0_u8; length];
@@ -751,9 +752,10 @@ impl FileHandle for HostHandle {
                     .with_path(path.clone())
             })?;
             if !state.flags.write {
-                return Err(FsError::new(ErrorCode::Ebadf)
-                    .with_syscall("write")
-                    .with_path(path.clone()));
+                // Node's FileHandle.write() reports EBADF with its syscall,
+                // but does not attach the handle's path. Keep path context
+                // for closed handles and backend failures below.
+                return Err(FsError::new(ErrorCode::Ebadf).with_syscall("write"));
             }
             if file
                 .metadata()
@@ -1174,6 +1176,7 @@ fn path_string(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mount_rs_core::Loopback;
 
     #[test]
     fn lexical_root_clamps_parent_components() {
@@ -1210,5 +1213,59 @@ mod tests {
             error_code(&io::Error::from_raw_os_error(95)),
             ErrorCode::Enotsup
         );
+    }
+
+    #[tokio::test]
+    async fn handle_access_errors_match_node_filehandle_shape() {
+        let root = std::env::temp_dir().join(format!(
+            "mount-rs-host-error-shape-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock is before the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).expect("create host error-shape fixture");
+
+        let result: Result<()> = async {
+            let fs = Loopback::new(HostFs::new(&root));
+            let creator = fs.open("/file", "w", 0o666).await?;
+            creator.write(b"x", Some(0)).await?;
+            creator.close().await?;
+
+            let read_only = fs.open("/file", "r", 0).await?;
+            let write_error = read_only
+                .write(b"y", Some(0))
+                .await
+                .expect_err("read-only handle write must fail");
+            assert_eq!(write_error.code, ErrorCode::Ebadf);
+            assert_eq!(write_error.syscall.as_deref(), Some("write"));
+            assert_eq!(write_error.path, None);
+            read_only.close().await?;
+
+            fs.mkdir(
+                "/dir",
+                MkdirOptions {
+                    recursive: false,
+                    mode: Some(0o755),
+                },
+            )
+            .await?;
+            let directory = fs.open("/dir", "r", 0).await?;
+            let mut buffer = [0_u8; 1];
+            let read_error = directory
+                .read(&mut buffer, Some(0))
+                .await
+                .expect_err("directory handle read must fail");
+            assert_eq!(read_error.code, ErrorCode::Eisdir);
+            assert_eq!(read_error.syscall.as_deref(), Some("read"));
+            assert_eq!(read_error.path, None);
+            directory.close().await?;
+            Ok(())
+        }
+        .await;
+
+        std::fs::remove_dir_all(&root).expect("remove host error-shape fixture");
+        result.expect("host error-shape regression");
     }
 }

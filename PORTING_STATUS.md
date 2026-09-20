@@ -63,6 +63,16 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `a19f297`: [native macOS NFS job 106006016122](https://github.com/andymac4182/mount-rs/actions/runs/35483700074/job/106006016122)
+  passed the expanded real NFSv3 namespace/handle test (one passed, zero
+  ignored). The same revision's Linux NFSv4.1 mount timed out before I/O;
+  wire tests had not exposed that failure. Native v4.1 remains incomplete.
+- Local macOS WebDAV native read/write/unmount passed after canonicalizing the
+  test mountpoint (`/var` versus `/private/var`); `5c2e74e` adds macOS/Linux
+  WebDAV native CI. Hosted results remain separate evidence.
+- The host-driver differential harness covers 112 operations, including flags,
+  handle cursors and errors, links and rooted paths. It caught two unwanted
+  error `path` fields; after correction the local macOS oracle passes.
 - `e15179d`: [native FUSE job 106005427389](https://github.com/andymac4182/mount-rs/actions/runs/35483491213/job/106005427389)
   passed both real mount-service graceful restart and SIGKILL recovery tests
   (two passed, zero ignored, 21.02s). Separate SQLite metadata/block files

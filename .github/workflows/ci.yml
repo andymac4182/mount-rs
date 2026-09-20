@@ -203,6 +203,7 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-edge-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-flags-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-auto-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-host-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-trace-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-inodes.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs
