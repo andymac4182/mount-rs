@@ -1472,6 +1472,50 @@ fn readlink_and_statfs_wire_edges_match_empty_and_legacy_layouts() {
 }
 
 #[test]
+fn poll_wire_edges_reject_truncation_and_trailing_bytes() {
+    let request = FuseRequestBody::Poll(FusePollIn {
+        fh: 0x0102_0304_0506_0708,
+        kh: 0x1112_1314_1516_1718,
+        flags: FUSE_POLL_SCHEDULE_NOTIFY,
+        events: 0x2122_2324,
+    });
+    let request_wire = encode_request_body(FUSE_POLL, &request, None).unwrap();
+    assert_eq!(request_wire.len(), 24);
+    assert_eq!(
+        decode_request_body(FUSE_POLL, &request_wire, None).unwrap(),
+        request
+    );
+    for length in 0..request_wire.len() {
+        assert!(
+            decode_request_body(FUSE_POLL, &request_wire[..length], None).is_err(),
+            "truncated POLL request at {length} bytes"
+        );
+    }
+    let mut request_trailing = request_wire;
+    request_trailing.push(0);
+    assert!(decode_request_body(FUSE_POLL, &request_trailing, None).is_err());
+
+    let reply = FuseReplyBody::Poll(FusePollOut {
+        revents: 0x3132_3334,
+    });
+    let reply_wire = encode_reply_body(FUSE_POLL, &reply, None).unwrap();
+    assert_eq!(reply_wire.len(), 8);
+    assert_eq!(
+        decode_reply_body(FUSE_POLL, &reply_wire, None).unwrap(),
+        reply
+    );
+    for length in 0..reply_wire.len() {
+        assert!(
+            decode_reply_body(FUSE_POLL, &reply_wire[..length], None).is_err(),
+            "truncated POLL reply at {length} bytes"
+        );
+    }
+    let mut reply_trailing = reply_wire;
+    reply_trailing.push(0);
+    assert!(decode_reply_body(FUSE_POLL, &reply_trailing, None).is_err());
+}
+
+#[test]
 fn framing_extensions_and_compatibility_layouts_are_bounded() {
     let request = encode_request(
         &EncodeRequest {
