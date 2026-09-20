@@ -58,6 +58,38 @@ assert.equal(sdkSelfTest.code, 0, output(sdkSelfTest));
 assert.match(sdkSelfTest.stdout, /sdk self-test passed: Node SDK wrote and read/);
 assert.doesNotMatch(output(sdkSelfTest), /^mounted\s+/im);
 
+const durableRoot = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-sdk-"));
+const durableConfig = join(durableRoot, "config.json");
+try {
+  await fs.writeFile(
+    durableConfig,
+    `${JSON.stringify({
+      version: 1,
+      driver: {
+        kind: "splitstore",
+        storage: {
+          metadata: { kind: "sqlite", path: "./metadata.sqlite" },
+          blocks: { kind: "sqlite", path: "./blocks.sqlite" },
+          chunk_size_bytes: 7,
+          owner: `node-cli-sdk-${process.pid}`,
+        },
+      },
+    }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  const durable = await runCli([
+    "--config", durableConfig, "--sdk-self-test", "--reopen",
+  ]);
+  assert.equal(durable.code, 0, output(durable));
+  assert.match(
+    durable.stdout,
+    /sdk self-test passed: Node SDK wrote, shut down, reopened, and read/,
+  );
+  assert.doesNotMatch(output(durable), /^mounted\s+/im);
+} finally {
+  await fs.rm(durableRoot, { recursive: true, force: true });
+}
+
 const volatileReopen = await runCli([
   "--driver", "memory", "--sdk-self-test", "--reopen",
 ]);
