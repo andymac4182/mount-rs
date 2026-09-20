@@ -54,6 +54,17 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `91577ab`: [native FUSE job 106004365456](https://github.com/andymac4182/mount-rs/actions/runs/35483110170/job/106004365456)
+  passed actual SQLite DELETE/WAL hosting and reopen on separate metadata and
+  block SQLite databases in 4.47s, plus the real auto-facade mount. This
+  revision's overall CI failed because two new fault-test initializers were
+  staged during an overlapping worker edit; the subsequent fixture correction
+  and expanded fault tests require a fresh green run.
+- `0ff3ff8`: [native NFS job 106003944143](https://github.com/andymac4182/mount-rs/actions/runs/35482956567/job/106003944143)
+  passed one actual Linux NFSv3 mount/read/write/unmount test, zero ignored.
+  This is not native v4.1 evidence.
+- `6f8ba04`: [CI run 35482470541](https://github.com/andymac4182/mount-rs/actions/runs/35482470541)
+  passed the entire platform, Node packaging and then-enabled native suite.
 - `3ebf501`: [CI run 35481387472](https://github.com/andymac4182/mount-rs/actions/runs/35481387472)
   passed all eight jobs: Rust on macOS/Linux, Node on both platforms and both
   arm64/x64 architectures, actual Linux FUSE mounts, and aggregation/packaging

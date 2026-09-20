@@ -2526,6 +2526,102 @@ mod tests {
     }
 
     #[test]
+    fn block_put_failure_does_not_acknowledge_or_publish_a_partial_write() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = FaultBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("put-fault"),
+        ))
+        .unwrap();
+        let file = block_on(filesystem.open("/file", "w+", 0o600)).unwrap();
+        let before = block_on(metadata.load()).unwrap().revision;
+
+        blocks.fail_put.store(true, Ordering::SeqCst);
+        let error = block_on(file.write(b"data", Some(0))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before);
+        assert_eq!(block_on(file.stat()).unwrap().size, 0);
+
+        blocks.fail_put.store(false, Ordering::SeqCst);
+        assert_eq!(block_on(file.write(b"data", Some(0))).unwrap(), 4);
+        block_on(file.close()).unwrap();
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn metadata_publish_failure_leaves_blocks_unreferenced_and_fails_closed() {
+        let metadata = TestMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            loaded: None,
+            fail_publish: Arc::new(AtomicBool::new(false)),
+            fail_flush: Arc::new(AtomicBool::new(false)),
+        };
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("publish-fault"),
+        ))
+        .unwrap();
+        let file = block_on(filesystem.open("/file", "w+", 0o600)).unwrap();
+        let before = block_on(metadata.inner.load()).unwrap().revision;
+        metadata.fail_publish.store(true, Ordering::SeqCst);
+
+        let error = block_on(file.write(b"data", Some(0))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert!(filesystem.failed());
+        let loaded = block_on(metadata.inner.load()).unwrap();
+        assert_eq!(loaded.revision, before);
+        let inode = loaded
+            .namespace
+            .as_ref()
+            .unwrap()
+            .nodes
+            .values()
+            .find(|node| node.stats.ino != 1)
+            .unwrap();
+        assert_eq!(inode.stats.size, 0);
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn metadata_flush_failure_reports_uncertain_commit_and_fails_closed() {
+        let metadata = TestMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            loaded: None,
+            fail_publish: Arc::new(AtomicBool::new(false)),
+            fail_flush: Arc::new(AtomicBool::new(false)),
+        };
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("metadata-flush-fault"),
+        ))
+        .unwrap();
+        let file = block_on(filesystem.open("/file", "w+", 0o600)).unwrap();
+        let before = block_on(metadata.inner.load()).unwrap().revision;
+        metadata.fail_flush.store(true, Ordering::SeqCst);
+
+        let error = block_on(file.write(b"data", Some(0))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert!(filesystem.failed());
+        let loaded = block_on(metadata.inner.load()).unwrap();
+        assert_eq!(loaded.revision, before + 1);
+        let inode = loaded
+            .namespace
+            .as_ref()
+            .unwrap()
+            .nodes
+            .values()
+            .find(|node| node.stats.ino != 1)
+            .unwrap();
+        assert_eq!(inode.stats.size, 4);
+        loaded.validate().unwrap();
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
     fn fixed_size_rewrites_fetch_only_affected_chunks_and_bound_sparse_offsets() {
         let metadata = MemoryMetadataStore::new();
         let blocks = FaultBlockStore::new();
@@ -2551,9 +2647,18 @@ mod tests {
             1,
             "partial overwrite must fetch only its affected chunk"
         );
+        blocks.gets.store(0, Ordering::SeqCst);
+        let mut untouched = [0_u8; 4];
+        assert_eq!(block_on(file.read(&mut untouched, Some(4))).unwrap(), 4);
+        assert_eq!(&untouched, b"bbbb");
+        assert_eq!(
+            blocks.gets.load(Ordering::SeqCst),
+            1,
+            "the untouched chunk remains readable as a separate extent"
+        );
 
         blocks.gets.store(0, Ordering::SeqCst);
-        let sparse_offset = 1_000_000_000;
+        let sparse_offset = 1_u64 << 40;
         assert_eq!(block_on(file.write(b"x", Some(sparse_offset))).unwrap(), 1);
         assert_eq!(
             blocks.gets.load(Ordering::SeqCst),
@@ -2566,6 +2671,39 @@ mod tests {
     }
 
     #[test]
+    fn missing_referenced_block_fails_a_lazy_read() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("missing-block"),
+        ))
+        .unwrap();
+        let file = block_on(filesystem.open("/file", "w+", 0o600)).unwrap();
+        block_on(file.write(b"data", Some(0))).unwrap();
+
+        let namespace = block_on(metadata.load()).unwrap().namespace.unwrap();
+        let block = namespace
+            .nodes
+            .values()
+            .find_map(|node| match &node.data {
+                NodeData::File(layout) => layout.extents.first().map(|extent| extent.block.clone()),
+                _ => None,
+            })
+            .expect("the write should publish one referenced block");
+        block_on(blocks.delete(&block)).unwrap();
+
+        let mut buffer = [0_u8; 4];
+        let error = block_on(file.read(&mut buffer, Some(0))).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Enoent);
+        assert_eq!(error.syscall.as_deref(), Some("read"));
+        assert_eq!(error.path.as_deref(), Some("/file"));
+        block_on(file.close()).unwrap();
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
     fn open_releases_exact_latest_lease_on_validation_and_initial_flush_failures() {
         let invalid = TestMetadataStore {
             inner: MemoryMetadataStore::new(),
@@ -2573,6 +2711,7 @@ mod tests {
                 revision: 0,
                 namespace: Some(initial_namespace(&options("invalid-load")).unwrap()),
             }),
+            fail_publish: Arc::new(AtomicBool::new(false)),
             fail_flush: Arc::new(AtomicBool::new(false)),
         };
         let result = block_on(ChunkedFs::open(
@@ -2595,6 +2734,7 @@ mod tests {
         let flush_failure = TestMetadataStore {
             inner: MemoryMetadataStore::new(),
             loaded: None,
+            fail_publish: Arc::new(AtomicBool::new(false)),
             fail_flush: Arc::new(AtomicBool::new(true)),
         };
         let result = block_on(ChunkedFs::open(
@@ -2635,6 +2775,37 @@ mod tests {
         );
         assert!(filesystem.failed());
         assert_eq!(block_on(metadata.release_writer(&newer)).unwrap(), ());
+    }
+
+    #[test]
+    fn expired_reacquire_fails_closed_after_another_owner_publishes_revision() {
+        let clock = Arc::new(ManualClock::new(0));
+        let metadata = MemoryMetadataStore::with_clock(clock.clone());
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("revision-old").with_lease_ttl(Duration::from_secs(1)),
+        ))
+        .unwrap();
+        assert!(clock.advance_ms(1_000));
+
+        let newer =
+            block_on(metadata.acquire_writer("revision-new", Duration::from_secs(10))).unwrap();
+        let loaded = block_on(metadata.load()).unwrap();
+        let mut namespace = loaded.namespace.unwrap();
+        namespace
+            .nodes
+            .get_mut(&namespace.root)
+            .unwrap()
+            .stats
+            .ctime_ms = 2;
+        let published = block_on(metadata.publish(loaded.revision, &newer, namespace)).unwrap();
+        assert_eq!(published, loaded.revision + 1);
+        block_on(metadata.release_writer(&newer)).unwrap();
+
+        let error = block_on(filesystem.stat("/")).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Estale);
+        assert!(filesystem.failed());
     }
 
     #[test]
