@@ -1,5 +1,10 @@
 use mount_rs_core::{FsDriver, MemoryFs};
-use mount_rs_fuse::{RequestHeader, session::FuseSession};
+use mount_rs_fuse::{
+    RequestHeader,
+    constants::FUSE_STATFS,
+    protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
+    session::FuseSession,
+};
 use std::sync::Arc;
 
 fn frame(opcode: u32, nodeid: u64, body: &[u8]) -> Vec<u8> {
@@ -184,8 +189,41 @@ async fn create_sync_and_statfs_roundtrip() {
     let stats = request(&mut session, 17, inode, &[]).await;
     assert_eq!(stats.len(), 80);
     assert_eq!(number(&stats, 24), fs.statfs("/").await.unwrap().files);
+    let decoded = decode_reply_body(
+        FUSE_STATFS,
+        &stats,
+        Some(ProtocolContext {
+            minor: 41,
+            setxattr_ext: false,
+        }),
+    )
+    .unwrap();
+    assert!(
+        matches!(decoded, FuseReplyBody::Statfs(value) if value.namelen == 255 && value.bsize == 4096)
+    );
     assert_eq!(fs.stat("/created").await.unwrap().mode & 0o7777, 0o640);
     request(&mut session, 18, inode, &release_body(handle)).await;
+}
+
+#[tokio::test]
+async fn readlink_uses_typed_wire_encoding_and_rejects_embedded_nul() {
+    let fs = Arc::new(MemoryFs::empty());
+    fs.symlink("target/λ", "/unicode").await.unwrap();
+    // MemoryFs intentionally permits this driver-level value so the transport
+    // must enforce the FUSE wire invariant, just like the pinned oracle.
+    fs.symlink("target\0tail", "/nul").await.unwrap();
+
+    let mut session = FuseSession::new(fs);
+    let unicode = number(&request(&mut session, 1, 1, b"unicode\0").await, 0);
+    assert_eq!(
+        request(&mut session, 5, unicode, &[]).await,
+        "target/λ".as_bytes()
+    );
+
+    let nul = number(&request(&mut session, 1, 1, b"nul\0").await, 0);
+    let reply = session.handle(&frame(5, nul, &[])).await.unwrap().unwrap();
+    assert_eq!(i32::from_le_bytes(reply[4..8].try_into().unwrap()), -5);
+    assert_eq!(reply.len(), 16);
 }
 
 #[tokio::test]
