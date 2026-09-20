@@ -15,6 +15,7 @@ objects created below their run-owned prefix.
 | direct memfs | \`memfs\` | \`memfs\` factory | memory config/runtime |
 | memory metadata + memory blocks | \`memory/memory\` | \`chunked-memory/memory\` | memory config/runtime |
 | SQLite metadata + SQLite blocks | \`sqlite/sqlite\` using \`:memory:\` | \`chunked-sqlite/sqlite\` using \`:memory:\` plus the SQLite factory | SQLite config plus real CLI SDK reopen |
+| SQLite metadata + SQLite blocks (seeded partial write, truncate, reopen) | \`sqlite/sqlite-seeded-reopen\` with file-backed stores | \`chunked-sqlite/sqlite-seeded-reopen\` with the same seeded mutation and reopen | both Node and Rust CLIs run the same file-backed split-store config with \`--sdk-self-test --reopen\` |
 | PGlite metadata + PGlite blocks | gated by \`PGLITE_DATABASE_URL\` or \`MOUNT_RS_PGLITE_URL\` | gated by \`PGLITE_DATABASE_URL\` | config validation only |
 | memory/SQLite metadata + Cloudflare R2 blocks | gated by all four \`R2_*\` variables | \`Filesystem.r2\` factory gated by all four \`R2_*\` variables | config validation only |
 | PGlite metadata + Cloudflare R2 blocks | gated by both PGlite and R2 | not duplicated here | config validation only |
@@ -38,8 +39,9 @@ node tests/provider_matrix/cli.mjs
 
 The CLI matrix runs both process-level SDK CLIs: the real Rust binary's
 mount-free `sdk-self-test` (memory and SQLite reopen) and the Rust-backed Node
-CLI's SDK self-test. Native mount self-tests remain explicit platform gates
-because they require a usable FUSE/NFS transport.
+CLI's SDK self-test against the same file-backed split-store configuration.
+Native mount self-tests remain explicit platform gates because they require a
+usable FUSE/NFS transport.
 
 The Node SDK command expects the checked-out native addon at
 \`integrations/mount-rs-napi/mount-rs.darwin-arm64.node\` (or the corresponding
