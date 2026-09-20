@@ -980,6 +980,9 @@ export async function runBenchmark(options, environment = process.env) {
     environment: await environmentRecord(options, environment),
     measurementSurfaces: {
       directApi: "measured",
+      nodeCaller: "measured",
+      nativeAddon: "provider-dependent; see each executionSurface",
+      directRust: "not-run",
       mountedPath: "not-run",
       mountedPathReason: "This dependency-light runner does not require privileged OS mount setup.",
     },

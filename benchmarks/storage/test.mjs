@@ -7,6 +7,7 @@ import {
   usageError,
   withTimeout,
 } from "./errors.mjs"
+import { providerById } from "./providers.mjs"
 import { cleanupOwnedPaths, parseArgs, runSample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
 
@@ -148,8 +149,27 @@ async function testCli() {
   assert.throws(() => parseArgs(["--unknown"]), /unknown argument/)
 }
 
+async function testExecutionSurfaceLabels() {
+  const definitions = providerById({})
+  assert.deepEqual(definitions.get("mount-rs-memory").executionSurface, {
+    callerRuntime: "node",
+    implementationLanguage: "rust",
+    apiBinding: "public-napi",
+    nativeAddon: true,
+    directRust: "not-run",
+  })
+  assert.deepEqual(definitions.get("mountx-memory").executionSurface, {
+    callerRuntime: "node",
+    implementationLanguage: "typescript",
+    apiBinding: "actual-typescript-oracle",
+    nativeAddon: false,
+    directRust: "not-run",
+  })
+}
+
 await testStats()
 await testErrors()
 await testCli()
+await testExecutionSurfaceLabels()
 await testDeferredWriteCleanup()
 console.log("storage benchmark unit tests: PASS")

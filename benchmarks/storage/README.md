@@ -112,9 +112,14 @@ TypeScript oracle. The mountx memory row is the equivalent actual-TS oracle
 comparison.
 
 All current measurements are labelled `measurementSurface: "direct-api"`.
-No privileged or OS-mounted path timings are reported; the JSON explicitly
-marks `mountedPath` as `not-run`. Direct API and mounted-path results must not
-be compared as if they were the same workload.
+Each provider result also records `executionSurface` with the Node caller
+runtime, implementation language, API binding, native-addon use, and
+`directRust: "not-run"`. The mount-rs rows therefore mean
+`Node -> public N-API -> Rust`; they are not direct-Rust timings. The mountx
+row means `Node -> actual TypeScript oracle`. No privileged or OS-mounted path
+timings are reported; the JSON explicitly marks `mountedPath` as `not-run`.
+Direct API and mounted-path results must not be compared as if they were the
+same workload.
 
 `durabilityClass`, per-store `metadataDurabilityClass` and
 `blockDurabilityClass`, `cacheState`, `synchronizationPolicy`, metadata

@@ -283,6 +283,13 @@ function onceCleanup(filesystem, directory) {
 function provider(specification) {
   return {
     measurementSurface: "direct-api",
+    executionSurface: {
+      callerRuntime: "node",
+      implementationLanguage: specification.implementation === "mount-rs" ? "rust" : "typescript",
+      apiBinding: specification.binding,
+      nativeAddon: specification.implementation === "mount-rs",
+      directRust: "not-run",
+    },
     cacheState: "fresh-provider-instance; OS/remote caches uncontrolled",
     ...specification,
   }
@@ -483,6 +490,7 @@ export function providerSummary(definition, chunkSizeBytes) {
     blockDurabilityClass: definition.blockDurabilityClass,
     synchronizationPolicy: definition.synchronizationPolicy,
     measurementSurface: definition.measurementSurface,
+    executionSurface: definition.executionSurface,
     cacheState: definition.cacheState,
     chunking,
     ...(definition.remoteRegion ? { remoteRegion: definition.remoteRegion } : {}),
