@@ -392,6 +392,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W21.7 Review Erlang gen_statem at the end of primary work for storage and
   communication lifecycle lessons; create follow-up tasks for applicable findings.
 - [ ] W21.8 Verify license compatibility before incorporating any reference code.
+- [ ] W21.9 Review Rivet Actors' FoundationDB/SQLite VFS implementation at a
+  pinned revision. Record exact source paths, transaction/locking/durability
+  assumptions, ambiguous-commit behavior and recovery tests; map adopt/adapt/
+  reject decisions to W07/W12/W15/W28 and preserve applicable attribution.
 
 ## W22 — Distributed cache: discuss after primary work
 

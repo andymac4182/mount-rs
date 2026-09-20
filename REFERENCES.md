@@ -8,6 +8,15 @@
 
 ## Inspiration and design references
 
+- [Rivet Actors](https://github.com/rivet-dev/actors): user-selected reference
+  for FoundationDB-backed SQLite VFS design. Locate and pin the relevant VFS and
+  FoundationDB implementation before drawing conclusions. Review page/key
+  representation, SQLite-to-FoundationDB transaction mapping, locking/fencing,
+  WAL/journal constraints, sync and acknowledgment boundaries, retries after
+  ambiguous commits, transaction-size limits, cache invalidation and recovery.
+  Bring applicable lessons and fault-injection cases into W07, W12, W15 and W28.
+  Inspect licenses/notices for the exact files before reuse; this is a review
+  requirement, not a new runtime dependency or a compatibility promise.
 - [SQLite VFS architecture](https://www.sqlite.org/vfs.html): review the
   separation between logical database/page operations, file handles and physical
   storage, plus composable VFS shims. Study explicit locking/sync capabilities,
