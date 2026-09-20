@@ -1325,6 +1325,37 @@ fn malformed_inputs_return_protocol_errors_without_unbounded_allocations() {
     huge_count[..4].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(decode_request_body(FUSE_BATCH_FORGET, &huge_count, None).is_err());
 
+    let batch = [0u8; 8];
+    assert!(matches!(
+        decode_request_body(FUSE_BATCH_FORGET, &batch, None),
+        Ok(FuseRequestBody::BatchForget(value)) if value.forgets.is_empty()
+    ));
+    for length in 0..batch.len() {
+        assert!(
+            decode_request_body(FUSE_BATCH_FORGET, &batch[..length], None).is_err(),
+            "batch forget length {length}"
+        );
+    }
+    let mut batch_with_trailing = batch.to_vec();
+    batch_with_trailing.extend([0; 16]);
+    assert!(decode_request_body(FUSE_BATCH_FORGET, &batch_with_trailing, None).is_err());
+
+    let interrupt = 0x6162_6364_6566_6768u64.to_le_bytes();
+    assert!(matches!(
+        decode_request_body(FUSE_INTERRUPT, &interrupt, None),
+        Ok(FuseRequestBody::Interrupt(FuseInterruptIn { unique }))
+            if unique == 0x6162_6364_6566_6768
+    ));
+    for length in 0..interrupt.len() {
+        assert!(
+            decode_request_body(FUSE_INTERRUPT, &interrupt[..length], None).is_err(),
+            "interrupt length {length}"
+        );
+    }
+    let mut interrupt_with_trailing = interrupt.to_vec();
+    interrupt_with_trailing.push(0);
+    assert!(decode_request_body(FUSE_INTERRUPT, &interrupt_with_trailing, None).is_err());
+
     let mut short_write = vec![0u8; 42];
     short_write[16..20].copy_from_slice(&1000u32.to_le_bytes());
     assert!(decode_request_body(FUSE_WRITE, &short_write, None).is_err());
