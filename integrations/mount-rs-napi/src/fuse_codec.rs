@@ -626,6 +626,53 @@ fn interrupt_in(value: NativeFuseInterruptIn) -> protocol::FuseInterruptIn {
 }
 
 #[napi(object)]
+pub struct NativeFusePollIn {
+    pub fh: BigInt,
+    pub kh: BigInt,
+    pub flags: u32,
+    pub events: u32,
+}
+
+impl From<protocol::FusePollIn> for NativeFusePollIn {
+    fn from(value: protocol::FusePollIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            kh: bigint(value.kh),
+            flags: value.flags,
+            events: value.events,
+        }
+    }
+}
+
+fn poll_in(value: NativeFusePollIn) -> protocol::FusePollIn {
+    protocol::FusePollIn {
+        fh: u64_from_bigint(&value.fh),
+        kh: u64_from_bigint(&value.kh),
+        flags: value.flags,
+        events: value.events,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFusePollOut {
+    pub revents: u32,
+}
+
+impl From<protocol::FusePollOut> for NativeFusePollOut {
+    fn from(value: protocol::FusePollOut) -> Self {
+        Self {
+            revents: value.revents,
+        }
+    }
+}
+
+fn poll_out(value: NativeFusePollOut) -> protocol::FusePollOut {
+    protocol::FusePollOut {
+        revents: value.revents,
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseEmpty {}
 
 #[napi(object)]
@@ -1906,6 +1953,72 @@ pub fn fuse_encode_interrupt_in(value: NativeFuseInterruptIn) -> napi::Result<Bu
         mount_rs_fuse::constants::FUSE_INTERRUPT,
         &protocol::FuseRequestBody::Interrupt(interrupt_in(value)),
         None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodePollIn")]
+pub fn fuse_decode_poll_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFusePollIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_POLL,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Poll(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_POLL did not decode as a poll request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodePollIn")]
+pub fn fuse_encode_poll_in(
+    value: NativeFusePollIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_POLL,
+        &protocol::FuseRequestBody::Poll(poll_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodePollOut")]
+pub fn fuse_decode_poll_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFusePollOut> {
+    match protocol::decode_reply_body(
+        mount_rs_fuse::FUSE_POLL,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Poll(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_POLL did not decode as a poll reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodePollOut")]
+pub fn fuse_encode_poll_out(
+    value: NativeFusePollOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_POLL,
+        &protocol::FuseReplyBody::Poll(poll_out(value)),
+        protocol_context(context),
     )
     .map(Buffer::from)
     .map_err(protocol_error)
