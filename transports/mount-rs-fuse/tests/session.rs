@@ -1,7 +1,7 @@
 use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_fuse::{
     RequestHeader,
-    constants::{FUSE_BATCH_FORGET, FUSE_INTERRUPT, FUSE_STATFS},
+    constants::{FUSE_BATCH_FORGET, FUSE_INTERRUPT, FUSE_POLL, FUSE_STATFS},
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::FuseSession,
 };
@@ -189,6 +189,52 @@ async fn interrupt_rejects_bad_wire_and_classifies_unknown_target_without_teardo
         number(&request(&mut session, 1, 1, b"still-alive\0").await, 0),
         number(&entry, 0)
     );
+}
+
+#[tokio::test]
+async fn poll_rejects_bad_wire_and_keeps_valid_poll_at_explicit_enosys_boundary() {
+    let mut session = FuseSession::new(Arc::new(MemoryFs::empty()));
+    let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
+
+    let malformed = session
+        .handle(&frame(FUSE_POLL, 1, &[0; 23]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(i32::from_le_bytes(malformed[4..8].try_into().unwrap()), -22);
+
+    let mut trailing = vec![0; 24];
+    trailing.push(0);
+    let trailing_reply = session
+        .handle(&frame(FUSE_POLL, 1, &trailing))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        i32::from_le_bytes(trailing_reply[4..8].try_into().unwrap()),
+        -22
+    );
+
+    let valid = session
+        .handle(&frame(FUSE_POLL, 1, &[0; 24]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(i32::from_le_bytes(valid[4..8].try_into().unwrap()), -38);
+    assert_eq!(number(&valid, 8), 42);
+
+    // The unsupported POLL path is observationally safe: it does not tear
+    // down the negotiated session or mutate the inode table.
+    let entry = session
+        .handle(&frame(1, 1, b"missing\0"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(i32::from_le_bytes(entry[4..8].try_into().unwrap()), -2);
 }
 
 fn io_body(handle: u64, offset: u64, size: u32) -> Vec<u8> {
