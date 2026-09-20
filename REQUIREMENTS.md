@@ -363,6 +363,21 @@ benchmarks. Distinguish disposable cached data from authoritative durable
 storage; preserve SQLite locking, fsync, and recovery guarantees. The feature
 is deferred pending that discussion, not implemented or implicitly waived.
 
+## Launch follow-up: domain and marketing site
+
+- Buy `mount-rs.com` through AWS domain registration, subject to availability.
+  Before purchase, verify the intended AWS account, current registration and
+  renewal prices, registrant details/privacy, and obtain explicit confirmation
+  of the paid transaction. This checklist entry does not authorize a purchase.
+- Build and deploy a mount-rs marketing site on Vercel, connect the domain,
+  configure DNS and HTTPS, and verify the public site from the actual deployed
+  URL. Confirm the Vercel team/project and AWS DNS ownership before changes.
+- Base feature, platform, durability, and benchmark claims on verified release
+  evidence. Clearly distinguish implemented, experimental, planned, and
+  unsupported capabilities; do not market pending acceptance as complete.
+- Keep this launch work tracked alongside engineering delivery. No domain has
+  been registered and no marketing deployment is implied by this requirement.
+
 ## Future requirement: copy-on-write
 
 Track copy-on-write as future work, not a current feature or a requirement to
