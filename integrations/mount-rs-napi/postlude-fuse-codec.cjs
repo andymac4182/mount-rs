@@ -705,6 +705,7 @@ function install(binding) {
     ["decodeOpenOut", "fuseDecodeOpenOut"], ["encodeOpenOut", "fuseEncodeOpenOut"],
     ["decodeCreateIn", "fuseDecodeCreateIn"], ["encodeCreateIn", "fuseEncodeCreateIn"],
     ["decodeCreateOut", "fuseDecodeCreateOut"], ["encodeCreateOut", "fuseEncodeCreateOut"],
+    ["decodeBatchForgetIn", "fuseDecodeBatchForgetIn"], ["encodeBatchForgetIn", "fuseEncodeBatchForgetIn"],
     ["decodeReadlinkIn", "fuseDecodeReadlinkIn"], ["encodeReadlinkIn", "fuseEncodeReadlinkIn"],
     ["decodeReadlinkOut", "fuseDecodeReadlinkOut"], ["encodeReadlinkOut", "fuseEncodeReadlinkOut"],
     ["decodeReleaseIn", "fuseDecodeReleaseIn"], ["encodeReleaseIn", "fuseEncodeReleaseIn"],
@@ -718,6 +719,7 @@ function install(binding) {
     ["decodeInitOut", "fuseDecodeInitOut"], ["encodeInitOut", "fuseEncodeInitOut"],
     ["decodeStatfsIn", "fuseDecodeStatfsIn"], ["encodeStatfsIn", "fuseEncodeStatfsIn"],
     ["decodeStatfsOut", "fuseDecodeStatfsOut"], ["encodeStatfsOut", "fuseEncodeStatfsOut"],
+    ["decodeInterruptIn", "fuseDecodeInterruptIn"], ["encodeInterruptIn", "fuseEncodeInterruptIn"],
     ["decodeGetxattrOut", "fuseDecodeGetxattrOut"], ["encodeGetxattrOut", "fuseEncodeGetxattrOut"],
     ["encodeXattrNames", "fuseEncodeXattrNames"], ["decodeXattrNames", "fuseDecodeXattrNames"],
   ]) {
