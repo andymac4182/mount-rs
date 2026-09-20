@@ -187,6 +187,32 @@ edge, N-API and upstream conformance gates; and the full locked Rust workspace
 plus oracle-enabled N-API suite passed. These packets further reduce W01 but
 do not claim native FUSE session/mount or live-provider acceptance.
 
+The latest W01 rotation completed three additional disjoint Luna Max packets
+and published them to `main` on 2026-09-21:
+
+- `80f2efd` (published as `e5902bed`) fixes Windows HostFs symlink creation to
+  use normal Win32 paths with a long-path fallback. The focused HostFs suite
+  passed 15 tests, the Windows target check and strict target Clippy passed;
+  hosted Windows runtime confirmation, read-only create flags and hard-link
+  metadata remain open.
+- `16b2180` (published as `9832b60`) adds typed Rust FUSE `ACCESS` session
+  dispatch with exact 8-byte request validation, root handling, owner/group/
+  other permission checks, invalid-mask errors and focused session tests.
+- `7dd9a60` (published as `83466d7f0be058390f5c951a58d04d3a67f4923e`)
+  exposes Rust-backed FUSE `LOOKUP` request/reply codecs through the N-API
+  package, including declarations, generated artifacts, protocol 7.8/7.39/
+  7.41 differentials and malformed/truncated/trailing-input checks.
+
+The combined local gate for this rotation passed `cargo fmt --all -- --check`,
+the locked offline all-feature Rust workspace suite, and the oracle-enabled
+N-API suite. The N-API run passed the FUSE `READDIR`, `READDIRPLUS`, `READ`,
+`WRITE`, `GETATTR`, `SETATTR`, `OPEN`/`OPENDIR`, `CREATE` and `LOOKUP`
+families, 9P, NFS, WebDAV, Unstorage, chunked storage and distribution checks;
+PGlite/R2 factories and native mounts remained explicit prerequisite skips.
+The newest CI and fault-injection runs for `83466d7` are queued, not green
+evidence. These packets further reduce W01 but do not close W01 or establish a
+privileged native FUSE mount, FSKit activation, live R2, or hosted Windows run.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -233,6 +259,9 @@ patch):
 | Galileo | W01 seeded provider/consumer lifecycle parity | `tests/provider_matrix/**` | Integrated as `a31880d`; 5 Rust SDK, 4 Node SDK and 9 CLI passes; PGlite/R2 explicit skips |
 | Poincare | W01 Unstorage path/metadata/handle parity | `tests/unstorage/**` | Integrated as `cc73ad5`; 11 rows, zero mismatches/skips; remaining capability limits explicit |
 | Socrates | W01 FUSE OPEN/OPENDIR request codecs | `integrations/mount-rs-napi/**` | Integrated as `a3795f0`; protocols 7.8/7.39/7.41 differential passed; native mount remains open |
+| Lagrange | W27 Windows HostFs symlink portability | `crates/mount-rs-host/**` | Integrated as `80f2efd` / published `e5902bed`; focused macOS and Windows-target gates passed; hosted Windows runtime remains open |
+| Mendel | W10 Rust FUSE ACCESS session dispatch | `transports/mount-rs-fuse/**` | Integrated as `16b2180` / published `9832b60`; focused locked session tests passed; native device/mount remains open |
+| Euler | W01 napi-rs FUSE LOOKUP request/reply codecs | `integrations/mount-rs-napi/**` | Integrated as `7dd9a60` / published `83466d7`; pinned protocol differential and full N-API gates passed |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -280,7 +309,7 @@ complete.
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
-| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec subpath landed; native and cross-platform transport acceptance remains open | Main (packet integrated) |
+| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec/session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
 | W11 | Config-driven CLI | Rust CLI now consumes the Rust SDK; Node CLI consumes the Node SDK; provider/remote/hosted gates remain | Main |
 | W12 | Safely hosting SQLite files | Local journal/WAL matrix, fail-closed bridge, and recovery gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
 | W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
@@ -297,7 +326,7 @@ complete.
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
-| W27 | Native Windows support and CI | HostFs Windows packet landed; hosted runtime qualification pending | Main |
+| W27 | Native Windows support and CI | HostFs Windows symlink packet landed; hosted runtime, flags, hard-links and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
@@ -439,6 +468,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   codecs across protocol 7.41/7.39/7.12/7.8. The full locked Rust and
   oracle-enabled N-API gates passed; native FUSE session/mount and live
   provider gates remain separate.
+- [x] The next W01 rotation is integrated: `80f2efd` / `e5902bed` fixes
+  Windows HostFs symlink path handling with a long-path fallback; `16b2180` /
+  `9832b60` adds Rust FUSE `ACCESS` session dispatch and permission checks; and
+  `7dd9a60` / `83466d7` exposes the Rust-backed N-API FUSE `LOOKUP` codecs.
+  The combined locked Rust and oracle-enabled N-API gates passed. Hosted
+  Windows, live R2, FSKit activation and privileged native mount evidence
+  remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
