@@ -20,7 +20,10 @@ MOUNTX_SOURCE="$mountx_source" node scripts/check-edge-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-flags-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-auto-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-host-parity.mjs
-MOUNTX_SOURCE="$mountx_source" node scripts/check-trace-parity.mjs
+# The dedicated PGlite gate below owns the lifecycle of its local server. Do
+# not let a caller's inherited connection URL make this preflight try to
+# connect before that server has been started.
+env -u PGLITE_DATABASE_URL MOUNTX_SOURCE="$mountx_source" node scripts/check-trace-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-inodes.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-init.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-session.mjs
