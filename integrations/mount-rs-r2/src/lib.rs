@@ -45,19 +45,42 @@ impl fmt::Debug for R2Config {
 impl R2Config {
     pub fn from_env() -> Result<Self> {
         let required = |name: &str| {
-            std::env::var(name).map_err(|_| FsError::backend(format!("missing {name}")))
+            let value =
+                std::env::var(name).map_err(|_| FsError::backend(format!("missing {name}")))?;
+            if value.trim().is_empty() {
+                return Err(FsError::backend(format!("missing {name}")));
+            }
+            Ok(value)
         };
-        Ok(Self {
+        let config = Self {
             endpoint: required("R2_ENDPOINT")?,
             bucket: required("R2_BUCKET")?,
             access_key_id: required("R2_ACCESS_KEY_ID")?,
             secret_access_key: required("R2_SECRET_ACCESS_KEY")?,
             state_key: std::env::var("R2_STATE_KEY")
                 .unwrap_or_else(|_| "mount-rs/state.json".to_owned()),
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Validate the complete configuration before constructing a client.
+    ///
+    /// This is intentionally stricter than relying on `object_store` to reject
+    /// malformed input: a bad endpoint, bucket, or state key must fail before
+    /// any request can be made, and an empty credential must never be treated
+    /// as a configured live R2 gate.
+    pub fn validate(&self) -> Result<()> {
+        validate_endpoint(&self.endpoint)?;
+        validate_bucket(&self.bucket)?;
+        validate_secret("access_key_id", &self.access_key_id)?;
+        validate_secret("secret_access_key", &self.secret_access_key)?;
+        validate_object_key("state_key", &self.state_key)?;
+        Ok(())
     }
 
     pub fn build_store(&self) -> Result<Arc<dyn ObjectStore>> {
+        self.validate()?;
         // `with_url` is a URL *parser* for a small set of AWS/R2 URL shapes;
         // it rejects ordinary HTTP endpoints used by local S3-compatible test
         // servers and custom R2 gateways. `with_endpoint` keeps the configured
@@ -81,6 +104,77 @@ impl R2Config {
         let store = builder.build().map_err(backend_error)?;
         Ok(Arc::new(store))
     }
+}
+
+fn validate_endpoint(endpoint: &str) -> Result<()> {
+    let Some((scheme, authority)) = endpoint.split_once("://") else {
+        return Err(invalid_config("endpoint", "must use http:// or https://"));
+    };
+    if !matches!(scheme, "http" | "https")
+        || authority.is_empty()
+        || authority.starts_with('/')
+        || endpoint.chars().any(|character| {
+            character == '\0'
+                || character.is_ascii_whitespace()
+                || character == '?'
+                || character == '#'
+        })
+    {
+        return Err(invalid_config(
+            "endpoint",
+            "must be an absolute HTTP(S) endpoint without query or fragment",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_bucket(bucket: &str) -> Result<()> {
+    let valid_length = (3..=63).contains(&bucket.len());
+    let valid_characters = bucket.bytes().all(|character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || character == b'.'
+            || character == b'-'
+    });
+    let valid_edges = bucket
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphanumeric)
+        && bucket
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric);
+    if !valid_length || !valid_characters || !valid_edges || bucket.contains("..") {
+        return Err(invalid_config(
+            "bucket",
+            "must be a 3-63 character DNS-compatible bucket name",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_secret(field: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() || value.contains('\0') {
+        return Err(invalid_config(field, "must be non-empty"));
+    }
+    Ok(())
+}
+
+fn validate_object_key(field: &str, key: &str) -> Result<()> {
+    if key.is_empty() || key.starts_with('/') || key.contains('\0') {
+        return Err(invalid_config(field, "must be a relative object key"));
+    }
+    if key
+        .split('/')
+        .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(invalid_config(field, "contains an unsafe path component"));
+    }
+    Ok(())
+}
+
+fn invalid_config(field: &str, message: &str) -> FsError {
+    FsError::backend(format!("invalid R2 {field}: {message}"))
 }
 
 #[derive(Clone)]
@@ -252,6 +346,69 @@ mod tests {
                 state_key: "state.json".to_owned(),
             };
             assert!(config.build_store().is_ok(), "endpoint: {endpoint}");
+        }
+    }
+
+    #[test]
+    fn configuration_validation_rejects_unsafe_live_inputs_before_client_build() {
+        let cases = [
+            (
+                "ftp://account-id.r2.cloudflarestorage.com",
+                "mount-rs-tests",
+                "state.json",
+            ),
+            (
+                "https://account-id.r2.cloudflarestorage.com?debug=1",
+                "mount-rs-tests",
+                "state.json",
+            ),
+            (
+                "https://account-id.r2.cloudflarestorage.com",
+                "bad_bucket",
+                "state.json",
+            ),
+            (
+                "https://account-id.r2.cloudflarestorage.com",
+                "mount-rs-tests",
+                "../state.json",
+            ),
+            (
+                "https://account-id.r2.cloudflarestorage.com",
+                "mount-rs-tests",
+                "state//snapshot.json",
+            ),
+        ];
+        for (endpoint, bucket, state_key) in cases {
+            let config = R2Config {
+                endpoint: endpoint.to_owned(),
+                bucket: bucket.to_owned(),
+                access_key_id: "test-access".to_owned(),
+                secret_access_key: "test-secret".to_owned(),
+                state_key: state_key.to_owned(),
+            };
+            assert!(
+                config.validate().is_err(),
+                "accepted unsafe config: {config:?}"
+            );
+            assert!(
+                config.build_store().is_err(),
+                "built unsafe config: {config:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configuration_validation_rejects_blank_credentials() {
+        for (access_key_id, secret_access_key) in [("", "test-secret"), ("test-access", " ")] {
+            let config = R2Config {
+                endpoint: "https://account-id.r2.cloudflarestorage.com".to_owned(),
+                bucket: "mount-rs-tests".to_owned(),
+                access_key_id: access_key_id.to_owned(),
+                secret_access_key: secret_access_key.to_owned(),
+                state_key: "state.json".to_owned(),
+            };
+            assert!(config.validate().is_err());
+            assert!(config.build_store().is_err());
         }
     }
 
