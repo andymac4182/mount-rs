@@ -56,6 +56,7 @@ for(const [op,path,arg] of commands) {
 }
 const backends=['memory','sqlite','object-store'];
 if(process.env.PGLITE_DATABASE_URL) backends.push('pglite');
+if(process.env.MOUNT_RS_TRACE_R2 === '1') backends.push('r2');
 for(const backend of backends) {
 const output=execFileSync('cargo',['run','--quiet','--locked','--example','trace_oracle','--',backend],{
   cwd:fileURLToPath(new URL('..',import.meta.url)),input:commands.map(c=>JSON.stringify(c)).join('\n')+'\n',encoding:'utf8',

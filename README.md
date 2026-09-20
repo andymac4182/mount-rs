@@ -30,6 +30,14 @@ The full upstream transport surface is tracked explicitly in
 [`PORTING_STATUS.md`](PORTING_STATUS.md) and remains part of the active porting
 goal.
 
+Additional delivery requirements are tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
+Safe hosting of SQLite database files on mounts is required but not yet verified;
+SQLite backend support alone does not establish it. Copy-on-write is planned
+future work and is not currently implemented.
+Independent metadata/block stores and fixed-size chunking behind an extensible
+interface are required next architecture work. Current snapshot-based
+persistence is transitional; additional chunking algorithms are future work.
+
 ## Development
 
 ```sh
@@ -55,6 +63,12 @@ runs the live PGlite integration test, and runs the live R2 test when all four
 R2 credential variables are present. Without R2 credentials it reports that
 gate as skipped rather than silently treating the in-memory object-store test
 as Cloudflare verification.
+
+With R2 credentials configured, the gate also runs all seeded TypeScript
+oracle traces against the live bucket. These use unique objects beneath
+`mount-rs-tests/trace-*`, never `R2_STATE_KEY`, and delete only their own
+snapshot after execution. Use a dedicated test bucket. Live credentials are
+still required; local object-store results are not live R2 evidence.
 
 Live R2 and PGlite checks are opt-in because they require credentials or a
 running PGlite socket server:

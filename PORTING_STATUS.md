@@ -38,6 +38,16 @@ cases still require audit.
 
 ## Still required before the overall porting goal is complete
 
+- Replace the transitional whole-filesystem snapshot persistence architecture
+  with independently composable metadata and block stores, and pluggable data
+  chunking with fixed-size chunks initially and an extensible algorithm interface.
+  Mixed-store correctness and durability
+  must be verified; see [`REQUIREMENTS.md`](REQUIREMENTS.md).
+- Safely host real SQLite database files inside mounted filesystems, including
+  concurrency, locking, journal/WAL behavior, synchronization, and crash recovery.
+  The detailed gate is in [`REQUIREMENTS.md`](REQUIREMENTS.md). SQLite-as-backend
+  tests do not satisfy this additional requirement. Copy-on-write is tracked in
+  that file as future work, not a currently implemented feature.
 - Keep revision-matched macOS and Linux CI green for Rust, Node addon builds,
   and backend/transport integration tests. The initial checkpoint `877afb6`
   passed all four hosted jobs in [CI run 35479549553](https://github.com/andymac4182/mount-rs/actions/runs/35479549553).

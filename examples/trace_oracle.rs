@@ -72,6 +72,7 @@ async fn execute(fs: &Loopback, command: &Value) -> Result<Value> {
 }
 #[tokio::main]
 async fn main() {
+    let mut r2_cleanup = None;
     let fs = match std::env::args().nth(1).as_deref().unwrap_or("memory") {
         "memory" => Loopback::new(MemoryFs::empty()),
         "sqlite" => Loopback::new(mount_rs_sqlite::open_sqlite_memory().await.unwrap()),
@@ -94,6 +95,22 @@ async fn main() {
                 .unwrap(),
             )
         }
+        "r2" => {
+            let mut config = mount_rs_r2::R2Config::from_env()
+                .expect("dedicated R2 test configuration required");
+            // Never use a caller's production snapshot key for differential tests.
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            config.state_key = format!("mount-rs-tests/trace-{}-{nonce}.json", std::process::id());
+            let store = mount_rs_r2::R2Store::from_config(&config).unwrap();
+            let fs = mount_rs_persist::PersistedFs::open(store.clone())
+                .await
+                .unwrap();
+            r2_cleanup = Some(store);
+            Loopback::new(fs)
+        }
         name => panic!("unknown backend {name}"),
     };
     for line in io::stdin().lock().lines() {
@@ -108,5 +125,11 @@ async fn main() {
             }
         };
         println!("{result}");
+    }
+    if let Some(store) = r2_cleanup {
+        store
+            .delete_snapshot()
+            .await
+            .expect("remove only this trace's generated R2 snapshot");
     }
 }
