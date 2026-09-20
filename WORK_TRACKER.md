@@ -66,7 +66,7 @@ non-overlapping packet. The current bounded allocation is:
 | Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Integrated |
 | Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Integrated |
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Integrated checkpoint |
-| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task complete; deployment pending |
+| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task complete; custom domain live |
 | Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Closed; no change recommended |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -129,7 +129,7 @@ complete.
 | W21 | Reference review and learnings | Ongoing | Main |
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
-| W24 | Domain and marketing site | TanStack Start draft and Vercel output hardening landed; deployment pending | Meitner (complete slice) / Main |
+| W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
 | W27 | Native Windows support and CI | Runtime qualification pending | Main |
@@ -156,9 +156,9 @@ complete.
   prerequisites when executable extension testing is ready.
 - [ ] **D04 — Distributed cache:** discuss topology, consistency and service
   choice with the user after the primary implementation is accepted.
-- [ ] **D05 — Launch:** user initiated domain registration and authorized the
-  existing Vercel Hobby plan. Verify registration, AWS account and DNS access;
-  no duplicate purchase, paid upgrade or additional paid resources.
+- [x] **D05 — Launch:** user authorized the existing Vercel Hobby plan and the
+  `mount-rs.com` launch. Route 53 and Vercel access are verified; no duplicate
+  purchase, paid upgrade or additional paid resources were used.
 - [x] **D06 — Rust crate publication authorization:** user authorized publication
   from CI on `main` when ready. npm publication must use `@mount-rs`, with secure
   release controls for both registries. Verify namespace ownership, OIDC trust,
@@ -645,16 +645,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W24 — Domain and marketing site
 
-- [ ] W24.1 User initiated AWS registration of `mount-rs.com`; verify completion
-  and DNS. Do not purchase a duplicate domain.
-- [ ] W24.2 Build combined marketing/docs site with TanStack Start and deploy to
-  the user's Vercel Hobby plan, explicitly authorized 2026-09-20. No paid plan
-  upgrade or paid resources. Use verified capability claims and visible status.
+- [x] W24.1 AWS MCP verified the Route 53 hosted zone for `mount-rs.com` and
+  configured the apex and `www` A records to Vercel at `76.76.21.21`.
+- [x] W24.2 Built and deployed the combined marketing/docs site with TanStack
+  Start to the user's Vercel Hobby plan, explicitly authorized 2026-09-20. No
+  paid plan upgrade or paid resources. Claims and support status are visible.
 - [x] Site child task delivered Vercel prebuilt-output/header/route hardening in
   `c9088aa` and `8cf0c5d`; these commits are site-only and do not prove a live
   Vercel deployment.
-- [ ] W24.3 Verify public DNS, HTTPS and actual deployment, and record ownership/
-  operational handoff. This backlog entry does not authorize spending now.
+- [x] W24.3 Public DNS, HTTPS and the actual deployment are verified for
+  `mount-rs.com` and `www.mount-rs.com`. Route 53 change
+  `C0259256PYIMTC38BKLA` reached `INSYNC`; both hosts returned HTTP 200 from
+  Vercel with the expected homepage and security headers. Operational handoff
+  is complete; this backlog entry did not authorize spending.
 
 ## W25 — Actual AWS S3 integration
 
@@ -805,6 +808,6 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `5d9e513` | SQLite VFS/WAL reliability checkpoint | 4 unit, 15 SQLite-engine and 15 storage-bridge tests plus strict Clippy; Windows/remote/Node acceptance remains open |
 | `67498a2` | TiDB schema-test lint follow-up | Focused lint correction; no new service qualification |
 | `d526c18` | CLI HTTP edge cases and Windows pinned-oracle CI | Local CLI/HTTP tests and Clippy passed; hosted Windows/oracle execution remains pending |
-| `c9088aa` / `8cf0c5d` | TanStack Start/Vercel output hardening | Site-only commits; local output handling, not public deployment evidence |
+| `afc55cb` / `c9088aa` / `8cf0c5d` | TanStack Start site and Vercel output hardening | Production deployment and custom-domain DNS/HTTPS verified; broader project release readiness remains open |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
