@@ -325,6 +325,12 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W15 — Mount-free SQLite VFS
 
+- [x] Extend the same remote VFS fixture through a graceful PGlite process
+  stop/start using its persisted data directory and a fresh listening port.
+  Main's full local harness passed exact ledger and integrity checks after
+  both RustFS and PGlite restarts, with fresh VFS test processes at each phase.
+  Clean shutdown status is required. Abrupt process loss, power loss, WAL and
+  hosted results remain separate unverified gates.
 - [x] Actual RustFS service stop/start now has its own VFS fixture: separate
   prepare/reopen test processes share the persisted metadata/block prefix,
   verify two exact committed binary rows, exclusion of a rolled-back row,

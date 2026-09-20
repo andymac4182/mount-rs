@@ -55,7 +55,8 @@ The bridge is generic over providers so the dependency surface stays small:
 | --- | --- | --- |
 | `MemoryMetadataStore` | `MemoryBlockStore` | Implemented volatile engine gate; not durable |
 | `SqliteMetadataStore` | `SqliteBlockStore` | Implemented durable local engine gate; reopen and integrity test covered |
-| `SqliteMetadataStore` or `PgliteMetadataStore` | `R2BlockStore` | API-compatible shape; an opt-in real PGlite + RustFS VFS hook exists, but live restart and fault evidence remain required |
+| `PgliteMetadataStore` | `R2BlockStore` against RustFS | Standard RustFS harness passes real SQLite transactions, client reconnect, RustFS stop/start, and graceful PGlite process restart with exact ledger/integrity checks; abrupt-loss and power-loss qualification remain open |
+| `SqliteMetadataStore` | `R2BlockStore` | API-compatible shape; VFS-specific live restart/fault qualification remains open |
 | `PgliteMetadataStore` | `PgliteBlockStore` | API-compatible shape only; requires a real external runtime/executor and live restart/fault evidence |
 
 The external-provider rows are intentionally not presented as production

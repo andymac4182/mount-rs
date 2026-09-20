@@ -574,7 +574,8 @@ fi
 pglite_data_dir="$run_dir/pglite-data"
 pglite_log="$run_dir/pglite.log"
 mkdir "$pglite_data_dir"
-pglite_port=$(node --input-type=module -e '
+start_pglite_server() {
+  pglite_port=$(node --input-type=module -e '
   import net from "node:net";
   const server = net.createServer();
   server.listen(0, "127.0.0.1", () => {
@@ -582,32 +583,34 @@ pglite_port=$(node --input-type=module -e '
     server.close();
   });
 ')
-PGLITE_PORT="$pglite_port" \
-PGLITE_MAX_CONNECTIONS=8 \
-PGLITE_DATA_DIR="$pglite_data_dir" \
-node "$repo_dir/tests/pglite/server.mjs" >"$pglite_log" 2>&1 &
-pglite_pid=$!
-pglite_ticks=0
-while :; do
-  if grep -q '^PGLITE_READY ' "$pglite_log" 2>/dev/null; then
-    break
-  fi
-  if ! kill -0 "$pglite_pid" 2>/dev/null; then
-    cat "$pglite_log" >&2 || true
-    echo "PGlite server exited before readiness" >&2
-    exit 1
-  fi
-  if [ "$pglite_ticks" -ge 60 ]; then
-    cat "$pglite_log" >&2 || true
-    echo "Timed out waiting for PGlite readiness" >&2
-    exit 1
-  fi
-  sleep 1
-  pglite_ticks=$((pglite_ticks + 1))
-done
-export PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$pglite_port/postgres?sslmode=disable"
+  PGLITE_PORT="$pglite_port" \
+  PGLITE_MAX_CONNECTIONS=8 \
+  PGLITE_DATA_DIR="$pglite_data_dir" \
+  node "$repo_dir/tests/pglite/server.mjs" >"$pglite_log" 2>&1 &
+  pglite_pid=$!
+  pglite_ticks=0
+  while :; do
+    if ! kill -0 "$pglite_pid" 2>/dev/null; then
+      cat "$pglite_log" >&2 || true
+      echo "PGlite server exited before readiness" >&2
+      return 1
+    fi
+    if grep -q '^PGLITE_READY ' "$pglite_log" 2>/dev/null; then
+      break
+    fi
+    if [ "$pglite_ticks" -ge 60 ]; then
+      cat "$pglite_log" >&2 || true
+      echo "Timed out waiting for PGlite readiness" >&2
+      return 1
+    fi
+    sleep 1
+    pglite_ticks=$((pglite_ticks + 1))
+  done
+  export PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$pglite_port/postgres?sslmode=disable"
+  echo "PGLITE_READY endpoint=127.0.0.1:$pglite_port"
+}
+start_pglite_server
 export RUSTFS_SQLITE_METADATA_FILE="$run_dir/sqlite-metadata.db"
-echo "PGLITE_READY endpoint=127.0.0.1:$pglite_port"
 
 if bounded_docker_startup_command "run-service" docker run --detach \
   --name "$container_name" \
@@ -892,6 +895,22 @@ RUSTFS_VFS_RESTART_PHASE=reopen cargo test \
   --locked -p mount-rs-sqlite-vfs --features remote-harness \
   --test remote_storage_bridge -- \
   remote_vfs_survives_rustfs_restart --exact --ignored --nocapture
+
+stop_pglite_server
+if [ "$pglite_wait_status" -ne 0 ]; then
+  echo "PGlite did not stop cleanly for the graceful-restart fixture" >&2
+  exit 1
+fi
+echo "PGLITE_VFS_STOPPED"
+pglite_log="$run_dir/pglite-restarted.log"
+start_pglite_server
+echo "PGLITE_VFS_RESTART_READY endpoint=127.0.0.1:$pglite_port"
+RUSTFS_VFS_RESTART_PHASE=reopen cargo test \
+  --manifest-path "$repo_dir/Cargo.toml" \
+  --locked -p mount-rs-sqlite-vfs --features remote-harness \
+  --test remote_storage_bridge -- \
+  remote_vfs_survives_rustfs_restart --exact --ignored --nocapture
+echo "PGLITE_VFS_RESTART_PASS"
 
 cargo test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
