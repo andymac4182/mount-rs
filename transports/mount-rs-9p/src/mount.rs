@@ -82,11 +82,9 @@ pub fn p9_client_probe() -> P9ClientProbe {
                 )
             });
         }
-        if !transport {
-            missing.push(
-                "the 9pnet_fd transport is unavailable; load it with modprobe 9pnet_fd".to_owned(),
-            );
-        }
+        // An explicitly selected transport may be built in or loadable at
+        // mount time. Report this fact without refusing named mounts; only
+        // automatic selection should apply the stricter no-fallback policy.
     }
     P9ClientProbe {
         usable: missing.is_empty(),
