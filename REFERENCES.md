@@ -8,6 +8,12 @@
 
 ## Inspiration and design references
 
+- [SQLite VFS architecture](https://www.sqlite.org/vfs.html): review the
+  separation between logical database/page operations, file handles and physical
+  storage, plus composable VFS shims. Study explicit locking/sync capabilities,
+  multiplexed physical representation, and fault/journal-ordering test shims.
+  Apply lessons to mount-rs storage abstraction without assuming that wrapping
+  a backend supplies SQLite's required durability or locking semantics.
 - [CrabBuild](https://github.com/crabbuild): review its blob-backed versioning
   designs and bring applicable lessons into the versioned-filesystem proposal.
   Initial candidates are [crab](https://github.com/crabbuild/crab) for large-file

@@ -296,6 +296,36 @@ target; mountx remains the behavioral oracle.
 - Test in a mount-disabled environment and document backend prerequisites,
   synchronous/asynchronous interface limits, and browser/runtime restrictions.
 
+## Multi-drive HTTP service and distributed-cache integration
+
+- Deliver a separately packaged HTTP server over mount-rs that exposes multiple
+  named logical drives from one service. Drives must work without OS mounting
+  and may also be served through native mounts, using the same authoritative
+  namespace, version views, permissions and independently configured stores.
+- Provide config-driven drive registration and discovery, stable drive IDs,
+  documented/versioned routes and errors, streamed/range file reads and writes,
+  metadata and directory operations, cancellation, backpressure and bounded
+  request sizes. Distinguish logical drive exposure from actual kernel mounts.
+- Enforce per-drive authorization and namespace isolation: paths, caches,
+  credentials and version references must never cross drive/tenant boundaries.
+  Define TLS/authentication deployment requirements and fail closed on unknown
+  drives or unsupported operations. Do not silently expose the service publicly.
+- Support the distributed-cache layer described below across multiple HTTP
+  server instances. Design its extension boundary now; implement the cache
+  only after primary acceptance and the requested user design discussion.
+  Key immutable bytes by drive/storage identity and immutable content/version;
+  mutable namespace/head caches require an explicit coherence contract.
+- Preserve authoritative durability/fencing: cached acknowledgements cannot
+  substitute for fsync or committed metadata. Specify cache bypass, invalidation,
+  eviction, restarts, partitions and stale-reader behavior before implementation.
+- Test two or more drives with separate and shared provider configurations,
+  mount-disabled clients, native/API shared visibility, pinned versions,
+  authorization failures, traversal attempts, and concurrent writes. Then test
+  multiple HTTP instances with the actual chosen distributed cache, including
+  restart/outage/invalidation and cross-drive isolation, with measured cold/warm
+  latency, backend requests and memory. A process-local cache is not acceptance
+  evidence for distributed caching.
+
 ## Native macOS FSKit acceptance
 
 - Implement an FSKit transport/integration separately from platform-neutral
@@ -357,6 +387,8 @@ for additional lessons about storage coordination and communication. Record
 source-backed findings and any proposed follow-up changes before final handoff.
 
 Track a **distributed cache** as a feature to complete after the primary uses.
+It must integrate with the multi-drive HTTP service above, not only direct
+in-process driver calls.
 When that phase is reached, discuss its scope and design with the user before
 implementation. Do not silently choose a cache service, consistency model, or
 topology, or start it while primary acceptance remains incomplete.
