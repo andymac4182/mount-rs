@@ -142,6 +142,16 @@ export declare class Mounted {
   unmount(): Promise<void>
 }
 
+export declare class NativeFuseTranscriptRecorder {
+  constructor(limit?: number | undefined | null)
+  get frames(): Array<NativeFuseTranscriptFrame>
+  get truncated(): boolean
+  get bytes(): number
+  tap(direction: string, bytes: Uint8Array): void
+  tapAt(direction: string, bytes: Uint8Array, now: bigint): void
+  encode(): Buffer
+}
+
 export declare class NativeP9DirentPacker {
   constructor(maxSize: number)
   get size(): number
@@ -462,6 +472,98 @@ export declare function fileTypeMode(mode: number): number
 
 export declare function fsError(code: string, options?: FsErrorOptions | undefined): FsError
 
+export declare function fuseAttrOutSize(minor: number): number
+
+export declare function fuseAttrSize(minor: number): number
+
+export declare function fuseDecodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
+
+export declare function fuseDecodeEntryOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseEntryOut
+
+export declare function fuseDecodeGetxattrOut(body: Uint8Array): NativeFuseGetxattrOut
+
+export declare function fuseDecodeInHeader(bytes: Uint8Array): NativeFuseInHeader
+
+export declare function fuseDecodeInitIn(body: Uint8Array): NativeFuseInitIn
+
+export declare function fuseDecodeInitOut(body: Uint8Array): NativeFuseInitOut
+
+export declare function fuseDecodeNotify(message: Uint8Array): NativeFuseNotification
+
+export declare function fuseDecodeNotifyInvalEntry(body: Uint8Array): NativeFuseNotifyInvalEntryOut
+
+export declare function fuseDecodeNotifyInvalInode(body: Uint8Array): NativeFuseNotifyInvalInodeOut
+
+export declare function fuseDecodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseOpenOut
+
+export declare function fuseDecodeOutHeader(bytes: Uint8Array): NativeFuseOutHeader
+
+export declare function fuseDecodeStatfsOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseKstatfs
+
+export declare function fuseDecodeTranscript(bytes: Uint8Array): Array<NativeFuseTranscriptFrame>
+
+export declare function fuseDecodeXattrNames(body: Uint8Array): Array<string>
+
+export declare function fuseDirentAlign(size: number): number
+
+export declare function fuseDirentPlusSize(nameByteLength: number, context?: NativeFuseProtocolContext | undefined | null): number
+
+export declare function fuseDirentSize(nameByteLength: number): number
+
+export declare function fuseDirentType(mode: number): number
+
+export declare function fuseEncodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeEntryOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeErrorReply(unique: bigint, errno: number): Buffer
+
+export declare function fuseEncodeGetxattrOut(value: NativeFuseGetxattrOut): Buffer
+
+export declare function fuseEncodeInHeader(value: NativeFuseInHeader): Buffer
+
+export declare function fuseEncodeInitIn(value: NativeFuseInitIn): Buffer
+
+export declare function fuseEncodeInitOut(value: NativeFuseInitOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeNotify(code: number, body: Uint8Array): Buffer
+
+export declare function fuseEncodeNotifyInvalEntry(value: NativeFuseNotifyInvalEntryOut): Buffer
+
+export declare function fuseEncodeNotifyInvalInode(value: NativeFuseNotifyInvalInodeOut): Buffer
+
+export declare function fuseEncodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeOutHeader(value: NativeFuseOutHeader): Buffer
+
+export declare function fuseEncodeReply(unique: bigint, body?: Uint8Array): Buffer
+
+export declare function fuseEncodeStatfsOut(value: NativeFuseKstatfs, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeTranscript(frames: Array<NativeFuseTranscriptFrame>): Buffer
+
+export declare function fuseEncodeXattrNames(names: Array<string>): Buffer
+
+export declare function fuseEntryOutSize(minor: number): number
+
+export declare function fuseFuseErrno(errno: number): number
+
+export declare function fuseInitOutSize(minor: number): number
+
+export declare function fuseJoinInitFlags(flags: number, flags2: number): bigint
+
+export declare function fuseKstatfsSize(minor: number): number
+
+export declare function fuseOpcodeName(opcode: number): string
+
+export declare function fuseReadWriteInSize(minor: number): number
+
+export declare function fuseSplitInitFlags(flags: bigint): NativeFuseSplitInitFlags
+
+export declare function fuseSupportedOpcodes(): Array<number>
+
+export declare function fuseUnimplementedOpcodes(): Array<number>
+
 export declare function isFsError(error: unknown, code?: string | undefined | null): error is FsError
 
 export declare function isNormalizedPath(path: string): boolean
@@ -656,6 +758,135 @@ export declare function liveMounts(): Promise<Array<Mounted>>
  * function never silently falls back after a named transport fails.
  */
 export declare function mount(driver: Filesystem | FsDriver, mountpoint: string, options?: JsAutoMountOptions | undefined | null): Promise<Mounted>
+
+export interface NativeFuseAttr {
+  ino: bigint
+  size: bigint
+  blocks: bigint
+  atime: bigint
+  mtime: bigint
+  ctime: bigint
+  atimensec: number
+  mtimensec: number
+  ctimensec: number
+  mode: number
+  nlink: number
+  uid: number
+  gid: number
+  rdev: number
+  blksize: number
+  flags: number
+}
+
+export interface NativeFuseAttrOut {
+  attrValid: bigint
+  attrValidNsec: number
+  attr: NativeFuseAttr
+}
+
+export interface NativeFuseEntryOut {
+  nodeid: bigint
+  generation: bigint
+  entryValid: bigint
+  attrValid: bigint
+  entryValidNsec: number
+  attrValidNsec: number
+  attr: NativeFuseAttr
+}
+
+export interface NativeFuseGetxattrOut {
+  size: number
+}
+
+export interface NativeFuseInHeader {
+  len: number
+  opcode: number
+  unique: bigint
+  nodeid: bigint
+  uid: number
+  gid: number
+  pid: number
+  totalExtlen: number
+}
+
+export interface NativeFuseInitIn {
+  major: number
+  minor: number
+  maxReadahead: number
+  flags: number
+  flags2: number
+}
+
+export interface NativeFuseInitOut {
+  major: number
+  minor: number
+  maxReadahead: number
+  flags: number
+  maxBackground: number
+  congestionThreshold: number
+  maxWrite: number
+  timeGran: number
+  maxPages: number
+  mapAlignment: number
+  flags2: number
+  maxStackDepth: number
+}
+
+export interface NativeFuseKstatfs {
+  blocks: bigint
+  bfree: bigint
+  bavail: bigint
+  files: bigint
+  ffree: bigint
+  bsize: number
+  namelen: number
+  frsize: number
+}
+
+export interface NativeFuseNotification {
+  code: number
+  body: Uint8Array
+}
+
+export interface NativeFuseNotifyInvalEntryOut {
+  parent: bigint
+  name: string
+  flags: number
+}
+
+export interface NativeFuseNotifyInvalInodeOut {
+  ino: bigint
+  off: bigint
+  len: bigint
+}
+
+export interface NativeFuseOpenOut {
+  fh: bigint
+  openFlags: number
+  backingId: number
+}
+
+export interface NativeFuseOutHeader {
+  len: number
+  error: number
+  unique: bigint
+}
+
+export interface NativeFuseProtocolContext {
+  minor: number
+  setxattrExt: boolean
+}
+
+export interface NativeFuseSplitInitFlags {
+  flags: number
+  flags2: number
+}
+
+export interface NativeFuseTranscriptFrame {
+  direction: string
+  timestamp: bigint
+  bytes: Uint8Array
+}
 
 export declare function nativeP9DecodeMessage(bytes: Uint8Array): NativeP9Message
 

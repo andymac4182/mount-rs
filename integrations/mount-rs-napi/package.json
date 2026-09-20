@@ -44,6 +44,11 @@
       "require": "./p9.cjs",
       "default": "./p9.cjs"
     },
+    "./fuse": {
+      "types": "./types/fuse-codec.d.ts",
+      "require": "./fuse.cjs",
+      "default": "./fuse.cjs"
+    },
     "./s3": {
       "types": "./index.d.ts",
       "require": "./index.js",
@@ -67,8 +72,10 @@
     "postlude-harness.cjs",
     "postlude-nfs-codec.cjs",
     "postlude-p9-codec.cjs",
+    "postlude-fuse-codec.cjs",
     "nfs.cjs",
     "p9.cjs",
+    "fuse.cjs",
     "types",
     "*.node",
     "npm/*"
@@ -79,7 +86,7 @@
     "prepare:npm": "napi create-npm-dirs",
     "aggregate:artifacts": "node scripts/aggregate-artifacts.mjs",
     "test:distribution:aggregate": "node test/distribution-aggregate.mjs",
-    "test": "node test/typecheck.mjs && node test/harness.mjs && node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/shutdown-lifecycle.mjs && node test/memory-options.mjs && node test/utilities.mjs && node test/servers.mjs && node test/js-driver.mjs && node test/nfs-codec.mjs && node test/9p-codec.mjs && node test/unstorage.mjs && node test/chunked.mjs && node test/native.mjs && node test/differential.mjs && node test/distribution.mjs && node test/distribution-aggregate.mjs",
+    "test": "node test/typecheck.mjs && node test/harness.mjs && node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/shutdown-lifecycle.mjs && node test/memory-options.mjs && node test/utilities.mjs && node test/servers.mjs && node test/js-driver.mjs && node test/fuse-codec.mjs && node test/nfs-codec.mjs && node test/9p-codec.mjs && node test/unstorage.mjs && node test/chunked.mjs && node test/native.mjs && node test/differential.mjs && node test/distribution.mjs && node test/distribution-aggregate.mjs",
     "prepublishOnly": "napi create-npm-dirs && napi pre-publish --root-publisher pnpm"
   },
   "napi": {
