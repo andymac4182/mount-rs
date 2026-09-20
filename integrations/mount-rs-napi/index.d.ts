@@ -512,6 +512,10 @@ export declare function fuseDecodeInitIn(body: Uint8Array): NativeFuseInitIn
 
 export declare function fuseDecodeInitOut(body: Uint8Array): NativeFuseInitOut
 
+export declare function fuseDecodeLookupIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseNameIn
+
+export declare function fuseDecodeLookupOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseEntryOut
+
 export declare function fuseDecodeNotify(message: Uint8Array): NativeFuseNotification
 
 export declare function fuseDecodeNotifyInvalEntry(body: Uint8Array): NativeFuseNotifyInvalEntryOut
@@ -571,6 +575,10 @@ export declare function fuseEncodeInHeader(value: NativeFuseInHeader): Buffer
 export declare function fuseEncodeInitIn(value: NativeFuseInitIn): Buffer
 
 export declare function fuseEncodeInitOut(value: NativeFuseInitOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeLookupOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeNotify(code: number, body: Uint8Array): Buffer
 
@@ -955,6 +963,10 @@ export interface NativeFuseKstatfs {
   bsize: number
   namelen: number
   frsize: number
+}
+
+export interface NativeFuseNameIn {
+  name: string
 }
 
 export interface NativeFuseNotification {
