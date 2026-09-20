@@ -42,7 +42,7 @@ export const NATIVE_TARGETS = Object.freeze([
   }),
 ]);
 
-const ROOT_FILES = ["index.js", "index.d.ts", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "nfs.cjs", "p9.cjs", "package.json", "types"];
+const ROOT_FILES = ["LICENSE", "THIRD_PARTY_NOTICES.md", "index.js", "index.d.ts", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "postlude-harness.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "nfs.cjs", "p9.cjs", "package.json", "types"];
 
 async function walkFiles(directory) {
   const files = [];
@@ -111,6 +111,9 @@ function packageFiles(report) {
 
 function assertPackageManifest(packageJson) {
   assert.equal(packageJson.name, "@mount-rs/core");
+  assert.equal(packageJson.napi.packageName, packageJson.name);
+  assert.equal(packageJson.publishConfig.access, "public");
+  assert.equal(packageJson.license, "Apache-2.0");
   assert.deepEqual(
     packageJson.optionalDependencies,
     Object.fromEntries(NATIVE_TARGETS.map(({ packageName }) => [packageName, packageJson.version])),
@@ -131,12 +134,16 @@ async function validateStagedPackages(stagingDir) {
     const targetDir = join(stagingDir, "npm", target.platformArchABI);
     const targetPackage = await readJson(join(targetDir, "package.json"));
     assert.equal(targetPackage.name, target.packageName);
+    assert.match(targetPackage.name, /^@mount-rs\//);
     assert.equal(targetPackage.main, target.artifact);
+    assert.equal(targetPackage.license, "Apache-2.0");
+    assert.equal(targetPackage.publishConfig.access, "public");
     assert.deepEqual(targetPackage.files, [target.artifact]);
     await stat(join(targetDir, target.artifact));
     const targetReport = await packDryRun(targetDir);
     const targetFiles = packageFiles(targetReport);
     assert(targetFiles.has("package.json"), `${target.packageName} pack is missing package.json`);
+    assert(targetFiles.has("README.md"), `${target.packageName} pack is missing README.md`);
     assert(targetFiles.has(target.artifact), `${target.packageName} pack is missing ${target.artifact}`);
     stagedPackages[target.platformArchABI] = targetPackage;
   }

@@ -36,6 +36,13 @@ try {
   }
 
   const result = await aggregateArtifacts({ inputDir });
+  assert.equal(result.packageJson.name, "@mount-rs/core");
+  assert.equal(result.packageJson.napi.packageName, result.packageJson.name);
+  assert.equal(result.packageJson.publishConfig.access, "public");
+  assert.equal(result.packageJson.license, "Apache-2.0");
+  for (const file of ["LICENSE", "THIRD_PARTY_NOTICES.md", "postlude-harness.cjs", "types/harness.d.ts"]) {
+    assert(result.files.includes(file), `aggregate package is missing ${file}`);
+  }
   assert.deepEqual(
     result.packageJson.optionalDependencies,
     Object.fromEntries(NATIVE_TARGETS.map(({ packageName }) => [packageName, "0.1.0"])),
@@ -43,6 +50,9 @@ try {
   for (const target of NATIVE_TARGETS) {
     assert(result.files.includes(`npm/${target.platformArchABI}/${target.artifact}`));
     assert.equal(result.stagedPackages[target.platformArchABI].name, target.packageName);
+    assert.match(result.stagedPackages[target.platformArchABI].name, /^@mount-rs\//);
+    assert.equal(result.stagedPackages[target.platformArchABI].license, "Apache-2.0");
+    assert.equal(result.stagedPackages[target.platformArchABI].publishConfig.access, "public");
   }
 
   const missingDir = await mkdtemp(join(tmpdir(), "mount-rs-missing-artifact-"));

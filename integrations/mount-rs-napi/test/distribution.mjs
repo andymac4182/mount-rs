@@ -15,8 +15,16 @@ const packageDirectory = new URL("..", import.meta.url);
 const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 );
+const loader = await readFile(new URL("../index.js", import.meta.url), "utf8");
 
+assert.equal(packageJson.name, "@mount-rs/core");
+assert.equal(packageJson.napi.packageName, packageJson.name);
+assert.equal(packageJson.publishConfig.access, "public");
 assert.equal(packageJson.license, "Apache-2.0");
+assert.equal(loader.includes("@andymac4182/"), false, "generated loader must not use the personal namespace");
+for (const target of ["darwin-arm64", "darwin-x64", "linux-arm64-gnu", "linux-x64-gnu", "win32-x64-msvc"]) {
+  assert.equal(loader.includes(`@mount-rs/core-${target}`), true, `generated loader must use the scoped ${target} package`);
+}
 for (const name of ["LICENSE", "THIRD_PARTY_NOTICES.md"]) {
   const canonical = await readFile(new URL(`../../${name}`, packageDirectory), "utf8");
   for (const directory of [packageDirectory, new URL("../mount-rs-virtual-fs/", packageDirectory)]) {
@@ -79,7 +87,11 @@ const direct = await import("../index.js");
 const self = await import("@mount-rs/core");
 const selfCommonJs = require("@mount-rs/core");
 assert.equal(typeof direct.Filesystem, "function");
+assert.equal(typeof direct.createLoopback, "function");
+assert.equal(typeof direct.resolveCapabilities, "function");
 assert.equal(self.Filesystem, direct.Filesystem);
+assert.equal(self.createLoopback, direct.createLoopback);
+assert.equal(self.resolveCapabilities, direct.resolveCapabilities);
 assert.equal(selfCommonJs.Filesystem, direct.Filesystem);
 assert.equal(require("@mount-rs/core/package.json").name, packageJson.name);
 for (const [path, exported] of [
