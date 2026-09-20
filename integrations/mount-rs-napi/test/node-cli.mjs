@@ -58,6 +58,12 @@ assert.equal(sdkSelfTest.code, 0, output(sdkSelfTest));
 assert.match(sdkSelfTest.stdout, /sdk self-test passed: Node SDK wrote and read/);
 assert.doesNotMatch(output(sdkSelfTest), /^mounted\s+/im);
 
+const volatileReopen = await runCli([
+  "--driver", "memory", "--sdk-self-test", "--reopen",
+]);
+assert.equal(volatileReopen.code, 2, output(volatileReopen));
+assert.match(volatileReopen.stderr, /requires a durable driver/);
+
 const checkMountpoint = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-check-"));
 try {
   for (const driver of ["memory", "host"]) {
