@@ -122,25 +122,29 @@ else
     "$fdb_image" >/dev/null
 fi
 
-ticks=0
-while :; do
-  if docker exec "$server" fdbcli --exec 'status json' >"$run_dir/status.json" 2>"$run_dir/status.err"; then
-    break
-  fi
-  if [ "$ticks" -ge 90 ]; then
-    docker logs --tail 160 "$server" >&2 || true
-    cat "$run_dir/status.err" >&2 || true
-    echo "Timed out waiting for the isolated FoundationDB cluster" >&2
-    exit 1
-  fi
-  if ! docker inspect --format '{{.State.Running}}' "$server" 2>/dev/null | grep -q '^true$'; then
-    docker logs --tail 160 "$server" >&2 || true
-    echo "FoundationDB server exited before readiness" >&2
-    exit 1
-  fi
-  sleep 1
-  ticks=$((ticks + 1))
-done
+wait_for_foundationdb() {
+  ticks=0
+  while :; do
+    if docker exec "$server" fdbcli --exec 'status json' >"$run_dir/status.json" 2>"$run_dir/status.err"; then
+      return 0
+    fi
+    if [ "$ticks" -ge 90 ]; then
+      docker logs --tail 160 "$server" >&2 || true
+      cat "$run_dir/status.err" >&2 || true
+      echo "Timed out waiting for the isolated FoundationDB cluster" >&2
+      return 1
+    fi
+    if ! docker inspect --format '{{.State.Running}}' "$server" 2>/dev/null | grep -q '^true$'; then
+      docker logs --tail 160 "$server" >&2 || true
+      echo "FoundationDB server exited before readiness" >&2
+      return 1
+    fi
+    sleep 1
+    ticks=$((ticks + 1))
+  done
+}
+
+wait_for_foundationdb
 
 if [ "$external_mode" -eq 0 ]; then
   docker cp "$server:/var/fdb/fdb.cluster" "$run_dir/fdb.cluster"
@@ -158,6 +162,10 @@ export MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE="$run_dir/fdb.cluster"
 echo "FOUNDATIONDB_READY platform=$docker_platform server=$server cluster=$run_dir/fdb.cluster"
 
 if [ -n "${R2_ENDPOINT:-}" ]; then
+  if [ "$external_mode" -eq 1 ]; then
+    echo "FoundationDB + RustFS service-restart gate requires an owned FoundationDB server; refusing external mode" >&2
+    exit 2
+  fi
   case "$R2_ENDPOINT" in
     http://127.0.0.1:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://127.0.0.1}" ;;
     http://localhost:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://localhost}" ;;
@@ -165,10 +173,9 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
     *) echo "Refusing non-local RustFS endpoint in composed gate: $R2_ENDPOINT" >&2; exit 2 ;;
   esac
   test_manifest=tests/foundationdb/Cargo.toml
-  # The composed lane proves the split ChunkedFs path, then runs the provider
-  # contract against the same real cluster. Keep both commands in this
-  # disposable client container so the combo cannot report RustFS coverage
-  # while silently omitting the actual FoundationDB metadata checks.
+  # The first composed client proves the split ChunkedFs path and the provider
+  # contract against the same real cluster. A second client runs after the
+  # owned FoundationDB container is restarted below.
   test_command="cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
   test_prefix=${RUSTFS_COMBO_PREFIX:?RUSTFS_COMBO_PREFIX must be set for the composed gate}
   : "${R2_BUCKET:?R2_BUCKET must be set for the composed gate}"
@@ -213,6 +220,7 @@ if [ -n "$rustfs_endpoint" ]; then
     --env R2_SECRET_ACCESS_KEY \
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP=1 \
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
      apt-get update -qq
@@ -249,7 +257,50 @@ else
 fi
 
 if [ -n "$rustfs_endpoint" ]; then
-  echo "FOUNDATIONDB_TEST_PASS manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform"
+  restart_timeout=${MOUNT_RS_FOUNDATIONDB_RESTART_TIMEOUT_SECONDS:-120}
+  case "$restart_timeout" in
+    ''|*[!0-9]*)
+      echo "MOUNT_RS_FOUNDATIONDB_RESTART_TIMEOUT_SECONDS must be a non-negative integer" >&2
+      exit 2
+      ;;
+  esac
+  if ! python3 "$repo_dir/scripts/rustfs-bounded-docker.py" "$restart_timeout" \
+    foundationdb-service-restart docker restart "$server" >/dev/null; then
+    echo "Could not restart the owned FoundationDB service container" >&2
+    exit 1
+  fi
+  wait_for_foundationdb
+  echo "FOUNDATIONDB_SERVICE_RESTART_READY server=$server"
+
+  restart_test_command="cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
+  docker run --rm \
+    --platform "$docker_platform" \
+    --network "$network" \
+    --add-host host.docker.internal:host-gateway \
+    --volume "$repo_dir:/workspace:ro" \
+    --volume "$run_dir:/fdb:ro" \
+    --workdir /workspace \
+    --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
+    --env LIBRARY_PATH=/fdb \
+    --env LD_LIBRARY_PATH=/fdb \
+    --env RUSTFLAGS=-Lnative=/fdb \
+    --env CARGO_TARGET_DIR=/tmp/mount-rs-foundationdb-target \
+    --env "R2_ENDPOINT=$rustfs_endpoint" \
+    --env R2_BUCKET \
+    --env R2_ACCESS_KEY_ID \
+    --env R2_SECRET_ACCESS_KEY \
+    --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    "$rust_image" sh -c \
+    'export PATH=/usr/local/cargo/bin:$PATH
+     apt-get update -qq
+     apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
+     exec sh -c "$1"' \
+    mount-rs-foundationdb-restart-client "$restart_test_command"
+fi
+
+if [ -n "$rustfs_endpoint" ]; then
+  echo "FOUNDATIONDB_TEST_PASS manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass"
 else
   echo "FOUNDATIONDB_TEST_PASS manifest=$test_manifest platform=$docker_platform"
 fi
