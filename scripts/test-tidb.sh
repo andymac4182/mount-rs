@@ -17,6 +17,10 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "test-tidb.sh: curl is required for local readiness checks" >&2
   exit 2
 fi
+if ! docker info >/dev/null 2>&1; then
+  echo "test-tidb.sh: Docker daemon is unavailable; actual TiDB/PD/TiKV acceptance cannot run" >&2
+  exit 2
+fi
 
 startup_timeout_seconds=${MOUNT_RS_TIDB_STARTUP_TIMEOUT_SECONDS:-300}
 case "$startup_timeout_seconds" in
@@ -83,6 +87,12 @@ case "$docker_mem_bytes" in
     exit 2
     ;;
 esac
+case "$docker_cpu_count" in
+  ''|*[!0-9]*)
+    echo "test-tidb.sh: Docker reported an invalid CPU count: $docker_cpu_count" >&2
+    exit 2
+    ;;
+esac
 allow_underprovisioned=${MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED:-0}
 case "$allow_underprovisioned" in
   0|1) ;;
@@ -92,12 +102,25 @@ case "$allow_underprovisioned" in
     ;;
 esac
 durable_min_memory_bytes=10737418240
-if [ "$topology" = durable ] && [ "$docker_mem_bytes" -lt "$durable_min_memory_bytes" ]; then
-  if [ "$allow_underprovisioned" -ne 1 ]; then
-    echo "test-tidb.sh: durable topology requires at least 10737418240 Docker memory bytes; found $docker_mem_bytes (set MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED=1 only for a diagnostic attempt)" >&2
-    exit 2
+durable_min_cpu_count=4
+capacity_issue=0
+capacity_details=""
+if [ "$topology" = durable ]; then
+  if [ "$docker_mem_bytes" -lt "$durable_min_memory_bytes" ]; then
+    capacity_issue=1
+    capacity_details="${capacity_details} memory_bytes=$docker_mem_bytes minimum_memory_bytes=$durable_min_memory_bytes"
   fi
-  echo "test-tidb.sh: warning: diagnostic underprovisioned durable run: Docker memory bytes=$docker_mem_bytes minimum=$durable_min_memory_bytes" >&2
+  if [ "$docker_cpu_count" -lt "$durable_min_cpu_count" ]; then
+    capacity_issue=1
+    capacity_details="${capacity_details} cpus=$docker_cpu_count minimum_cpus=$durable_min_cpu_count"
+  fi
+  if [ "$capacity_issue" -ne 0 ]; then
+    if [ "$allow_underprovisioned" -ne 1 ]; then
+      echo "test-tidb.sh: durable topology lacks required Docker capacity:$capacity_details (set MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED=1 only for a diagnostic attempt)" >&2
+      exit 2
+    fi
+    echo "test-tidb.sh: warning: diagnostic underprovisioned durable run:$capacity_details" >&2
+  fi
 fi
 
 temp_root=${TMPDIR:-/tmp}
@@ -387,6 +410,7 @@ start_pd() {
     --advertise-client-urls="http://$pd_ip:2379" \
     --advertise-peer-urls="http://$pd_ip:2380" \
     --initial-cluster="$pd_cluster" \
+    --initial-cluster-state=new \
     --log-level=warn \
     --data-dir=/data \
     >/dev/null
@@ -540,6 +564,11 @@ run_provider_test() {
     cargo test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture
 }
 
+run_ambiguous_commit_test() {
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+    cargo test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+}
+
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2
 docker pull --platform "$docker_platform" "$pd_image" >/dev/null
 docker pull --platform "$docker_platform" "$tikv_image" >/dev/null
@@ -633,11 +662,17 @@ set -e
 if [ "$provider_status" -ne 0 ]; then
   exit "$provider_status"
 fi
+run_ambiguous_commit_test
 
 if [ "$topology" = durable ]; then
-  # Confirm data remains available through both a TiDB frontend restart and a
-  # TiKV store restart. This is still a test-cluster check, not a power-loss
-  # or host-fsync guarantee; the provider's durable flag remains caller-owned.
+  # Confirm data remains available through PD quorum recovery, a TiDB frontend
+  # restart, and a TiKV store restart. This is still a test-cluster check, not
+  # a power-loss or host-fsync guarantee; the provider's durable flag remains
+  # caller-owned.
+  begin_phase "PD restart readiness"
+  docker restart "$pd1_container" >/dev/null
+  wait_for_pd "$pd1_container" "PD1 after restart"
+  wait_for_pd_quorum
   begin_phase "TiDB restart readiness"
   docker restart "$tidb_container" >/dev/null
   wait_for_tidb
@@ -654,4 +689,11 @@ if [ "$topology" = durable ]; then
   fi
 fi
 
-echo "TiDB identity, provider contract, and configured restart checks passed topology=$topology version=$image_version platform=$docker_platform" >&2
+if [ "$topology" = durable ] && [ "$capacity_issue" -eq 0 ]; then
+  evidence_class="durable-multinode-restart"
+elif [ "$topology" = durable ]; then
+  evidence_class="diagnostic-underprovisioned-not-durable-acceptance"
+else
+  evidence_class="single-node-smoke-not-replicated-acceptance"
+fi
+echo "TIDB_ACCEPTANCE evidence=$evidence_class topology=$topology version=$image_version platform=$docker_platform cpus=$docker_cpu_count mem_bytes=$docker_mem_bytes ambiguous_commit=pass" >&2
