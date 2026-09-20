@@ -293,32 +293,46 @@ try {
     expectedCapabilities.extensions.includes("mknod") && typeof oracleMknod === "function";
   assert.equal(oracle.fs.mountx, undefined);
   assert.equal(oracleMknodSupported, false);
-  const oracleMknodOperation = (path) => {
+  const oracleMknodOperation = (path, mode, dev) => {
     if (oracleMknodSupported) {
-      return oracleMknod.call(oracle.fs.mountx, path, 0o010644, 0);
+      return oracleMknod.call(oracle.fs.mountx, path, mode, dev);
     }
     return Promise.reject(errors.fsError("ENOSYS", { syscall: "mknod" }));
   };
   const nativeMknod = native.fs.mknod;
   assert.equal(typeof nativeMknod, "function");
-  capabilityCounts[await compareCapabilityRow({
-    label: "mknod",
-    supported: oracleMknodSupported,
-    syscall: "mknod",
-    oracleOperation: () => oracleMknodOperation("/fifo"),
-    nativeOperation: () => nativeMknod.call(native.fs, "/fifo", 0o010644, 0),
-  })] += 1;
-
-  // The compatibility namespace and the direct convenience method must make
-  // the same oracle-backed classification, not merely both happen to reject.
   const nativeMountxMknod = native.fs.mountx?.mknod;
   assert.equal(typeof nativeMountxMknod, "function");
-  const [mountxExpected, mountxActual] = await Promise.all([
-    capture(() => oracleMknodOperation("/fifo-mountx")),
-    capture(() => nativeMountxMknod.call(native.fs.mountx, "/fifo-mountx", 0o010644, 0)),
-  ]);
-  assert.deepEqual(mountxActual, mountxExpected, "mountx.mknod: native result differs from oracle");
-  assert.equal(mountxExpected?.code, "ENOSYS");
+
+  // The generic key space has no node-kind or device-number representation.
+  // Keep the capability false and classify every special-node shape from the
+  // upstream skipped group through both public mknod surfaces. If a future
+  // adapter grows the extension, these rows become real oracle-backed behavior
+  // checks without changing the test's capability decision.
+  const specialNodeRows = [
+    { label: "mknod FIFO", name: "fifo", mode: 0o010644, dev: 0 },
+    { label: "mknod socket", name: "socket", mode: 0o140600, dev: 0 },
+    { label: "mknod character device", name: "character", mode: 0o020666, dev: (1 << 8) | 3 },
+    { label: "mknod block device", name: "block", mode: 0o060660, dev: 7 << 8 },
+  ];
+  for (const row of specialNodeRows) {
+    capabilityCounts[await compareCapabilityRow({
+      label: `${row.label} direct`,
+      supported: oracleMknodSupported,
+      syscall: "mknod",
+      oracleOperation: () => oracleMknodOperation(`/direct-${row.name}`, row.mode, row.dev),
+      nativeOperation: () => nativeMknod.call(native.fs, `/direct-${row.name}`, row.mode, row.dev),
+    })] += 1;
+    capabilityCounts[await compareCapabilityRow({
+      label: `${row.label} mountx`,
+      supported: oracleMknodSupported,
+      syscall: "mknod",
+      oracleOperation: () => oracleMknodOperation(`/mountx-${row.name}`, row.mode, row.dev),
+      nativeOperation: () =>
+        nativeMountxMknod.call(native.fs.mountx, `/mountx-${row.name}`, row.mode, row.dev),
+    })] += 1;
+  }
+  capabilityRowCount = capabilityRows.length + specialNodeRows.length * 2 + 1;
 
   // Permissions and link-aware timestamp calls are supported as overlays. In
   // a no-symlink profile lstat/lutimes are intentionally indistinguishable
