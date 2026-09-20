@@ -190,11 +190,11 @@ against [libuv's Windows implementation](https://github.com/libuv/libuv/blob/v1.
   Main reran both timeout regressions and the full real-service harness after
   the final script changes: exit 0, block/split-provider/Node/restart gates
   passed. CLI integration beyond existing configuration tests remains open.
-- [ ] W06.2 Verify the hosted RustFS CI job, not just its configuration.
+- [x] W06.2 Verify the hosted RustFS CI job, not just its configuration.
   Hosted runs `35493800880` / `35493696795` passed block/restart tests but
   failed cleanup of container-owned `.rustfs.sys` bind-mount files with permission
   denied. Ownership-validated cleanup is implemented and locally passed;
-  hosted Linux confirmation is still required.
+  hosted Linux confirmation passed at `37e9ba1`, job `106049192404`.
 - [ ] W06.3 Add fault and benchmark workloads with reproducible service settings.
 - [ ] W06.4 Provide isolated RustFS service orchestration for W07.6 and W08.5;
   test actual composed filesystems rather than unrelated backend smoke tests.
@@ -203,17 +203,20 @@ against [libuv's Windows implementation](https://github.com/libuv/libuv/blob/v1.
 
 - [ ] W07.1 Review and register the separate draft integration crate.
   Worker feature-enabled check/Clippy passed; this is not live-service evidence.
-- [ ] W07.2 Finish isolated real FoundationDB client/server harness. Current
-  native execution was blocked by missing `fdb_c`; do not replace with mocks.
+- [x] W07.2 Finish isolated real FoundationDB client/server harness. Main ran
+  the real pinned 7.4.7 Linux ARM64 server/client in Docker; the provider
+  contract passed. The container supplies `fdb_c`; no host install or mock.
 - [ ] W07.3 Resolve production lease/time semantics: default unsupported clock
   behavior and a development clock do not establish safe distributed fencing.
 - [ ] W07.4 Validate transaction/block limits, CAS, stale writers, durability,
   restart and backend identity against the real service.
 - [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
-- [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** Hilbert owns real-service
-  integration, multi-chunk/boundary/partial-write/truncate round trips, namespace
-  persistence, fresh-client/service restart, CAS and stale-writer assertions.
-  Coordinate RustFS lifecycle with Hooke; no emulated acceptance.
+- [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
+  composition and provider contract in the full RustFS harness (exit 0), with
+  multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
+  The surrounding RustFS/PGlite VFS restart checks also passed, but are not
+  FoundationDB service-restart evidence. FDB service restart, root integration,
+  and hosted composition coverage remain open; no emulated acceptance.
 
 ## W08 — TiDB
 
