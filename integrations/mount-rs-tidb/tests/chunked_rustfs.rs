@@ -459,6 +459,16 @@ async fn seed_chunked_filesystem(
         .await
         .unwrap_or_else(|_| panic!("could not replace the expired CAS writer"));
     assert!(replacement.fence > expiring.fence);
+    let stale_renew = cas_a
+        .renew_writer(&expiring, Duration::from_secs(5))
+        .await
+        .expect_err("expired TiDB writer must not renew after fencing");
+    assert!(stale_renew.is(ErrorCode::Estale));
+    let stale_release = cas_a
+        .release_writer(&expiring)
+        .await
+        .expect_err("expired TiDB writer must not release after fencing");
+    assert!(stale_release.is(ErrorCode::Estale));
     let stale = cas_a
         .publish(
             snapshot.revision,
@@ -484,6 +494,49 @@ async fn seed_chunked_filesystem(
         .await
         .expect_err("TiDB revision CAS must reject a stale expected revision");
     assert!(conflict.is(ErrorCode::Eagain));
+
+    let current = cas_b
+        .load()
+        .await
+        .unwrap_or_else(|_| panic!("could not reload the current CAS namespace"));
+    // Keep both candidates rooted in the real ChunkedFs namespace so the race
+    // exercises metadata publication without creating untracked RustFS blocks.
+    let mut left_namespace = current.namespace.clone().expect("current namespace");
+    left_namespace.default_uid = 41;
+    let mut right_namespace = current.namespace.clone().expect("current namespace");
+    right_namespace.default_uid = 42;
+    let expected_revision = current.revision;
+    let (left, right) = tokio::join!(
+        cas_a.publish(expected_revision, &replacement, left_namespace),
+        cas_b.publish(expected_revision, &replacement, right_namespace),
+    );
+    let published = match (left, right) {
+        (Ok(revision), Err(error)) | (Err(error), Ok(revision)) => {
+            assert!(
+                error.is(ErrorCode::Eagain),
+                "concurrent TiDB publication lost for the wrong reason: {error}"
+            );
+            revision
+        }
+        (Ok(_), Ok(_)) => panic!("concurrent TiDB publications must not both commit"),
+        (Err(left), Err(right)) => {
+            panic!("concurrent TiDB publications both failed: {left}; {right}")
+        }
+    };
+    assert_eq!(published, expected_revision + 1);
+    let after_concurrent = cas_b
+        .load()
+        .await
+        .unwrap_or_else(|_| panic!("could not load the concurrent TiDB publication"));
+    assert_eq!(after_concurrent.revision, published);
+    let winning_uid = after_concurrent
+        .namespace
+        .expect("concurrent publication namespace")
+        .default_uid;
+    assert!(
+        winning_uid == 41 || winning_uid == 42,
+        "concurrent publication stored neither candidate namespace: uid={winning_uid}"
+    );
     cas_b
         .release_writer(&replacement)
         .await
