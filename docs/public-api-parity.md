@@ -40,7 +40,7 @@ described as a complete session or native-mount implementation.
 | Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the opt-in native mount lifecycle now accepts the plain structural object and passes macOS NFS read/write/unmount | **PARTIAL; UNVERIFIED** for hosted Linux/other platforms |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
-| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS` dispatch is tested separately; remaining bodies, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
+| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS` dispatch and pure Rust INIT negotiation are tested separately; remaining bodies, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
@@ -138,6 +138,15 @@ The Rust implementation has useful, tested FUSE pieces:
   with the fixed 8-byte wire shape, root handling, owner/group/other mode
   checks and invalid-mask errors. Focused locked session tests pass, but this
   does not establish a kernel FUSE device or native mount lifecycle;
+- the N-API `./fuse` barrel now exposes Rust-backed `RELEASE`/`RELEASEDIR`,
+  `FLUSH`, and `FSYNC`/`FSYNCDIR` request/status codecs. Pinned protocol
+  differentials cover empty status replies and malformed/truncated/trailing
+  inputs; these remain mount-free codec gates;
+- pure Rust INIT negotiation now gates `FUSE_INIT_EXT`/`flags2` by the
+  negotiated minor and extension bit, rejects unmarked extension words, and
+  has six wire-layout integration tests for downgrade/retry, clamping,
+  compatibility layouts and truncation. This is not native session/mount
+  acceptance;
 - the Rust-backed `InodeTable` is now exposed from the N-API `./fuse` barrel;
   its facade preserves oracle-shaped `Inode` views and `Set` paths while the
   state and mutation logic remain in Rust. The focused oracle test covers
@@ -457,6 +466,17 @@ the closure items listed above.
   7.8/7.39/7.41 differential coverage, generated declarations/artifacts and
   malformed/truncated/trailing-input checks. The combined locked Rust and
   oracle-enabled N-API gates passed; native FUSE remains unqualified.
+- **PASS** — `13c3acb` N-API FUSE lifecycle codecs: pinned differential
+  coverage for `RELEASE`/`RELEASEDIR`, `FLUSH`, `FSYNC`/`FSYNCDIR`, including
+  empty status framing and malformed/truncated/trailing inputs. The full
+  N-API suite passed; the scoped Clippy run keeps the known pre-existing
+  `js_driver.rs` type-complexity warning excluded.
+- **PASS** — `b2040f6` pure Rust FUSE INIT hardening: six locked integration
+  tests pass for version retry/downgrade, extension flags, max-pages/write
+  clamping, compatibility layouts and truncation; strict scoped Clippy passed.
+- **PASS** — `72d570f` Windows HostFs read-only/link packet: 15 macOS tests,
+  Windows-target check and target Clippy passed; native Windows runtime remains
+  a hosted-CI boundary.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
