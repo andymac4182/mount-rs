@@ -1,7 +1,10 @@
 use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_fuse::{
     RequestHeader,
-    constants::{FUSE_BATCH_FORGET, FUSE_INTERRUPT, FUSE_POLL, FUSE_STATFS},
+    constants::{
+        FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_INTERRUPT, FUSE_LSEEK,
+        FUSE_POLL, FUSE_RENAME2, FUSE_STATFS,
+    },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::FuseSession,
 };
@@ -235,6 +238,82 @@ async fn poll_rejects_bad_wire_and_keeps_valid_poll_at_explicit_enosys_boundary(
         .unwrap()
         .unwrap();
     assert_eq!(i32::from_le_bytes(entry[4..8].try_into().unwrap()), -2);
+}
+
+#[tokio::test]
+async fn advanced_operations_fail_closed_and_remain_explicitly_unsupported() {
+    let fs = Arc::new(MemoryFs::empty());
+    let file = fs.open("/old", "w", 0o644).await.unwrap();
+    file.close().await.unwrap();
+    let mut session = FuseSession::new(fs.clone());
+    let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
+
+    let errno = |reply: &[u8]| i32::from_le_bytes(reply[4..8].try_into().unwrap());
+
+    for (opcode, size) in [
+        (FUSE_FALLOCATE, 32usize),
+        (FUSE_LSEEK, 24usize),
+        (FUSE_COPY_FILE_RANGE, 56usize),
+    ] {
+        let short = session
+            .handle(&frame(opcode, 1, &vec![0; size - 1]))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&short), -22, "short {opcode} frame");
+
+        let mut trailing_body = vec![0; size];
+        trailing_body.push(0);
+        let trailing = session
+            .handle(&frame(opcode, 1, &trailing_body))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&trailing), -22, "trailing {opcode} frame");
+    }
+
+    // RENAME2 has a fixed header followed by exactly two NUL-terminated
+    // names. The missing second name is rejected before any backend call.
+    let mut malformed_rename2 = vec![0; 16];
+    malformed_rename2.extend(b"old\0");
+    let malformed = session
+        .handle(&frame(FUSE_RENAME2, 1, &malformed_rename2))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&malformed), -22);
+
+    let mut rename2 = vec![0; 16];
+    rename2[..8].copy_from_slice(&1u64.to_le_bytes());
+    rename2.extend(b"old\0new\0");
+    for (opcode, body) in [
+        (FUSE_FALLOCATE, vec![0; 32]),
+        (FUSE_RENAME2, rename2),
+        (FUSE_LSEEK, vec![0; 24]),
+        (FUSE_COPY_FILE_RANGE, vec![0; 56]),
+    ] {
+        let reply = session
+            .handle(&frame(opcode, 1, &body))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&reply), -38, "valid {opcode} frame");
+    }
+
+    // ENOSYS is a boundary, not a best-effort rename/copy/seek. The
+    // filesystem contents and negotiated session remain unchanged.
+    assert!(fs.lstat("/old").await.is_ok());
+    assert!(fs.lstat("/new").await.is_err());
+    let lookup = session
+        .handle(&frame(1, 1, b"old\0"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&lookup), 0);
 }
 
 fn io_body(handle: u64, offset: u64, size: u32) -> Vec<u8> {
