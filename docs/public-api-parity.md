@@ -427,6 +427,11 @@ the closure items listed above.
   skips without their environment gates.
 - **PASS** — the oracle-enabled N-API suite, including public FUSE
   `READDIRPLUS`, completed its functional tests and artifact aggregation.
+- **PASS** — `bash scripts/demo-end-to-end.sh` on macOS built the Rust CLI,
+  mounted a HostFs through native NFS, exercised independent Rust and Node
+  processes writing and reading through the same mount, verified the Node
+  bytes from Rust after the write, and confirmed clean unmount plus backing
+  directory persistence. This does not qualify FUSE, FSKit or remote providers.
 
 ### W01 parallel packet evidence (2026-09-21)
 
