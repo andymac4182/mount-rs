@@ -23,6 +23,14 @@ const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const PAYLOAD: &[u8] = b"graceful-pglite-restart-payload";
 
+type PgliteFilesystem = ChunkedFs<PgliteMetadataStore, PgliteBlockStore>;
+
+struct OpenFilesystem {
+    filesystem: PgliteFilesystem,
+    metadata: PgliteMetadataStore,
+    blocks: PgliteBlockStore,
+}
+
 struct PgliteServer {
     child: Child,
     connection_string: String,
@@ -175,48 +183,90 @@ fn pglite_options(key: &str) -> PgliteStorageOptions {
     PgliteStorageOptions::new(key).with_durable(false)
 }
 
-async fn open_filesystem(
-    url: &str,
-    key: &str,
-    owner: &str,
-) -> Result<ChunkedFs<PgliteMetadataStore, PgliteBlockStore>, String> {
+async fn open_filesystem(url: &str, key: &str, owner: &str) -> Result<OpenFilesystem, String> {
     let options = pglite_options(key);
-    ChunkedFs::open(
-        PgliteMetadataStore::connect_with_options(url, options.clone())
-            .await
-            .map_err(|error| format!("connect PGlite metadata: {error}"))?,
-        PgliteBlockStore::connect_with_options(url, options)
-            .await
-            .map_err(|error| format!("connect PGlite blocks: {error}"))?,
-        chunked_options(owner),
-    )
-    .await
-    .map_err(|error| format!("open split PGlite filesystem: {error}"))
+    let metadata = PgliteMetadataStore::connect_with_options(url, options.clone())
+        .await
+        .map_err(|error| format!("connect PGlite metadata: {error}"))?;
+    let blocks = match PgliteBlockStore::connect_with_options(url, options).await {
+        Ok(blocks) => blocks,
+        Err(error) => {
+            let _ = metadata.close().await;
+            return Err(format!("connect PGlite blocks: {error}"));
+        }
+    };
+    let filesystem =
+        match ChunkedFs::open(metadata.clone(), blocks.clone(), chunked_options(owner)).await {
+            Ok(filesystem) => filesystem,
+            Err(error) => {
+                let _ = metadata.close().await;
+                let _ = blocks.close().await;
+                return Err(format!("open split PGlite filesystem: {error}"));
+            }
+        };
+    Ok(OpenFilesystem {
+        filesystem,
+        metadata,
+        blocks,
+    })
+}
+
+async fn shutdown_filesystem(opened: &OpenFilesystem, phase: &str) -> Result<(), String> {
+    // Dropping tokio-postgres clients is asynchronous. Explicitly close both
+    // providers after the lease is released so the server cannot race its
+    // own disk/database shutdown with detached connection-task teardown.
+    let filesystem = opened.filesystem.shutdown().await;
+    let metadata = opened.metadata.close().await;
+    let blocks = opened.blocks.close().await;
+    filesystem
+        .err()
+        .map(|error| format!("{phase} filesystem shutdown: {error}"))
+        .or_else(|| {
+            metadata
+                .err()
+                .map(|error| format!("{phase} metadata close: {error}"))
+        })
+        .or_else(|| {
+            blocks
+                .err()
+                .map(|error| format!("{phase} blocks close: {error}"))
+        })
+        .map_or(Ok(()), Err)
+}
+
+fn finish_phase(operation: Result<(), String>, shutdown: Result<(), String>) -> Result<(), String> {
+    match (operation, shutdown) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(operation), Ok(())) => Err(operation),
+        (Ok(()), Err(shutdown)) => Err(shutdown),
+        (Err(operation), Err(shutdown)) => Err(format!("{operation}; {shutdown}")),
+    }
 }
 
 async fn write_and_close(url: &str, key: &str) -> Result<(), String> {
-    let filesystem = open_filesystem(url, key, "pglite-server-first").await?;
+    let opened = open_filesystem(url, key, "pglite-server-first").await?;
     let operation: Result<(), String> = async {
-        let loopback = Loopback::new(filesystem.clone());
+        let loopback = Loopback::new(opened.filesystem.clone());
         loopback
             .write_file("/restart", PAYLOAD)
             .await
             .map_err(|error| format!("write restart payload: {error}"))?;
-        filesystem
+        opened
+            .filesystem
             .syncfs()
             .await
             .map_err(|error| format!("sync PGlite restart payload: {error}"))
     }
     .await;
-    let shutdown = filesystem.shutdown().await;
-    drop(filesystem);
-    operation.and(shutdown.map_err(|error| format!("shutdown first PGlite filesystem: {error}")))
+    let shutdown = shutdown_filesystem(&opened, "first PGlite filesystem").await;
+    drop(opened);
+    finish_phase(operation, shutdown)
 }
 
 async fn reopen_and_read(url: &str, key: &str) -> Result<(), String> {
-    let filesystem = open_filesystem(url, key, "pglite-server-reopen").await?;
+    let opened = open_filesystem(url, key, "pglite-server-reopen").await?;
     let operation: Result<(), String> = async {
-        let loopback = Loopback::new(filesystem.clone());
+        let loopback = Loopback::new(opened.filesystem.clone());
         let payload = loopback
             .read_file("/restart")
             .await
@@ -231,9 +281,9 @@ async fn reopen_and_read(url: &str, key: &str) -> Result<(), String> {
         Ok(())
     }
     .await;
-    let shutdown = filesystem.shutdown().await;
-    drop(filesystem);
-    operation.and(shutdown.map_err(|error| format!("shutdown reopened PGlite filesystem: {error}")))
+    let shutdown = shutdown_filesystem(&opened, "reopened PGlite filesystem").await;
+    drop(opened);
+    finish_phase(operation, shutdown)
 }
 
 async fn run_lifecycle() -> Result<(), String> {
