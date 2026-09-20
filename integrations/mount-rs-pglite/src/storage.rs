@@ -20,7 +20,7 @@ use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
 
-use super::postgres_error;
+use super::{CloseGate, postgres_error};
 
 // The clock is evaluated by PostgreSQL/PGlite, never supplied by the client.
 // clock_timestamp() deliberately uses the current provider clock even inside
@@ -75,6 +75,7 @@ impl Default for PgliteStorageOptions {
 struct Database {
     client: Arc<Mutex<Option<Client>>>,
     connection: Arc<Mutex<Option<JoinHandle<()>>>>,
+    close_gate: CloseGate,
     volume_key: String,
     durable: bool,
 }
@@ -99,6 +100,7 @@ impl Database {
         let database = Self {
             client: Arc::new(Mutex::new(Some(client))),
             connection: Arc::new(Mutex::new(Some(connection))),
+            close_gate: CloseGate::new(),
             volume_key: options.volume_key,
             durable: options.durable,
         };
@@ -115,8 +117,11 @@ impl Database {
     }
 
     async fn lock_client(&self) -> Result<MutexGuard<'_, Option<Client>>> {
+        if !self.close_gate.is_open() {
+            return Err(connection_closed());
+        }
         let client = self.client.lock().await;
-        if client.is_none() {
+        if client.is_none() || !self.close_gate.is_open() {
             return Err(connection_closed());
         }
         Ok(client)
@@ -127,13 +132,27 @@ impl Database {
     /// a subsequent filesystem may connect immediately after shutdown without
     /// racing the old socket's teardown.
     async fn close(&self) -> Result<()> {
+        if self.close_gate.start() {
+            let database = self.clone();
+            // Keep teardown owned by a task independent of this caller. If a
+            // close future is canceled, later callers still await this same
+            // teardown rather than observing partially detached state.
+            tokio::spawn(async move {
+                database.finish_close().await;
+            });
+        }
+        self.close_gate.wait().await;
+        Ok(())
+    }
+
+    async fn finish_close(&self) {
         let client = self.client.lock().await.take();
         drop(client);
         let connection = self.connection.lock().await.take();
         if let Some(connection) = connection {
             let _ = connection.await;
         }
-        Ok(())
+        self.close_gate.complete();
     }
 
     async fn ensure_metadata_row(&self) -> Result<()> {
@@ -595,6 +614,10 @@ pub(crate) mod test_support {
 
     impl PgliteServer {
         pub(crate) fn start() -> Self {
+            Self::start_with_max_connections(8)
+        }
+
+        pub(crate) fn start_with_max_connections(max_connections: usize) -> Self {
             let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("../../tests/pglite/server.mjs");
             assert!(
@@ -608,7 +631,7 @@ pub(crate) mod test_support {
             let mut child = Command::new("node")
                 .arg(script)
                 .env("PGLITE_PORT", port.to_string())
-                .env("PGLITE_MAX_CONNECTIONS", "8")
+                .env("PGLITE_MAX_CONNECTIONS", max_connections.to_string())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
@@ -653,6 +676,27 @@ mod tests {
     use mount_rs_core::storage::{BlockExtent, FileLayout, NodeData, NodeMetadata};
     use mount_rs_core::{FsDriver, MemoryFs};
     use std::collections::BTreeMap;
+
+    async fn cancel_close_while_client_is_held(database: &Database) {
+        let client_guard = database.client.lock().await;
+        let canceled = tokio::spawn({
+            let database = database.clone();
+            async move { database.close().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(database.close_gate.is_closing());
+        canceled.abort();
+        assert!(canceled.await.unwrap_err().is_cancelled());
+
+        let second = tokio::spawn({
+            let database = database.clone();
+            async move { database.close().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!second.is_finished());
+        drop(client_guard);
+        second.await.unwrap().unwrap();
+    }
 
     async fn namespace(block: BlockId) -> Namespace {
         let stats = MemoryFs::empty().stat("/").await.unwrap();
@@ -813,6 +857,55 @@ mod tests {
             assert!(blocks.get(&orphan).await.unwrap_err().is(ErrorCode::Enoent));
             competitor.release_writer(&second).await.unwrap();
             metadata.flush().await.unwrap();
+        });
+    }
+
+    /// Keep the server deliberately bounded so an early close return leaves a
+    /// visible connection slot behind. This covers cancellation, simultaneous
+    /// closes on clones, repeated idempotent calls, post-close operations, and
+    /// reopening both provider types after complete teardown.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn bounded_server_close_is_shared_cancellation_safe_and_reusable() {
+        let server = PgliteServer::start_with_max_connections(2);
+        let connection_string = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let options = PgliteStorageOptions::new("close-lifecycle");
+            let metadata =
+                PgliteMetadataStore::connect_with_options(connection_string, options.clone())
+                    .await
+                    .unwrap();
+            let blocks = PgliteBlockStore::connect_with_options(connection_string, options)
+                .await
+                .unwrap();
+            let block = blocks.put(b"close").await.unwrap();
+
+            cancel_close_while_client_is_held(&metadata.0).await;
+            for _ in 0..3 {
+                metadata.close().await.unwrap();
+            }
+            assert!(metadata.load().await.unwrap_err().is(ErrorCode::Ebadf));
+
+            cancel_close_while_client_is_held(&blocks.0).await;
+            for _ in 0..3 {
+                blocks.close().await.unwrap();
+            }
+            assert!(blocks.get(&block).await.unwrap_err().is(ErrorCode::Ebadf));
+
+            let reopened_metadata =
+                PgliteMetadataStore::connect_with_key(connection_string, "close-reopened")
+                    .await
+                    .unwrap();
+            let reopened_blocks =
+                PgliteBlockStore::connect_with_key(connection_string, "close-reopened")
+                    .await
+                    .unwrap();
+            reopened_metadata.close().await.unwrap();
+            reopened_blocks.close().await.unwrap();
         });
     }
 }

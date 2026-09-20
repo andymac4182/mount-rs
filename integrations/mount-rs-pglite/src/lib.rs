@@ -5,7 +5,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_persist::{LoadedSnapshot, PersistedFs, StateStore, snapshot_conflict};
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::{Mutex, MutexGuard, watch};
 use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
@@ -26,10 +26,71 @@ fn postgres_error(error: tokio_postgres::Error) -> mount_rs_core::FsError {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CloseState {
+    Open,
+    Closing,
+    Closed,
+}
+
+#[derive(Clone)]
+pub(crate) struct CloseGate {
+    state: watch::Sender<CloseState>,
+}
+
+impl CloseGate {
+    fn new() -> Self {
+        let (state, _receiver) = watch::channel(CloseState::Open);
+        Self { state }
+    }
+
+    fn start(&self) -> bool {
+        let mut started = false;
+        self.state.send_if_modified(|state| {
+            if *state != CloseState::Open {
+                return false;
+            }
+            *state = CloseState::Closing;
+            started = true;
+            true
+        });
+        started
+    }
+
+    fn is_open(&self) -> bool {
+        *self.state.borrow() == CloseState::Open
+    }
+
+    #[cfg(test)]
+    fn is_closing(&self) -> bool {
+        *self.state.borrow() == CloseState::Closing
+    }
+
+    fn complete(&self) {
+        self.state.send_modify(|state| *state = CloseState::Closed);
+    }
+
+    async fn wait(&self) {
+        let mut receiver = self.state.subscribe();
+        loop {
+            if *receiver.borrow() == CloseState::Closed {
+                return;
+            }
+            if receiver.changed().await.is_err() {
+                // The sender is owned by the store and by the spawned
+                // teardown task, so this is unreachable during normal use.
+                // Never report close completion if that invariant is broken.
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PgliteStore {
     client: Arc<Mutex<Option<Client>>>,
     connection: Arc<Mutex<Option<JoinHandle<()>>>>,
+    close_gate: CloseGate,
     state_key: String,
 }
 
@@ -51,6 +112,7 @@ impl PgliteStore {
         let store = Self {
             client: Arc::new(Mutex::new(Some(client))),
             connection: Arc::new(Mutex::new(Some(connection))),
+            close_gate: CloseGate::new(),
             state_key: state_key.into(),
         };
         store.init().await?;
@@ -58,8 +120,11 @@ impl PgliteStore {
     }
 
     async fn lock_client(&self) -> Result<MutexGuard<'_, Option<Client>>> {
+        if !self.close_gate.is_open() {
+            return Err(connection_closed());
+        }
         let client = self.client.lock().await;
-        if client.is_none() {
+        if client.is_none() || !self.close_gate.is_open() {
             return Err(connection_closed());
         }
         Ok(client)
@@ -68,13 +133,27 @@ impl PgliteStore {
     /// Close the PostgreSQL-wire client and wait for its connection task to
     /// finish. This is idempotent for explicit N-API filesystem shutdown.
     pub async fn close(&self) -> Result<()> {
+        if self.close_gate.start() {
+            let store = self.clone();
+            // The teardown owner is detached from this caller's future. A
+            // caller may be canceled after start() without abandoning the
+            // client or its connection task.
+            tokio::spawn(async move {
+                store.finish_close().await;
+            });
+        }
+        self.close_gate.wait().await;
+        Ok(())
+    }
+
+    async fn finish_close(&self) {
         let client = self.client.lock().await.take();
         drop(client);
         let connection = self.connection.lock().await.take();
         if let Some(connection) = connection {
             let _ = connection.await;
         }
-        Ok(())
+        self.close_gate.complete();
     }
 
     async fn init(&self) -> Result<()> {
@@ -233,7 +312,7 @@ pub async fn connect_pglite_with_key(
 mod tests {
     use super::*;
     use crate::storage::test_support::PgliteServer;
-    use mount_rs_core::FsDriver;
+    use mount_rs_core::{ErrorCode, FsDriver};
 
     /// This is opt-in because it talks to the caller-provided PGlite socket.
     /// It never runs against an ambient database merely because a URL exists.
@@ -271,6 +350,66 @@ mod tests {
             let mut bytes = [0_u8; 6];
             assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 6);
             assert_eq!(&bytes, b"pglite");
+        });
+    }
+
+    /// This exercises cancellation after a close caller has been scheduled,
+    /// concurrent close callers on clones, repeated idempotent calls, and the
+    /// bounded server's ability to accept new clients after teardown.
+    #[test]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
+    fn pglite_store_close_is_shared_cancellation_safe_and_bounded() {
+        let server = PgliteServer::start_with_max_connections(2);
+        let connection_string = server.connection_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build Tokio test runtime");
+        runtime.block_on(async {
+            let store = PgliteStore::connect_with_key(connection_string, "close-lifecycle")
+                .await
+                .unwrap();
+
+            let client_guard = store.client.lock().await;
+            let canceled = tokio::spawn({
+                let store = store.clone();
+                async move { store.close().await }
+            });
+            tokio::task::yield_now().await;
+            assert!(store.close_gate.is_closing());
+            canceled.abort();
+            assert!(canceled.await.unwrap_err().is_cancelled());
+
+            let second = tokio::spawn({
+                let store = store.clone();
+                async move { store.close().await }
+            });
+            tokio::task::yield_now().await;
+            assert!(!second.is_finished());
+            drop(client_guard);
+            second.await.unwrap().unwrap();
+
+            for _ in 0..3 {
+                store.close().await.unwrap();
+            }
+            assert!(
+                store
+                    .load_versioned()
+                    .await
+                    .unwrap_err()
+                    .is(ErrorCode::Ebadf)
+            );
+
+            let first_reopened =
+                PgliteStore::connect_with_key(connection_string, "close-lifecycle-reopened-1")
+                    .await
+                    .unwrap();
+            let second_reopened =
+                PgliteStore::connect_with_key(connection_string, "close-lifecycle-reopened-2")
+                    .await
+                    .unwrap();
+            first_reopened.close().await.unwrap();
+            second_reopened.close().await.unwrap();
         });
     }
 }
