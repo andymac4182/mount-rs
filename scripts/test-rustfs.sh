@@ -811,6 +811,10 @@ cargo test \
 
 node "$repo_dir/tests/rustfs/napi-factories.mjs"
 
+# Exercise the shipped CLI with real metadata and blob providers, not only
+# their library factories. The child runner also verifies durable reopen.
+sh "$repo_dir/scripts/test-cli-remote-rustfs.sh"
+
 echo "RUSTFS_SQLITE_VFS_START"
 cargo test \
   --manifest-path "$repo_dir/Cargo.toml" \

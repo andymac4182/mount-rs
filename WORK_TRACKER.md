@@ -63,7 +63,7 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 | W05 | Cloudflare R2 | Live local tests passed; acceptance incomplete | Main |
 | W06 | RustFS integration service | Landed; extending | Main |
 | W07 | FoundationDB | Real composition passed; correctness review | Maxwell / Main |
-| W08 | TiDB | Implementing | Main |
+| W08 | TiDB | Real harness repair and qualification | Mill / Main |
 | W09 | Node / napi-rs and public API | Verifying | Main / Lagrange |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel / Main |
 | W11 | Config-driven CLI | HTTP landed; real remote tests implementing | Epicurus / Main |
@@ -447,6 +447,12 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
   remained opt-in/ignored. Tests cover memory/SQLite/split-store isolation,
   forced-process SQLite reopen, volatile-store loss, and Unix SIGINT shutdown.
   Portable HTTP coverage now runs on Windows CI; no Windows runtime pass yet.
+- [x] Add mandatory real CLI HTTP gate to the RustFS harness: PGlite metadata
+  and SQLite metadata each use actual RustFS chunks. Main's full harness run
+  exited 0 with binary multi-chunk writes, full/range reads, per-drive auth,
+  graceful shutdown and fresh-process durable reopen with distinct default
+  owners. Existing VFS/RustFS/PGlite restart checks also passed. Windows remote
+  execution, Cloudflare R2 CLI and abrupt CLI crash recovery remain open.
 - [ ] W17.2 Define discovery, routing, filesystem operations, streaming/ranges,
   stable errors and lifecycle; share the actual native/API drive namespace.
 - [ ] W17.3 Add per-drive authorization/isolation, limits and deployment/TLS guidance.
