@@ -44,6 +44,9 @@ if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-fuse" ]; then
   exit 0
 fi
 
+# Exercise bounded socket-slot cleanup against a real in-process PGlite server.
+node "$repo_dir/integrations/mount-rs-pglite/test/server_slot_release.mjs"
+
 MOUNT_RS_REQUIRE_PGLITE=1 \
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   cargo test --locked -p mount-rs-core --test backend_parity pglite_matches_the_same_contract_when_a_socket_is_configured -- --ignored --nocapture
