@@ -100,6 +100,12 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 240s cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_split_stores_host_sqlite_and_reopen -- --ignored --nocapture
+      - name: Build the independent SQLite mount service
+        run: cargo build --locked -p mount-rs-core --example sqlite_mount_service
+      - name: Verify SQLite mount-service restart and SIGKILL recovery
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 240s cargo test --locked -p mount-rs-core --test sqlite_service_crash -- --ignored --nocapture
       - uses: actions/setup-node@v4
         with:
           node-version: 24
