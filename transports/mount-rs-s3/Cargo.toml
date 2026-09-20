@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Path-style S3 gateway transport for mount-rs filesystem drivers"
-license = "MIT"
+license = "Apache-2.0"
 
 [dependencies]
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }

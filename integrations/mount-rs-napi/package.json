@@ -2,7 +2,7 @@
   "name": "@andymac4182/mount-rs",
   "version": "0.1.0",
   "description": "Node.js bindings for mount-rs",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "main": "index.js",
   "types": "index.d.ts",
   "exports": {

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Portable WebDAV transport for mount-rs filesystem drivers"
-license = "MIT"
+license = "Apache-2.0"
 repository = "https://github.com/andymac4182/mount-rs"
 
 [dependencies]

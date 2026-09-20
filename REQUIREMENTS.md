@@ -8,6 +8,8 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 
 ## Current completion gates
 
+- License first-party mount-rs code and package metadata as Apache-2.0, retaining
+  the root LICENSE and all required third-party attribution notices.
 - Complete the Rust port of the pinned `pithings/mountx` source with behavioral
   parity tests, separate core/integration crates, minimal dependencies, and
   napi-rs Node bindings.

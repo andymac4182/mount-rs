@@ -59,8 +59,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   credentials for `mount-rs-integration-tests`, stored in macOS Keychain, expiring
   2026-09-27. Read-only S3 listing passed. Full integration acceptance remains
   open; credentials are not committed and RustFS evidence is not a substitute.
-- [ ] **D02 — License:** resolve root Apache-2.0 versus MIT package declarations
-  with the user before release; do not silently select a license.
+- [x] **D02 — License:** user selected Apache-2.0 for mount-rs on 2026-09-20.
+  First-party package declarations use Apache-2.0; preserve third-party notices,
+  including MIT attribution for upstream-derived portions.
 - [ ] **D03 — FSKit:** obtain signing/install/activation authorization and host
   prerequisites when executable extension testing is ready.
 - [ ] **D04 — Distributed cache:** discuss topology, consistency and service

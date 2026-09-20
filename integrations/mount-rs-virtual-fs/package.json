@@ -2,7 +2,7 @@
   "name": "@andymac4182/mount-rs-virtual-fs",
   "version": "0.1.0",
   "description": "Mount-independent just-bash and Mastra filesystem adapters for mount-rs",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "type": "module",
   "main": "src/index.mjs",
   "types": "index.d.ts",

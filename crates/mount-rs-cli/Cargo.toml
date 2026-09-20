@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "The mount-rs command-line mount and transport probe tool"
-license = "MIT"
+license = "Apache-2.0"
 
 [[bin]]
 name = "mount-rs"
