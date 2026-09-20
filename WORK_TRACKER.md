@@ -112,13 +112,13 @@ complete.
 | W08 | TiDB | Real harness repair and qualification | Mill / Main |
 | W09 | Node / napi-rs and public API | Verifying | Raman (complete slice) / Main |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
-| W11 | Config-driven CLI | HTTP landed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
+| W11 | Config-driven CLI | HTTP landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
 | W13 | macOS FSKit | Unsigned draft awaiting integration | Aristotle / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Rollback/lifetime landed; WAL design starting | Peirce / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
-| W17 | Multi-drive HTTP server | Server/CLI landed; RustFS remote passed, Cloudflare acceptance pending | Main |
+| W17 | Multi-drive HTTP server | Server/CLI landed; local split-store demo passed; RustFS remote passed, Cloudflare acceptance pending | Main |
 | W18 | Benchmarks and dependency budget | Partial implementation | Ohm / Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
@@ -365,6 +365,10 @@ complete.
   Process locking/recovery passed; mount-service crash was not tested here.
 - [ ] W11.5 Extend configuration and lifecycle coverage to all new providers,
   version views, FSKit and multi-drive HTTP without silently falling back.
+- [x] Main passed the checked-in HTTP config as a real local demo after
+  `4af2a30`: memory and split SQLite drives served, bearer isolation returned
+  401, and split SQLite data survived a service restart. This is local
+  evidence only and does not qualify live R2 or native-mount acceptance.
 
 ## W12 — Safely host SQLite database files
 
@@ -515,6 +519,9 @@ complete.
   including concurrency, restart, failures and Node/CLI configuration.
 - [ ] W17.5 Define a cache integration boundary, but do not implement/select the
   distributed cache until the W22 discussion and primary acceptance.
+- [x] `4af2a30` records a runnable cross-platform local demo using independent
+  SQLite metadata/blocks, live PUT/GET, authorization isolation and process-
+  reopen persistence. Cloud/TLS/deployment acceptance remains open.
 
 ## W18 — Benchmarks, allocations and dependencies
 
