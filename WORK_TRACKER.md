@@ -98,6 +98,12 @@ These packets reduce the W01 queue but do not close W01.1-W01.4: the complete
 parity ledger, all classified skips, cross-backend seeded evidence, live R2,
 hosted Windows/macOS and privileged native transport gates remain required.
 
+Final integrated local gate after `192749e`: `cargo test --workspace
+--all-targets --all-features --locked --offline` exited 0, and the
+oracle-enabled `pnpm test` in `integrations/mount-rs-napi` exited 0 with the
+new Unstorage parity included. R2/PGlite factory and privileged native-mount
+rows remain explicit skips without credentials or opt-in host prerequisites.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
