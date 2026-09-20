@@ -962,6 +962,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   A minimal `MountRsHost` containing app now embeds the FSKit appex in
   `Contents/Extensions` and builds unsigned; Apple team/profile authorization
   and activation remain open.
+- [x] `fdd7c81` adds the strict macOS activation gate and publishes it through `ea9ac68`: Rust/Swift/Xcode/embedded-bundle checks pass, while the real activation probe correctly reports `FSKIT_ACTIVATION=FAIL` because the host has zero valid Apple signing identities, only ad-hoc signing, and no installed/enabled `mount-rs` FSClient entry. This proves the blocker and does not close W13.4.
 - [ ] W13.4 Activate and test real FSKit mounts, CLI integration, persistence and
   supported SQLite workloads. NFS/FUSE fallback does not satisfy this stream.
 
