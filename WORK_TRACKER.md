@@ -257,13 +257,13 @@ gate still excludes the pre-existing `js_driver.rs` type-complexity warning.
 Hosted Windows runtime, live R2/PGlite, FSKit activation and privileged native
 FUSE acceptance remain separate gates.
 
-The fourth W01 implementation packet is locally validated in `1a8b112` and is
-queued for sequential publication. Rust FUSE now strictly validates the
-`FALLOCATE`, `RENAME2`, `LSEEK`, and `COPY_FILE_RANGE` request bodies, rejects
-malformed/trailing frames with `EINVAL`, and keeps valid operations at an
-explicit `ENOSYS` boundary without mutating the session. The focused FUSE
-tests and strict scoped Clippy gate passed; publication and hosted/native
-acceptance remain separate gates.
+The fourth W01 implementation packet is locally validated in `1a8b112` and
+published through remote commit `7c6186f`. Rust FUSE now strictly validates
+the `FALLOCATE`, `RENAME2`, `LSEEK`, and `COPY_FILE_RANGE` request bodies,
+rejects malformed/trailing frames with `EINVAL`, and keeps valid operations at
+an explicit `ENOSYS` boundary without mutating the session. The focused FUSE
+tests and strict scoped Clippy gate passed; hosted/native acceptance remains a
+separate gate.
 
 The W01 follow-up packets are now published sequentially. The N-API xattr
 packet is local `cf7a132` and finished at remote commit `4f484ad`; it adds
@@ -272,6 +272,11 @@ generated declarations/artifacts and malformed/truncated/trailing coverage.
 The Unstorage packet is local `e0e8195` and finished at remote commit
 `9b74c87`; its 14 capability-boundary rows passed with 5 supported results, 9
 explicit `ENOSYS` results, zero `ENOTSUP` mismatches and zero skips.
+
+The Unstorage hardlink follow-up is local `99c7d32` and published through
+`2bce444`: four hardlink capability rows passed with zero supported results,
+four exact `ENOSYS` results, zero `ENOTSUP` mismatches and zero skips; every
+row preserved errno `-38`, syscall `link`, and null path/destination fields.
 
 The W04.3 PGlite packet was rebased onto remote `8ea3dc8` and published as a
 seven-file sequence ending at `90c33949`. It adds durable version metadata,
@@ -354,6 +359,7 @@ patch):
 | Mendel the 2nd | W01 Rust FUSE advanced-operation validation | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated as `1a8b112`; published through `7c6186f`; strict FALLOCATE/RENAME2/LSEEK/COPY_FILE_RANGE framing, explicit EINVAL/ENOSYS boundaries, no-mutation/session-survival tests and strict Clippy passed |
 | Ramanujan the 2nd | W01 napi-rs FUSE xattr codecs | `integrations/mount-rs-napi/**` | Integrated as `cf7a132`; published through `4f484ad`; SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR pinned-oracle differentials, generated artifacts/declarations, typecheck, build and full focused suite passed |
 | Zeno the 2nd | W01 Unstorage capability boundary parity | `tests/unstorage/**` | Integrated as `e0e8195`; published through `9b74c87`; 14 rows passed with 5 supported, 9 explicit ENOSYS, zero ENOTSUP mismatches and zero skips |
+| Kant the 2nd | W01 Unstorage hardlink capability boundary | `tests/unstorage/**` | Integrated as `99c7d32`; published through `2bce444`; 4 rows passed with 0 supported, 4 exact ENOSYS, zero ENOTSUP mismatches and zero skips |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
