@@ -162,7 +162,7 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
           MOUNT_RS_PGLITE_TEST_SCOPE: native-fuse
-        run: timeout 180s ./scripts/test-pglite.sh
+        run: timeout 480s ./scripts/test-pglite.sh
 
   rust:
     strategy:

@@ -29,6 +29,9 @@ fi
 if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-fuse" ]; then
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
     cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_pglite_persists_through_connection_reopen -- --ignored --nocapture
+  MOUNT_RS_RUN_NATIVE_PGLITE_SQLITE=1 \
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+    cargo test --locked -p mount-rs-core --test native_pglite_sqlite -- --ignored --nocapture
   exit 0
 fi
 
@@ -40,6 +43,9 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
   cargo test --locked -p mount-rs-pglite configured_pglite_state_survives_reconnect -- --ignored --nocapture
 
 cargo test --locked -p mount-rs-pglite split_stores_enforce_durability_fencing_cas_and_immutable_blocks -- --ignored --nocapture
+
+MOUNT_RS_RUN_PGLITE_SERVER_LIFECYCLE=1 \
+  cargo test --locked -p mount-rs-core --test pglite_server_lifecycle -- --ignored --nocapture
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   cargo test --locked -p mount-rs-core --test split_store pglite_metadata_and_blocks_compose_independently -- --ignored --nocapture
