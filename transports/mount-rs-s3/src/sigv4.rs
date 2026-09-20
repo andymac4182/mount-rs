@@ -24,12 +24,24 @@ pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 pub const STREAMING_PAYLOAD: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
 pub const STREAMING_PAYLOAD_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
 pub const STREAMING_UNSIGNED_PAYLOAD_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+pub const QUERY_ALGORITHM: &str = "X-Amz-Algorithm";
+pub const QUERY_CREDENTIAL: &str = "X-Amz-Credential";
+pub const QUERY_DATE: &str = "X-Amz-Date";
+pub const QUERY_EXPIRES: &str = "X-Amz-Expires";
+pub const QUERY_SIGNED_HEADERS: &str = "X-Amz-SignedHeaders";
+pub const QUERY_SIGNATURE: &str = "X-Amz-Signature";
+pub const HEADER_AUTHORIZATION: &str = "authorization";
+pub const HEADER_DATE: &str = "x-amz-date";
+pub const HEADER_CONTENT_SHA256: &str = "x-amz-content-sha256";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credentials {
     pub access_key_id: String,
     pub secret_access_key: String,
 }
+
+/// Rust-shaped equivalent of the upstream SigV4 credential pair.
+pub type SigV4Credentials = Credentials;
 
 impl Credentials {
     pub fn new(access_key_id: impl Into<String>, secret_access_key: impl Into<String>) -> Self {
@@ -126,6 +138,26 @@ pub struct PresignedRequest {
     pub signature: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationHeader {
+    pub algorithm: String,
+    pub access_key_id: String,
+    pub scope: CredentialScope,
+    pub signed_headers: Vec<String>,
+    pub signature: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedPresignedQuery {
+    pub algorithm: String,
+    pub access_key_id: String,
+    pub scope: CredentialScope,
+    pub signed_headers: Vec<String>,
+    pub signature: String,
+    pub amz_date: String,
+    pub expires_in: i64,
+}
+
 fn hmac_bytes(key: &[u8], data: &[u8]) -> Vec<u8> {
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts every key length");
     mac.update(data);
@@ -136,6 +168,11 @@ pub fn sha256_hex(data: impl AsRef<[u8]>) -> String {
     let mut digest = Sha256::new();
     digest.update(data.as_ref());
     sha256_hex_digest(digest.finalize())
+}
+
+/// Format a credential scope as date/region/service/aws4_request.
+pub fn credential_scope(scope: &CredentialScope) -> String {
+    scope.as_string()
 }
 
 pub(crate) fn sha256_hex_digest(digest: impl AsRef<[u8]>) -> String {
@@ -298,6 +335,13 @@ pub fn signing_key(secret: &str, scope: &CredentialScope) -> Vec<u8> {
     hmac_bytes(&service, SIGV4_TERMINATOR.as_bytes())
 }
 
+/// Compare two signatures without leaking the first differing byte.
+pub fn signatures_match(expected: &str, actual: &str) -> bool {
+    let left = expected.to_ascii_lowercase();
+    let right = actual.to_ascii_lowercase();
+    left.len() == right.len() && left.as_bytes().ct_eq(right.as_bytes()).unwrap_u8() == 1
+}
+
 /// Sign one `aws-chunked` payload in a streaming SigV4 signature chain.
 pub fn sign_chunk(
     secret: &str,
@@ -398,6 +442,59 @@ fn parse_scope(value: &str) -> Option<CredentialScope> {
     Some(scope)
 }
 
+fn parse_credential(value: &str) -> Option<(String, CredentialScope)> {
+    let parts = value.split('/').collect::<Vec<_>>();
+    if parts.len() < 5 {
+        return None;
+    }
+    let access_key_id = parts[..parts.len() - 4].join("/");
+    let date = parts.get(parts.len() - 4)?;
+    let region = parts.get(parts.len() - 3)?;
+    let service = parts.get(parts.len() - 2)?;
+    let terminator = parts.last()?;
+    if access_key_id.is_empty() || *terminator != SIGV4_TERMINATOR {
+        return None;
+    }
+    Some((
+        access_key_id,
+        CredentialScope {
+            date: (*date).to_owned(),
+            region: (*region).to_owned(),
+            service: (*service).to_owned(),
+        },
+    ))
+}
+
+/// Parse an Authorization header without authenticating it.
+///
+/// Unsupported algorithms and unknown keys are returned as data for the
+/// caller to classify. Malformed field structure returns None.
+pub fn parse_authorization_header(value: &str) -> Option<AuthorizationHeader> {
+    let (algorithm, rest) = value.split_once(' ')?;
+    let mut fields = HashMap::new();
+    for field in rest.split(',') {
+        let (name, value) = field.trim().split_once('=')?;
+        fields.insert(name, value);
+    }
+    let (access_key_id, scope) = parse_credential(fields.get("Credential")?)?;
+    let signed_headers = fields
+        .get("SignedHeaders")?
+        .split(';')
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let signature = *fields.get("Signature")?;
+    if signed_headers.is_empty() || signature.is_empty() {
+        return None;
+    }
+    Some(AuthorizationHeader {
+        algorithm: algorithm.to_owned(),
+        access_key_id,
+        scope,
+        signed_headers,
+        signature: signature.to_owned(),
+    })
+}
+
 #[derive(Debug)]
 struct ParsedAuthorization {
     scope: CredentialScope,
@@ -462,6 +559,43 @@ fn query_value(query: &[QueryEntry], name: &str) -> Option<String> {
         .iter()
         .find(|entry| entry.name.eq_ignore_ascii_case(name))
         .map(|entry| entry.value.clone())
+}
+
+/// Return whether the query carries a SigV4 presigned signature.
+pub fn is_presigned(query: &[QueryEntry]) -> bool {
+    query_value(query, QUERY_SIGNATURE).is_some()
+}
+
+/// Parse the required SigV4 presigned-query fields without authenticating.
+pub fn parse_presigned_query(query: &[QueryEntry]) -> Option<ParsedPresignedQuery> {
+    let algorithm = query_value(query, QUERY_ALGORITHM)?;
+    let credential = query_value(query, QUERY_CREDENTIAL)?;
+    let amz_date = query_value(query, QUERY_DATE)?;
+    let expires = query_value(query, QUERY_EXPIRES)?;
+    let signed_headers = query_value(query, QUERY_SIGNED_HEADERS)?;
+    let signature = query_value(query, QUERY_SIGNATURE)?;
+    if signed_headers.is_empty()
+        || signature.is_empty()
+        || expires.is_empty()
+        || expires.len() > 7
+        || !expires.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let expires_in = expires.parse::<i64>().ok()?;
+    if !(1..=MAX_PRESIGNED_EXPIRES).contains(&expires_in) {
+        return None;
+    }
+    let (access_key_id, scope) = parse_credential(&credential)?;
+    Some(ParsedPresignedQuery {
+        algorithm,
+        access_key_id,
+        scope,
+        signed_headers: signed_headers.split(';').map(str::to_owned).collect(),
+        signature,
+        amz_date,
+        expires_in,
+    })
 }
 
 fn has_query(query: &[QueryEntry], name: &str) -> bool {
@@ -588,7 +722,7 @@ pub fn verify_request(input: VerifyRequest<'_>) -> Result<VerifiedRequest, SigV4
 /// incrementally and the streaming payload decoder verifies aws-chunked
 /// signatures. This mode must not consume or buffer a body before the driver
 /// can receive its first chunk.
-pub fn verify_request_without_body(
+pub(crate) fn verify_request_without_body(
     input: VerifyRequest<'_>,
 ) -> Result<VerifiedRequest, SigV4Failure> {
     verify_request_inner(input, false)
