@@ -64,3 +64,28 @@ directly to the public SDK. Native mounting is an explicit operation;
 `--check` remains mount-free and does not resolve credentials, while the SDK
 self-test exercises the public driver API without a transport. The integration
 test runs both paths.
+
+## Native Node CLI integration
+
+The bounded native example launches this exact CLI as a separate process,
+checks the host mount table, uses an independent Node process to read and write
+through the mounted path, sends `SIGINT` so the CLI performs its own unmount,
+and verifies the written bytes in the host-backed root after unmount:
+
+```sh
+MOUNT_RS_NODE_CLI_NATIVE_INTEGRATION=1 \
+  node examples/node-cli/native-integration.mjs
+```
+
+It is deliberately opt-in. Without the environment variable it prints
+`SKIP`, not `PASS`. On macOS it requires the repository's NFS client probe to
+report usable and exercises native NFS. On Linux it requires the FUSE probe,
+`/dev/fuse`, and a usable `fusermount3`/`fusermount` path and exercises native
+FUSE. Other platforms and unavailable prerequisites are explicit skips; an
+opted-in mount failure is a failure. This example uses only a temporary local
+host driver, so it does not require provider credentials and does not claim
+R2/PGlite coverage.
+
+Build the local N-API addon first, or set `MOUNT_RS_NAPI_PACKAGE` to a package
+that exports the same public SDK. The temporary directory is preserved when a
+mount cannot be proven unmounted so it can be recovered manually.
