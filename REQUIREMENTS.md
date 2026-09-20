@@ -21,6 +21,8 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 - **Safely host SQLite database files on mount-rs filesystems.** This is distinct
   from using SQLite as mount-rs's persistence backend. It is a required delivery
   gate, not established by backend tests or ordinary file round trips.
+- Provide a **SQLite VFS for mount-free database access** and a **mount-independent
+  filesystem API with just-bash and Mastra adapters**, as specified below.
 - **Separate metadata storage from byte/block storage.** Drivers must compose
   independent stores, including configurations where metadata and bytes use
   different backing services. The current whole-filesystem JSON snapshot is
@@ -226,6 +228,47 @@ for the pinned mountx behavioral oracle.
 - Preserve minimal dependencies and inspect licensing before any code reuse.
   Additional systems such as NBD or HA require an explicit scope decision;
   copy-on-write remains the future requirement below.
+
+## Mount-free SQLite VFS
+
+- Deliver a separate SQLite VFS integration crate backed by mount-rs storage
+  engines. It must support environments where native filesystem mounting is
+  unavailable, without secretly requiring FUSE, NFS, FSKit, or a host mount.
+- Specify and implement SQLite's file lifecycle, random reads/writes, short-read
+  zero filling, truncate, synchronization, locking, access/delete, and error
+  contracts. Advertise only device characteristics actually guaranteed by the
+  selected backend. Address SQLite's synchronous callbacks over async providers
+  without runtime deadlocks or unsafe borrowed-buffer lifetimes.
+- Explicitly define supported journal modes, writer/reader concurrency and
+  process boundaries. WAL requires correct shared-memory and locking support;
+  do not claim WAL support from a rollback-journal implementation.
+- Test actual SQLite connections using this VFS against supported storage
+  compositions: transactions, contention, reopen, integrity checks, abrupt
+  interruption, failed barriers, partial writes and ambiguous publication.
+  Compare SQL results with conventional SQLite and verify durable acknowledgements.
+- Expose usable Rust and Node entry points with reproducible examples and
+  platform/runtime support documentation. Keep this distinct from both SQLite
+  as a storage backend and SQLite hosted on an OS-mounted filesystem.
+
+## Mount-independent filesystem API and consumer adapters
+
+- Expose the same logical drives through a usable API without an OS mount,
+  including drives also served through native mounts. Reuse the same storage,
+  namespace, permission/read-only policy, version view and concurrency rules;
+  do not copy mounted contents into a separate in-memory filesystem.
+- Provide documented Rust/Node access and separately packaged adapters for
+  just-bash and Mastra virtual filesystems, based on their actual version-pinned
+  contracts. Verify supported methods and report unsupported capabilities
+  explicitly; do not substitute a lookalike interface for consumer integration.
+- Run real consumer-level integration tests for reads/writes, directories,
+  rename/delete, metadata, errors, path handling, read-only/pinned versions,
+  provider persistence, and cancellation/cleanup. Test shared visibility between
+  API access and an actual mount where the platform permits it.
+- Define how external processes/systems access the API. In-process adapters
+  must not silently imply a remote service exists; any network API needs an
+  explicit transport, authentication, isolation, and error/versioning contract.
+- Test in a mount-disabled environment and document backend prerequisites,
+  synchronous/asynchronous interface limits, and browser/runtime restrictions.
 
 ## Native macOS FSKit acceptance
 
