@@ -64,6 +64,13 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `b63e616`: [native Linux NFS job 106014665000](https://github.com/andymac4182/mount-rs/actions/runs/35486840994/job/106014665000)
+  passed actual NFSv3 and NFSv4.1 mounts, expanded namespace/handle I/O, and
+  unmount cleanup: two passed, zero ignored, 0.37s. This retains the original
+  60-second I/O deadline and confirms the v4 stateid/protocol fixes removed the
+  earlier repeated delays. It does not prove distributed SQLite locking.
+  Local combined upstream driver/NFS/9P conformance at this revision passed
+  878 tests with 45 capability/privilege skips; platform-wide CI is separate.
 - `c95e48b`: [native FUSE job 106012611132](https://github.com/andymac4182/mount-rs/actions/runs/35486085535/job/106012611132)
   passed real SQLite DELETE/WAL hosting through all three PGlite/SQLite split
   store compositions, including competing processes, killed-writer recovery,
