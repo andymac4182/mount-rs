@@ -3,13 +3,16 @@ use mount_rs_fuse::{RequestHeader, session::FuseSession};
 use std::sync::Arc;
 
 fn frame(opcode: u32, nodeid: u64, body: &[u8]) -> Vec<u8> {
+    frame_with_credentials(opcode, nodeid, body, 0, 0)
+}
+fn frame_with_credentials(opcode: u32, nodeid: u64, body: &[u8], uid: u32, gid: u32) -> Vec<u8> {
     let mut bytes = RequestHeader {
         len: (40 + body.len()) as u32,
         opcode,
         unique: 42,
         nodeid,
-        uid: 0,
-        gid: 0,
+        uid,
+        gid,
         pid: 0,
         total_extlen: 0,
     }
@@ -62,6 +65,57 @@ async fn lifecycle_requires_handshake_and_rejects_requests_after_destroy() {
         .unwrap();
     assert_eq!(i32::from_le_bytes(reply[4..8].try_into().unwrap()), -19);
     session.destroy().await;
+}
+
+#[tokio::test]
+async fn access_dispatch_checks_credentials_and_fixed_wire_mask() {
+    let fs = Arc::new(MemoryFs::empty());
+    let file = fs.open("/owned", "w", 0o640).await.unwrap();
+    file.close().await.unwrap();
+    fs.chown("/owned", 1000, 2000).await.unwrap();
+    fs.chmod("/owned", 0o640).await.unwrap();
+
+    let mut session = FuseSession::new(fs);
+    let inode = number(&request(&mut session, 1, 1, b"owned\0").await, 0);
+    let access = |mask: u32| {
+        let mut body = mask.to_le_bytes().to_vec();
+        body.extend([0; 4]);
+        body
+    };
+    let success = session
+        .handle(&frame_with_credentials(34, inode, &access(6), 1000, 2000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&success[4..8], &[0; 4]);
+    assert_eq!(success.len(), 16);
+
+    let group_read = session
+        .handle(&frame_with_credentials(34, inode, &access(4), 3000, 2000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&group_read[4..8], &[0; 4]);
+
+    let other_read = session
+        .handle(&frame_with_credentials(34, inode, &access(4), 3000, 4000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        i32::from_le_bytes(other_read[4..8].try_into().unwrap()),
+        -13
+    );
+
+    let invalid_mask = session
+        .handle(&frame_with_credentials(34, inode, &access(8), 1000, 2000))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        i32::from_le_bytes(invalid_mask[4..8].try_into().unwrap()),
+        -22
+    );
 }
 fn io_body(handle: u64, offset: u64, size: u32) -> Vec<u8> {
     let mut body = vec![0; 40];
