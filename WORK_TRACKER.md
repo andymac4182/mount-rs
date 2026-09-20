@@ -295,6 +295,9 @@ patch):
 | Locke | W27 Windows HostFs read-only/link lifetime parity | `integrations/mount-rs-host/**` | Integrated as `72d570f` / published through `1352fa9`; 15 macOS tests, Windows-target check and target Clippy passed; hosted Windows runtime remains open |
 | Singer | W01 napi-rs FUSE lifecycle codecs | `integrations/mount-rs-napi/**` | Integrated as `13c3acb` / published through `5ba69dd`; pinned differential and full N-API suite passed; strict pre-existing Clippy lint remains |
 | Zeno | W01 Rust FUSE INIT wire negotiation | `transports/mount-rs-fuse/{src/init.rs,tests/init.rs}` | Integrated as `b2040f6` / published through `63c4264`; six focused tests and strict scoped Clippy passed |
+| Schrodinger | W01 napi-rs FUSE READLINK/STATFS codecs | `integrations/mount-rs-napi/**` | Integrated as `054fb95`; pinned protocol differential, declarations/artifacts, typecheck, build and full N-API suite passed; scoped Clippy retains the known pre-existing lint exclusion |
+| Pasteur | W01 Node SDK CLI native integration | `examples/node-cli/**` | Integrated as `8e1f218`; opt-in macOS NFS mount/read/write/unmount/persistence passed; Linux FUSE and unavailable-platform paths remain explicit skips |
+| Pascal | W01 Rust FUSE READLINK/STATFS wire/session behavior | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `08731ed`; full FUSE suite and strict scoped Clippy passed; native kernel/session acceptance remains separate |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -516,6 +519,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and pinned-oracle N-API gates passed. The N-API scoped Clippy run retains
   the pre-existing `js_driver.rs` type-complexity exclusion; hosted Windows,
   live providers, FSKit and privileged native mount evidence remain open.
+- [x] The next three-way W01 rotation is integrated: `08731ed` adds typed
+  Rust FUSE `READLINK`/`STATFS` wire/session behavior; `054fb95` exposes the
+  matching napi-rs codecs, generated declarations/artifacts and pinned-oracle
+  differentials; and `8e1f218` adds the opt-in Node SDK CLI native mount
+  integration. The current-tree locked Rust workspace, oracle-enabled N-API
+  suite, and macOS NFS Node CLI mount/read/write/unmount/persistence test all
+  passed. Hosted Linux FUSE, hosted Windows, FSKit, live R2/PGlite and the
+  remaining FUSE session/mount surfaces remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
