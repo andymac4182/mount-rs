@@ -355,6 +355,12 @@ jobs:
         env:
           MOUNT_RS_NAPI_NATIVE_MOUNT: '1'
         run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/native.mjs"], check=True, timeout=180)'
+      - name: Verify Node SDK CLI native mount on Linux FUSE or macOS NFS
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          MOUNT_RS_NODE_CLI_NATIVE_INTEGRATION: '1'
+        run: python3 -c 'import subprocess; subprocess.run(["node", "examples/node-cli/native-integration.mjs"], check=True, timeout=240)'
       - name: Verify structural-driver native mount lifecycle on Linux FUSE
         if: runner.os == 'Linux'
         env:
