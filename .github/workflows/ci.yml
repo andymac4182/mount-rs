@@ -41,7 +41,10 @@ jobs:
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile
           pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
-          pnpm --dir integrations/mount-rs-napi build
+      - name: Build the N-API addon with the locked Rust graph
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
       - name: Verify nested process timeout cleanup
         run: sh scripts/test-rustfs-combo-timeout.sh
       - name: Verify bounded Docker command cleanup
@@ -263,7 +266,10 @@ jobs:
       - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
       - name: Install pinned oracle dependencies without lifecycle scripts
         run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
-      - run: pnpm --dir integrations/mount-rs-napi build
+      - name: Build the Windows N-API addon with the locked Rust graph
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
       - name: Verify portable Windows N-API parity against the pinned oracle
         env:
           MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
@@ -313,7 +319,10 @@ jobs:
       - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
       - name: Install pinned oracle dependencies without lifecycle scripts
         run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
-      - run: pnpm --dir integrations/mount-rs-napi build
+      - name: Build the N-API addon with the locked Rust graph
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
       - name: Verify real just-bash and Mastra consumers
         timeout-minutes: 5
