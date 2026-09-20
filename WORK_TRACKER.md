@@ -125,6 +125,17 @@ oracle-enabled `pnpm test` in `integrations/mount-rs-napi` exited 0 with the
 new Unstorage parity included. R2/PGlite factory and privileged native-mount
 rows remain explicit skips without credentials or opt-in host prerequisites.
 
+Latest W01 rotation completed with three disjoint Luna Max packets. Local
+commits `31d62df`, `3355cc1` and `323231f` were each validated and published
+to `origin/main` through the GitHub contents API. The Linux packet wires an
+explicit `/dev/fuse`/`fuse3` structural-driver mount/read/write/unmount job;
+the hosted Linux result is still required. The Unstorage packet adds oracle
+parity for atime, mtime, ctime and birthtime (11/11 Rust tests plus direct and
+N-API parity). The FUSE packet exposes and differentially tests the `READDIR`
+body codec, including UTF-8 names, alignment, bounded packing and malformed
+input. The full locked Rust workspace gate, oracle-enabled N-API gate and the
+real macOS Rust+Node CLI NFS demo all passed after the rotation.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -156,6 +167,15 @@ non-overlapping packet. The current bounded allocation is:
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Integrated checkpoint |
 | Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task complete; custom domain live |
 | Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Closed; no change recommended |
+
+Completed W01 rotation packets (closed after main reviewed and published each
+patch):
+
+| Worker | Packet | Write scope | Handoff state |
+| --- | --- | --- | --- |
+| Hume | W01 Linux structural FUSE acceptance wiring | `.github/workflows/ci.yml`, `integrations/mount-rs-napi/{README.md,test/structural-native.mjs}` | Integrated as `31d62df`; hosted Linux result pending |
+| Gibbs | W01 Unstorage timestamp metadata parity | `integrations/mount-rs-kv/tests/driver.rs`, Unstorage parity tests | Integrated as `3355cc1`; focused oracle gates passed |
+| Euler | W01 FUSE READDIR body codec | `integrations/mount-rs-napi/{fuse.cjs,postlude-fuse-codec.cjs,index.d.ts,test/fuse-codec.mjs}` | Integrated as `323231f`; pinned differential passed |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -194,7 +214,7 @@ complete.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Active simple-first; four parallel sidecars integrated on 2026-09-21; full parity remains open | Main (packets integrated) |
+| W01 | Core and mountx parity | Active simple-first; parallel sidecars are integrated as bounded packets; full parity remains open | Main (integration/acceptance) |
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
@@ -323,6 +343,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   N-API adapter and changes the opt-in native lifecycle from an expected write
   refusal to mounted write/readback. The local macOS NFS run passed; other
   transport/platform acceptance remains open.
+- [x] `31d62df` wires the Linux structural-driver FUSE mount/read/write/unmount
+  acceptance job with explicit `/dev/fuse` prerequisites. The local harness and
+  YAML validation passed; hosted Linux execution remains unverified.
+- [x] `3355cc1` adds Unstorage timestamp metadata parity for atime, mtime, ctime
+  and birthtime. Focused Rust, direct oracle and N-API tests passed; the other
+  capability-limited rows remain open.
+- [x] `323231f` exposes the FUSE `READDIR` body pack/unpack codec with UTF-8,
+  alignment, bounded-packing and malformed-input coverage against the pinned
+  oracle. FUSE session, `READDIRPLUS` and native-mount surfaces remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -1081,3 +1110,6 @@ cross-drive isolation.
 | `71e826f` | Pinned-oracle W01 parity audit and closure queue | Core/concurrency traces passed with zero mismatches; structural native, NFS handle, Unstorage and durability gaps remain explicit |
 | `21803fd` (published as `9868e93`..`b43a4e9`) | Public-SDK provider matrices and Node CLI config/reopen | Rust/Node/PGlite and CLI local gates passed; memory durability guard added; R2 credentials and hosted CI remain pending |
 | `fd5eb04` (published as `88f8f9b` / `f7e630e`) | Structural N-API open flags and native lifecycle | macOS NFS mounted write/readback passed; Linux, other transports, Windows hosted and full FSKit/FUSE acceptance remain open |
+| `31d62df` (published as `968119a` / `3c98aa6` / `6b4e8b4`) | Linux structural-driver FUSE CI lifecycle | Prerequisite-gated CI wiring and local harness pass; hosted Linux result pending |
+| `3355cc1` (published as `eaba478` / `6a4ec2a` / `3aac826`) | Unstorage timestamp metadata parity | 11/11 Rust tests plus direct and N-API oracle parity passed |
+| `323231f` (published as `75d2cae` / `6db5dd9` / `890389f` / `34c6cb0`) | Public FUSE READDIR body codec | Pinned-oracle differential, typecheck and distribution/export checks passed |
