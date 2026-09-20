@@ -695,6 +695,10 @@ function install(binding) {
   for (const [publicName, nativeName] of [
     ["decodeEntryOut", "fuseDecodeEntryOut"], ["encodeEntryOut", "fuseEncodeEntryOut"],
     ["decodeAttrOut", "fuseDecodeAttrOut"], ["encodeAttrOut", "fuseEncodeAttrOut"],
+    ["decodeGetattrIn", "fuseDecodeGetattrIn"], ["encodeGetattrIn", "fuseEncodeGetattrIn"],
+    ["decodeGetattrOut", "fuseDecodeGetattrOut"], ["encodeGetattrOut", "fuseEncodeGetattrOut"],
+    ["decodeSetattrIn", "fuseDecodeSetattrIn"], ["encodeSetattrIn", "fuseEncodeSetattrIn"],
+    ["decodeSetattrOut", "fuseDecodeSetattrOut"], ["encodeSetattrOut", "fuseEncodeSetattrOut"],
     ["decodeOpenOut", "fuseDecodeOpenOut"], ["encodeOpenOut", "fuseEncodeOpenOut"],
     ["decodeReadIn", "fuseDecodeReadIn"], ["encodeReadIn", "fuseEncodeReadIn"],
     ["decodeReadOut", "fuseDecodeReadOut"], ["encodeReadOut", "fuseEncodeReadOut"],
