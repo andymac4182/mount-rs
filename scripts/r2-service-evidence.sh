@@ -41,7 +41,15 @@ if ! command -v aws >/dev/null 2>&1; then
 fi
 
 revision=$(git -C "$repo_dir" rev-parse HEAD)
-dirty_entries=$(git -C "$repo_dir" status --porcelain | wc -l | tr -d ' ')
+if ! dirty_status=$(git -C "$repo_dir" status --porcelain); then
+  printf '%s\n' "R2 service evidence could not read repository status" >&2
+  exit 1
+fi
+if [ -n "$dirty_status" ]; then
+  dirty_entries=$(printf '%s\n' "$dirty_status" | wc -l | tr -d ' ')
+else
+  dirty_entries=0
+fi
 
 if ! AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
   AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
@@ -51,13 +59,13 @@ if ! AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
       --bucket "$R2_BUCKET" \
       --endpoint-url "$endpoint" \
       >/dev/null 2>&1; then
-  echo "R2 service evidence bucket probe failed" >&2
+  printf '%s\n' "R2 service evidence bucket probe failed" >&2
   exit 1
 fi
 
-echo "R2_SERVICE=cloudflare-r2"
-echo "R2_ENDPOINT_AUTHORITY=$authority"
-echo "R2_BUCKET=$R2_BUCKET"
-echo "R2_BUCKET_PROBE=head-bucket-pass"
-echo "MOUNT_RS_REVISION=$revision"
-echo "MOUNT_RS_WORKTREE_DIRTY_ENTRIES=$dirty_entries"
+printf 'R2_SERVICE=%s\n' 'cloudflare-r2'
+printf 'R2_ENDPOINT_AUTHORITY=%s\n' "$authority"
+printf 'R2_BUCKET=%s\n' "$R2_BUCKET"
+printf 'R2_BUCKET_PROBE=%s\n' 'head-bucket-pass'
+printf 'MOUNT_RS_REVISION=%s\n' "$revision"
+printf 'MOUNT_RS_WORKTREE_DIRTY_ENTRIES=%s\n' "$dirty_entries"

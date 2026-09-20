@@ -44,12 +44,34 @@ impl fmt::Debug for R2Config {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("R2Config")
-            .field("endpoint", &self.endpoint)
+            .field(
+                "endpoint_authority",
+                &debug_endpoint_authority(&self.endpoint),
+            )
             .field("bucket", &self.bucket)
             .field("access_key_id", &"<redacted>")
             .field("secret_access_key", &"<redacted>")
             .field("state_key", &self.state_key)
             .finish()
+    }
+}
+
+fn debug_endpoint_authority(endpoint: &str) -> String {
+    let Some((scheme, remainder)) = endpoint.split_once("://") else {
+        return "<redacted>".to_owned();
+    };
+    if !matches!(scheme, "http" | "https") {
+        return "<redacted>".to_owned();
+    }
+    let authority = remainder.split('/').next().unwrap_or_default();
+    if authority.is_empty()
+        || authority.contains('@')
+        || endpoint.contains('?')
+        || endpoint.contains('#')
+    {
+        "<redacted>".to_owned()
+    } else {
+        authority.to_owned()
     }
 }
 
@@ -495,6 +517,9 @@ mod tests {
         };
         assert!(config.validate().is_err());
         assert!(config.build_store().is_err());
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("user:password"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
