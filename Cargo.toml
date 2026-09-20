@@ -4,6 +4,7 @@ members = [
     "integrations/mount-rs-persist",
     "integrations/mount-rs-memory",
     "integrations/mount-rs-host",
+    "integrations/mount-rs-chunked",
     "integrations/mount-rs-sqlite",
     "integrations/mount-rs-r2",
     "integrations/mount-rs-pglite",
@@ -13,6 +14,7 @@ members = [
     "transports/mount-rs-nfs",
     "transports/mount-rs-webdav",
     "transports/mount-rs-s3",
+    "transports/mount-rs-auto",
 ]
 resolver = "3"
 
@@ -33,6 +35,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+mount-rs-memory = { path = "integrations/mount-rs-memory" }
+mount-rs-chunked = { path = "integrations/mount-rs-chunked" }
 mount-rs-fuse = { path = "transports/mount-rs-fuse" }
 tokio = { version = "1", features = ["macros", "process", "rt-multi-thread"] }
 mount-rs-r2 = { path = "integrations/mount-rs-r2" }

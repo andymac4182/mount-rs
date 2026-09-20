@@ -84,6 +84,10 @@ jobs:
         run: timeout 180s cargo test --locked -p mount-rs-fuse --test native_mount -- --ignored --nocapture
       - name: Build mounted backend integration test
         run: cargo test --locked -p mount-rs-core --test native_fuse_backends --no-run
+      - name: Verify the auto transport facade through actual FUSE
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 120s cargo test --locked -p mount-rs-auto --test native_fuse -- --ignored --nocapture
       - name: Verify mounted memory and persisted backend operations
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
@@ -92,6 +96,10 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 240s cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_sqlite_engine_locks_journals_and_process_recovery -- --ignored --nocapture
+      - name: Verify SQLite hosting on independent metadata and block stores
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 240s cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_split_stores_host_sqlite_and_reopen -- --ignored --nocapture
       - uses: actions/setup-node@v4
         with:
           node-version: 24

@@ -1,0 +1,19 @@
+[package]
+name = "mount-rs-auto"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Automatic FUSE, 9P, or NFS native transport facade for mount-rs"
+license = "MIT"
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+mount-rs-fuse = { path = "../mount-rs-fuse" }
+mount-rs-9p = { path = "../mount-rs-9p" }
+mount-rs-nfs = { path = "../mount-rs-nfs" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }

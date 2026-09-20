@@ -200,3 +200,43 @@ async fn mounted_sqlite_engine_locks_journals_and_process_recovery() {
     ))
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Linux FUSE and exercises the final split-store architecture"]
+async fn mounted_split_stores_host_sqlite_and_reopen() {
+    use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+    use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+    assert_eq!(
+        std::env::var("MOUNT_RS_RUN_NATIVE_FUSE").as_deref(),
+        Ok("1")
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let metadata_path = directory.path().join("metadata.db");
+    let blocks_path = directory.path().join("blocks.db");
+    let fs = ChunkedFs::open(
+        SqliteMetadataStore::open(&metadata_path).unwrap(),
+        SqliteBlockStore::open(&blocks_path).unwrap(),
+        ChunkedOptions::fixed("kernel-split-first", 4096).unwrap(),
+    )
+    .await
+    .unwrap();
+    mounted_round_trip(Arc::new(fs.clone())).await;
+    sqlite_engine_round_trip(Arc::new(fs.clone())).await;
+    fs.shutdown().await.unwrap();
+    drop(fs);
+    let reopened = ChunkedFs::open(
+        SqliteMetadataStore::open(&metadata_path).unwrap(),
+        SqliteBlockStore::open(&blocks_path).unwrap(),
+        ChunkedOptions::fixed("kernel-split-reopen", 65536).unwrap(),
+    )
+    .await
+    .unwrap();
+    let loopback = Loopback::new(reopened.clone());
+    assert_eq!(
+        loopback.read_file("/alias").await.unwrap(),
+        [0, 255, 1, 127]
+    );
+    assert!(loopback.stat("/delete.sqlite").await.unwrap().size > 0);
+    assert!(loopback.stat("/wal.sqlite").await.unwrap().size > 0);
+    reopened.shutdown().await.unwrap();
+}

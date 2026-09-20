@@ -993,11 +993,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-auto"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "mount-rs-9p",
+ "mount-rs-core",
+ "mount-rs-fuse",
+ "mount-rs-nfs",
+ "tokio",
+]
+
+[[package]]
+name = "mount-rs-chunked"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "mount-rs-memory",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mount-rs-chunked",
  "mount-rs-fuse",
+ "mount-rs-memory",
  "mount-rs-persist",
  "mount-rs-pglite",
  "mount-rs-r2",

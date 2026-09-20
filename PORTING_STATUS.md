@@ -28,6 +28,10 @@ cases still require audit.
   without a kernel mount; separate Linux kernel tests also exercise mounts.
 - Workspace-integrated 9P2000.L, NFSv3, WebDAV, and S3 gateway crates with
   userspace protocol and loopback network tests.
+- NFSv4.1 sessions, filesystem operations, stateids and byte-range locks have
+  userspace wire coverage at `0ff3ff8`; actual Linux NFS client CI is newly
+  enabled and remains an acceptance gate. Unsupported protocol operations
+  explicitly fail; this is not a claim of complete RFC coverage.
 - Seeded differential traces: five seeds, each with 621 operations against the TypeScript memory
   oracle for Rust memory, SQLite, local object-store, and real local PGlite.
   This caught and fixed PGlite named prepared-statement collisions across
@@ -38,8 +42,15 @@ cases still require audit.
 - Core independent metadata/block contracts and fixed-size chunker with persisted
   algorithm/version/configuration. Separate volatile memory and SQLite providers
   now implement fenced writer leases, revision CAS and immutable blocks. The
-  composed chunked driver and mixed-store acceptance are still in progress;
-  existing Node factories still use transitional snapshot persistence.
+  composed chunked driver now passes seven mixed-store/fault/sparse integration
+  tests and all five 621-operation TypeScript oracle seeds across memory,
+  SQLite and local object-store block combinations. Actual SQLite hosting on
+  the split stores is newly wired into Linux CI, not yet verified there.
+  Existing Node factories still use transitional snapshot persistence while
+  independently composable Node factories are being added.
+- Automatic native transport selection and explicit overrides are implemented
+  in a separate crate with five passing selection/options tests. An actual
+  Linux FUSE facade test is wired into CI.
 
 ## Revision-specific verification checkpoints
 
@@ -97,7 +108,7 @@ cases still require audit.
   WebDAV, and S3 gateway behavior.
 - Add transport-specific differential/conformance tests once each transport is
   implemented.
-- Complete the remaining upstream surface, including NFSv4.1, native mount
+- Complete the remaining upstream surface, including NFSv4.1 native acceptance, native mount
   wrappers and probes, the auto-mount facade, CLI, and driver adapters absent
   from the current Rust workspace. Existing transport success is not evidence
   for these missing components.

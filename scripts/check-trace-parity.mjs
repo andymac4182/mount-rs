@@ -54,7 +54,7 @@ for(const [op,path,arg] of commands) {
     expected.push({ok:value});
   } catch(error) {expected.push({error:error.code});}
 }
-const backends=['memory','sqlite','object-store'];
+const backends=['memory','sqlite','object-store','chunked-memory','chunked-sqlite','chunked-object-store'];
 if(process.env.PGLITE_DATABASE_URL) backends.push('pglite');
 if(process.env.MOUNT_RS_TRACE_R2 === '1') backends.push('r2');
 for(const backend of backends) {

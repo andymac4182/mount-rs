@@ -75,6 +75,38 @@ async fn main() {
     let mut r2_cleanup = None;
     let fs = match std::env::args().nth(1).as_deref().unwrap_or("memory") {
         "memory" => Loopback::new(MemoryFs::empty()),
+        "chunked-memory" => Loopback::new(
+            mount_rs_chunked::ChunkedFs::open(
+                mount_rs_memory::MemoryMetadataStore::new(),
+                mount_rs_memory::MemoryBlockStore::new(),
+                mount_rs_chunked::ChunkedOptions::fixed("trace", 7).unwrap(),
+            )
+            .await
+            .unwrap(),
+        ),
+        "chunked-sqlite" => Loopback::new(
+            mount_rs_chunked::ChunkedFs::open(
+                mount_rs_sqlite::SqliteMetadataStore::in_memory().unwrap(),
+                mount_rs_sqlite::SqliteBlockStore::in_memory().unwrap(),
+                mount_rs_chunked::ChunkedOptions::fixed("trace", 7).unwrap(),
+            )
+            .await
+            .unwrap(),
+        ),
+        "chunked-object-store" => Loopback::new(
+            mount_rs_chunked::ChunkedFs::open(
+                mount_rs_sqlite::SqliteMetadataStore::in_memory().unwrap(),
+                mount_rs_r2::R2BlockStore::new(
+                    std::sync::Arc::new(object_store::memory::InMemory::new()),
+                    "trace/blocks",
+                    false,
+                )
+                .unwrap(),
+                mount_rs_chunked::ChunkedOptions::fixed("trace", 7).unwrap(),
+            )
+            .await
+            .unwrap(),
+        ),
         "sqlite" => Loopback::new(mount_rs_sqlite::open_sqlite_memory().await.unwrap()),
         "object-store" => Loopback::new(
             mount_rs_r2::open_object_store(
