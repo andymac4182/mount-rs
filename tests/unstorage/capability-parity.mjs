@@ -400,14 +400,13 @@ try {
 // directly when reviewing the pinned-oracle evidence.
 await import("./capability-boundaries-next.mjs");
 
+// Keep the atomic hardlink inventory in the same N-API gate as the broader
+// capability packets while retaining a standalone direct fixture for review.
+await import("./hardlink-capability-boundary.mjs");
+
 console.log(
   `mount-rs Unstorage capability parity: PASS (${capabilityRowCount} rows: ` +
     `${capabilityCounts.implemented} implemented, ${capabilityCounts.unsupported} ` +
     `oracle-classified unsupported, ${capabilityCounts.skipped} skipped; ` +
     "lstat/stat parity covered)",
 );
-
-// Keep the next disjoint capability-boundary packet in the same N-API gate as
-// this profile check. It remains a standalone fixture so it can also be run
-// directly when reviewing the pinned-oracle evidence.
-await import("./capability-boundaries-next.mjs");
