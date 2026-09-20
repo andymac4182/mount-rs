@@ -566,6 +566,66 @@ fn name_in(value: NativeFuseNameIn) -> protocol::FuseNameIn {
 }
 
 #[napi(object)]
+pub struct NativeFuseForgetOne {
+    pub nodeid: BigInt,
+    pub nlookup: BigInt,
+}
+
+impl From<protocol::FuseForgetOne> for NativeFuseForgetOne {
+    fn from(value: protocol::FuseForgetOne) -> Self {
+        Self {
+            nodeid: bigint(value.nodeid),
+            nlookup: bigint(value.nlookup),
+        }
+    }
+}
+
+fn forget_one(value: NativeFuseForgetOne) -> protocol::FuseForgetOne {
+    protocol::FuseForgetOne {
+        nodeid: u64_from_bigint(&value.nodeid),
+        nlookup: u64_from_bigint(&value.nlookup),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseBatchForgetIn {
+    pub forgets: Vec<NativeFuseForgetOne>,
+}
+
+impl From<protocol::FuseBatchForgetIn> for NativeFuseBatchForgetIn {
+    fn from(value: protocol::FuseBatchForgetIn) -> Self {
+        Self {
+            forgets: value.forgets.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+fn batch_forget_in(value: NativeFuseBatchForgetIn) -> protocol::FuseBatchForgetIn {
+    protocol::FuseBatchForgetIn {
+        forgets: value.forgets.into_iter().map(forget_one).collect(),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseInterruptIn {
+    pub unique: BigInt,
+}
+
+impl From<protocol::FuseInterruptIn> for NativeFuseInterruptIn {
+    fn from(value: protocol::FuseInterruptIn) -> Self {
+        Self {
+            unique: bigint(value.unique),
+        }
+    }
+}
+
+fn interrupt_in(value: NativeFuseInterruptIn) -> protocol::FuseInterruptIn {
+    protocol::FuseInterruptIn {
+        unique: u64_from_bigint(&value.unique),
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseEmpty {}
 
 #[napi(object)]
@@ -1488,6 +1548,31 @@ pub fn fuse_encode_create_out(
     .map_err(protocol_error)
 }
 
+#[napi(js_name = "fuseDecodeBatchForgetIn")]
+pub fn fuse_decode_batch_forget_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseBatchForgetIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_BATCH_FORGET, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::BatchForget(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_BATCH_FORGET did not decode as a batch-forget request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeBatchForgetIn")]
+pub fn fuse_encode_batch_forget_in(value: NativeFuseBatchForgetIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_BATCH_FORGET,
+        &protocol::FuseRequestBody::BatchForget(batch_forget_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
 fn decode_empty_request(opcode: u32, body: &[u8], expected: &str) -> napi::Result<NativeFuseEmpty> {
     match protocol::decode_request_body(opcode, body, None).map_err(protocol_error)? {
         protocol::FuseRequestBody::Empty => Ok(NativeFuseEmpty {}),
@@ -1795,6 +1880,35 @@ pub fn fuse_encode_statfs_out(
         &kstatfs(value),
         protocol_context(context),
     ))
+}
+
+#[napi(js_name = "fuseDecodeInterruptIn")]
+pub fn fuse_decode_interrupt_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseInterruptIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::constants::FUSE_INTERRUPT,
+        body.as_ref(),
+        None,
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Interrupt(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_INTERRUPT did not decode as an interrupt request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeInterruptIn")]
+pub fn fuse_encode_interrupt_in(value: NativeFuseInterruptIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::constants::FUSE_INTERRUPT,
+        &protocol::FuseRequestBody::Interrupt(interrupt_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeGetxattrOut")]
