@@ -5,20 +5,13 @@
 //! Missing external gates are reported as skips; they are never converted into
 //! successful provider runs.
 
-use async_trait::async_trait;
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
-use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore, Namespace, NodeData};
 use mount_rs_core::{FsError, Loopback, MkdirOptions};
-use mount_rs_memory::MemoryMetadataStore;
-use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
-use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_r2::R2Config;
 use mount_rs_sdk::{Filesystem, MemoryOptions, SplitOptions, StoreConfig};
-use mount_rs_sqlite::SqliteMetadataStore;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use std::collections::BTreeSet;
 use std::env;
-use std::sync::{Arc, Mutex};
 
 const PAYLOAD: &[u8] = b"mount-rs/provider-matrix\0payload\xff";
 const CHUNK_SIZE: usize = 7;
@@ -33,7 +26,7 @@ fn missing_env(names: &[&'static str]) -> Vec<&'static str> {
     names
         .iter()
         .filter(|name| env::var_os(name).is_none_or(|value| value.is_empty()))
-        .map(|name| *name)
+        .copied()
         .collect()
 }
 
@@ -93,200 +86,146 @@ async fn exercise_sdk_split(
     blocks: StoreConfig,
     label: &str,
 ) -> MatrixResult<()> {
-    let filesystem = Filesystem::split(SplitOptions {
+    let filesystem =
+        open_sdk_split(metadata, blocks, format!("provider-matrix-sdk-{label}")).await?;
+    exercise_sdk(filesystem).await
+}
+
+async fn open_sdk_split(
+    metadata: StoreConfig,
+    blocks: StoreConfig,
+    owner: String,
+) -> MatrixResult<Filesystem> {
+    Filesystem::split(SplitOptions {
         metadata,
         blocks,
         chunk_size_bytes: CHUNK_SIZE,
-        owner: format!("provider-matrix-sdk-{label}"),
+        owner,
         uid: 0,
         gid: 0,
         umask: 0,
     })
     .await
-    .map_err(fs_code)?;
-    exercise_sdk(filesystem).await
+    .map_err(fs_code)
 }
 
-fn block_ids(namespace: &Namespace) -> Vec<BlockId> {
-    namespace
-        .nodes
-        .values()
-        .filter_map(|node| match &node.data {
-            NodeData::File(layout) => {
-                Some(layout.extents.iter().map(|extent| extent.block.clone()))
-            }
-            _ => None,
-        })
-        .flatten()
-        .collect()
-}
+async fn exercise_sdk_split_reopen(
+    metadata: StoreConfig,
+    blocks: StoreConfig,
+    label: &str,
+) -> MatrixResult<()> {
+    let first = open_sdk_split(
+        metadata.clone(),
+        blocks.clone(),
+        format!("provider-matrix-sdk-{label}-first"),
+    )
+    .await?;
+    exercise_sdk(first).await?;
 
-async fn exercise_chunked<M, B>(metadata: M, blocks: B, owner: &str) -> MatrixResult<Vec<BlockId>>
-where
-    M: MetadataStore + Clone + 'static,
-    B: BlockStore + Clone + 'static,
-{
-    let filesystem = ChunkedFs::open(
+    let reopened = open_sdk_split(
         metadata,
         blocks,
-        ChunkedOptions::fixed(owner, CHUNK_SIZE).map_err(fs_code)?,
+        format!("provider-matrix-sdk-{label}-reopened"),
     )
-    .await
-    .map_err(fs_code)?;
-
+    .await?;
+    let view = Loopback::from_arc(reopened.driver());
     let result = async {
-        let loopback = Loopback::new(filesystem.clone());
-        loopback
-            .mkdir(
-                "/provider-matrix",
-                MkdirOptions {
-                    recursive: true,
-                    mode: Some(0o755),
-                },
-            )
-            .await
-            .map_err(fs_code)?;
-        loopback
-            .write_file("/provider-matrix/value", PAYLOAD)
-            .await
-            .map_err(fs_code)?;
-        let actual = loopback
+        let actual = view
             .read_file("/provider-matrix/value")
             .await
             .map_err(fs_code)?;
         if actual != PAYLOAD {
-            return Err("readback-mismatch".to_owned());
+            return Err("reopen-readback-mismatch".to_owned());
         }
-        let stat = loopback
-            .stat("/provider-matrix/value")
-            .await
-            .map_err(fs_code)?;
+        let stat = view.stat("/provider-matrix/value").await.map_err(fs_code)?;
         if stat.size != PAYLOAD.len() as u64 {
-            return Err("size-mismatch".to_owned());
+            return Err("reopen-size-mismatch".to_owned());
         }
-        loopback.syncfs().await.map_err(fs_code)?;
-
-        let loaded = filesystem.metadata_store().load().await.map_err(fs_code)?;
-        loaded.validate().map_err(fs_code)?;
-        let namespace = loaded
-            .namespace
-            .as_ref()
-            .ok_or_else(|| "metadata-not-published".to_owned())?;
-        Ok(block_ids(namespace))
+        view.syncfs().await.map_err(fs_code)
     }
     .await;
-
-    let shutdown = filesystem.shutdown().await.map_err(fs_code);
+    let shutdown = reopened.shutdown().await.map_err(fs_code);
     match (result, shutdown) {
-        (Ok(ids), Ok(())) => Ok(ids),
+        (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(format!("shutdown-{error}")),
-        (Err(error), Err(shutdown_error)) => Err(format!("{error};shutdown-{shutdown_error}")),
-    }
-}
-
-/// Track exactly the blocks created by this run so a live R2 row can clean up
-/// without listing or deleting anything outside its owned prefix.
-#[derive(Clone)]
-struct TrackedR2Blocks {
-    inner: R2BlockStore,
-    object_store: Arc<dyn ObjectStore>,
-    prefix: String,
-    created: Arc<Mutex<BTreeSet<String>>>,
-}
-
-impl TrackedR2Blocks {
-    fn new(config: &R2Config, prefix: String) -> MatrixResult<Self> {
-        let object_store = config.build_store().map_err(fs_code)?;
-        let inner =
-            R2BlockStore::new(object_store.clone(), prefix.clone(), true).map_err(fs_code)?;
-        Ok(Self {
-            inner,
-            object_store,
-            prefix,
-            created: Arc::new(Mutex::new(BTreeSet::new())),
-        })
-    }
-
-    async fn cleanup(&self) -> MatrixResult<()> {
-        let keys = self
-            .created
-            .lock()
-            .map_err(|_| "r2-tracker-lock".to_owned())?
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            match self.object_store.delete(&ObjectPath::from(key)).await {
-                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                Err(_) => return Err("r2-cleanup-delete".to_owned()),
-            }
+        (Ok(()), Err(error)) => Err(format!("reopen-shutdown-{error}")),
+        (Err(error), Err(shutdown_error)) => {
+            Err(format!("{error};reopen-shutdown-{shutdown_error}"))
         }
-        let remaining = self
-            .object_store
-            .list_with_delimiter(Some(&ObjectPath::from(self.prefix.clone())))
-            .await
-            .map_err(|_| "r2-cleanup-list".to_owned())?;
-        if !remaining.objects.is_empty() || !remaining.common_prefixes.is_empty() {
-            return Err("r2-cleanup-incomplete".to_owned());
-        }
-        Ok(())
-    }
-
-    fn track(&self, id: &BlockId) -> MatrixResult<()> {
-        self.created
-            .lock()
-            .map_err(|_| "r2-tracker-lock".to_owned())?
-            .insert(format!("{}/{}", self.prefix, id.0));
-        Ok(())
     }
 }
 
-#[async_trait]
-impl BlockStore for TrackedR2Blocks {
-    fn durable(&self) -> bool {
-        self.inner.durable()
-    }
-
-    async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<BlockId> {
-        let id = self.inner.put(bytes).await?;
-        self.track(&id).map_err(FsError::backend)?;
-        Ok(id)
-    }
-
-    async fn get(&self, id: &BlockId) -> mount_rs_core::Result<Vec<u8>> {
-        self.inner.get(id).await
-    }
-
-    async fn flush(&self) -> mount_rs_core::Result<()> {
-        self.inner.flush().await
-    }
-
-    async fn delete(&self, id: &BlockId) -> mount_rs_core::Result<()> {
-        let result = self.inner.delete(id).await;
-        if result.is_ok()
-            && let Ok(mut created) = self.created.lock()
-        {
-            created.remove(&format!("{}/{}", self.prefix, id.0));
-        }
-        result
+fn r2_blocks_config(config: &R2Config, prefix: String) -> StoreConfig {
+    StoreConfig::R2 {
+        endpoint: config.endpoint.clone(),
+        bucket: config.bucket.clone(),
+        prefix,
+        access_key_id: config.access_key_id.clone(),
+        secret_access_key: config.secret_access_key.clone(),
+        durable: true,
     }
 }
 
-async fn run_r2_with_metadata<M>(metadata: M, config: &R2Config, label: &str) -> MatrixResult<()>
-where
-    M: MetadataStore + Clone + 'static,
-{
+async fn list_r2_prefix(
+    config: &R2Config,
+    prefix: &str,
+) -> MatrixResult<(std::sync::Arc<dyn ObjectStore>, BTreeSet<String>)> {
+    let object_store = config.build_store().map_err(fs_code)?;
+    let listing = object_store
+        .list_with_delimiter(Some(&ObjectPath::from(prefix.to_owned())))
+        .await
+        .map_err(|_| "r2-cleanup-list".to_owned())?;
+    if !listing.common_prefixes.is_empty() {
+        return Err("r2-cleanup-unexpected-nested-prefix".to_owned());
+    }
+    let owned_prefix = format!("{prefix}/");
+    let mut keys = BTreeSet::new();
+    for object in listing.objects {
+        let key = object.location.to_string();
+        if !key.starts_with(&owned_prefix) {
+            return Err("r2-cleanup-scope".to_owned());
+        }
+        keys.insert(key);
+    }
+    Ok((object_store, keys))
+}
+
+async fn cleanup_r2_prefix(
+    config: &R2Config,
+    prefix: &str,
+    protected: &BTreeSet<String>,
+) -> MatrixResult<()> {
+    let (object_store, keys) = list_r2_prefix(config, prefix).await?;
+    for key in keys {
+        if protected.contains(&key) {
+            continue;
+        }
+        match object_store.delete(&ObjectPath::from(key)).await {
+            Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+            Err(_) => return Err("r2-cleanup-delete".to_owned()),
+        }
+    }
+    let (_, remaining) = list_r2_prefix(config, prefix).await?;
+    if remaining.into_iter().any(|key| !protected.contains(&key)) {
+        return Err("r2-cleanup-incomplete".to_owned());
+    }
+    Ok(())
+}
+
+async fn run_r2_with_metadata(
+    metadata: StoreConfig,
+    config: &R2Config,
+    label: &str,
+) -> MatrixResult<()> {
     let prefix = format!("mount-rs-provider-matrix/{}/{label}", safe_run_id());
-    let blocks = TrackedR2Blocks::new(config, prefix)?;
-    let result = exercise_chunked(
+    let (_, protected) = list_r2_prefix(config, &prefix).await?;
+    let result = exercise_sdk_split_reopen(
         metadata,
-        blocks.clone(),
-        &format!("provider-matrix-{label}"),
+        r2_blocks_config(config, prefix.clone()),
+        &format!("{label}-reopen"),
     )
-    .await
-    .map(|_| ());
-    let cleanup = blocks.cleanup().await;
+    .await;
+    let cleanup = cleanup_r2_prefix(config, &prefix, &protected).await;
     match (result, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(error), Ok(())) => Err(error),
@@ -296,47 +235,44 @@ where
 }
 
 async fn run_pglite(url: &str, with_r2: bool, config: Option<&R2Config>) -> MatrixResult<()> {
-    let key = format!("mount-rs-provider-matrix/{}/pglite", safe_run_id());
-    let options = PgliteStorageOptions::new(key).with_durable(false);
-    let metadata = PgliteMetadataStore::connect_with_options(url, options.clone())
-        .await
-        .map_err(fs_code)?;
-
+    let volume_suffix = if with_r2 { "-r2" } else { "" };
+    let key = format!(
+        "mount-rs-provider-matrix/{}/pglite{volume_suffix}",
+        safe_run_id()
+    );
+    let metadata = StoreConfig::Pglite {
+        connection: url.to_owned(),
+        volume_key: key.clone(),
+        durable: false,
+    };
     if with_r2 {
         let config = config.ok_or_else(|| "r2-config-not-provided".to_owned())?;
         let prefix = format!("mount-rs-provider-matrix/{}/pglite-r2", safe_run_id());
-        let blocks = TrackedR2Blocks::new(config, prefix)?;
-        let result = exercise_chunked(
-            metadata.clone(),
-            blocks.clone(),
-            "provider-matrix-pglite-r2",
+        let (_, protected) = list_r2_prefix(config, &prefix).await?;
+        let result = exercise_sdk_split_reopen(
+            metadata,
+            r2_blocks_config(config, prefix.clone()),
+            "provider-matrix-pglite-r2-reopen",
         )
-        .await
-        .map(|_| ());
-        let close = metadata.close().await.map_err(fs_code);
-        let cleanup = blocks.cleanup().await;
-        return match (result, close, cleanup) {
-            (Ok(()), Ok(()), Ok(())) => Ok(()),
-            (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
+        .await;
+        let cleanup = cleanup_r2_prefix(config, &prefix, &protected).await;
+        return match (result, cleanup) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Err(error), Err(cleanup_error)) => Err(format!("{error};{cleanup_error}")),
         };
     }
-
-    let blocks = PgliteBlockStore::connect_with_options(url, options)
-        .await
-        .map_err(fs_code)?;
-    let result = exercise_chunked(
-        metadata.clone(),
-        blocks.clone(),
-        "provider-matrix-pglite-pglite",
+    exercise_sdk_split_reopen(
+        metadata,
+        StoreConfig::Pglite {
+            connection: url.to_owned(),
+            volume_key: key,
+            durable: false,
+        },
+        "provider-matrix-pglite-pglite-reopen",
     )
     .await
-    .map(|_| ());
-    let close_metadata = metadata.close().await.map_err(fs_code);
-    let close_blocks = blocks.close().await.map_err(fs_code);
-    match (result, close_metadata, close_blocks) {
-        (Ok(()), Ok(()), Ok(())) => Ok(()),
-        (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => Err(error),
-    }
 }
 
 struct Report {
@@ -426,14 +362,20 @@ async fn main() {
             report
                 .case(
                     "memory/r2",
-                    run_r2_with_metadata(MemoryMetadataStore::new(), config, "memory-r2"),
+                    run_r2_with_metadata(StoreConfig::Memory, config, "memory-r2"),
                 )
                 .await;
             report
-                .case("sqlite/r2", async {
-                    let metadata = SqliteMetadataStore::in_memory().map_err(fs_code)?;
-                    run_r2_with_metadata(metadata, config, "sqlite-r2").await
-                })
+                .case(
+                    "sqlite/r2",
+                    run_r2_with_metadata(
+                        StoreConfig::Sqlite {
+                            path: ":memory:".into(),
+                        },
+                        config,
+                        "sqlite-r2",
+                    ),
+                )
                 .await;
         } else {
             report.fail += 2;
