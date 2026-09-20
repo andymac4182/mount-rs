@@ -6,6 +6,9 @@
 
 import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createChunkedDriver, Filesystem } from "../../integrations/mount-rs-napi/index.js";
 
 const PAYLOAD = Buffer.from([
@@ -17,6 +20,10 @@ const R2_REQUIRED = [
   "R2_ACCESS_KEY_ID",
   "R2_SECRET_ACCESS_KEY",
 ];
+const SEEDED_PAYLOAD = Buffer.from("seeded\0cross-backend-payload");
+const SEEDED_PATCH = Buffer.from("R2!");
+const SEEDED_PATCH_OFFSET = 7;
+const SEEDED_FINAL_LENGTH = 20;
 
 function safeRunId() {
   const configured = process.env.MOUNT_RS_PROVIDER_MATRIX_RUN_ID ?? "";
@@ -34,6 +41,39 @@ async function exercise(filesystem) {
   await filesystem.writeFile("/provider-matrix/value", PAYLOAD);
   assert.deepEqual(Buffer.from(await filesystem.readFile("/provider-matrix/value")), PAYLOAD);
   assert.equal((await filesystem.stat("/provider-matrix/value")).size, PAYLOAD.length);
+}
+
+function seededExpected() {
+  const expected = Buffer.from(SEEDED_PAYLOAD);
+  SEEDED_PATCH.copy(expected, SEEDED_PATCH_OFFSET);
+  return expected.subarray(0, SEEDED_FINAL_LENGTH);
+}
+
+async function exerciseSeeded(filesystem) {
+  await filesystem.mkdir("/provider-matrix", { recursive: true, mode: 0o755 });
+  await filesystem.writeFile("/provider-matrix/seeded", SEEDED_PAYLOAD);
+  const handle = await filesystem.open("/provider-matrix/seeded", "r+");
+  try {
+    const result = await handle.write(
+      SEEDED_PATCH,
+      0,
+      SEEDED_PATCH.length,
+      SEEDED_PATCH_OFFSET,
+    );
+    assert.equal(result.bytesWritten, SEEDED_PATCH.length);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await filesystem.truncate("/provider-matrix/seeded", SEEDED_FINAL_LENGTH);
+  assert.deepEqual(
+    Buffer.from(await filesystem.readFile("/provider-matrix/seeded")),
+    seededExpected(),
+  );
+  assert.equal(
+    (await filesystem.stat("/provider-matrix/seeded")).size,
+    SEEDED_FINAL_LENGTH,
+  );
 }
 
 const failures = [];
@@ -66,21 +106,32 @@ async function runCase(label, factory, cleanup = async () => {}) {
   }
 }
 
-async function runReopenCase(label, firstFactory, reopenedFactory, cleanup = async () => {}) {
+async function runReopenCase(
+  label,
+  firstFactory,
+  reopenedFactory,
+  cleanup = async () => {},
+  exerciseFunction = exercise,
+  expectedPayload = PAYLOAD,
+  expectedPath = "/provider-matrix/value",
+) {
   let first;
   let reopened;
   let failure;
   try {
     first = await firstFactory();
-    await exercise(first);
+    await exerciseFunction(first);
     await first.shutdown();
     first = undefined;
 
     reopened = await reopenedFactory();
-    assert.deepEqual(Buffer.from(await reopened.readFile("/provider-matrix/value")), PAYLOAD);
+    assert.deepEqual(
+      Buffer.from(await reopened.readFile(expectedPath)),
+      expectedPayload,
+    );
     assert.equal(
-      (await reopened.stat("/provider-matrix/value")).size,
-      PAYLOAD.length,
+      (await reopened.stat(expectedPath)).size,
+      expectedPayload.length,
     );
   } catch (error) {
     failure = error;
@@ -208,6 +259,33 @@ await runCase("chunked-sqlite/sqlite", () =>
     chunkSize: 7,
     owner: "provider-matrix-node-sqlite",
   }),
+);
+
+const seededSqliteDirectory = await mkdtemp(
+  join(tmpdir(), "mount-rs-provider-matrix-node-seeded-"),
+);
+const seededSqliteMetadata = join(seededSqliteDirectory, "metadata.sqlite");
+const seededSqliteBlocks = join(seededSqliteDirectory, "blocks.sqlite");
+await runReopenCase(
+  "chunked-sqlite/sqlite-seeded-reopen",
+  () =>
+    createChunkedDriver({
+      metadata: { kind: "sqlite", uri: seededSqliteMetadata },
+      blocks: { kind: "sqlite", uri: seededSqliteBlocks },
+      chunkSize: 7,
+      owner: "provider-matrix-node-sqlite-seeded-first",
+    }),
+  () =>
+    createChunkedDriver({
+      metadata: { kind: "sqlite", uri: seededSqliteMetadata },
+      blocks: { kind: "sqlite", uri: seededSqliteBlocks },
+      chunkSize: 7,
+      owner: "provider-matrix-node-sqlite-seeded-reopened",
+    }),
+  () => rm(seededSqliteDirectory, { recursive: true, force: true }),
+  exerciseSeeded,
+  seededExpected(),
+  "/provider-matrix/seeded",
 );
 
 const pgliteUrl = process.env.PGLITE_DATABASE_URL;
