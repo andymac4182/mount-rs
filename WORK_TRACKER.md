@@ -280,6 +280,16 @@ configuration-driven PGlite gate. Focused versioning/VFS tests, locked
 compilation, formatting, Clippy and script checks passed; hosted reconnect
 acceptance remains open.
 
+The provider packets subsequently published on the current remote are W08
+TiDB/RustFS hardening (rebased local tip `6327857`, published through
+`bbe8ebb`), W07 FoundationDB/RustFS restart-gate hardening (rebased local tip
+`629c2f6`, published through `ffd06bf`) and W30 observability (published at
+`6ce8228`). W26's nine-file Ozone packet remains byte-for-byte present in the
+current branch at its verified `a936eba` content. W08 and W07 service runs
+remain explicitly blocked by unavailable Docker/libfdb runtime prerequisites;
+W30 collector-backed export, overhead benchmarking and cross-platform
+qualification remain open.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -764,7 +774,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
-  restart, root-registration or hosted-composition boundaries above.
+  restart, root-registration or hosted-composition boundaries above. The
+  published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
+  fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
+  handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
 
 ## W08 — TiDB
 
@@ -779,6 +792,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   constitute TiDB verification.
 - [ ] W08.3 Verify provider time/fencing, ambiguous commits, concurrency and
   deployment durability assumptions. Liveness queries are not fsync evidence.
+  The published `6327857` packet adds provider-clock fencing races, concurrent
+  RustFS publication, ambiguous-commit failure injection and durable-harness
+  capacity/restart markers; its real TiDB/RustFS lane remains blocked by the
+  unavailable Docker daemon, so no service result is counted.
 - [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
 - [x] W08.5 **TiDB metadata + RustFS S3 chunks:** the real single-node v8.5.7
   TiDB service and pinned loopback RustFS endpoint passed the mixed-provider
