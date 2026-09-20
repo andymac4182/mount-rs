@@ -115,3 +115,29 @@ async fn mounted_memory_sqlite_and_object_store_match_and_persist() {
         [0, 255, 1, 127]
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Linux FUSE and a real PGlite socket server"]
+async fn mounted_pglite_persists_through_connection_reopen() {
+    assert_eq!(
+        std::env::var("MOUNT_RS_RUN_NATIVE_FUSE").as_deref(),
+        Ok("1")
+    );
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let key = format!("native-pglite-{}", std::process::id());
+    mounted_round_trip(Arc::new(
+        mount_rs_pglite::connect_pglite_with_key(&url, &key)
+            .await
+            .unwrap(),
+    ))
+    .await;
+    let reopened = Loopback::new(
+        mount_rs_pglite::connect_pglite_with_key(&url, &key)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        reopened.read_file("/alias").await.unwrap(),
+        [0, 255, 1, 127]
+    );
+}

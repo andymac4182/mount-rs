@@ -29,7 +29,19 @@ jobs:
       - name: Verify mounted memory and persisted backend operations
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
-        run: timeout 180s cargo test --locked -p mount-rs-core --test native_fuse_backends -- --ignored --nocapture
+        run: timeout 180s cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_memory_sqlite_and_object_store_match_and_persist -- --ignored --nocapture
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - run: pnpm --dir tests/pglite install --frozen-lockfile
+      - name: Verify real PGlite through mounted kernel operations
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+          MOUNT_RS_PGLITE_TEST_SCOPE: native-fuse
+        run: timeout 180s ./scripts/test-pglite.sh
 
   rust:
     strategy:
