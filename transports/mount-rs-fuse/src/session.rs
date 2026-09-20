@@ -2,11 +2,17 @@
 //! lifecycle are separate and remain under implementation.
 use crate::{
     Request,
-    constants::{FUSE_KERNEL_MINOR_VERSION, FUSE_READLINK, FUSE_SETXATTR_EXT, FUSE_STATFS},
+    constants::{
+        FUSE_BATCH_FORGET, FUSE_FORGET, FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION,
+        FUSE_NOTIFY_REPLY, FUSE_READLINK, FUSE_SETXATTR_EXT, FUSE_STATFS,
+    },
     error_reply,
     inodes::InodeTable,
     open_flags,
-    protocol::{FuseKstatfs, FuseReadlinkOut, FuseReplyBody, ProtocolContext},
+    protocol::{
+        FuseKstatfs, FuseReadlinkOut, FuseReplyBody, FuseRequestBody, ProtocolContext,
+        decode_request_body,
+    },
 };
 use mount_rs_core::{ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Result, Stats};
 use std::{collections::HashMap, sync::Arc};
@@ -60,10 +66,27 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         15 | 28 | 44 => Some(40),
         18 | 25 | 29 => Some(24),
         20 | 30 => Some(16),
+        FUSE_INTERRUPT => Some(8),
         _ => None,
     };
     if exact.is_some_and(|size| body.len() != size) {
         return Err(FsError::new(ErrorCode::Einval));
+    }
+    if opcode == FUSE_BATCH_FORGET {
+        if body.len() < 8 {
+            return Err(FsError::new(ErrorCode::Einval));
+        }
+        let count =
+            usize::try_from(u32_at(body, 0)?).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let entries = count
+            .checked_mul(16)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let expected = 8usize
+            .checked_add(entries)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        if body.len() != expected {
+            return Err(FsError::new(ErrorCode::Einval));
+        }
     }
     if opcode == 16 && (body.len() < 40 || body.len() - 40 != u32_at(body, 16)? as usize) {
         return Err(FsError::new(ErrorCode::Einval));
@@ -252,34 +275,39 @@ impl FuseSession {
             destroyed: false,
         }
     }
-    /// Returns no frame for FORGET. Malformed frames with no readable header
-    /// cannot be assigned a request ID and return a protocol error.
+    /// Returns no frame for FORGET and BATCH_FORGET. Malformed no-reply frames
+    /// return a protocol error before changing inode state.
     pub async fn handle(
         &mut self,
         bytes: &[u8],
     ) -> std::result::Result<Option<Vec<u8>>, crate::ProtocolError> {
         let request = Request::decode(bytes, self.max_request)?;
-        if request.header.unique == 0 || request.header.opcode == 41 {
-            return Ok(None);
-        }
-        if request.header.opcode == 2 {
-            if request.body.len() == 8 {
-                self.inodes
-                    .forget(request.header.nodeid, u64_at(request.body, 0).unwrap());
-            }
-            return Ok(None);
-        }
-        if request.header.opcode == 42 {
-            if let Ok(count) = u32_at(request.body, 0)
-                && request.body.len() >= 8
-                && (request.body.len() - 8) / 16 == count as usize
-                && (request.body.len() - 8).is_multiple_of(16)
-            {
-                for entry in request.body[8..].chunks_exact(16) {
-                    self.inodes
-                        .forget(u64_at(entry, 0).unwrap(), u64_at(entry, 8).unwrap());
+        if matches!(request.header.opcode, FUSE_FORGET | FUSE_BATCH_FORGET) {
+            // These opcodes are explicitly no-reply operations. A malformed
+            // frame cannot be answered without violating that contract, so
+            // reject it before applying a partial or guessed forget list.
+            validate_body(request.header.opcode, request.body).map_err(|error| {
+                crate::ProtocolError::new(format!(
+                    "{} body validation failed: {}",
+                    crate::constants::opcode_name(request.header.opcode),
+                    error.code.as_str()
+                ))
+            })?;
+            let decoded = decode_request_body(request.header.opcode, request.body, None)?;
+            match decoded {
+                FuseRequestBody::Forget(value) => {
+                    self.inodes.forget(request.header.nodeid, value.nlookup);
                 }
+                FuseRequestBody::BatchForget(value) => {
+                    for forget in value.forgets {
+                        self.inodes.forget(forget.nodeid, forget.nlookup);
+                    }
+                }
+                _ => unreachable!("no-reply forget opcode decoded to another body"),
             }
+            return Ok(None);
+        }
+        if request.header.unique == 0 || request.header.opcode == FUSE_NOTIFY_REPLY {
             return Ok(None);
         }
         if let Err(error) = validate_body(request.header.opcode, request.body) {
@@ -630,6 +658,16 @@ impl FuseSession {
                 };
                 check_access(&stats, r.header.uid, r.header.gid, u32_at(r.body, 0)?)?;
                 Ok(vec![])
+            }
+            FUSE_INTERRUPT => {
+                let target_unique = u64_at(r.body, 0)?;
+                // This request pump is deliberately serial and has no
+                // in-flight registry. Never guess which operation an
+                // interrupt refers to or cancel a reused unique ID. FUSE
+                // permits EAGAIN when the original request cannot be found.
+                Err(FsError::new(ErrorCode::Eagain).with_message(format!(
+                    "FUSE_INTERRUPT target {target_unique} is not safely cancellable"
+                )))
             }
             20 => {
                 let handle = self
