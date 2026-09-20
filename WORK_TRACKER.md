@@ -395,6 +395,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `READDIRPLUS` body codec, including legacy/default layouts, integer coercion,
   truncation, padding and missing-entry errors. FUSE session and native-mount
   surfaces remain open.
+- [x] The next disjoint W01 packets are also integrated: `750484d` adds 11
+  oracle-classified Unstorage edge rows with zero skips; `26427f8` adds a
+  72-step core handle/lifecycle trace with 63 successes, 9 expected errors and
+  zero mismatches; and `8eac5cb` exposes the N-API FUSE `READ` request/raw-reply
+  codec with protocol 7.41/7.8 differential and malformed-input coverage.
+  The combined N-API suite passed; native FUSE session/device/mount and the
+  remaining capability-limited rows remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -1120,6 +1127,9 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `8eac5cb` (published as `67f8b08`) | Public napi-rs FUSE `READ` request/raw-reply codecs | Protocol 7.41/7.8 pinned differential, malformed/truncated checks, declarations, distribution and full N-API suite passed; native FUSE session/device/mount remains open |
+| `26427f8` (published as `2c141d5`) | Core handle and lifecycle parity packet | 72-step pinned-oracle trace passed with 63 successes, 9 expected errors, zero mismatches; cross-provider, transport and native lifecycle remain open |
+| `750484d` (published as `e510bfb`) | Remaining Unstorage edge classifications | 11 edge rows passed with 11 explicit ENOSYS classifications and zero skips; hardlinks, symlinks, statfs and special nodes remain intentionally unsupported |
 | `e64d161` | Public napi-rs FUSE `WRITE` request/reply body codecs | Rebuilt N-API package, malformed-input and pinned mountx differential tests passed; full oracle-enabled N-API suite and distribution checks passed. Existing unrelated strict-Clippy `js_driver.rs` type-complexity lint remains. |
 | `8d52d3c` (published as `6ec7b4d`) | Unstorage special-node capability classification | FIFO, socket, character-device and block-device operations are explicitly classified as unsupported; 13-row capability parity passed with 12 oracle-classified unsupported rows and zero skips. |
 | `6b9258e` (published as `5f1ec1a`) | Locked Cargo resolution for all N-API CI builds | YAML, shell, local locked release-build checks passed; hosted CI run `35528165152` was created but remains queued and is not acceptance evidence until it completes. |
