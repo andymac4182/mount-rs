@@ -984,6 +984,73 @@ fn fsync_in(value: NativeFuseFsyncIn) -> protocol::FuseFsyncIn {
 }
 
 #[napi(object)]
+pub struct NativeFuseSetxattrIn {
+    pub flags: u32,
+    #[napi(js_name = "setxattrFlags")]
+    pub setxattr_flags: u32,
+    pub name: String,
+    #[napi(ts_type = "Uint8Array")]
+    pub value: Buffer,
+}
+
+impl From<protocol::FuseSetxattrIn> for NativeFuseSetxattrIn {
+    fn from(value: protocol::FuseSetxattrIn) -> Self {
+        Self {
+            flags: value.flags,
+            setxattr_flags: value.setxattr_flags,
+            name: value.name,
+            value: Buffer::from(value.value),
+        }
+    }
+}
+
+fn setxattr_in(value: NativeFuseSetxattrIn) -> protocol::FuseSetxattrIn {
+    protocol::FuseSetxattrIn {
+        flags: value.flags,
+        setxattr_flags: value.setxattr_flags,
+        name: value.name,
+        value: value.value.as_ref().to_vec(),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseGetxattrIn {
+    pub size: u32,
+    pub name: String,
+}
+
+impl From<protocol::FuseGetxattrIn> for NativeFuseGetxattrIn {
+    fn from(value: protocol::FuseGetxattrIn) -> Self {
+        Self {
+            size: value.size,
+            name: value.name,
+        }
+    }
+}
+
+fn getxattr_in(value: NativeFuseGetxattrIn) -> protocol::FuseGetxattrIn {
+    protocol::FuseGetxattrIn {
+        size: value.size,
+        name: value.name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseListxattrIn {
+    pub size: u32,
+}
+
+impl From<protocol::FuseListxattrIn> for NativeFuseListxattrIn {
+    fn from(value: protocol::FuseListxattrIn) -> Self {
+        Self { size: value.size }
+    }
+}
+
+fn listxattr_in(value: NativeFuseListxattrIn) -> protocol::FuseListxattrIn {
+    protocol::FuseListxattrIn { size: value.size }
+}
+
+#[napi(object)]
 pub struct NativeFuseReadIn {
     pub fh: BigInt,
     pub offset: BigInt,
@@ -1754,6 +1821,138 @@ pub fn fuse_encode_fsync_in(value: NativeFuseFsyncIn) -> napi::Result<Buffer> {
         mount_rs_fuse::FUSE_FSYNC,
         &protocol::FuseRequestBody::Fsync(fsync_in(value)),
         None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeSetxattrIn")]
+pub fn fuse_decode_setxattr_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseSetxattrIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_SETXATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Setxattr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_SETXATTR did not decode as a setxattr request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeSetxattrIn")]
+pub fn fuse_encode_setxattr_in(
+    value: NativeFuseSetxattrIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_SETXATTR,
+        &protocol::FuseRequestBody::Setxattr(setxattr_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeGetxattrIn")]
+pub fn fuse_decode_getxattr_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseGetxattrIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_GETXATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Getxattr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_GETXATTR did not decode as a getxattr request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeGetxattrIn")]
+pub fn fuse_encode_getxattr_in(
+    value: NativeFuseGetxattrIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_GETXATTR,
+        &protocol::FuseRequestBody::Getxattr(getxattr_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeListxattrIn")]
+pub fn fuse_decode_listxattr_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseListxattrIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_LISTXATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Listxattr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_LISTXATTR did not decode as a listxattr request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeListxattrIn")]
+pub fn fuse_encode_listxattr_in(
+    value: NativeFuseListxattrIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_LISTXATTR,
+        &protocol::FuseRequestBody::Listxattr(listxattr_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeRemovexattrIn")]
+pub fn fuse_decode_removexattr_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseNameIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_REMOVEXATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Name(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_REMOVEXATTR did not decode as a removexattr request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeRemovexattrIn")]
+pub fn fuse_encode_removexattr_in(
+    value: NativeFuseNameIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_REMOVEXATTR,
+        &protocol::FuseRequestBody::Name(name_in(value)),
+        protocol_context(context),
     )
     .map(Buffer::from)
     .map_err(protocol_error)
