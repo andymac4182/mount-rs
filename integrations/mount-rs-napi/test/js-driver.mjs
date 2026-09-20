@@ -88,8 +88,9 @@ async function exercise(fs, label) {
     .map((entry) => {
       const view = entryView(entry)
       assert.equal(typeof view.parentPath, "string", `${label}: dirent parentPath type`)
+      const parentPath = view.parentPath.replaceAll("\\", "/")
       assert.ok(
-        view.parentPath === directory || view.parentPath.endsWith(directory),
+        parentPath === directory || parentPath.endsWith(directory),
         `${label}: dirent parentPath ${view.parentPath}`,
       )
       return { ...view, parentPath: directory.slice(root.length) }
