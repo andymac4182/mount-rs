@@ -584,6 +584,10 @@ export declare function packDirents(entries: Iterable<NativeFuseDirent>, maxSize
 
 export declare function unpackDirents(body: Uint8Array): Array<NativeFuseDirent>
 
+export declare function packDirentsPlus(entries: Iterable<NativeFuseDirentPlus>, maxSize: number, context?: NativeFuseProtocolContext | undefined | null): { buffer: Buffer; packed: number }
+
+export declare function unpackDirentsPlus(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): Array<NativeFuseDirentPlus>
+
 export declare function isFsError(error: unknown, code?: string | undefined | null): error is FsError
 
 export declare function isNormalizedPath(path: string): boolean
@@ -873,6 +877,11 @@ export interface NativeFuseDirent {
   off: bigint
   type: number
   name: string
+}
+
+export interface NativeFuseDirentPlus {
+  entry: NativeFuseEntryOut
+  dirent: NativeFuseDirent
 }
 
 export interface NativeFuseKstatfs {
