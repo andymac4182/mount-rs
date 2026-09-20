@@ -213,6 +213,14 @@ The newest CI and fault-injection runs for `83466d7` are queued, not green
 evidence. These packets further reduce W01 but do not close W01 or establish a
 privileged native FUSE mount, FSKit activation, live R2, or hosted Windows run.
 
+Fresh macOS demo evidence on this checkout: `bash scripts/demo-end-to-end.sh`
+exited 0 after building the Rust CLI. The CLI mounted the local HostFs through
+native NFS; an independent Rust process wrote/read `rust-process.txt`, an
+independent Node `fs/promises` process wrote/read `javascript-process.txt`, a
+second Rust process verified the JavaScript bytes, and the CLI unmounted cleanly
+with the bytes still present in the host-backed directory. This is a real
+single-host NFS mount demonstration, not FUSE/FSKit or a remote-provider result.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
