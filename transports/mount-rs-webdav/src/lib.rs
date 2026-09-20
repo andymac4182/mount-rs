@@ -44,4 +44,6 @@ pub use server::{
     DEFAULT_DRAIN_TIMEOUT, WebdavBindError, WebdavServer, WebdavServerError, WebdavServerOptions,
     bind_refusal, create_webdav_server, is_loopback_host,
 };
-pub use session::{WebdavCredentials, WebdavSession, WebdavSessionOptions, WebdavSessionStats};
+pub use session::{
+    WebdavCredentials, WebdavRequestBody, WebdavSession, WebdavSessionOptions, WebdavSessionStats,
+};

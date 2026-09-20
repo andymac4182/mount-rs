@@ -2,13 +2,15 @@ use std::sync::Arc;
 
 use mount_rs_core::MemoryFs;
 use mount_rs_webdav::protocol::{
-    collect_body, href_of, parse_depth, parse_destination, parse_lock_token, parse_overwrite,
-    parse_target_path, parse_xml, status_of_error,
+    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_token,
+    parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
 };
 use mount_rs_webdav::{
     DavFault, Depth, WebdavRequestHead, WebdavServer, WebdavServerOptions, WebdavSessionOptions,
     create_webdav_server,
 };
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 fn method(name: &str) -> reqwest::Method {
     reqwest::Method::from_bytes(name.as_bytes()).expect("valid HTTP method")
@@ -19,6 +21,46 @@ async fn server() -> WebdavServer {
     let server = create_webdav_server(fs, WebdavServerOptions::default()).expect("loopback bind");
     server.listen().await.expect("listen");
     server
+}
+
+async fn read_http_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {
+    let mut response = Vec::new();
+    let (header_end, content_length) = loop {
+        let mut chunk = [0_u8; 1024];
+        let count = stream.read(&mut chunk).await.unwrap();
+        assert_ne!(count, 0, "connection ended before the HTTP response");
+        response.extend_from_slice(&chunk[..count]);
+        let Some(header_end) = response.windows(4).position(|window| window == b"\r\n\r\n") else {
+            continue;
+        };
+        let headers = String::from_utf8_lossy(&response[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("content-length:")
+                    .or_else(|| line.strip_prefix("Content-Length:"))
+                    .and_then(|value| value.trim().parse::<usize>().ok())
+            })
+            .unwrap_or(0);
+        break (header_end, content_length);
+    };
+    let body_start = header_end + 4;
+    while response.len() < body_start + content_length {
+        let mut chunk = [0_u8; 1024];
+        let count = stream.read(&mut chunk).await.unwrap();
+        assert_ne!(count, 0, "connection ended before the HTTP body");
+        response.extend_from_slice(&chunk[..count]);
+    }
+    let status = String::from_utf8_lossy(&response[..header_end])
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .expect("HTTP status line");
+    (
+        status,
+        response[body_start..body_start + content_length].to_vec(),
+    )
 }
 
 #[tokio::test]
@@ -48,6 +90,14 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         Some(Depth::Infinity)
     );
     assert_eq!(parse_depth(Some("2"), Depth::Zero), None);
+    assert_eq!(
+        parse_range(Some("bytes=99-not-a-number"), 4),
+        RangeSpec::Full
+    );
+    assert_eq!(
+        parse_range(Some("bytes=99-101"), 4),
+        RangeSpec::Unsatisfiable
+    );
     assert_eq!(parse_overwrite(None), Some(true));
     assert_eq!(parse_overwrite(Some("f")), Some(false));
     assert_eq!(parse_overwrite(Some("yes")), None);
@@ -421,6 +471,80 @@ async fn recursive_delete_honors_submitted_member_lock_tokens() {
         .await
         .unwrap();
     assert_eq!(allowed.status(), 204);
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn chunked_put_streams_request_body_over_a_real_connection() {
+    let server = server().await;
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            b"PUT /chunked HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    // The first chunk is deliberately split across writes: the body reaches
+    // Hyper incrementally while the HTTP chunk framing remains valid.
+    stream.write_all(b"4\r\n").await.unwrap();
+    stream.write_all(b"abc").await.unwrap();
+    stream.write_all(b"d\r\n3\r\n").await.unwrap();
+    stream.write_all(b"ef").await.unwrap();
+    stream.write_all(b"g\r\n0\r\n\r\n").await.unwrap();
+    let (status, body) = read_http_response(&mut stream).await;
+    assert_eq!(status, 201);
+    assert!(body.is_empty());
+
+    stream
+        .write_all(b"GET /chunked HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let (status, body) = read_http_response(&mut stream).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, b"abcdefg");
+    drop(stream);
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn chunked_request_limit_drains_and_keeps_http11_framing() {
+    let fs = Arc::new(MemoryFs::empty());
+    let server = create_webdav_server(
+        fs,
+        WebdavServerOptions {
+            max_request_bytes: 4,
+            ..WebdavServerOptions::default()
+        },
+    )
+    .unwrap();
+    server.listen().await.unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            b"PUT /too-large-chunked HTTP/1.1\r\nHost: 127.0.0.1\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    stream
+        .write_all(b"4\r\nabcd\r\n1\r\ne\r\n0\r\n\r\n")
+        .await
+        .unwrap();
+    let (status, body) = read_http_response(&mut stream).await;
+    assert_eq!(status, 413);
+    assert!(body.is_empty());
+
+    stream
+        .write_all(b"OPTIONS * HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    let (status, body) = read_http_response(&mut stream).await;
+    assert_eq!(status, 200);
+    assert!(body.is_empty());
+    drop(stream);
     server.close().await.unwrap();
 }
 

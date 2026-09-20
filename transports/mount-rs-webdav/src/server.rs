@@ -1,15 +1,18 @@
 //! Portable HTTP/1.1 adapter for [`crate::session::WebdavSession`].
 //!
 //! This is deliberately a small Tokio/Hyper server rather than a native mount
-//! wrapper.  It binds a TCP socket on macOS and Linux, buffers each request
-//! body under an explicit limit, and hands the normalized request to the same
-//! session used by unit tests.
+//! wrapper.  It binds a TCP socket on macOS and Linux, streams `PUT` bodies
+//! through an explicit limit, buffers only bounded XML bodies, and hands the
+//! normalized request to the same session used by unit tests.
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -24,7 +27,7 @@ use tokio::sync::Notify;
 
 use crate::constants::{DEFAULT_HOST, DEFAULT_MAX_REQUEST_BYTES};
 use crate::protocol::{DavFault, WebdavError, WebdavRequestHead, WebdavResponse};
-use crate::session::{WebdavSession, WebdavSessionOptions};
+use crate::session::{WebdavRequestBody, WebdavSession, WebdavSessionOptions};
 
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -338,41 +341,91 @@ async fn handle_request(
             .insert("connection".to_owned(), "close".to_owned());
         return Ok(to_http_response(response, false));
     }
-    let body = match collect_request_body(body, max_request_bytes).await {
-        Ok(body) => body,
-        Err(error) => {
-            let mut response = crate::protocol::fault_response(&error);
-            response
-                .headers
-                .insert("connection".to_owned(), "close".to_owned());
-            return Ok(to_http_response(response, true));
-        }
-    };
     let head = WebdavRequestHead {
         method: parts.method.as_str().to_owned(),
         target: parts.uri.to_string(),
         headers,
     };
     let is_head = head.method.eq_ignore_ascii_case("HEAD");
-    let response = session.handle_request(head, body).await;
+    let body = LimitedRequestBody {
+        inner: IncomingRequestBody { body },
+        limit: max_request_bytes,
+        total: 0,
+        exceeded: false,
+    };
+    let response = session.handle_request_stream(head, body).await;
     Ok(to_http_response(response, is_head))
 }
 
-async fn collect_request_body(mut body: Incoming, limit: usize) -> Result<Vec<u8>, WebdavError> {
-    let mut result = Vec::new();
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|error| WebdavError::Body(error.to_string()))?;
-        if let Ok(data) = frame.into_data() {
-            if result.len().saturating_add(data.len()) > limit {
-                return Err(WebdavError::Fault(
-                    DavFault::new(413)
-                        .with_message("the request body exceeds the configured limit"),
-                ));
+struct IncomingRequestBody {
+    body: Incoming,
+}
+
+impl WebdavRequestBody for IncomingRequestBody {
+    fn poll_next_chunk(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, WebdavError>>> {
+        loop {
+            let this = self.as_mut().get_mut();
+            let mut frame = std::pin::pin!(this.body.frame());
+            match Future::poll(frame.as_mut(), cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => {
+                    return Poll::Ready(Some(Err(WebdavError::Body(error.to_string()))));
+                }
+                Poll::Ready(Some(Ok(frame))) => match frame.into_data() {
+                    Ok(data) => return Poll::Ready(Some(Ok(data))),
+                    Err(_trailers) => continue,
+                },
             }
-            result.extend_from_slice(&data);
         }
     }
-    Ok(result)
+}
+
+struct LimitedRequestBody<B> {
+    inner: B,
+    limit: usize,
+    total: usize,
+    exceeded: bool,
+}
+
+impl<B> WebdavRequestBody for LimitedRequestBody<B>
+where
+    B: WebdavRequestBody + Unpin,
+{
+    fn poll_next_chunk(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, WebdavError>>> {
+        loop {
+            let this = self.as_mut().get_mut();
+            if this.exceeded {
+                match Pin::new(&mut this.inner).poll_next_chunk(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Ready(Some(Ok(_))) | Poll::Ready(Some(Err(_))) => continue,
+                }
+            }
+            match Pin::new(&mut this.inner).poll_next_chunk(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok(data))) => {
+                    if this.total.saturating_add(data.len()) > this.limit {
+                        this.exceeded = true;
+                        return Poll::Ready(Some(Err(WebdavError::Fault(
+                            DavFault::new(413)
+                                .with_message("the request body exceeds the configured limit"),
+                        ))));
+                    }
+                    this.total += data.len();
+                    return Poll::Ready(Some(Ok(data)));
+                }
+            }
+        }
+    }
 }
 
 fn to_http_response(response: WebdavResponse, head: bool) -> Response<HttpBody> {

@@ -589,10 +589,10 @@ pub fn parse_range(value: Option<&str>, size: u64) -> RangeSpec {
     let Some(start) = range_number(first) else {
         return RangeSpec::Full;
     };
-    if start >= size {
-        return RangeSpec::Unsatisfiable;
-    }
     if last.trim().is_empty() {
+        if start >= size {
+            return RangeSpec::Unsatisfiable;
+        }
         return RangeSpec::Range {
             start,
             end: size - 1,
@@ -604,6 +604,9 @@ pub fn parse_range(value: Option<&str>, size: u64) -> RangeSpec {
     };
     if requested_end < start {
         return RangeSpec::Full;
+    }
+    if start >= size {
+        return RangeSpec::Unsatisfiable;
     }
     let end = requested_end.min(size - 1);
     RangeSpec::Range {

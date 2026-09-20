@@ -1,10 +1,12 @@
 //! WebDAV request/reply session over the shared `FsDriver` contract.
 
 use std::collections::{BTreeMap, HashMap};
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
+use bytes::Bytes;
 use mount_rs_core::{ErrorCode, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
@@ -24,6 +26,41 @@ use crate::protocol::{
     parse_propfind, parse_proppatch, parse_range, parse_timeout, resource_etag, status_of_error,
     submitted_tokens, supported_lock_node,
 };
+
+/// A transport-neutral stream of request-body chunks.
+///
+/// The WebDAV session consumes `PUT` bodies incrementally and only buffers the
+/// bounded XML grammars. HTTP adapters implement this trait for their native
+/// body stream; callers that already have bytes can continue using
+/// [`WebdavSession::handle_request`]. After an error, an implementation may
+/// yield more chunks while the session drains the request before replying.
+pub trait WebdavRequestBody {
+    fn poll_next_chunk(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, WebdavError>>>;
+}
+
+struct BytesRequestBody {
+    body: Option<Bytes>,
+}
+
+impl BytesRequestBody {
+    fn new(body: &[u8]) -> Self {
+        Self {
+            body: Some(Bytes::copy_from_slice(body)),
+        }
+    }
+}
+
+impl WebdavRequestBody for BytesRequestBody {
+    fn poll_next_chunk(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, WebdavError>>> {
+        Poll::Ready(self.body.take().map(Ok))
+    }
+}
 
 /// Optional server-side Basic authentication.
 #[derive(Debug, Clone)]
@@ -171,9 +208,27 @@ impl WebdavSession {
     where
         B: AsRef<[u8]> + Send,
     {
-        let body = body.as_ref();
+        self.handle_request_stream(head, BytesRequestBody::new(body.as_ref()))
+            .await
+    }
+
+    /// Answer one request from an asynchronous body stream and never reject.
+    ///
+    /// `PUT` writes each non-empty chunk before asking the transport for the
+    /// next one. XML request grammars remain bounded and buffered. Any body
+    /// left after dispatch is drained so persistent HTTP/1.1 connections stay
+    /// correctly framed.
+    pub async fn handle_request_stream<B>(
+        &self,
+        head: WebdavRequestHead,
+        mut body: B,
+    ) -> WebdavResponse
+    where
+        B: WebdavRequestBody + Send + Unpin,
+    {
         self.count_request(&head.method);
-        let result = self.dispatch(&head, body).await;
+        let result = self.dispatch_stream(&head, &mut body).await;
+        drain_body(&mut body).await;
         let mut response = match result {
             Ok(response) => response,
             Err(error) => fault_response(&error),
@@ -185,11 +240,14 @@ impl WebdavSession {
         response
     }
 
-    async fn dispatch(
+    async fn dispatch_stream<B>(
         &self,
         head: &WebdavRequestHead,
-        body: &[u8],
-    ) -> Result<WebdavResponse, WebdavError> {
+        body: &mut B,
+    ) -> Result<WebdavResponse, WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
         let method = head.method.to_ascii_uppercase();
         if let Some(response) = self.authorize(head) {
             return Ok(response);
@@ -353,13 +411,16 @@ impl WebdavSession {
         headers
     }
 
-    async fn put(
+    async fn put<B>(
         &self,
         head: &WebdavRequestHead,
         path: &str,
-        body: &[u8],
+        body: &mut B,
         guard: &Guard,
-    ) -> Result<WebdavResponse, WebdavError> {
+    ) -> Result<WebdavResponse, WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
         if head.headers.contains_key("content-range") {
             return Err(refuse(400)
                 .with_message("Content-Range is not allowed on PUT")
@@ -368,13 +429,6 @@ impl WebdavSession {
         if path == "/" {
             return Err(refuse(405).with_header("allow", ALLOW_HEADER).into());
         }
-        if let Some(limit) = self.options.max_body_bytes
-            && body.len() > limit
-        {
-            return Err(refuse(413)
-                .with_message("the PUT body exceeds its byte budget")
-                .into());
-        }
         let existing = self.stat_or_absent(path).await?;
         if existing.as_ref().is_some_and(Stats::is_directory) {
             return Err(refuse(405).with_header("allow", ALLOW_HEADER).into());
@@ -382,7 +436,7 @@ impl WebdavSession {
         self.require_collection(&parent(path)).await?;
         self.require_writable(path, guard, existing.is_none())?;
         self.check_conditionals(head, existing.as_ref())?;
-        self.write_file(path, body).await?;
+        self.write_file_stream(path, body).await?;
         let stats = self.stat_or_absent(path).await?;
         let mut headers = BTreeMap::new();
         headers.insert("content-length".to_owned(), "0".to_owned());
@@ -398,6 +452,66 @@ impl WebdavSession {
             headers,
             body: None,
         })
+    }
+
+    async fn write_file_stream<B>(&self, path: &str, body: &mut B) -> Result<(), WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
+        let cap = self.options.max_body_bytes;
+        let mut handle = None;
+        let mut written = 0_u64;
+        let result: Result<(), WebdavError> = async {
+            while let Some(chunk) = next_body_chunk(body).await {
+                let chunk = chunk?;
+                if chunk.is_empty() {
+                    continue;
+                }
+                let chunk_len = chunk.len() as u64;
+                if cap.is_some_and(|limit| {
+                    written > limit as u64 || chunk_len > (limit as u64).saturating_sub(written)
+                }) {
+                    return Err(WebdavError::from(
+                        refuse(413).with_message("the PUT body exceeds its byte budget"),
+                    ));
+                }
+                if handle.is_none() {
+                    handle = Some(self.driver.open(path, "w", 0o666).await?);
+                }
+                let file = handle.as_ref().expect("PUT handle opened above");
+                let mut offset = 0_usize;
+                while offset < chunk.len() {
+                    let position = written.checked_add(offset as u64).ok_or_else(|| {
+                        WebdavError::from(FsError::new(ErrorCode::Eio).with_syscall("write"))
+                    })?;
+                    let count = file.write(&chunk[offset..], Some(position)).await?;
+                    if count == 0 || count > chunk.len() - offset {
+                        return Err(WebdavError::from(
+                            FsError::new(ErrorCode::Eio).with_syscall("write"),
+                        ));
+                    }
+                    offset += count;
+                }
+                written = written.checked_add(chunk_len).ok_or_else(|| {
+                    WebdavError::from(FsError::new(ErrorCode::Eio).with_syscall("write"))
+                })?;
+            }
+            if handle.is_none() {
+                // An empty request still creates or truncates the resource.
+                handle = Some(self.driver.open(path, "w", 0o666).await?);
+            }
+            Ok::<(), WebdavError>(())
+        }
+        .await;
+        let close = match handle {
+            Some(handle) => handle.close().await.map_err(WebdavError::from),
+            None => Ok(()),
+        };
+        match (result, close) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
     }
 
     async fn write_file(&self, path: &str, body: &[u8]) -> Result<(), WebdavError> {
@@ -514,17 +628,16 @@ impl WebdavSession {
         })
     }
 
-    async fn mkcol(
+    async fn mkcol<B>(
         &self,
         path: &str,
-        body: &[u8],
+        body: &mut B,
         guard: &Guard,
-    ) -> Result<WebdavResponse, WebdavError> {
-        if body.len() > self.options.max_xml_bytes {
-            return Err(refuse(413)
-                .with_message("the MKCOL body exceeds its byte budget")
-                .into());
-        }
+    ) -> Result<WebdavResponse, WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
+        let body = collect_body_stream(body, self.options.max_xml_bytes).await?;
         if !body.is_empty() {
             return Err(refuse(415)
                 .with_message("this server defines no MKCOL request body")
@@ -772,13 +885,16 @@ impl WebdavSession {
             .map_err(WebdavError::from)
     }
 
-    async fn propfind(
+    async fn propfind<B>(
         &self,
         head: &WebdavRequestHead,
         path: &str,
-        body: &[u8],
+        body: &mut B,
         guard: &Guard,
-    ) -> Result<WebdavResponse, WebdavError> {
+    ) -> Result<WebdavResponse, WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
         let depth = parse_depth(
             head.headers.get("depth").map(String::as_str),
             Depth::Infinity,
@@ -789,7 +905,8 @@ impl WebdavSession {
                 .with_condition("propfind-finite-depth", Vec::new())
                 .into());
         }
-        let request = parse_propfind(body, self.options.max_xml_bytes)?;
+        let body = collect_body_stream(body, self.options.max_xml_bytes).await?;
+        let request = parse_propfind(&body, self.options.max_xml_bytes)?;
         let stats = self.stat(path).await?;
         let now = guard.now;
         let mut entries = vec![MultistatusEntry {
@@ -935,13 +1052,17 @@ impl WebdavSession {
         }))
     }
 
-    async fn proppatch(
+    async fn proppatch<B>(
         &self,
         path: &str,
-        body: &[u8],
+        body: &mut B,
         guard: &Guard,
-    ) -> Result<WebdavResponse, WebdavError> {
-        let request = parse_proppatch(body, self.options.max_xml_bytes)?;
+    ) -> Result<WebdavResponse, WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
+        let body = collect_body_stream(body, self.options.max_xml_bytes).await?;
+        let request = parse_proppatch(&body, self.options.max_xml_bytes)?;
         let stats = self.stat(path).await?;
         self.require_writable(path, guard, false)?;
         let mut outcomes = Vec::new();
@@ -1026,14 +1147,18 @@ impl WebdavSession {
         ))
     }
 
-    async fn lock(
+    async fn lock<B>(
         &self,
         head: &WebdavRequestHead,
         path: &str,
-        body: &[u8],
+        body: &mut B,
         guard: &Guard,
-    ) -> Result<WebdavResponse, WebdavError> {
-        let info = parse_lock_info(body, self.options.max_xml_bytes)?;
+    ) -> Result<WebdavResponse, WebdavError>
+    where
+        B: WebdavRequestBody + Unpin,
+    {
+        let body = collect_body_stream(body, self.options.max_xml_bytes).await?;
+        let info = parse_lock_info(&body, self.options.max_xml_bytes)?;
         let timeout = parse_timeout(head.headers.get("timeout").map(String::as_str));
         let Some(info) = info else {
             return self.refresh_lock(path, timeout, guard).await;
@@ -1418,6 +1543,37 @@ impl WebdavSession {
             .collect::<Vec<_>>();
         crate::protocol::xml_body(207, &encode_multistatus(&entries), BTreeMap::new())
     }
+}
+
+async fn next_body_chunk<B>(body: &mut B) -> Option<Result<Bytes, WebdavError>>
+where
+    B: WebdavRequestBody + Unpin,
+{
+    poll_fn(|cx| Pin::new(&mut *body).poll_next_chunk(cx)).await
+}
+
+async fn drain_body<B>(body: &mut B)
+where
+    B: WebdavRequestBody + Unpin,
+{
+    while next_body_chunk(body).await.is_some() {}
+}
+
+async fn collect_body_stream<B>(body: &mut B, limit: usize) -> Result<Vec<u8>, WebdavError>
+where
+    B: WebdavRequestBody + Unpin,
+{
+    let mut result = Vec::new();
+    while let Some(chunk) = next_body_chunk(body).await {
+        let chunk = chunk?;
+        if result.len().saturating_add(chunk.len()) > limit {
+            return Err(refuse(413)
+                .with_message(format!("the request body exceeds its {limit}-byte budget"))
+                .into());
+        }
+        result.extend_from_slice(&chunk);
+    }
+    Ok(result)
 }
 
 fn property_node(name: &DavPropertyName) -> XmlNode {

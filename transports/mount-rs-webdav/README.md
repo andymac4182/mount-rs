@@ -9,9 +9,10 @@ methods `OPTIONS`, `GET`, `HEAD`, `PUT`, `MKCOL`, `DELETE`, `COPY`, `MOVE`, and
 bounded `PROPFIND`, with RFC-style path decoding, bounded XML/request bodies,
 ETags, dates, byte ranges, recursive transfer/delete, and errno-to-HTTP mapping.
 Class-2 locking and `PROPPATCH` are implemented for the driver properties that
-the core contract can represent. Incoming requests are bounded and buffered
-before dispatch; regular-file GET responses are streamed with positional reads
-and are closed on completion or connection shutdown.
+the core contract can represent. `PUT` request bodies are consumed as bounded
+transport chunks and written incrementally; XML request bodies are bounded and
+buffered for parsing. Regular-file GET responses are streamed with positional
+reads and are closed on completion or connection shutdown.
 
 The HTTP integration tests bind an ephemeral loopback TCP socket and run as an
 ordinary user on both macOS and Linux. They are protocol tests; they do not
