@@ -4,6 +4,11 @@
 //! only test in this crate that asks the host kernel to mount NFS; the wire
 //! tests must remain runnable by an ordinary user on both supported platforms.
 
+// The cases below invoke macOS/Linux kernel mount clients. Keep their helper
+// code under the same platform boundary as the tests; portable wire tests are
+// separate and continue to compile/run on Windows.
+#![cfg(any(target_os = "linux", target_os = "macos"))]
+
 use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 #[cfg(target_os = "linux")]
