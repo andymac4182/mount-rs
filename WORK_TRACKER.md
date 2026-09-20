@@ -140,6 +140,8 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   and CLI extensions. These are active uncommitted changes.
 - [ ] W06.2 Verify the hosted RustFS CI job, not just its configuration.
 - [ ] W06.3 Add fault and benchmark workloads with reproducible service settings.
+- [ ] W06.4 Provide isolated RustFS service orchestration for W07.6 and W08.5;
+  test actual composed filesystems rather than unrelated backend smoke tests.
 
 ## W07 — FoundationDB
 
@@ -152,6 +154,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [ ] W07.4 Validate transaction/block limits, CAS, stale writers, durability,
   restart and backend identity against the real service.
 - [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+- [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** Hilbert owns real-service
+  integration, multi-chunk/boundary/partial-write/truncate round trips, namespace
+  persistence, fresh-client/service restart, CAS and stale-writer assertions.
+  Coordinate RustFS lifecycle with Hooke; no emulated acceptance.
 
 ## W08 — TiDB
 
@@ -163,6 +169,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [ ] W08.3 Verify provider time/fencing, ambiguous commits, concurrency and
   deployment durability assumptions. Liveness queries are not fsync evidence.
 - [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+- [ ] W08.5 **TiDB metadata + RustFS S3 chunks:** Arendt owns real-service
+  integration with the same mixed-provider acceptance as W07.6, using actual
+  TiDB/PD/TiKV and RustFS. Add runnable isolated orchestration and retain results.
 
 ## W09 — napi-rs, Node API and packaging
 

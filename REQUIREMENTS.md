@@ -39,6 +39,19 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 
 ### FoundationDB and TiDB backing-store acceptance
 
+Required mixed-provider integration lanes (actual services, not mocks):
+
+- TiDB metadata store + RustFS S3 immutable block store through `ChunkedFs`.
+- FoundationDB metadata store + RustFS S3 immutable block store through `ChunkedFs`.
+
+Each lane must exercise multi-chunk binary files, boundary/partial writes,
+truncate, namespace operations, fresh-client reopen and service restart,
+concurrent publication and stale-writer rejection. Verify persisted bytes and
+metadata together; independent provider tests do not satisfy this composition.
+Use isolated test resources and scoped cleanup. Explicitly invoked live lanes
+must fail when required services/configuration are missing, not silently pass.
+Record runnable harness commands and revision-matched results in the tracker.
+
 - Provide separate `mount-rs-foundationdb` and `mount-rs-tidb` integration
   crates with minimal justified dependencies; keep database clients out of
   core crates. Each exposes metadata and block stores that can be selected
