@@ -1,7 +1,8 @@
 # Workstream and task tracker
 
-Updated: 2026-09-21. Baseline: `71e826f`, plus explicitly identified uncommitted
-work below. Overall status: **in progress; not release-ready**.
+Updated: 2026-09-21. Baseline: local commit `21803fd` plus the sequentially
+published `main` updates listed below. Overall status: **in progress;
+not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
@@ -64,6 +65,18 @@ split metadata/blocks, N-API, chunked, userspace FUSE, Rust/Node/CLI provider
 matrices, the 1,194-test upstream suite, and all 40 PGlite-inclusive seeded
 trace lanes passed. R2 rows were explicit skips because this shell still lacks
 the required scoped credentials.
+
+Latest SDK-consumer slice at local `21803fd` was published to `main` as the
+sequential API commits `9868e93`, `83153ef`, `b8a49a0`, `9163a39`, `b09965c`,
+`cc605c7` and `b43a4e9`. The Rust provider matrix now opens PGlite/R2 through
+the public Rust SDK facade and verifies clean shutdown/reopen; the Node matrix
+does the same through `createChunkedDriver`; and the Node CLI accepts the same
+versioned provider config shape as the Rust CLI. The local PGlite run passed
+Rust SDK 4/4, Node SDK 5/5 and CLI 7/7 gated cases, while R2 remained an
+explicit credential skip. The CLI also rejects `--reopen` for process-local
+memory rather than reporting a false durability result. Full offline workspace
+tests and the N-API package gate passed after this slice; hosted CI is still
+queued and does not count as green evidence.
 
 Focused current-head acceptance after the follow-up packets: `mount-rs-sdk`
 unit tests passed (2/2), the Rust provider matrix passed memfs, memory/memory,
@@ -276,10 +289,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   its opt-in real macOS NFS self-test. Linux and provider-backed SDK matrices
   remain unverified here.
 - [x] The isolated provider/consumer matrix exercises Rust SDK, Node SDK and
-  CLI consumers with machine-readable PASS/SKIP/FAIL output. Local Rust rows
-  are 3/3, local Node rows are 4/4, and CLI config/runtime rows are 5/5; the
-  PGlite lifecycle adds Rust and Node PGlite rows. R2 rows remain explicit
-  skips without credentials and do not count as live-provider acceptance.
+  CLI consumers with machine-readable PASS/SKIP/FAIL output. Offline Rust rows
+  are 3/3, offline Node rows are 4/4, and offline CLI rows are 6/6; the local
+  PGlite lifecycle extends those to Rust 4/4, Node 5/5 and CLI 7/7. R2 rows
+  remain explicit skips without credentials and do not count as live-provider
+  acceptance.
 - [x] `29337f7` makes the Rust CLI construct all local/provider drivers through
   the public `mount-rs-sdk` facade and adds a public Node CLI SDK self-test. The
   Rust SDK example, Rust CLI, Node CLI and provider matrix now exercise the same
@@ -292,6 +306,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `9215ba3` and `a1ec0c5` integrate parallel W01 capability, structural native,
   Windows SQLite and NFS held-handle sidecars. Their focused evidence is listed
   above; these commits do not close the remaining end-to-end parity gates.
+- [x] `21803fd` adds the SDK-backed Node CLI provider-config/reopen path, extends
+  the Rust and Node provider matrices to public-SDK PGlite/R2 compositions, adds
+  the memory durability guard, and wires structural-driver coverage into the
+  Windows/macOS Node CI jobs. Focused local gates passed; live R2 and hosted CI
+  remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -542,9 +561,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   of the public SDKs and are included in the provider/consumer matrix.
 - [x] `946a7cb` fixes the Windows Node CLI integration test to use the platform
   temp directory; the local check passes and the hosted Windows rerun is queued.
+- [x] `21803fd` adds the Node CLI's versioned provider config, SDK-only reopen
+  self-test and PGlite integration-matrix row. The PGlite config-to-SDK path
+  passed through clean shutdown/reopen; memory is correctly rejected for
+  `--reopen` because it is process-local.
 - [ ] W11.6 Run the same SDK-backed CLI flow against the configured metadata/
   block providers, including restart and cleanup, before treating the demo as a
-  provider-integrated acceptance path.
+  provider-integrated acceptance path. The local PGlite path is covered; live
+  R2, native configured-provider mounts, and hosted platform runs remain open.
 
 ## W12 — Safely host SQLite database files
 
@@ -1041,3 +1065,4 @@ cross-drive isolation.
 | `d6b80f4` | Chunked persistence, SQLite VFS failure handling and Windows HostFs acceptance packets | Focused local chunked, SQLite and HostFs gates passed; hosted Windows and remote-provider lanes remain open |
 | `3042d09` | Rust-backed FUSE inode state in napi-rs | Rust/Node inode parity, generated package checks and complete local N-API suite passed; native mount remains open |
 | `71e826f` | Pinned-oracle W01 parity audit and closure queue | Core/concurrency traces passed with zero mismatches; structural native, NFS handle, Unstorage and durability gaps remain explicit |
+| `21803fd` (published as `9868e93`..`b43a4e9`) | Public-SDK provider matrices and Node CLI config/reopen | Rust/Node/PGlite and CLI local gates passed; memory durability guard added; R2 credentials and hosted CI remain pending |
