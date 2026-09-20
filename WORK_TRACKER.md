@@ -162,6 +162,19 @@ skips. The oracle-enabled N-API suite passed, including the public
 consumer-path checkpoint, not closure of W01 or live-provider/native-mount
 acceptance.
 
+The latest parallel acceptance rotation added three bounded packets and
+published them to `origin/main`. `3b59dc8` exposes typed FUSE `GETATTR` and
+`SETATTR` request/reply codecs with pinned 7.41/7.8 differential coverage;
+`7da18fb` verifies exact prefix cleanup and sibling/parent sentinel
+preservation in the real FoundationDB metadata + RustFS chunk harness; and
+`d6c8a29` hardens the real TiDB + RustFS composition fixture with explicit
+durable scope, block absence checks, metadata-row cleanup and symlink-path
+rejection. The combined locked offline Rust workspace gate and oracle-enabled
+N-API suite both exited 0. The FoundationDB and TiDB mixed-provider harnesses
+passed real service runs; TiDB used the available single-node v8.5.7 topology,
+so replicated/durable capacity and provider restart promotion remain open
+acceptance boundaries rather than being implied by these passes.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -189,7 +202,7 @@ non-overlapping packet. The current bounded allocation is:
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
 | Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Integrated |
-| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Integrated |
+| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Integrated; bounded TiDB + RustFS composition passed |
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Integrated checkpoint |
 | Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task complete; custom domain live |
 | Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Closed; no change recommended |
@@ -541,6 +554,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
   FoundationDB service-restart evidence. FDB service restart, root integration,
   and hosted composition coverage remain open; no emulated acceptance.
+- [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
+  cleanup: every tracked block is absent after cleanup while sibling and parent
+  sentinel objects remain untouched. This does not close the W07.6 service-
+  restart, root-registration or hosted-composition boundaries above.
 
 ## W08 — TiDB
 
@@ -556,9 +573,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [ ] W08.3 Verify provider time/fencing, ambiguous commits, concurrency and
   deployment durability assumptions. Liveness queries are not fsync evidence.
 - [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
-- [ ] W08.5 **TiDB metadata + RustFS S3 chunks:** the separate contract test and
-  runnable harness are landed, but the actual mixed-provider test still needs
-  explicit TiDB and RustFS services and has not been claimed as passed.
+- [x] W08.5 **TiDB metadata + RustFS S3 chunks:** the real single-node v8.5.7
+  TiDB service and pinned loopback RustFS endpoint passed the mixed-provider
+  seed, partial-write, truncate, reopen, CAS/fencing and exact cleanup path.
+  Persisted fixtures require explicit volume/prefix/manifest scope and reject
+  transient or symlink paths. Replicated/durable TiDB capacity and provider
+  restart acceptance remain open under W08.2-W08.3.
 
 ## W09 — napi-rs, Node API and packaging
 
@@ -1127,6 +1147,9 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `d6c8a29` (published as `89e4940`) | TiDB + RustFS durable fixture hardening | Real TiDB v8.5.7 and loopback RustFS composition passed seed, partial writes, truncate, reopen, CAS/fencing and exact block/metadata cleanup; replicated durable topology remains capacity-gated |
+| `7da18fb` | FoundationDB + RustFS exact cleanup scope | Real FoundationDB/RustFS harness passed multi-chunk, partial update, truncate/extend, reopen, CAS, stale fencing and sibling/parent sentinel preservation; service restart/root/hosted composition remain open |
+| `3b59dc8` | Public napi-rs FUSE `GETATTR`/`SETATTR` codecs | Protocol 7.41/7.8 pinned differential, typed replies, malformed/truncated/trailing checks, generated declarations and full N-API suite passed; native FUSE session/device/mount remains open |
 | `8eac5cb` (published as `67f8b08`) | Public napi-rs FUSE `READ` request/raw-reply codecs | Protocol 7.41/7.8 pinned differential, malformed/truncated checks, declarations, distribution and full N-API suite passed; native FUSE session/device/mount remains open |
 | `26427f8` (published as `2c141d5`) | Core handle and lifecycle parity packet | 72-step pinned-oracle trace passed with 63 successes, 9 expected errors, zero mismatches; cross-provider, transport and native lifecycle remain open |
 | `750484d` (published as `e510bfb`) | Remaining Unstorage edge classifications | 11 edge rows passed with 11 explicit ENOSYS classifications and zero skips; hardlinks, symlinks, statfs and special nodes remain intentionally unsupported |
