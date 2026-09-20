@@ -1,14 +1,13 @@
-//! Native kernel-mount lifecycle for the NFSv3 server.
+//! Native kernel-mount lifecycle for the NFSv3/NFSv4.1 server.
 //!
 //! The wire server is deliberately usable without privileges. This module is
 //! the separate bridge to the host's `mount(8)`/`umount(8)` commands. It keeps
 //! all platform-specific behavior here so the XDR, RPC, and session code stays
 //! portable on macOS and Linux.
 //!
-//! NFSv4.1 is represented in the option model so callers and tests can inspect
-//! the intended client spelling, but the server currently implements NFSv3 and
-//! MOUNTv3 only. A native v4.1 request therefore fails before opening a
-//! listener; it must not be mistaken for partial v4 interoperability.
+//! Linux can select the v4.1 wire service. macOS is deliberately refused for
+//! v4.1 because this crate does not provide the v4.0 compatibility mode that
+//! Apple's client expects; use NFSv3 there.
 
 use std::fmt;
 use std::fs;
@@ -185,7 +184,7 @@ pub enum NfsVersion {
 }
 
 /// Native mount configuration. `server_options` configures the in-process
-/// NFSv3 listener; the remaining fields configure the host client.
+/// NFSv3/NFSv4.1 listener; the remaining fields configure the host client.
 #[derive(Debug, Clone)]
 pub struct NfsMountOptions {
     pub server_options: NfsServerOptions,
@@ -576,7 +575,7 @@ struct NativeNfsMountInner {
     unmount_lock: AsyncMutex<()>,
 }
 
-/// A live host-kernel NFS mount backed by an in-process NFSv3 server.
+/// A live host-kernel NFS mount backed by an in-process NFSv3 or NFSv4.1 server.
 #[derive(Clone)]
 pub struct NativeNfsMount {
     inner: Arc<NativeNfsMountInner>,
@@ -753,7 +752,7 @@ pub async fn unmount_all_nfs() -> Vec<NfsMountError> {
     failures
 }
 
-/// Start an NFSv3 server and put the host kernel NFS client in front of it.
+/// Start an NFS server and put the host kernel NFS client in front of it.
 pub async fn mount_nfs<D>(
     driver: D,
     mountpoint: impl AsRef<Path>,
@@ -770,11 +769,6 @@ where
     })?;
     if let Some(message) = version_refusal(platform, options.version) {
         return Err(NfsMountError::UnsupportedVersion(message));
-    }
-    if options.version == NfsVersion::V4_1 {
-        return Err(NfsMountError::UnsupportedVersion(
-            "mount-rs-nfs does not yet implement the NFSv4.1 server; only NFSv3/MOUNTv3 are currently served".into(),
-        ));
     }
     let probe = nfs_client_probe();
     if !probe.usable {

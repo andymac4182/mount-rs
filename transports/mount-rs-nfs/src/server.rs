@@ -1,4 +1,4 @@
-//! TCP transport for [`crate::session::Nfs3Session`].
+//! TCP transport for the NFSv3 and NFSv4.1 sessions.
 //!
 //! RPC record marking is handled here; all protocol and filesystem behavior
 //! remains in the byte-oriented session. The default bind address is loopback
@@ -17,8 +17,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, frame_record};
+use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, decode_call, frame_record};
 use crate::session::{Nfs3Session, NfsRequestContext, NfsSessionOptions};
+use crate::v4::{NFS_V4, NFS4_PROGRAM, Nfs4Session};
 
 pub const DEFAULT_NFS_PORT: u16 = 2049;
 
@@ -48,6 +49,7 @@ impl Default for NfsServerOptions {
 
 pub struct NfsServer {
     session: Nfs3Session,
+    v4_session: Nfs4Session,
     options: NfsServerOptions,
     address: Arc<Mutex<Option<SocketAddr>>>,
     shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
@@ -55,7 +57,7 @@ pub struct NfsServer {
     connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
-/// Construct an NFSv3/MOUNTv3 TCP server backed by an [`FsDriver`].
+/// Construct an NFSv3/MOUNTv3 and NFSv4.1 TCP server backed by an [`FsDriver`].
 pub fn create_nfs_server<D>(driver: D, options: NfsServerOptions) -> NfsServer
 where
     D: FsDriver + 'static,
@@ -72,8 +74,11 @@ impl NfsServer {
     }
 
     pub fn from_session(session: Nfs3Session, options: NfsServerOptions) -> Self {
+        let v4_session =
+            Nfs4Session::from_loopback(session.driver.clone(), options.session.clone());
         Self {
             session,
+            v4_session,
             options,
             address: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(Mutex::new(None)),
@@ -91,6 +96,10 @@ impl NfsServer {
 
     pub fn session(&self) -> &Nfs3Session {
         &self.session
+    }
+
+    pub fn v4_session(&self) -> &Nfs4Session {
+        &self.v4_session
     }
 
     pub fn local_addr(&self) -> Option<SocketAddr> {
@@ -111,6 +120,7 @@ impl NfsServer {
         let (shutdown_sender, mut shutdown_receiver) = oneshot::channel();
         *self.shutdown.lock().expect("NFS shutdown lock") = Some(shutdown_sender);
         let session = self.session.clone();
+        let v4_session = self.v4_session.clone();
         let record_limit = self.options.record_limit;
         let max_in_flight = self.options.max_in_flight.max(1);
         let allow_remote = self.options.allow_remote;
@@ -122,11 +132,13 @@ impl NfsServer {
                     result = listener.accept() => {
                         let Ok((stream, peer)) = result else { break };
                         let session = session.clone();
+                        let v4_session = v4_session.clone();
                         let task = tokio::spawn(async move {
                             let _ = serve_connection(
                                 stream,
                                 peer,
                                 session,
+                                v4_session,
                                 record_limit,
                                 max_in_flight,
                                 allow_remote,
@@ -159,6 +171,7 @@ impl NfsServer {
             task.abort();
         }
         self.session.destroy().await;
+        self.v4_session.destroy().await;
         Ok(())
     }
 }
@@ -186,6 +199,7 @@ async fn serve_connection(
     mut stream: TcpStream,
     peer: SocketAddr,
     session: Nfs3Session,
+    v4_session: Nfs4Session,
     record_limit: usize,
     max_in_flight: usize,
     allow_remote: bool,
@@ -223,14 +237,21 @@ async fn serve_connection(
                 .await
                 .map_err(|_| io::Error::other("NFS connection semaphore closed"))?;
             let session = session.clone();
+            let v4_session = v4_session.clone();
             let writer = writer.clone();
             let peer = peer.clone();
             workers.spawn(async move {
                 let _permit = permit;
-                let Some(reply) = session
-                    .handle_call(&record, NfsRequestContext { peer: Some(peer) })
-                    .await
-                else {
+                let context = NfsRequestContext { peer: Some(peer) };
+                let is_v4 = decode_call(&record)
+                    .map(|(call, _)| call.program == NFS4_PROGRAM && call.version == NFS_V4)
+                    .unwrap_or(false);
+                let reply = if is_v4 {
+                    v4_session.handle_call(&record, context).await
+                } else {
+                    session.handle_call(&record, context).await
+                };
+                let Some(reply) = reply else {
                     return;
                 };
                 let Ok(framed) = frame_record(&reply) else {

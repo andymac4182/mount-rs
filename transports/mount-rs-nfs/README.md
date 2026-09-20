@@ -1,10 +1,11 @@
 # mount-rs-nfs
 
-This crate provides the mountx NFS transport boundary for NFSv3 and MOUNTv3
-over ONC RPC/TCP. `Nfs3Session` is byte-oriented and can be tested without a
+This crate provides the mountx NFS transport boundary for NFSv3, MOUNTv3, and
+the implemented NFSv4.1 COMPOUND/session service over ONC RPC/TCP.
+`Nfs3Session` and `Nfs4Session` are byte-oriented and can be tested without a
 kernel mount; `NfsServer` adds TCP record marking and filesystem-backed NFS
 operations through `mount-rs-core::FsDriver`. `mount_nfs` is the separate
-native macOS/Linux lifecycle bridge around that NFSv3 server.
+native macOS/Linux lifecycle bridge around that server.
 
 ## Rootless wire tests
 
@@ -14,7 +15,10 @@ on macOS and Linux. Passing them proves RPC/XDR/session behavior only; it is
 not native kernel-mount verification.
 
 The server does not start `rpcbind`/portmap and does not register a dynamic
-port. It serves MOUNTv3 and NFSv3 on the same explicitly selected TCP address.
+port. It serves MOUNTv3/NFSv3 and NFSv4.1 on the same explicitly selected TCP
+address. The NFSv4.1 service uses AUTH_NONE/AUTH_SYS, session slots, replay
+cache, stateids, common namespace operations, OPEN/CLOSE, READ/WRITE, and the
+filesystem-backed attributes exposed by `FsDriver`.
 
 ## Native macOS/Linux mount lifecycle
 
@@ -38,10 +42,12 @@ an NFS client and a writable empty mount point:
   Access for the terminal or process running the test.
 
 The native helper uses an ephemeral loopback TCP port and supplies both
-`port=` and `mountport=` for NFSv3, so `rpcbind`/portmap is not needed. The
-export path is `/` by default. For a manual mount outside the helper, use a
-reachable fixed bind address/port and the same explicit TCP options. These
-prerequisites do not claim that native mounting has been run or passed here.
+`port=` and `mountport=` for NFSv3, so `rpcbind`/portmap is not needed. Linux
+NFSv4.1 uses `vers=4.1,proto=tcp,port=...` and does not add the v3
+`mountport=`/lock controls. The export path is `/` by default. For a manual
+mount outside the helper, use a reachable fixed bind address/port and the same
+explicit TCP options. These prerequisites do not claim that native mounting
+has been run or passed here.
 
 The ignored integration harness can be deliberately enabled on a prepared
 host; it performs a real kernel mount only when explicitly selected:
@@ -54,14 +60,17 @@ The normal crate tests remain rootless and do not invoke `mount(8)`.
 
 ## Deliberate scope gaps
 
-NFSv4.1 wire service is not implemented. `NfsVersion::V4_1` and its Linux
-option spelling are present only so the native/client boundary is explicit;
-`mount_nfs` refuses it before opening a listener. The planned v4.1 work is a
-separate server dispatcher for RPC program version 4 with COMPOUND,
-EXCHANGE_ID/CREATE_SESSION/SEQUENCE, stateids and leases, OPEN/CLOSE,
-READ/WRITE/COMMIT, reclaim, delegations, ACLs, and id mapping, backed by
-interoperability tests against a Linux kernel client. macOS remains v3-only in
-this crate until its v4 minor-version behavior is verified.
+NFSv4.1 is not full upstream parity yet. Byte-range LOCK/LOCKT/LOCKU now have
+real process-local state, conflict/denial replies, range release, and
+stateid lifecycle handling, but they are advisory to this in-process service:
+there is no blocking wait, backend/kernel lock integration, or persistent
+lease/lock recovery. Delegations and callbacks, ACL/id-mapping policy,
+pNFS/layout/offload operations, persistent lease/reply state across process
+restart, and the other RFC operations outside the common filesystem/session
+path remain gaps. It does not claim Linux-kernel native mount interoperability
+from the rootless wire test. macOS remains v3-only here until its v4
+minor-version behavior is verified, and native Linux CI is not wired by this
+crate.
 
 UDP transport, portmapper registration, NLM/NSM locking, and persistent
 cross-process file-handle recovery remain unimplemented. File handles and

@@ -1,10 +1,11 @@
 //! NFS transport for [`mount-rs-core`].
 //!
-//! The wire implementation follows RFC 1813 (NFSv3 and MOUNTv3) and RFC 5531
-//! (ONC RPC v2). The byte-oriented [`Nfs3Session`] is usable without a socket,
-//! which is the basis of the rootless integration tests. [`NfsServer`] adds a
-//! TCP record-marking listener; native kernel mounting is intentionally a
-//! separate, platform-specific concern and is not claimed by this crate.
+//! The wire implementation follows RFC 1813 (NFSv3 and MOUNTv3), RFC 5531
+//! (ONC RPC v2), and the implemented NFSv4.1 COMPOUND/session subset from RFC
+//! 8881. The byte-oriented sessions are usable without a socket, which is the
+//! basis of the rootless integration tests. [`NfsServer`] adds a TCP
+//! record-marking listener; native kernel mounting is intentionally a separate,
+//! platform-specific concern and is not claimed by wire tests.
 
 pub mod constants;
 pub mod handles;
@@ -13,6 +14,7 @@ pub mod protocol;
 pub mod rpc;
 pub mod server;
 pub mod session;
+pub mod v4;
 pub mod xdr;
 
 pub use constants::*;
@@ -30,4 +32,5 @@ pub use rpc::{
 };
 pub use server::{NfsServer, NfsServerOptions, create_nfs_server};
 pub use session::{Nfs3Session, NfsRequestContext, NfsSessionOptions, NfsSessionStats};
+pub use v4::{NFS_V4, NFS4_PROGRAM, Nfs4Session};
 pub use xdr::{XdrError, XdrReader, XdrWriter};
