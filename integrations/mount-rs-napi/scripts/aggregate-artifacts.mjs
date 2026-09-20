@@ -18,22 +18,22 @@ export const NATIVE_TARGETS = Object.freeze([
   Object.freeze({
     platformArchABI: "darwin-arm64",
     artifact: "mount-rs.darwin-arm64.node",
-    packageName: "@andymac4182/mount-rs-darwin-arm64",
+    packageName: "@mount-rs/core-darwin-arm64",
   }),
   Object.freeze({
     platformArchABI: "darwin-x64",
     artifact: "mount-rs.darwin-x64.node",
-    packageName: "@andymac4182/mount-rs-darwin-x64",
+    packageName: "@mount-rs/core-darwin-x64",
   }),
   Object.freeze({
     platformArchABI: "linux-arm64-gnu",
     artifact: "mount-rs.linux-arm64-gnu.node",
-    packageName: "@andymac4182/mount-rs-linux-arm64-gnu",
+    packageName: "@mount-rs/core-linux-arm64-gnu",
   }),
   Object.freeze({
     platformArchABI: "linux-x64-gnu",
     artifact: "mount-rs.linux-x64-gnu.node",
-    packageName: "@andymac4182/mount-rs-linux-x64-gnu",
+    packageName: "@mount-rs/core-linux-x64-gnu",
   }),
 ]);
 
@@ -105,7 +105,7 @@ function packageFiles(report) {
 }
 
 function assertPackageManifest(packageJson) {
-  assert.equal(packageJson.name, "@andymac4182/mount-rs");
+  assert.equal(packageJson.name, "@mount-rs/core");
   assert.deepEqual(
     packageJson.optionalDependencies,
     Object.fromEntries(NATIVE_TARGETS.map(({ packageName }) => [packageName, packageJson.version])),

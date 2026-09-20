@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createNodeFsDriver, Filesystem } from "@andymac4182/mount-rs";
+import { createNodeFsDriver, Filesystem } from "@mount-rs/core";
 import {
   DirectoryNotEmptyError,
   FileExistsError,
@@ -12,7 +12,7 @@ import {
   Workspace,
   WorkspaceReadOnlyError,
 } from "@mastra/core/workspace";
-import { createMastraFilesystem } from "@andymac4182/mount-rs-virtual-fs/mastra";
+import { createMastraFilesystem } from "@mount-rs/virtual-fs/mastra";
 
 const driver = Filesystem.memory();
 const filesystem = createMastraFilesystem(driver, {

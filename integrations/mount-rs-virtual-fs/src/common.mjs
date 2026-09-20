@@ -1,7 +1,7 @@
 import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 
-import { fsError } from "@andymac4182/mount-rs";
+import { fsError } from "@mount-rs/core";
 
 import { assertMountRsBackend } from "./backend.mjs";
 

@@ -212,6 +212,15 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W09 — napi-rs, Node API and packaging
 
+- [x] Migrate npm packages to `@mount-rs/core` and `@mount-rs/virtual-fs`,
+  including loaders, dependencies, imports and distribution checks. No registry
+  publication or namespace-ownership verification is implied.
+- [x] Land shared cancellation-safe shutdown, provider-reference release ordering,
+  panic/error retry and Windows numeric flags. Main passed 12 native binding
+  tests, strict Clippy, rebuilt-addon/oracle-enabled Node suite, consumer tests
+  and TypeScript checks. R2/PGlite/native-mount opt-ins were skipped in this
+  package run; hosted Windows verification remains open. Independent handles,
+  servers and in-flight operations must finish before backing-file deletion.
 - [x] Land JavaScript driver bridge, codec/server hooks and 9P ESM exports.
 - [x] Fix shutdown test's early rejection handling (`8d1f4ad`); 25 strict repeats
   passed locally. This corrects the test race, not a proven runtime defect.

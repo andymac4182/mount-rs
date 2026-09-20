@@ -8,8 +8,9 @@ pub mod utilities;
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use mount_rs_auto::{
@@ -261,7 +262,19 @@ fn decode_numeric_flags(bits: f64, _path: &str) -> Result<OpenFlags, Error> {
     #[cfg(target_os = "macos")]
     const O_APPEND: u64 = 0x0008;
 
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    // Node exposes the Microsoft CRT open flags on Windows. These are not
+    // the Linux values: _O_CREAT/_O_EXCL/_O_TRUNC/_O_APPEND are 0x0100,
+    // 0x0400, 0x0200, and 0x0008 respectively.
+    #[cfg(target_os = "windows")]
+    const O_CREAT: u64 = 0x0100;
+    #[cfg(target_os = "windows")]
+    const O_EXCL: u64 = 0x0400;
+    #[cfg(target_os = "windows")]
+    const O_TRUNC: u64 = 0x0200;
+    #[cfg(target_os = "windows")]
+    const O_APPEND: u64 = 0x0008;
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     return Err(to_js_error(
         FsError::new(ErrorCode::Einval)
             .with_syscall("open")
@@ -269,7 +282,7 @@ fn decode_numeric_flags(bits: f64, _path: &str) -> Result<OpenFlags, Error> {
             .with_message("numeric open flags are unsupported on this platform"),
     ));
 
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         let access = bits & 0x3;
         Ok(OpenFlags {
@@ -532,6 +545,442 @@ impl JsStatsFs {
 #[napi]
 pub struct JsDirEntry {
     inner: DirEntry,
+}
+
+/// Shared ownership slot for a JavaScript filesystem and the lightweight
+/// wrappers it creates (currently `mountx`). `shutdown()` must be able to
+/// release the native provider even when JavaScript retains those wrappers;
+/// storing the driver directly in each wrapper would keep SQLite connections
+/// alive until garbage collection. The slot also makes post-shutdown calls
+/// fail closed with EBADF instead of dereferencing a released provider.
+struct DriverSlot {
+    driver: Mutex<Option<Arc<dyn FsDriver>>>,
+    capabilities: Capabilities,
+    has_utimens: bool,
+}
+
+impl DriverSlot {
+    fn new(driver: Arc<dyn FsDriver>) -> Self {
+        let capabilities = driver.capabilities();
+        let has_utimens = driver.has_utimens();
+        Self {
+            driver: Mutex::new(Some(driver)),
+            capabilities,
+            has_utimens,
+        }
+    }
+
+    fn get(&self) -> CoreResult<Arc<dyn FsDriver>> {
+        let driver = self
+            .driver
+            .lock()
+            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("driver lock poisoned"))?;
+        driver.clone().ok_or_else(|| {
+            FsError::new(ErrorCode::Ebadf)
+                .with_syscall("filesystem")
+                .with_message("filesystem is closed")
+        })
+    }
+
+    fn clear(&self) -> CoreResult<()> {
+        let mut driver = self
+            .driver
+            .lock()
+            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("driver lock poisoned"))?;
+        driver.take();
+        Ok(())
+    }
+}
+
+impl FsDriver for DriverSlot {
+    fn capabilities(&self) -> Capabilities {
+        self.capabilities
+    }
+
+    fn syncfs<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.syncfs().await })
+    }
+
+    fn stat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Stats>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.stat(path).await })
+    }
+
+    fn lstat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Stats>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.lstat(path).await })
+    }
+
+    fn statfs<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<StatsFs>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.statfs(path).await })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<DirEntry>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.open(path, flags, mode).await })
+    }
+
+    fn open_flags<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.open_flags(path, flags, mode).await })
+    }
+
+    fn mkdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        options: MkdirOptions,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<String>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.mkdir(path, options).await })
+    }
+
+    fn rmdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.rmdir(path).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.unlink(path).await })
+    }
+
+    fn rename<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        old_path: &'b str,
+        new_path: &'c str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.rename(old_path, new_path).await })
+    }
+
+    fn link<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        existing_path: &'b str,
+        new_path: &'c str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.link(existing_path, new_path).await })
+    }
+
+    fn symlink<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        target: &'b str,
+        path: &'c str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.symlink(target, path).await })
+    }
+
+    fn readlink<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<String>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.readlink(path).await })
+    }
+
+    fn chmod<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.chmod(path, mode).await })
+    }
+
+    fn chown<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        uid: u32,
+        gid: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.chown(path, uid, gid).await })
+    }
+
+    fn lchown<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        uid: u32,
+        gid: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.lchown(path, uid, gid).await })
+    }
+
+    fn truncate<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        length: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.truncate(path, length).await })
+    }
+
+    fn has_utimens(&self) -> bool {
+        self.has_utimens
+    }
+
+    fn utimens<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        atime_ns: i128,
+        mtime_ns: i128,
+        follow_symlinks: bool,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move {
+            driver
+                .utimens(path, atime_ns, mtime_ns, follow_symlinks)
+                .await
+        })
+    }
+
+    fn utimes<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        atime_ms: i64,
+        mtime_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.utimes(path, atime_ms, mtime_ms).await })
+    }
+
+    fn lutimes<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        atime_ms: i64,
+        mtime_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.lutimes(path, atime_ms, mtime_ms).await })
+    }
+
+    fn mknod<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        mode: u32,
+        dev: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.mknod(path, mode, dev).await })
+    }
 }
 
 #[napi]
@@ -1590,6 +2039,271 @@ impl FileHandle {
 type ShutdownFuture = Pin<Box<dyn Future<Output = CoreResult<()>> + Send>>;
 type ShutdownCallback = dyn Fn() -> ShutdownFuture + Send + Sync;
 
+struct ShutdownAttemptState {
+    result: Option<CoreResult<()>>,
+    waiters: Vec<Waker>,
+}
+
+struct ShutdownAttempt {
+    state: Mutex<ShutdownAttemptState>,
+}
+
+impl ShutdownAttempt {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ShutdownAttemptState {
+                result: None,
+                waiters: Vec::new(),
+            }),
+        }
+    }
+
+    fn finish(&self, result: CoreResult<()>) {
+        let waiters = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.result = Some(result);
+            std::mem::take(&mut state.waiters)
+        };
+        for waiter in waiters {
+            waiter.wake();
+        }
+    }
+}
+
+struct ShutdownWait {
+    attempt: Arc<ShutdownAttempt>,
+}
+
+impl Future for ShutdownWait {
+    type Output = CoreResult<()>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self
+            .attempt
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &state.result {
+            Some(result) => Poll::Ready(result.clone()),
+            None => {
+                if !state
+                    .waiters
+                    .iter()
+                    .any(|waiter| waiter.will_wake(context.waker()))
+                {
+                    state.waiters.push(context.waker().clone());
+                }
+                Poll::Pending
+            }
+        }
+    }
+}
+
+struct ShutdownRunGuard {
+    lifecycle: Arc<ShutdownState>,
+    attempt: Arc<ShutdownAttempt>,
+    callback: Option<Arc<ShutdownCallback>>,
+    completed: bool,
+}
+
+impl ShutdownRunGuard {
+    fn new(
+        lifecycle: Arc<ShutdownState>,
+        attempt: Arc<ShutdownAttempt>,
+        callback: Option<Arc<ShutdownCallback>>,
+    ) -> Self {
+        Self {
+            lifecycle,
+            attempt,
+            callback,
+            completed: false,
+        }
+    }
+
+    fn finish_error(&mut self, error: FsError) {
+        let callback = self.callback.take();
+        let mut state = self
+            .lifecycle
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = ShutdownLifecycle::Open(callback);
+        drop(state);
+        self.completed = true;
+        self.attempt.finish(Err(error));
+    }
+
+    fn finish_success(&mut self) {
+        // The callback can own the last provider clone outside DriverSlot. It
+        // must be dropped while the lifecycle is still Running, and before
+        // the shared attempt is completed, so neither a third caller nor a
+        // resolved promise can observe a still-live native provider.
+        drop(self.callback.take());
+        self.completed = true;
+        self.attempt.finish(Ok(()));
+        let mut state = self
+            .lifecycle
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = ShutdownLifecycle::Closed;
+    }
+}
+
+impl Drop for ShutdownRunGuard {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+
+        // The spawned task is detached from the caller's Promise. If a
+        // provider callback panics after the task has entered Running, this
+        // guard still publishes a bounded error and restores the callback so
+        // a later shutdown call can retry rather than hanging forever.
+        let callback = self.callback.take();
+        let mut state = self
+            .lifecycle
+            .lifecycle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *state = ShutdownLifecycle::Open(callback);
+        drop(state);
+        self.attempt.finish(Err(shutdown_panic_error()));
+    }
+}
+
+fn shutdown_panic_error() -> FsError {
+    FsError::new(ErrorCode::Eio)
+        .with_syscall("shutdown")
+        .with_message("shutdown callback panicked")
+}
+
+struct CatchUnwind<F> {
+    future: Pin<Box<F>>,
+}
+
+impl<F> CatchUnwind<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: Box::pin(future),
+        }
+    }
+}
+
+impl<F> Unpin for CatchUnwind<F> {}
+
+impl<F: Future> Future for CatchUnwind<F> {
+    type Output = std::thread::Result<F::Output>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.future.as_mut().poll(context)
+        })) {
+            Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(panic) => Poll::Ready(Err(panic)),
+        }
+    }
+}
+
+enum ShutdownLifecycle {
+    Open(Option<Arc<ShutdownCallback>>),
+    Running(Arc<ShutdownAttempt>),
+    Closed,
+}
+
+struct ShutdownState {
+    lifecycle: Mutex<ShutdownLifecycle>,
+}
+
+impl ShutdownState {
+    fn new(callback: Option<Arc<ShutdownCallback>>) -> Self {
+        Self {
+            lifecycle: Mutex::new(ShutdownLifecycle::Open(callback)),
+        }
+    }
+}
+
+struct ShutdownController {
+    lifecycle: Arc<ShutdownState>,
+    driver: Arc<DriverSlot>,
+}
+
+impl ShutdownController {
+    fn new(driver: Arc<DriverSlot>, callback: Option<Arc<ShutdownCallback>>) -> Arc<Self> {
+        Arc::new(Self {
+            lifecycle: Arc::new(ShutdownState::new(callback)),
+            driver,
+        })
+    }
+
+    fn callback(controller: Arc<Self>) -> Arc<ShutdownCallback> {
+        Arc::new(move || {
+            let controller = Arc::clone(&controller);
+            Box::pin(async move { controller.shutdown().await })
+        })
+    }
+
+    async fn shutdown(&self) -> CoreResult<()> {
+        let (attempt, start) = {
+            let mut lifecycle =
+                self.lifecycle.lifecycle.lock().map_err(|_| {
+                    FsError::new(ErrorCode::Eio).with_message("shutdown lock poisoned")
+                })?;
+            match &mut *lifecycle {
+                ShutdownLifecycle::Closed => (None, None),
+                ShutdownLifecycle::Running(attempt) => (Some(Arc::clone(attempt)), None),
+                ShutdownLifecycle::Open(callback) => {
+                    let attempt = Arc::new(ShutdownAttempt::new());
+                    let callback = callback.take();
+                    *lifecycle = ShutdownLifecycle::Running(Arc::clone(&attempt));
+                    (Some(Arc::clone(&attempt)), Some((attempt, callback)))
+                }
+            }
+        };
+
+        let Some(attempt) = attempt else {
+            return Ok(());
+        };
+        if let Some((attempt, callback)) = start {
+            napi::bindgen_prelude::spawn(run_shutdown(
+                Arc::clone(&self.lifecycle),
+                Arc::clone(&self.driver),
+                attempt,
+                callback,
+            ));
+        }
+        ShutdownWait { attempt }.await
+    }
+}
+
+async fn run_shutdown(
+    lifecycle: Arc<ShutdownState>,
+    driver: Arc<DriverSlot>,
+    attempt: Arc<ShutdownAttempt>,
+    callback: Option<Arc<ShutdownCallback>>,
+) {
+    let mut guard = ShutdownRunGuard::new(lifecycle, attempt, callback);
+    let callback_result = match guard.callback.as_ref() {
+        Some(callback) => match CatchUnwind::new(async { callback().await }).await {
+            Ok(result) => result,
+            Err(_) => Err(shutdown_panic_error()),
+        },
+        None => Ok(()),
+    };
+
+    match callback_result {
+        Err(error) => guard.finish_error(error),
+        Ok(()) => match driver.clear() {
+            Ok(()) => guard.finish_success(),
+            Err(error) => guard.finish_error(error),
+        },
+    }
+}
+
 #[napi]
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
@@ -1598,22 +2312,29 @@ pub struct Filesystem {
 
 #[napi]
 impl Filesystem {
+    fn from_driver(driver: Arc<dyn FsDriver>, shutdown: Option<Arc<ShutdownCallback>>) -> Self {
+        let slot = Arc::new(DriverSlot::new(driver));
+        let controller = ShutdownController::new(Arc::clone(&slot), shutdown);
+        Self {
+            driver: slot,
+            shutdown: Some(ShutdownController::callback(controller)),
+        }
+    }
+
+    fn driver(&self) -> napi::Result<Arc<dyn FsDriver>> {
+        Ok(Arc::clone(&self.driver))
+    }
+
     #[napi(factory)]
     pub fn memory() -> Self {
-        Self {
-            driver: Arc::new(MemoryFs::empty()),
-            shutdown: None,
-        }
+        Self::from_driver(Arc::new(MemoryFs::empty()), None)
     }
 
     #[napi(factory)]
     pub async fn sqlite(path: String) -> napi::Result<Self> {
         open_sqlite(path)
             .await
-            .map(|filesystem| Self {
-                driver: Arc::new(filesystem),
-                shutdown: None,
-            })
+            .map(|filesystem| Self::from_driver(Arc::new(filesystem), None))
             .map_err(to_js_error)
     }
 
@@ -1627,10 +2348,7 @@ impl Filesystem {
             let store = shutdown_store.clone();
             Box::pin(async move { store.close().await })
         });
-        Ok(Self {
-            driver: Arc::new(filesystem),
-            shutdown: Some(shutdown),
-        })
+        Ok(Self::from_driver(Arc::new(filesystem), Some(shutdown)))
     }
 
     #[napi(factory)]
@@ -1646,10 +2364,7 @@ impl Filesystem {
         };
         open_r2(config)
             .await
-            .map(|filesystem| Self {
-                driver: Arc::new(filesystem),
-                shutdown: None,
-            })
+            .map(|filesystem| Self::from_driver(Arc::new(filesystem), None))
             .map_err(to_js_error)
     }
 
@@ -1669,8 +2384,10 @@ impl Filesystem {
         self.resolved_capabilities()
     }
 
-    /// Release the chunked metadata writer lease immediately. Legacy
-    /// snapshot factories have no lease and therefore resolve successfully.
+    /// Complete provider shutdown and detach this filesystem's shared driver.
+    /// Concurrent callers share an attempt; a failed attempt can be retried.
+    /// Close independent handles and servers, and finish in-flight operations,
+    /// before relying on shutdown to permit removal of backing files.
     #[napi]
     pub async fn shutdown(&self) -> napi::Result<()> {
         if let Some(shutdown) = &self.shutdown {
@@ -1681,7 +2398,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn stat(&self, path: String) -> napi::Result<JsStats> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .stat(&normalized_path(&path))
             .await
             .map(Into::into)
@@ -1690,7 +2408,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn lstat(&self, path: String) -> napi::Result<JsStats> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .lstat(&normalized_path(&path))
             .await
             .map(Into::into)
@@ -1699,7 +2418,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn statfs(&self, path: String) -> napi::Result<JsStatsFs> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .statfs(&normalized_path(&path))
             .await
             .map(Into::into)
@@ -1712,7 +2432,8 @@ impl Filesystem {
         path: String,
         _options: Option<JsReaddirOptions>,
     ) -> napi::Result<Vec<JsDirEntry>> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .readdir(&normalized_path(&path))
             .await
             .map(|entries| entries.into_iter().map(Into::into).collect())
@@ -1735,7 +2456,8 @@ impl Filesystem {
     ) -> napi::Result<FileHandle> {
         let path = normalized_path(&path);
         let flags = parse_open_flags(flags.unwrap_or_else(|| Either::A("r".to_owned())), &path)?;
-        self.driver
+        let driver = self.driver()?;
+        driver
             .open_flags(&path, flags, mode.unwrap_or(0o666))
             .await
             .map(|inner| FileHandle { inner })
@@ -1745,8 +2467,8 @@ impl Filesystem {
     #[napi(ts_return_type = "Promise<Uint8Array>")]
     pub async fn read_file(&self, path: String) -> napi::Result<Buffer> {
         let path = normalized_path(&path);
-        let handle = self
-            .driver
+        let driver = self.driver()?;
+        let handle = driver
             .open_flags(&path, OpenFlags::READ_ONLY, 0)
             .await
             .map_err(to_js_error)?;
@@ -1794,7 +2516,7 @@ impl Filesystem {
             Either::B(data) => data.to_vec(),
         };
         let handle = self
-            .driver
+            .driver()?
             .open_flags(
                 &path,
                 OpenFlags {
@@ -1843,7 +2565,8 @@ impl Filesystem {
         path: String,
         options: Option<Either<bool, JsMkdirOptions>>,
     ) -> napi::Result<Option<String>> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .mkdir(&normalized_path(&path), parse_mkdir_options(options)?)
             .await
             .map_err(to_js_error)
@@ -1851,7 +2574,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn rmdir(&self, path: String) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .rmdir(&normalized_path(&path))
             .await
             .map_err(to_js_error)
@@ -1859,7 +2583,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn unlink(&self, path: String) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .unlink(&normalized_path(&path))
             .await
             .map_err(to_js_error)
@@ -1867,7 +2592,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn rename(&self, old_path: String, new_path: String) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .rename(&normalized_path(&old_path), &normalized_path(&new_path))
             .await
             .map_err(to_js_error)
@@ -1875,7 +2601,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn link(&self, existing_path: String, new_path: String) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .link(
                 &normalized_path(&existing_path),
                 &normalized_path(&new_path),
@@ -1891,7 +2618,8 @@ impl Filesystem {
         path: String,
         _type: Option<String>,
     ) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .symlink(&target, &normalized_path(&path))
             .await
             .map_err(to_js_error)
@@ -1899,7 +2627,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn readlink(&self, path: String) -> napi::Result<String> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .readlink(&normalized_path(&path))
             .await
             .map_err(to_js_error)
@@ -1907,7 +2636,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn chmod(&self, path: String, mode: f64) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .chmod(&normalized_path(&path), validate_u32("mode", mode)?)
             .await
             .map_err(to_js_error)
@@ -1915,7 +2645,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn chown(&self, path: String, uid: f64, gid: f64) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .chown(
                 &normalized_path(&path),
                 validate_owner_id("uid", uid)?,
@@ -1927,7 +2658,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn lchown(&self, path: String, uid: f64, gid: f64) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .lchown(
                 &normalized_path(&path),
                 validate_owner_id("uid", uid)?,
@@ -1939,7 +2671,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn truncate(&self, path: String, length: Option<f64>) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .truncate(&normalized_path(&path), validate_length(length)?)
             .await
             .map_err(to_js_error)
@@ -1955,7 +2688,8 @@ impl Filesystem {
         #[napi(ts_arg_type = "number | Date")] atime: f64,
         #[napi(ts_arg_type = "number | Date")] mtime: f64,
     ) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .utimes(
                 &normalized_path(&path),
                 timestamp_ms("atime", atime)?,
@@ -1972,7 +2706,8 @@ impl Filesystem {
         #[napi(ts_arg_type = "number | Date")] atime: f64,
         #[napi(ts_arg_type = "number | Date")] mtime: f64,
     ) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .lutimes(
                 &normalized_path(&path),
                 timestamp_ms("atime", atime)?,
@@ -1984,7 +2719,8 @@ impl Filesystem {
 
     #[napi]
     pub async fn mknod(&self, path: String, mode: f64, dev: f64) -> napi::Result<()> {
-        self.driver
+        let driver = self.driver()?;
+        driver
             .mknod(
                 &normalized_path(&path),
                 validate_u32("mode", mode)?,
@@ -2054,10 +2790,10 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         let blocks = shutdown_blocks.clone();
         Box::pin(async move { shutdown_chunked_filesystem(filesystem, metadata, blocks).await })
     });
-    Ok(Filesystem {
-        driver: Arc::new(filesystem),
-        shutdown: Some(shutdown),
-    })
+    Ok(Filesystem::from_driver(
+        Arc::new(filesystem),
+        Some(shutdown),
+    ))
 }
 
 /// Create the rooted host-filesystem driver used by the upstream
@@ -2068,10 +2804,10 @@ pub fn create_node_fs_driver(root: String, options: Option<JsNodeFsOptions>) -> 
     let read_only = options
         .and_then(|options| options.read_only)
         .unwrap_or(false);
-    Filesystem {
-        driver: Arc::new(HostFs::with_options(root, HostFsOptions { read_only })),
-        shutdown: None,
-    }
+    Filesystem::from_driver(
+        Arc::new(HostFs::with_options(root, HostFsOptions { read_only })),
+        None,
+    )
 }
 
 /// Probe host facts without attempting a mount. This is safe and rootless on
@@ -2092,10 +2828,10 @@ pub async fn mount(
 ) -> napi::Result<Mounted> {
     let options = auto_options(options)?;
     let mountpoint_for_error = mountpoint.clone();
-    let mounted =
-        mount_rs_auto::mount(MountDriver(Arc::clone(&driver.driver)), mountpoint, options)
-            .await
-            .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))?;
+    let mount_driver = driver.driver()?;
+    let mounted = mount_rs_auto::mount(MountDriver(mount_driver), mountpoint, options)
+        .await
+        .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))?;
     Ok(Mounted {
         inner: Arc::new(mounted),
     })
@@ -2127,6 +2863,122 @@ pub async fn unmount_all() -> Vec<JsMountFailure> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::{Condvar, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
+
+    struct NoopWaker;
+
+    impl Wake for NoopWaker {
+        fn wake(self: Arc<Self>) {}
+
+        fn wake_by_ref(self: &Arc<Self>) {}
+    }
+
+    struct CompletionWaker {
+        lifecycle: Arc<ShutdownState>,
+        observed_running: Arc<AtomicBool>,
+    }
+
+    impl CompletionWaker {
+        fn observe(&self) {
+            if matches!(
+                &*self.lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
+                ShutdownLifecycle::Running(_)
+            ) {
+                self.observed_running.store(true, AtomicOrdering::SeqCst);
+            }
+        }
+    }
+
+    impl Wake for CompletionWaker {
+        fn wake(self: Arc<Self>) {
+            self.observe();
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.observe();
+        }
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(value) => return value,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct DropGateState {
+        started: bool,
+        released: bool,
+        finished: bool,
+    }
+
+    struct DropGate {
+        state: Mutex<DropGateState>,
+        condition: Condvar,
+    }
+
+    impl DropGate {
+        fn new() -> Self {
+            Self {
+                state: Mutex::new(DropGateState::default()),
+                condition: Condvar::new(),
+            }
+        }
+
+        fn wait_started(&self) {
+            let mut state = self.state.lock().expect("drop gate lock");
+            while !state.started {
+                state = self.condition.wait(state).expect("drop gate wait");
+            }
+        }
+
+        fn release(&self) {
+            let mut state = self.state.lock().expect("drop gate lock");
+            state.released = true;
+            self.condition.notify_all();
+        }
+
+        fn wait_finished(&self) {
+            let mut state = self.state.lock().expect("drop gate lock");
+            while !state.finished {
+                state = self.condition.wait(state).expect("drop gate wait");
+            }
+        }
+    }
+
+    struct CallbackDropProbe(Arc<DropGate>);
+
+    impl Drop for CallbackDropProbe {
+        fn drop(&mut self) {
+            let mut state = self.0.state.lock().expect("drop gate lock");
+            state.started = true;
+            self.0.condition.notify_all();
+            while !state.released {
+                state = self.0.condition.wait(state).expect("drop gate wait");
+            }
+            state.finished = true;
+            self.0.condition.notify_all();
+        }
+    }
+
+    fn running_lifecycle(
+        attempt: &Arc<ShutdownAttempt>,
+        callback: Option<Arc<ShutdownCallback>>,
+    ) -> Arc<ShutdownState> {
+        let lifecycle = Arc::new(ShutdownState::new(callback));
+        *lifecycle.lifecycle.lock().expect("shutdown lifecycle lock") =
+            ShutdownLifecycle::Running(Arc::clone(attempt));
+        lifecycle
+    }
 
     #[test]
     fn numeric_flags_use_the_host_namespace() {
@@ -2137,6 +2989,8 @@ mod tests {
         let bits = 1 | 0o100 | 0o1000 | 0o2000 | 0o200;
         #[cfg(target_os = "macos")]
         let bits = 1 | 0x0200 | 0x0400 | 0x0008 | 0x0800;
+        #[cfg(target_os = "windows")]
+        let bits = 1 | 0x0100 | 0x0200 | 0x0008 | 0x0400;
         let flags = decode_numeric_flags(bits as f64, "/file").expect("numeric flags");
         assert!(flags.write);
         assert!(flags.create);
@@ -2249,5 +3103,177 @@ mod tests {
                 .unwrap();
         assert!(native.split(',').any(|value| value == "locallocks"));
         assert!(native.split(',').any(|value| value == "hard"));
+    }
+
+    #[test]
+    fn shutdown_wait_deduplicates_wakers_after_cancellation() {
+        let attempt = Arc::new(ShutdownAttempt::new());
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut wait = Box::pin(ShutdownWait {
+            attempt: Arc::clone(&attempt),
+        });
+
+        for _ in 0..32 {
+            assert!(matches!(wait.as_mut().poll(&mut context), Poll::Pending));
+        }
+        assert_eq!(
+            attempt
+                .state
+                .lock()
+                .expect("shutdown attempt lock")
+                .waiters
+                .len(),
+            1
+        );
+
+        // Dropping the caller's wait must not cancel the detached shutdown
+        // attempt or make its completion path panic on the stale waker.
+        drop(wait);
+        attempt.finish(Ok(()));
+        assert!(matches!(
+            attempt.state.lock().expect("shutdown attempt lock").result,
+            Some(Ok(()))
+        ));
+    }
+
+    #[test]
+    fn shutdown_keeps_running_until_provider_callback_reference_is_dropped() {
+        let gate = Arc::new(DropGate::new());
+        let probe = CallbackDropProbe(Arc::clone(&gate));
+        let callback: Arc<ShutdownCallback> = Arc::new(move || {
+            let _ = &probe;
+            Box::pin(async { Ok(()) })
+        });
+        let attempt = Arc::new(ShutdownAttempt::new());
+        let lifecycle = running_lifecycle(&attempt, None);
+        let driver = Arc::new(DriverSlot::new(Arc::new(MemoryFs::empty())));
+
+        let run_lifecycle = Arc::clone(&lifecycle);
+        let run_driver = Arc::clone(&driver);
+        let run_attempt = Arc::clone(&attempt);
+        let run = std::thread::spawn(move || {
+            block_on(run_shutdown(
+                run_lifecycle,
+                run_driver,
+                run_attempt,
+                Some(callback),
+            ));
+        });
+
+        gate.wait_started();
+        let running_before_release = {
+            let state = lifecycle.lifecycle.lock().expect("shutdown lifecycle lock");
+            matches!(&*state, ShutdownLifecycle::Running(_))
+        };
+
+        // Two callers can join the same attempt; while the provider-owned
+        // callback reference is blocked in Drop, neither may observe Closed
+        // or resolve a third shutdown call early.
+        let observed_running = Arc::new(AtomicBool::new(false));
+        let waker = Waker::from(Arc::new(CompletionWaker {
+            lifecycle: Arc::clone(&lifecycle),
+            observed_running: Arc::clone(&observed_running),
+        }));
+        let mut context = Context::from_waker(&waker);
+        let mut first = Box::pin(ShutdownWait {
+            attempt: Arc::clone(&attempt),
+        });
+        let mut second = Box::pin(ShutdownWait {
+            attempt: Arc::clone(&attempt),
+        });
+        assert!(matches!(first.as_mut().poll(&mut context), Poll::Pending));
+        assert!(matches!(second.as_mut().poll(&mut context), Poll::Pending));
+
+        gate.release();
+        run.join().expect("shutdown worker");
+        gate.wait_finished();
+
+        assert!(running_before_release);
+        assert!(observed_running.load(AtomicOrdering::SeqCst));
+        assert!(matches!(
+            &*lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
+            ShutdownLifecycle::Closed
+        ));
+        assert!(matches!(
+            attempt.state.lock().expect("shutdown attempt lock").result,
+            Some(Ok(()))
+        ));
+        assert_eq!(block_on(first).expect("first shutdown waiter"), ());
+        assert_eq!(block_on(second).expect("second shutdown waiter"), ());
+    }
+
+    #[test]
+    fn shutdown_callback_panic_is_bounded_and_retryable() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback: Arc<ShutdownCallback> = Arc::new({
+            let calls = Arc::clone(&calls);
+            move || {
+                let call = calls.fetch_add(1, AtomicOrdering::SeqCst);
+                Box::pin(async move {
+                    if call == 0 {
+                        panic!("test shutdown panic");
+                    }
+                    Ok(())
+                })
+            }
+        });
+        let driver = Arc::new(DriverSlot::new(Arc::new(MemoryFs::empty())));
+        let attempt = Arc::new(ShutdownAttempt::new());
+        let lifecycle = Arc::new(ShutdownState::new(Some(callback)));
+        let callback = {
+            let mut state = lifecycle.lifecycle.lock().expect("shutdown lifecycle lock");
+            match &mut *state {
+                ShutdownLifecycle::Open(callback) => callback.take(),
+                _ => panic!("expected open shutdown state"),
+            }
+        };
+        *lifecycle.lifecycle.lock().expect("shutdown lifecycle lock") =
+            ShutdownLifecycle::Running(Arc::clone(&attempt));
+
+        block_on(run_shutdown(
+            Arc::clone(&lifecycle),
+            Arc::clone(&driver),
+            Arc::clone(&attempt),
+            callback,
+        ));
+        assert!(matches!(
+            attempt
+                .state
+                .lock()
+                .expect("shutdown attempt lock")
+                .result,
+            Some(Err(ref error)) if error.code == ErrorCode::Eio
+        ));
+        assert!(matches!(
+            &*lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
+            ShutdownLifecycle::Open(Some(_))
+        ));
+
+        let retry_attempt = Arc::new(ShutdownAttempt::new());
+        let retry_callback = {
+            let mut state = lifecycle.lifecycle.lock().expect("shutdown lifecycle lock");
+            let callback = match &mut *state {
+                ShutdownLifecycle::Open(callback) => callback.take(),
+                _ => panic!("expected retryable shutdown state"),
+            };
+            *state = ShutdownLifecycle::Running(Arc::clone(&retry_attempt));
+            callback
+        };
+        block_on(run_shutdown(
+            lifecycle,
+            driver,
+            retry_attempt.clone(),
+            retry_callback,
+        ));
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+        assert!(matches!(
+            retry_attempt
+                .state
+                .lock()
+                .expect("shutdown attempt lock")
+                .result,
+            Some(Ok(()))
+        ));
     }
 }

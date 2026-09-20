@@ -32,37 +32,37 @@ import {
   type ErrnoCode,
   type FsError,
   type FsErrorOptions,
-} from "@andymac4182/mount-rs"
+} from "@mount-rs/core"
 import {
   createMemoryDriver,
   type MemoryDriver,
   type MemoryDriverOptions,
-} from "@andymac4182/mount-rs/drivers/memory"
+} from "@mount-rs/core/drivers/memory"
 import {
   createUnstorageDriver,
   type JsUnstorageOptions,
-} from "@andymac4182/mount-rs/drivers/unstorage"
+} from "@mount-rs/core/drivers/unstorage"
 import {
   createNfsServer,
   type NfsServer,
   type NfsServerOptions,
-} from "@andymac4182/mount-rs/nfs"
+} from "@mount-rs/core/nfs"
 import {
   createP9Server,
   type P9Connection,
   type P9Server,
   type P9ServerOptions,
-} from "@andymac4182/mount-rs/9p"
+} from "@mount-rs/core/9p"
 import {
   createS3Server,
   type S3Server,
   type S3ServerOptions,
-} from "@andymac4182/mount-rs/s3"
+} from "@mount-rs/core/s3"
 import {
   createWebdavServer,
   type WebdavServer,
   type WebdavServerOptions,
-} from "@andymac4182/mount-rs/webdav"
+} from "@mount-rs/core/webdav"
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
   __napiBindingTarget

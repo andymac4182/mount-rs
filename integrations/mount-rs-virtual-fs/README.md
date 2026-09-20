@@ -1,8 +1,8 @@
-# `@andymac4182/mount-rs-virtual-fs`
+# `@mount-rs/virtual-fs`
 
 Mount-independent adapters for the pinned `just-bash` and Mastra workspace
 filesystem contracts. The adapters operate directly on one public
-`@andymac4182/mount-rs` `Filesystem` instance: they do not mount a host path,
+`@mount-rs/core` `Filesystem` instance: they do not mount a host path,
 copy a drive into a second in-memory filesystem, or expose a public service.
 
 The package is deliberately separate from the N-API package. It currently
@@ -16,7 +16,7 @@ implemented here.
 
 The runtime tests use the pinned versions `just-bash@3.4.2` and
 `@mastra/core@1.67.0`. Both are optional peers because an application using one
-adapter does not need to install the other. `@andymac4182/mount-rs` is the
+adapter does not need to install the other. `@mount-rs/core` is the
 required peer. Use the `./just-bash` or `./mastra` subpath when installing only
 one consumer; the convenience root entrypoint re-exports both adapters and
 therefore expects both consumer peers to be present.
@@ -24,8 +24,8 @@ therefore expects both consumer peers to be present.
 ## just-bash
 
 ```js
-import { Filesystem } from "@andymac4182/mount-rs";
-import { createBash } from "@andymac4182/mount-rs-virtual-fs/just-bash";
+import { Filesystem } from "@mount-rs/core";
+import { createBash } from "@mount-rs/virtual-fs/just-bash";
 
 const filesystem = Filesystem.memory();
 const bash = await createBash(filesystem, { cwd: "/" });
@@ -52,9 +52,9 @@ shell glob expansion observes them.
 ## Mastra
 
 ```js
-import { Filesystem } from "@andymac4182/mount-rs";
+import { Filesystem } from "@mount-rs/core";
 import { Workspace } from "@mastra/core/workspace";
-import { createMastraFilesystem } from "@andymac4182/mount-rs-virtual-fs/mastra";
+import { createMastraFilesystem } from "@mount-rs/virtual-fs/mastra";
 
 const filesystem = Filesystem.memory();
 const provider = createMastraFilesystem(filesystem, {
@@ -103,6 +103,29 @@ node node_modules/typescript/lib/tsc.js --noEmit
 node test/just-bash.mjs
 node test/mastra.mjs
 ```
+
+The optional live consumer lane uses the real pinned adapters over PGlite
+metadata and RustFS S3 blocks. It is explicitly opt-in and uses the portable
+Node argument form; the environment variable remains available for harnesses:
+
+```sh
+pnpm test:live-rustfs
+# equivalent direct invocation:
+node test/live-pglite-rustfs.mjs --live
+# legacy harness opt-in:
+MOUNT_RS_VIRTUAL_FS_LIVE=1 node test/live-pglite-rustfs.mjs
+```
+
+From the repository root, run it through the isolated RustFS combo contract:
+
+```sh
+RUSTFS_COMBO_NAME=virtual-fs-pglite-rustfs RUSTFS_COMBO_TIMEOUT_SECONDS=900 RUSTFS_COMBO_COMMAND='pnpm --dir integrations/mount-rs-virtual-fs test:live-rustfs' ./scripts/test-rustfs.sh
+```
+
+The harness supplies a fresh PGlite server, loopback RustFS endpoint, test
+bucket, credentials, and test-owned prefix, then removes the owned service and
+fixtures. This proves the RustFS-backed consumer lane only; it is not evidence
+against Cloudflare R2 or an HTTP remote service.
 
 The two runtime tests execute the real pinned Bash interpreter and the real
 Mastra `Workspace` against native memory, SQLite, and rooted native NodeFs

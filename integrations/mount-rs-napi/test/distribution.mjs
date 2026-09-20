@@ -70,12 +70,12 @@ assert.equal(
 
 const require = createRequire(import.meta.url);
 const direct = await import("../index.js");
-const self = await import("@andymac4182/mount-rs");
-const selfCommonJs = require("@andymac4182/mount-rs");
+const self = await import("@mount-rs/core");
+const selfCommonJs = require("@mount-rs/core");
 assert.equal(typeof direct.Filesystem, "function");
 assert.equal(self.Filesystem, direct.Filesystem);
 assert.equal(selfCommonJs.Filesystem, direct.Filesystem);
-assert.equal(require("@andymac4182/mount-rs/package.json").name, packageJson.name);
+assert.equal(require("@mount-rs/core/package.json").name, packageJson.name);
 for (const [path, exported] of [
   ["drivers/memory", "createMemoryDriver"],
   ["drivers/node-fs", "createNodeFsDriver"],
@@ -86,8 +86,8 @@ for (const [path, exported] of [
   ["s3", "createS3Server"],
   ["webdav", "createWebdavServer"],
 ]) {
-  const esm = await import(`@andymac4182/mount-rs/${path}`);
-  const cjs = require(`@andymac4182/mount-rs/${path}`);
+  const esm = await import(`@mount-rs/core/${path}`);
+  const cjs = require(`@mount-rs/core/${path}`);
   assert.equal(typeof esm[exported], "function", `${path} ESM export`);
   assert.equal(esm[exported], cjs[exported], `${path} CJS/ESM identity`);
 }

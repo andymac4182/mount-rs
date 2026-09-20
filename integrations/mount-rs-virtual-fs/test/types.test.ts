@@ -4,18 +4,18 @@ import type {
   Workspace,
   WorkspaceFilesystem,
 } from "@mastra/core/workspace";
-import type { Filesystem } from "@andymac4182/mount-rs";
+import type { Filesystem } from "@mount-rs/core";
 import {
   createBash,
   createJustBashFilesystem,
   createMastraFilesystem,
-} from "@andymac4182/mount-rs-virtual-fs";
+} from "@mount-rs/virtual-fs";
 import {
   createJustBashFilesystem as createJustBashSubpath,
-} from "@andymac4182/mount-rs-virtual-fs/just-bash";
+} from "@mount-rs/virtual-fs/just-bash";
 import {
   createMastraFilesystem as createMastraSubpath,
-} from "@andymac4182/mount-rs-virtual-fs/mastra";
+} from "@mount-rs/virtual-fs/mastra";
 
 declare const nodeRustFs: Filesystem;
 declare const workspace: Workspace;

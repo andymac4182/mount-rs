@@ -127,7 +127,7 @@ import {
   readRmkdir as esmReadRmkdir,
   writeRlcreate as esmWriteRlcreate,
   readRlcreate as esmReadRlcreate,
-} from "@andymac4182/mount-rs/9p"
+} from "@mount-rs/core/9p"
 
 const source = process.env.MOUNTX_SOURCE
 if (!source) {
@@ -136,9 +136,9 @@ if (!source) {
 }
 
 const require = createRequire(import.meta.url)
-const root = require("@andymac4182/mount-rs")
+const root = require("@mount-rs/core")
 const rootKeys = Object.keys(root)
-const native = require("@andymac4182/mount-rs/9p")
+const native = require("@mount-rs/core/9p")
 assert.deepEqual(Object.keys(root), rootKeys, "9P facade must not mutate root exports")
 assert.equal(native.createP9Server, root.createP9Server)
 

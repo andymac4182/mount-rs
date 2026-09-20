@@ -244,6 +244,7 @@ jobs:
         run: |
           node integrations/mount-rs-napi/test/factories.mjs
           node integrations/mount-rs-napi/test/chunked.mjs
+          node integrations/mount-rs-napi/test/shutdown-lifecycle.mjs
       - name: Verify Windows virtual filesystem consumers and declarations
         run: |
           pnpm --dir integrations/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts

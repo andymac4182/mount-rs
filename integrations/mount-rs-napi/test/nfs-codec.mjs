@@ -9,9 +9,9 @@ if (!source) {
 }
 
 const require = createRequire(import.meta.url)
-const root = require("@andymac4182/mount-rs")
+const root = require("@mount-rs/core")
 const rootKeys = Object.keys(root)
-const native = require("@andymac4182/mount-rs/nfs")
+const native = require("@mount-rs/core/nfs")
 assert.deepEqual(Object.keys(root), rootKeys, "NFS facade must not mutate root exports")
 assert.equal(native.createNfsServer, root.createNfsServer)
 

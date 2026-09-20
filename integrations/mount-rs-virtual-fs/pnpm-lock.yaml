@@ -8,7 +8,7 @@ importers:
 
   .:
     devDependencies:
-      '@andymac4182/mount-rs':
+      '@mount-rs/core':
         specifier: file:../mount-rs-napi
         version: file:../mount-rs-napi
       '@mastra/core':
@@ -80,7 +80,7 @@ packages:
     resolution: {integrity: sha512-tbHKNLirllUNF3ZlkCsXnwab2ZV1Sl4b1H/Cp9ruCce15IBmskE8Gwkk0yo9xDWY+jho2of7lVXtwSsyrq7cwQ==}
     engines: {node: '>=22'}
 
-  '@andymac4182/mount-rs@file:../mount-rs-napi':
+  '@mount-rs/core@file:../mount-rs-napi':
     resolution: {directory: ../mount-rs-napi, type: directory}
 
   '@borewit/text-codec@0.2.2':
@@ -934,7 +934,7 @@ snapshots:
     dependencies:
       json-schema: 0.4.0
 
-  '@andymac4182/mount-rs@file:../mount-rs-napi':
+  '@mount-rs/core@file:../mount-rs-napi':
     dependencies:
       '@types/node': 24.13.6
 

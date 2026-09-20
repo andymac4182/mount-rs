@@ -1,8 +1,11 @@
 {
-  "name": "@andymac4182/mount-rs-virtual-fs",
+  "name": "@mount-rs/virtual-fs",
   "version": "0.1.0",
   "description": "Mount-independent just-bash and Mastra filesystem adapters for mount-rs",
   "license": "Apache-2.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "src/index.mjs",
   "types": "index.d.ts",
@@ -34,10 +37,11 @@
   ],
   "scripts": {
     "test": "node test/just-bash.mjs && node test/mastra.mjs",
+    "test:live-rustfs": "node test/live-pglite-rustfs.mjs --live",
     "typecheck": "tsc --noEmit"
   },
   "peerDependencies": {
-    "@andymac4182/mount-rs": ">=0.1.0 <0.2.0",
+    "@mount-rs/core": ">=0.1.0 <0.2.0",
     "@mastra/core": ">=1.67.0 <2",
     "just-bash": ">=3.4.2 <4"
   },
@@ -50,7 +54,7 @@
     }
   },
   "devDependencies": {
-    "@andymac4182/mount-rs": "file:../mount-rs-napi",
+    "@mount-rs/core": "file:../mount-rs-napi",
     "@mastra/core": "1.67.0",
     "@types/node": "24.13.6",
     "just-bash": "3.4.2",

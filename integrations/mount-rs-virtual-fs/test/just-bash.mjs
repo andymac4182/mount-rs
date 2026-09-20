@@ -3,12 +3,12 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { createNodeFsDriver, Filesystem } from "@andymac4182/mount-rs";
-import { MOUNT_RS_BACKEND_METHODS } from "@andymac4182/mount-rs-virtual-fs";
+import { createNodeFsDriver, Filesystem } from "@mount-rs/core";
+import { MOUNT_RS_BACKEND_METHODS } from "@mount-rs/virtual-fs";
 import {
   createBash,
   createJustBashFilesystem,
-} from "@andymac4182/mount-rs-virtual-fs/just-bash";
+} from "@mount-rs/virtual-fs/just-bash";
 
 assert.deepEqual(MOUNT_RS_BACKEND_METHODS, [
   "stat",

@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { pathToFileURL } from "node:url"
 
 const { createMemoryDriver: createNativeMemoryDriver } = await import(
-  "@andymac4182/mount-rs/drivers/memory",
+  "@mount-rs/core/drivers/memory",
 )
 
 const source = process.env.MOUNTX_SOURCE

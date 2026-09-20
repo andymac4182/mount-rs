@@ -1,9 +1,9 @@
-import type { Filesystem, JsCapabilities } from "@andymac4182/mount-rs";
+import type { Filesystem, JsCapabilities } from "@mount-rs/core";
 
 /**
  * The public async filesystem surface consumed by both adapters.
  *
- * `Filesystem` from @andymac4182/mount-rs satisfies this type. A future
+ * `Filesystem` from @mount-rs/core satisfies this type. A future
  * remote logical-drive client may implement the same method surface; the
  * virtual-fs package intentionally does not provide an HTTP transport.
  */
