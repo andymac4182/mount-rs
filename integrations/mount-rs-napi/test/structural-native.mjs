@@ -116,10 +116,16 @@ try {
       "MOUNT_RS_NAPI_STRUCTURAL_TRANSPORT must be auto, fuse, 9p, or nfs")
     const probe = await probeTransports()
     const chosen = requestedTransport === "auto" ? probe.chosen : requestedTransport
-    assert.ok(chosen, `no usable native transport was selected for ${requestedTransport}`)
+    assert.ok(
+      chosen,
+      `no usable native transport was selected for ${requestedTransport}: ${probe.reason ?? "the host probe returned no reason"}`,
+    )
     const availability = probe[mountTransportKey(chosen)]
-    assert.equal(availability?.usable, true,
-      `${chosen} is not usable: ${availability?.reason ?? "no probe reason"}`)
+    assert.equal(
+      availability?.usable,
+      true,
+      `${chosen} is not usable: ${availability?.reason ?? "the host probe returned no reason"}`,
+    )
 
     const mountpoint = await mkdtemp(join(tmpdir(), "mount-rs-napi-structural-native-"))
     let mounted
@@ -147,7 +153,9 @@ try {
         (calls.stat ?? 0) + (calls.lstat ?? 0) > 0,
         "native I/O did not reach structural stat callback",
       )
-      console.log(`structural native mount: PASS (${mounted.transport}; read/write callback reachability)`)
+      console.log(
+        `structural native mount: PASS (${mounted.transport}; read/write/unmount callback reachability)`,
+      )
     } catch (error) {
       teardownFailure = error
     } finally {
