@@ -165,11 +165,12 @@ cases still require audit.
 
 ## Still required before the overall porting goal is complete
 
-- Replace the transitional whole-filesystem snapshot persistence architecture
-  with independently composable metadata and block stores, and pluggable data
-  chunking with fixed-size chunks initially and an extensible algorithm interface.
-  Mixed-store correctness and durability
-  must be verified; see [`REQUIREMENTS.md`](REQUIREMENTS.md).
+- Finish acceptance of the independently composable metadata/block stores and
+  fixed-size chunking implementation. These now exist alongside transitional
+  whole-filesystem providers; retaining those compatibility providers does not
+  replace verification of the split-store architecture. Live remote mixed-store
+  correctness and durability evidence remains required; see
+  [`REQUIREMENTS.md`](REQUIREMENTS.md).
 - Safely host real SQLite database files inside mounted filesystems, including
   concurrency, locking, journal/WAL behavior, synchronization, and crash recovery.
   The detailed gate is in [`REQUIREMENTS.md`](REQUIREMENTS.md). SQLite-as-backend
@@ -189,12 +190,34 @@ cases still require audit.
   WebDAV, and S3 gateway behavior.
 - Add transport-specific differential/conformance tests once each transport is
   implemented.
-- Complete the remaining upstream surface, including NFSv4.1 native acceptance, native mount
-  wrappers and probes, the auto-mount facade, CLI, and driver adapters absent
-  from the current Rust workspace. Existing transport success is not evidence
-  for these missing components.
+- Close the remaining upstream API gaps in
+  [`docs/public-api-parity.md`](docs/public-api-parity.md). Native wrappers,
+  probes, auto-mount, CLI, and Linux NFSv4.1 mounted I/O now have implementations
+  and focused acceptance evidence; this does not prove all exported low-level
+  codecs, lifecycle contracts, or arbitrary JavaScript driver support.
 - Verify platform packaging and Node API/export completeness against upstream;
   building a local `.node` binary alone is not distribution acceptance.
+- Complete ComputeSDK-aligned storage benchmarks and the separate small-operation
+  dispatch/allocation baseline and measured optimization review. Passing a smoke
+  workload alone does not establish remote-backend or mounted-path performance.
+
+### PGlite shutdown and Node integration checkpoint
+
+At `a35cb5a`, the hosted Linux x64 and ARM64 Node jobs passed, including the
+full PGlite integration step, native addon mount checks, and upstream suites:
+[x64 job](https://github.com/andymac4182/mount-rs/actions/runs/35488618239/job/106019462092),
+[ARM64 job](https://github.com/andymac4182/mount-rs/actions/runs/35488618239/job/106019461997).
+The two macOS Node jobs were still running when this checkpoint was recorded;
+this is not a claim that the entire run or later revisions passed.
+
+The local macOS PGlite script also passed provider fencing/CAS, shared
+cancellation-safe close, four fresh disk-server restart rounds, 1,194 upstream
+tests (88 skipped), and forty 621-operation seeded traces. The local addon was
+built at `b621c40`; Rust tests used the checkout at `9cb892a`. This mixed local
+evidence must not be presented as a revision-matched release build. Live R2 was
+not configured. The shutdown shim is a workaround for pinned
+`pglite-socket@0.2.11` asynchronous detach ordering, not a general guarantee for
+future library versions.
 
 The goal remains active until those gates are closed. The in-memory object-store
 test validates the R2 adapter without making a claim about a live Cloudflare
