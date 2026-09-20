@@ -97,4 +97,13 @@ await fs.shutdown()
 await readOnly.shutdown()
 await failing.shutdown()
 
+
+if (process.env.MOUNTX_SOURCE) {
+  // Keep the capability-limited, oracle-backed matrix in the root test tree
+  // while making it part of the published N-API package gate.
+  await import("../../../tests/unstorage/capability-parity.mjs")
+} else {
+  console.log("mount-rs N-API unstorage capability parity: SKIP (MOUNTX_SOURCE unset)")
+}
+
 console.log("mount-rs N-API unstorage bridge: PASS")
