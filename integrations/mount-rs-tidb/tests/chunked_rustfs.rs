@@ -24,6 +24,7 @@ const RUSTFS_PREFIX: &str = "MOUNT_RS_TIDB_RUSTFS_PREFIX";
 const FIXTURE: &str = "MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE";
 const EXPECT_PERSISTED: &str = "MOUNT_RS_TIDB_EXPECT_PERSISTED";
 const REOPEN: &str = "MOUNT_RS_TIDB_CHUNKED_RUSTFS_REOPEN";
+const FIXTURE_FORMAT: &str = "mount-rs-tidb-chunked-rustfs-v1";
 
 fn optional_env(name: &str) -> Option<String> {
     std::env::var(name)
@@ -46,11 +47,17 @@ fn reopen_after_seed() -> bool {
     std::env::var(REOPEN).as_deref() == Ok("1")
 }
 
-fn configured_volume_key(prefix: &str) -> String {
+fn configured_volume_key(prefix: &str, persisted: bool) -> String {
+    if persisted {
+        return required_env(VOLUME_KEY);
+    }
     optional_env(VOLUME_KEY).unwrap_or_else(|| format!("{prefix}/tidb-metadata"))
 }
 
-fn configured_prefix() -> String {
+fn configured_prefix(persisted: bool) -> String {
+    if persisted {
+        return required_env(RUSTFS_PREFIX);
+    }
     optional_env(RUSTFS_PREFIX)
         .or_else(|| optional_env("RUSTFS_COMBO_PREFIX"))
         .unwrap_or_else(|| {
@@ -60,14 +67,27 @@ fn configured_prefix() -> String {
         })
 }
 
-fn configured_fixture() -> PathBuf {
+fn configured_fixture(persisted: bool) -> PathBuf {
     if let Some(path) = optional_env(FIXTURE) {
         return PathBuf::from(path);
+    }
+    if persisted {
+        panic!("{FIXTURE} must be set to a durable path for a persisted TiDB/RustFS restart run");
     }
     let run_dir = optional_env("RUSTFS_RUN_DIR").unwrap_or_else(|| {
         panic!("{FIXTURE} or RUSTFS_RUN_DIR must be set for the opt-in TiDB/RustFS test")
     });
     PathBuf::from(run_dir).join("tidb-chunked-rustfs-blocks")
+}
+
+fn assert_fixture_path_safe(path: &Path) {
+    if let Ok(metadata) = std::fs::symlink_metadata(path) {
+        assert!(
+            !metadata.file_type().is_symlink(),
+            "RustFS cleanup fixture must not be a symlink: {}",
+            path.display()
+        );
+    }
 }
 
 fn options(volume_key: &str) -> TidbStorageOptions {
@@ -167,6 +187,20 @@ impl TrackedRustFsBlocks {
             }
         }
     }
+
+    async fn assert_ids_absent(&self, ids: &[BlockId]) {
+        for id in ids {
+            let error = self
+                .inner
+                .get(id)
+                .await
+                .expect_err("deleted RustFS block must not remain readable");
+            assert!(
+                error.is(ErrorCode::Enoent),
+                "deleted RustFS block returned the wrong error: {error}"
+            );
+        }
+    }
 }
 
 #[async_trait]
@@ -197,22 +231,67 @@ impl BlockStore for TrackedRustFsBlocks {
     }
 }
 
-fn write_fixture(path: &Path, ids: &[BlockId]) {
+fn write_fixture(path: &Path, prefix: &str, volume_key: &str, ids: &[BlockId]) {
+    assert_fixture_path_safe(path);
+    for (name, value) in [("RustFS prefix", prefix), ("TiDB volume key", volume_key)] {
+        assert!(
+            !value.is_empty() && !value.contains(['\n', '\r']),
+            "{name} cannot be empty or contain a newline in the restart fixture"
+        );
+    }
+    assert!(
+        !ids.is_empty(),
+        "RustFS restart fixture must contain blocks"
+    );
     let body = ids
         .iter()
-        .map(|id| id.0.as_str())
+        .map(|id| format!("block:{}", id.0))
         .collect::<Vec<_>>()
         .join("\n");
-    std::fs::write(path, format!("{body}\n")).expect("write RustFS cleanup fixture");
+    std::fs::write(
+        path,
+        format!("{FIXTURE_FORMAT}\n{prefix}\n{volume_key}\n{body}\n"),
+    )
+    .expect("write RustFS cleanup fixture");
 }
 
-fn read_fixture(path: &Path) -> Vec<BlockId> {
-    std::fs::read_to_string(path)
-        .expect("RustFS cleanup fixture must survive the TiDB restart")
-        .lines()
-        .filter(|line| !line.is_empty())
-        .map(|line| BlockId(line.to_owned()))
-        .collect()
+fn read_fixture(path: &Path, expected_prefix: &str, expected_volume_key: &str) -> Vec<BlockId> {
+    assert_fixture_path_safe(path);
+    let contents = std::fs::read_to_string(path)
+        .expect("RustFS cleanup fixture must survive the TiDB restart");
+    let mut lines = contents.lines();
+    assert_eq!(
+        lines.next(),
+        Some(FIXTURE_FORMAT),
+        "RustFS cleanup fixture format mismatch"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(expected_prefix),
+        "RustFS cleanup fixture prefix does not match this run"
+    );
+    assert_eq!(
+        lines.next(),
+        Some(expected_volume_key),
+        "RustFS cleanup fixture TiDB volume key does not match this run"
+    );
+    let ids = lines
+        .map(|line| {
+            let id = line
+                .strip_prefix("block:")
+                .expect("RustFS cleanup fixture contains an invalid block record");
+            assert!(
+                !id.is_empty(),
+                "RustFS cleanup fixture contains an empty block id"
+            );
+            BlockId(id.to_owned())
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !ids.is_empty(),
+        "RustFS cleanup fixture must contain blocks"
+    );
+    ids
 }
 
 async fn delete_metadata_row(url: &str, volume_key: &str) {
@@ -232,6 +311,27 @@ async fn delete_metadata_row(url: &str, volume_key: &str) {
     pool.disconnect()
         .await
         .unwrap_or_else(|_| panic!("could not close the TiDB cleanup connection"));
+}
+
+async fn assert_metadata_row_absent(url: &str, volume_key: &str) {
+    let pool = Pool::from_url(url)
+        .unwrap_or_else(|_| panic!("could not parse TiDB cleanup verification URL"));
+    let mut connection = pool
+        .get_conn()
+        .await
+        .unwrap_or_else(|_| panic!("could not connect for TiDB cleanup verification"));
+    let count: Option<u64> = connection
+        .exec_first(
+            "SELECT COUNT(*) FROM mount_rs_tidb_metadata WHERE volume_key=?",
+            (volume_key,),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("could not verify TiDB metadata cleanup"));
+    assert_eq!(count, Some(0), "scoped TiDB metadata row still exists");
+    drop(connection);
+    pool.disconnect()
+        .await
+        .unwrap_or_else(|_| panic!("could not close the TiDB cleanup verification connection"));
 }
 
 async fn seed_chunked_filesystem(
@@ -397,7 +497,7 @@ async fn seed_chunked_filesystem(
         .await
         .unwrap_or_else(|_| panic!("could not close the second CAS metadata pool"));
 
-    write_fixture(fixture, &blocks.created_ids());
+    write_fixture(fixture, prefix, volume_key, &blocks.created_ids());
     println!("TIDB_CHUNKED_RUSTFS_SEED_PASS");
 }
 
@@ -444,10 +544,17 @@ async fn reopen_chunked_filesystem(
         .await
         .unwrap_or_else(|_| panic!("could not close the reopened TiDB metadata pool"));
 
-    let ids = read_fixture(fixture);
-    blocks.delete_ids(ids).await;
+    let ids = read_fixture(fixture, prefix, volume_key);
+    blocks.delete_ids(ids.iter().cloned()).await;
+    blocks.assert_ids_absent(&ids).await;
     delete_metadata_row(url, volume_key).await;
+    assert_metadata_row_absent(url, volume_key).await;
     std::fs::remove_file(fixture).expect("remove RustFS cleanup fixture");
+    assert_fixture_path_safe(fixture);
+    assert!(
+        !fixture.exists(),
+        "RustFS cleanup fixture still exists after successful cleanup"
+    );
     println!("TIDB_CHUNKED_RUSTFS_REOPEN_PASS");
 }
 
@@ -460,13 +567,20 @@ async fn actual_tidb_chunked_rustfs_contract() {
         "set MOUNT_RS_TIDB_CHUNKED_RUSTFS=1 to explicitly run this ignored test"
     );
     let url = required_env("MOUNT_RS_TIDB_URL");
-    let prefix = configured_prefix();
-    let volume_key = configured_volume_key(&prefix);
-    let fixture = configured_fixture();
+    let persisted = persisted_run();
+    let prefix = configured_prefix(persisted);
+    let volume_key = configured_volume_key(&prefix, persisted);
+    let fixture = configured_fixture(persisted);
+    if persisted && let Some(run_dir) = optional_env("RUSTFS_RUN_DIR") {
+        assert!(
+            !fixture.starts_with(Path::new(&run_dir)),
+            "persisted restart fixture must not live under transient RUSTFS_RUN_DIR"
+        );
+    }
     let config = local_rustfs_config();
 
     tokio::time::timeout(TEST_TIMEOUT, async {
-        if persisted_run() {
+        if persisted {
             reopen_chunked_filesystem(&url, &volume_key, &config, &prefix, &fixture).await;
         } else {
             seed_chunked_filesystem(&url, &volume_key, &config, &prefix, &fixture).await;
