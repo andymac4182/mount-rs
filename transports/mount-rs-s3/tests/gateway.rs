@@ -609,20 +609,29 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
         ))
         .await;
     assert_eq!(parts.status, 200);
-    assert!(String::from_utf8_lossy(&parts.body).contains("<PartNumber>1</PartNumber>"));
+    let parts_text = String::from_utf8_lossy(&parts.body);
+    assert!(parts_text.contains("<PartNumber>1</PartNumber>"));
+    assert!(parts_text.contains(
+        "<PartNumberMarker>0</PartNumberMarker><MaxParts>1000</MaxParts><IsTruncated>false</IsTruncated>"
+    ));
 
     let complete_body = format!(
         "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
     );
-    let completed = session
-        .handle(request(
-            "POST",
-            &format!("/mountx/multipart.bin?uploadId={upload_id}"),
-            complete_body.as_bytes(),
-            &[],
-        ))
-        .await;
+    let mut complete_request = request(
+        "POST",
+        &format!("/mountx/multipart.bin?uploadId={upload_id}"),
+        complete_body.as_bytes(),
+        &[],
+    );
+    complete_request
+        .head
+        .headers
+        .push(HeaderEntry::new("host", "s3.example"));
+    let completed = session.handle(complete_request).await;
     assert_eq!(completed.status, 200);
+    let completed_text = String::from_utf8_lossy(&completed.body);
+    assert!(completed_text.contains("<Location>http://s3.example/mountx/multipart.bin</Location>"));
     assert_eq!(
         session
             .handle(request("GET", "/mountx/multipart.bin", [], &[]))
@@ -636,6 +645,20 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
             .await
             .is_err()
     );
+    let after = session
+        .handle(request(
+            "GET",
+            &format!("/mountx/multipart.bin?uploadId={upload_id}"),
+            [],
+            &[],
+        ))
+        .await;
+    assert_eq!(after.status, 404);
+    let after_text = String::from_utf8_lossy(&after.body);
+    assert!(after_text.contains("<Code>NoSuchUpload</Code>"));
+    assert!(after_text.contains(
+        "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed."
+    ));
 }
 
 #[tokio::test]

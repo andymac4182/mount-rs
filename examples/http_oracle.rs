@@ -96,7 +96,7 @@ impl FsDriver for FixedMtimeDriver {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let credentials = Credentials::new(ACCESS_KEY, SECRET_KEY);
     let s3 = create_s3_server(
-        MemoryFs::empty(),
+        FixedMtimeDriver::new(MemoryFs::empty()),
         S3ServerOptions::default(),
         Some(credentials),
         Some(REGION.to_owned()),

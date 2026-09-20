@@ -103,7 +103,10 @@ pub fn s3_error(code: &str) -> S3Error {
         "MissingContentLength" => (411, "You must provide the Content-Length HTTP header."),
         "NoSuchBucket" => (404, "The specified bucket does not exist."),
         "NoSuchKey" => (404, "The specified key does not exist."),
-        "NoSuchUpload" => (404, "The specified multipart upload does not exist."),
+        "NoSuchUpload" => (
+            404,
+            "The specified multipart upload does not exist. The upload ID might be invalid, or the multipart upload might have been aborted or completed.",
+        ),
         "NotImplemented" => (
             501,
             "A header you provided implies functionality that is not implemented.",
@@ -1065,7 +1068,7 @@ pub fn list_parts_xml(input: ListPartsXml<'_>) -> String {
         parts,
     } = input;
     let mut xml = format!(
-        "{}<ListPartsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId><Initiator><ID>{}</ID><DisplayName>{}</DisplayName></Initiator><Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner><StorageClass>STANDARD</StorageClass><PartNumberMarker>{marker}</PartNumberMarker><MaxParts>{max_parts}</MaxParts>",
+        "{}<ListPartsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>{}</Bucket><Key>{}</Key><UploadId>{}</UploadId><Initiator><ID>{}</ID><DisplayName>{}</DisplayName></Initiator><Owner><ID>{}</ID><DisplayName>{}</DisplayName></Owner><StorageClass>STANDARD</StorageClass><PartNumberMarker>{marker}</PartNumberMarker>",
         xml_header(),
         xml_escape(bucket),
         xml_escape(key),
@@ -1081,7 +1084,7 @@ pub fn list_parts_xml(input: ListPartsXml<'_>) -> String {
         ));
     }
     xml.push_str(&format!(
-        "<IsTruncated>{}</IsTruncated>",
+        "<MaxParts>{max_parts}</MaxParts><IsTruncated>{}</IsTruncated>",
         if truncated { "true" } else { "false" }
     ));
     for part in parts {

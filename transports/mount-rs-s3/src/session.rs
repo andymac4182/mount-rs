@@ -1300,7 +1300,7 @@ impl S3Session {
         }
         let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
         remove_tree(&driver, &upload_directory(upload_id)).await?;
-        let location = format!("/{}/{}", target.bucket, target.key);
+        let location = object_location(request.head, &target.bucket, &target.key);
         Ok(xml_response(
             200,
             protocol::complete_multipart_xml(
@@ -1512,6 +1512,20 @@ fn object_etag(stats: &Stats) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("{}-1", &hex[..32])
+}
+
+fn object_location(head: &S3RequestHead, bucket: &str, key: &str) -> String {
+    let encoded_bucket = sigv4::uri_encode(bucket);
+    let encoded_key = key
+        .split('/')
+        .map(sigv4::uri_encode)
+        .collect::<Vec<_>>()
+        .join("/");
+    let path = format!("/{encoded_bucket}/{encoded_key}");
+    match header_value(&head.headers, "host") {
+        Some(host) if !host.is_empty() => format!("http://{host}{path}"),
+        _ => path,
+    }
 }
 
 fn object_conditional_headers(etag: &str, mtime_ms: i64) -> Vec<(String, String)> {
@@ -2401,7 +2415,10 @@ fn decode_aws_chunked(
                 .expect("signed chunk signature checked above")
                 .to_ascii_lowercase();
             if expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() != 1 {
-                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+                return Err(S3Failure::S3(protocol::error_with_message(
+                    "SignatureDoesNotMatch",
+                    "chunk signature does not match",
+                )));
             }
             previous_signature = Some(expected);
         }
@@ -2512,7 +2529,10 @@ fn decode_trailers(
                 .unwrap_u8()
                 != 1
             {
-                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+                return Err(S3Failure::S3(protocol::error_with_message(
+                    "SignatureDoesNotMatch",
+                    "trailer signature does not match",
+                )));
             }
             if cursor == body.len() || (body.len() - cursor == 2 && &body[cursor..] == b"\r\n") {
                 return Ok(output);
@@ -2844,7 +2864,10 @@ impl<'a> StreamingBodyDecoder<'a> {
                 .unwrap_u8()
                 != 1
             {
-                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+                return Err(S3Failure::S3(protocol::error_with_message(
+                    "SignatureDoesNotMatch",
+                    "trailer signature does not match",
+                )));
             }
             self.state = StreamingDecodeState::Epilogue;
             return Ok(true);
@@ -2910,7 +2933,10 @@ impl<'a> StreamingBodyDecoder<'a> {
                 .expect("signed chunk signature checked above")
                 .to_ascii_lowercase();
             if expected.as_bytes().ct_eq(provided.as_bytes()).unwrap_u8() != 1 {
-                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+                return Err(S3Failure::S3(protocol::error_with_message(
+                    "SignatureDoesNotMatch",
+                    "chunk signature does not match",
+                )));
             }
             self.previous_signature = Some(expected);
             if !terminal && !self.current_payload.is_empty() {

@@ -33,10 +33,11 @@ if (!source) {
 }
 
 const sourceRoot = pathToFileURL(source.endsWith("/") ? source : `${source}/`);
-const [s3Oracle, webdavOracle, signer] = await Promise.all([
+const [s3Oracle, webdavOracle, signer, chunked] = await Promise.all([
   import(new URL("src/s3/server.ts", sourceRoot).href),
   import(new URL("src/webdav/server.ts", sourceRoot).href),
   import(new URL("src/s3/sigv4.ts", sourceRoot).href),
+  import(new URL("src/s3/chunked.ts", sourceRoot).href),
 ]);
 const { createMemoryDriver: createS3MemoryDriver } = await import(
   new URL("src/drivers/memory.ts", sourceRoot).href,
@@ -160,7 +161,14 @@ function xmlCanonical(value) {
   const namespaces = [{}];
   const elements = [];
   const output = [];
-  const dynamic = new Set(["creationdate", "getlastmodified", "hostid", "lastmodified", "requestid"]);
+  const dynamic = new Set([
+    "creationdate",
+    "getlastmodified",
+    "hostid",
+    "lastmodified",
+    "requestid",
+    "uploadid",
+  ]);
   let position = 0;
   let textBuffer = "";
 
@@ -173,8 +181,11 @@ function xmlCanonical(value) {
     // cannot be hidden by a permissive canonicalizer.
     if (text.trim() !== "") {
       const parent = elements.at(-1);
+      const local = parent?.local?.toLowerCase();
+      const semantic =
+        local === "location" ? text.replace(/^(https?:\/\/)[^/]+/, "$1<dynamic-origin>") : text;
       output.push(
-        dynamic.has(parent?.local?.toLowerCase()) ? "#<dynamic-value>" : `#${JSON.stringify(text)}`,
+        dynamic.has(local) ? "#<dynamic-value>" : `#${JSON.stringify(semantic)}`,
       );
     }
     textBuffer = "";
@@ -285,7 +296,7 @@ function bodyValue(bytesValue, contentType) {
   return { kind: "bytes", value: Buffer.from(bytesValue).toString("base64") };
 }
 
-async function readResponse(response, method) {
+async function readResponseDetails(response, method) {
   const body = new Uint8Array(await response.arrayBuffer());
   const advertisedLength = response.headers.get("content-length");
   if (advertisedLength !== null && method !== "HEAD" && Number(advertisedLength) !== body.byteLength) {
@@ -302,9 +313,12 @@ async function readResponse(response, method) {
     headers["content-length"] = String(Buffer.byteLength(semanticBody.value));
   }
   return {
-    status: response.status,
-    headers,
-    body: semanticBody,
+    value: {
+      status: response.status,
+      headers,
+      body: semanticBody,
+    },
+    bytes: body,
   };
 }
 
@@ -321,12 +335,24 @@ function compare(label, left, right) {
 
 async function pair(label, tsRequest, rustRequest, { method } = {}) {
   const [typescriptResponse, rustResponse] = await Promise.all([tsRequest(), rustRequest()]);
-  const [typescript, rust] = await Promise.all([
-    readResponse(typescriptResponse, method),
-    readResponse(rustResponse, method),
+  const [typescriptDetails, rustDetails] = await Promise.all([
+    readResponseDetails(typescriptResponse, method),
+    readResponseDetails(rustResponse, method),
   ]);
-  compare(label, typescript, rust);
-  return { typescript, rust };
+  compare(label, typescriptDetails.value, rustDetails.value);
+  return {
+    typescript: typescriptDetails.value,
+    rust: rustDetails.value,
+    typescriptBytes: typescriptDetails.bytes,
+    rustBytes: rustDetails.bytes,
+  };
+}
+
+function xmlField(bytesValue, name) {
+  const text = new TextDecoder().decode(bytesValue);
+  const match = text.match(new RegExp(`<${name}>([^<]*)</${name}>`));
+  assert(match, `missing <${name}> in XML response: ${text}`);
+  return decodeXml(match[1]);
 }
 
 function urlFor(base, pathAndQuery) {
@@ -354,11 +380,16 @@ async function fetchWebdav(base, method, path, options = {}) {
 function s3SignedHeaders(base, method, pathAndQuery, body, extra = {}, timestamp = Date.now(), payloadHash) {
   const url = new URL(pathAndQuery, `${base.replace(/\/$/, "")}/`);
   const hash = payloadHash ?? signer.sha256Hex(body ?? new Uint8Array());
+  const extraHeaders = Object.entries(extra).map(([name, value]) => ({
+    name: name.toLowerCase(),
+    value: String(value),
+  }));
+  const host = extraHeaders.find(({ name }) => name === "host")?.value ?? url.host;
   const headers = [
-    { name: "host", value: url.host },
+    { name: "host", value: host },
     { name: "x-amz-date", value: signer.formatAmzDate(timestamp) },
     { name: "x-amz-content-sha256", value: hash },
-    ...Object.entries(extra).map(([name, value]) => ({ name: name.toLowerCase(), value: String(value) })),
+    ...extraHeaders.filter(({ name }) => name !== "host"),
   ];
   const signed = signer.signRequest({
     method,
@@ -377,7 +408,126 @@ function s3SignedHeaders(base, method, pathAndQuery, body, extra = {}, timestamp
       ["authorization", signed.authorization],
     ]),
     hash,
+    amzDate: signed.amzDate,
+    scope: signed.scope,
+    signature: signed.signature,
   };
+}
+
+function concatBytes(parts) {
+  const total = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const output = new Uint8Array(total);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.byteLength;
+  }
+  return output;
+}
+
+function tamperChunkSignature(body) {
+  const marker = bytes("chunk-signature=");
+  const output = body.slice();
+  for (let offset = 0; offset + marker.byteLength + 64 < output.byteLength; offset += 1) {
+    if (marker.every((value, index) => output[offset + index] === value)) {
+      const signatureOffset = offset + marker.byteLength + 63;
+      output[signatureOffset] = output[signatureOffset] === 48 ? 49 : 48;
+      return output;
+    }
+  }
+  throw new Error("AWS chunked body has no signature to tamper");
+}
+
+function awsChunkedBytes(payload, signature, { chunkSize = 64 * 1024, trailers = false } = {}) {
+  const parts = [];
+  let previous = signature.seed;
+  for (let offset = 0; offset < payload.byteLength; offset += chunkSize) {
+    const chunk = payload.slice(offset, Math.min(payload.byteLength, offset + chunkSize));
+    const chunkSignature = chunked.signChunk(signature, previous, signer.sha256Hex(chunk));
+    parts.push(
+      bytes(`${chunk.byteLength.toString(16)};chunk-signature=${chunkSignature}\r\n`),
+      chunk,
+      bytes("\r\n"),
+    );
+    previous = chunkSignature;
+  }
+
+  const terminalSignature = chunked.signChunk(signature, previous, signer.sha256Hex(new Uint8Array()));
+  parts.push(bytes(`0;chunk-signature=${terminalSignature}\r\n`));
+  if (trailers) {
+    const trailerName = "x-amz-checksum-crc32";
+    const trailerValue = "1B2M2Y8=";
+    const trailerBlock = bytes(`${trailerName}:${trailerValue}\n`);
+    const trailerSignature = chunked.signTrailer(
+      signature,
+      terminalSignature,
+      signer.sha256Hex(trailerBlock),
+    );
+    parts.push(
+      bytes(
+        `${trailerName}:${trailerValue}\r\nx-amz-trailer-signature:${trailerSignature}\r\n\r\n`,
+      ),
+    );
+  } else {
+    parts.push(bytes("\r\n"));
+  }
+  return concatBytes(parts);
+}
+
+function s3ChunkedRequest(base, method, pathAndQuery, payload, options = {}) {
+  const body = payload instanceof Uint8Array ? payload : bytes(payload);
+  const timestamp = options.timestamp ?? Date.now();
+  const payloadHash = options.trailers
+    ? "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER"
+    : "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+  const amzDate = signer.formatAmzDate(timestamp);
+  const scope = { date: amzDate.slice(0, 8), region: REGION, service: "s3" };
+  const draftSignature = {
+    seed: "0".repeat(64),
+    amzDate,
+    scope,
+    secretAccessKey: SECRET_KEY,
+  };
+  const draftBody = awsChunkedBytes(body, draftSignature, options);
+  const extra = {
+    ...options.headers,
+    "content-encoding": "aws-chunked",
+    "x-amz-decoded-content-length": body.byteLength,
+    "content-length": draftBody.byteLength,
+    ...(options.trailers ? { "x-amz-trailer": "x-amz-checksum-crc32" } : {}),
+  };
+  const signed = s3SignedHeaders(
+    base,
+    method,
+    pathAndQuery,
+    body,
+    extra,
+    timestamp,
+    payloadHash,
+  );
+  const actualBody = awsChunkedBytes(
+    body,
+    {
+      seed: signed.signature,
+      amzDate: signed.amzDate,
+      scope: signed.scope,
+      secretAccessKey: SECRET_KEY,
+    },
+    options,
+  );
+  assert.equal(actualBody.byteLength, draftBody.byteLength, "AWS chunked signature changed framing length");
+  return { url: signed.url, headers: signed.headers, body: actualBody };
+}
+
+async function fetchS3Chunked(base, method, pathAndQuery, options = {}) {
+  const request = s3ChunkedRequest(base, method, pathAndQuery, options.body ?? new Uint8Array(), options);
+  const body = options.tamperChunkSignature ? tamperChunkSignature(request.body) : request.body;
+  return fetch(request.url, {
+    method,
+    headers: request.headers,
+    body: fragmentedBody(body, [1, 3, 7, 31, 113, 4096]),
+    duplex: "half",
+  });
 }
 
 async function fetchS3(base, method, pathAndQuery, options = {}) {
@@ -591,6 +741,108 @@ async function runS3Pair(tsBase, rustBase) {
     payloadHash: signer.sha256Hex(bytes("body whose digest is intentionally wrong")),
     headers: { "x-amz-meta-mtime": FIXED_MTIME_SECONDS },
   });
+
+  const multipartKey = "multipart/assembled.bin";
+  const multipartPath = (key, uploadId, suffix = "") =>
+    `/${S3_BUCKET}/${key}?uploadId=${encodeURIComponent(uploadId)}${suffix}`;
+  const initiate = await run("multipart-initiate", "POST", `/${S3_BUCKET}/${multipartKey}?uploads`, {
+    headers: { "x-amz-meta-mtime": FIXED_MTIME_SECONDS },
+  });
+  const tsUploadId = xmlField(initiate.typescriptBytes, "UploadId");
+  const rustUploadId = xmlField(initiate.rustBytes, "UploadId");
+  const multipartPart = seeded(256 * 1024 + 17);
+  const uploaded = await pair(
+    "s3/multipart-upload-part-signed-chunks",
+    () =>
+      fetchS3Chunked(tsBase, "PUT", multipartPath(multipartKey, tsUploadId, "&partNumber=1"), {
+        body: multipartPart,
+        chunkSize: 64 * 1024,
+      }),
+    () =>
+      fetchS3Chunked(rustBase, "PUT", multipartPath(multipartKey, rustUploadId, "&partNumber=1"), {
+        body: multipartPart,
+        chunkSize: 64 * 1024,
+      }),
+    { method: "PUT" },
+  );
+  const tsPartEtag = uploaded.typescript.headers.etag;
+  const rustPartEtag = uploaded.rust.headers.etag;
+  assert(tsPartEtag, "TypeScript multipart part did not return an ETag");
+  assert(rustPartEtag, "Rust multipart part did not return an ETag");
+  await pair(
+    "s3/multipart-upload-part-bad-chain",
+    () =>
+      fetchS3Chunked(tsBase, "PUT", multipartPath(multipartKey, tsUploadId, "&partNumber=2"), {
+        body: multipartPart,
+        chunkSize: 64 * 1024,
+        tamperChunkSignature: true,
+      }),
+    () =>
+      fetchS3Chunked(rustBase, "PUT", multipartPath(multipartKey, rustUploadId, "&partNumber=2"), {
+        body: multipartPart,
+        chunkSize: 64 * 1024,
+        tamperChunkSignature: true,
+      }),
+    { method: "PUT" },
+  );
+  await pair(
+    "s3/multipart-list-parts",
+    () =>
+      fetchS3(tsBase, "GET", multipartPath(multipartKey, tsUploadId), {
+      }),
+    () =>
+      fetchS3(rustBase, "GET", multipartPath(multipartKey, rustUploadId), {
+      }),
+    { method: "GET" },
+  );
+  const completeXml = (etag) =>
+    bytes(
+      `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>${etag}</ETag></Part></CompleteMultipartUpload>`,
+    );
+  await pair(
+    "s3/multipart-complete-signed-trailer",
+    () =>
+      fetchS3Chunked(tsBase, "POST", multipartPath(multipartKey, tsUploadId), {
+        body: completeXml(tsPartEtag),
+        chunkSize: 4096,
+        trailers: true,
+        headers: { "content-type": "application/xml" },
+      }),
+    () =>
+      fetchS3Chunked(rustBase, "POST", multipartPath(multipartKey, rustUploadId), {
+        body: completeXml(rustPartEtag),
+        chunkSize: 4096,
+        trailers: true,
+        headers: { "content-type": "application/xml" },
+      }),
+    { method: "POST" },
+  );
+  await run("multipart-get-completed", "GET", `/${S3_BUCKET}/${multipartKey}`, {
+  });
+  await pair(
+    "s3/multipart-completed-upload-error",
+    () => fetchS3(tsBase, "GET", multipartPath(multipartKey, tsUploadId)),
+    () => fetchS3(rustBase, "GET", multipartPath(multipartKey, rustUploadId)),
+    { method: "GET" },
+  );
+
+  const abortInitiate = await run("multipart-abort-initiate", "POST", `/${S3_BUCKET}/abort.bin?uploads`, {
+    headers: { "x-amz-meta-mtime": FIXED_MTIME_SECONDS },
+  });
+  const tsAbortId = xmlField(abortInitiate.typescriptBytes, "UploadId");
+  const rustAbortId = xmlField(abortInitiate.rustBytes, "UploadId");
+  await pair(
+    "s3/multipart-abort",
+    () => fetchS3(tsBase, "DELETE", multipartPath("abort.bin", tsAbortId)),
+    () => fetchS3(rustBase, "DELETE", multipartPath("abort.bin", rustAbortId)),
+    { method: "DELETE" },
+  );
+  await pair(
+    "s3/multipart-abort-error",
+    () => fetchS3(tsBase, "GET", multipartPath("abort.bin", tsAbortId)),
+    () => fetchS3(rustBase, "GET", multipartPath("abort.bin", rustAbortId)),
+    { method: "GET" },
+  );
   await run("unsupported-method", "PATCH", `/${S3_BUCKET}/tree/hello.bin`);
 }
 
@@ -598,7 +850,7 @@ let rust;
 let tsS3;
 let tsWebdav;
 try {
-  tsS3 = s3Oracle.createS3Server(createS3MemoryDriver(), {
+  tsS3 = s3Oracle.createS3Server(fixedTimeDriver(createS3MemoryDriver()), {
     host: "127.0.0.1",
     credentials: CREDENTIALS,
     region: REGION,
@@ -611,7 +863,7 @@ try {
   rust = await startRust();
   await runS3Pair(tsS3.url, rust.ready.s3);
   await runWebdavPair(tsWebdav.url, rust.ready.webdav);
-  console.log("mount-rs HTTP TypeScript/Rust differential: PASS (S3 + WebDAV, 30 paired cases)");
+  console.log("mount-rs HTTP TypeScript/Rust differential: PASS (S3 + WebDAV, 40 paired cases)");
 } finally {
   await tsS3?.close();
   await tsWebdav?.close();
