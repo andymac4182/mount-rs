@@ -40,7 +40,7 @@ described as a complete session or native-mount implementation.
 | Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the opt-in native mount lifecycle now accepts the plain structural object and passes macOS NFS read/write/unmount | **PARTIAL; UNVERIFIED** for hosted Linux/other platforms |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
-| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces and a Rust-backed `InodeTable` are exported through `./fuse`; full request/reply body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
+| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; remaining bodies, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
@@ -127,6 +127,11 @@ The Rust implementation has useful, tested FUSE pieces:
   packing, protocol layouts, integer coercion and malformed input are
   differentially tested against the pinned oracle in
   [`fuse-codec.mjs`](../integrations/mount-rs-napi/test/fuse-codec.mjs);
+- the same barrel now exposes typed Rust-backed `READ`/`WRITE`,
+  `GETATTR`/`SETATTR`, and `OPEN`/`OPENDIR` request/reply codecs. Protocol
+  7.8/7.39/7.41 differential checks cover truncation, trailing bytes,
+  malformed inputs and typed replies. These are still mount-free codec gates;
+  they do not establish FUSE session or native mount parity;
 - the Rust-backed `InodeTable` is now exposed from the N-API `./fuse` barrel;
   its facade preserves oracle-shaped `Inode` views and `Set` paths while the
   state and mutation logic remain in Rust. The focused oracle test covers
@@ -265,11 +270,12 @@ from the smallest contract boundary to the larger environment boundary:
    cancellation/close, fault-injection, SQLite and PGlite gates now cover the
    main storage paths, including the SDK-backed CLI reopen flow. Hosted crash,
    live-R2 and native transport concurrency remain separate acceptance gates.
-4. **Remaining public transport/API surface (P1):** the FUSE `READDIR` and
-   `READDIRPLUS` body codecs are now public and oracle-differentially tested.
-   Expose the remaining request/reply bodies, session and native-mount
-   surfaces, then run oracle-backed subpath tests for every exported transport
-   rather than treating codec or inode fixture tests as transport completion.
+4. **Remaining public transport/API surface (P1):** the FUSE directory,
+   `READ`/`WRITE`, `GETATTR`/`SETATTR`, and `OPEN`/`OPENDIR` body codecs are
+   now public and oracle-differentially tested. Expose the remaining
+   request/reply bodies, session and native-mount surfaces, then run
+   oracle-backed subpath tests for every exported transport rather than
+   treating codec or inode fixture tests as transport completion.
 
 The first two items are behavior or environment gaps in the current W01 slice;
 the third and fourth retain broader acceptance boundaries. Provider,
@@ -411,6 +417,20 @@ the closure items listed above.
   skips without their environment gates.
 - **PASS** — the oracle-enabled N-API suite, including public FUSE
   `READDIRPLUS`, completed its functional tests and artifact aggregation.
+
+### W01 parallel packet evidence (2026-09-21)
+
+- **PASS** — `a31880d` provider matrix: seeded positional writes, truncate,
+  flush and reopen passed for 5 Rust SDK, 4 Node SDK and 9 CLI cases; PGlite
+  and R2 remained explicit prerequisite skips.
+- **PASS** — `cc73ad5` Unstorage path/metadata/handle parity: 11 oracle rows,
+  zero mismatches and zero skips, alongside the capability, edge, N-API and
+  upstream conformance gates. Hardlinks, symlinks, `statfs` and special-node
+  creation remain explicit capability limitations.
+- **PASS** — `a3795f0` FUSE `OPEN`/`OPENDIR` request codecs: protocol 7.8,
+  7.39 and 7.41 differential coverage, malformed/truncated/trailing checks,
+  typecheck, Clippy and the full N-API suite. Native FUSE session/mount is
+  intentionally not inferred from this mount-free evidence.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
