@@ -16,16 +16,25 @@ reads and are closed on completion or connection shutdown.
 
 The HTTP integration tests bind an ephemeral loopback TCP socket and run as an
 ordinary user on both macOS and Linux. They are protocol tests; they do not
-claim native mount verification. A real client mount is an external
-platform-specific prerequisite: Linux requires a separately installed
-`davfs2`/FUSE setup and the relevant privileges or `/etc/fstab` policy; macOS
-uses `/sbin/mount_webdav` and its system authorization policy. Neither is
-invoked by this crate's test suite.
+claim native mount verification. `tests/native_mount.rs` is the separate,
+ignored harness corresponding to the oracle's `test/webdav/mount.test.ts`.
+Run it only with:
+`MOUNT_RS_WEBDAV_NATIVE_TEST=1 cargo test -p mount-rs-webdav --test native_mount -- --ignored --nocapture`.
+It hard-fails
+missing prerequisites when explicitly selected and is never part of ordinary
+or CI test runs. Linux requires `mount.davfs`, FUSE (`/dev/fuse` and the
+kernel fuse filesystem), root, and `umount`; macOS requires `/sbin/mount_webdav`
+and `umount` plus the host's authorization policy. We do not invoke that
+harness here.
 
-Known intentional remainder is documented in `src/lib.rs`: dead WebDAV
-properties, extended MKCOL bodies, multi-range responses, and a native mount
-probe are outside this crate. Unsupported HTTP methods return `405` with the
-supported method list.
+The oracle intentionally does not store dead WebDAV properties: named unknown
+properties are `404`, and `PROPPATCH` set/remove instructions are `403
+cannot-modify-protected-property` (except the writable `getlastmodified`
+property when the driver advertises `times`). Non-empty MKCOL bodies are
+`415`, because extended MKCOL is not defined. Multi-range `Range` headers are
+ignored as unsupported and return the complete representation with `200`, not
+an invented multipart format. These behaviors are covered by explicit tests.
+Unsupported HTTP methods return `405` with the supported method list.
 
 The runtime dependency set is intentionally transport-only: Hyper/Hyper-Util
 and Tokio provide the HTTP/async server, Quick-XML and percent-encoding handle

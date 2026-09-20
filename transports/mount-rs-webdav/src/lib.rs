@@ -19,11 +19,13 @@
 //!   bodies, streamed file responses, recursive transfer/delete, and
 //!   errno-aware HTTP status mapping.
 //!
-//! Intentional remainder: extended MKCOL bodies, dead-property storage,
-//! multi-range responses, and native kernel mount orchestration are not part of
-//! the core driver contract or this crate.  Unsupported methods answer `405`
-//! with `Allow`.  The HTTP integration tests never claim native mount
-//! verification.
+//! The oracle's deliberate refusals are preserved: extended MKCOL bodies are
+//! `415`, dead-property writes are `403` and unknown property reads are `404`,
+//! and multi-range requests are served as an ordinary full `200` response
+//! rather than an invented multipart format. Native kernel mount orchestration
+//! remains test-only; the ignored harness never runs in ordinary tests.
+//! Unsupported methods answer `405` with `Allow`. The HTTP integration tests
+//! never claim native mount verification.
 
 mod constants;
 pub mod locks;

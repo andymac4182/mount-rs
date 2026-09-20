@@ -98,6 +98,11 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         parse_range(Some("bytes=99-101"), 4),
         RangeSpec::Unsatisfiable
     );
+    assert_eq!(
+        parse_range(Some("bytes=0-1,3-4"), 6),
+        RangeSpec::Full,
+        "mountx ignores multi-range requests rather than emitting multipart/byteranges"
+    );
     assert_eq!(parse_overwrite(None), Some(true));
     assert_eq!(parse_overwrite(Some("f")), Some(false));
     assert_eq!(parse_overwrite(Some("yes")), None);
@@ -253,6 +258,96 @@ async fn http_round_trip_covers_class_one_methods_and_properties() {
             .status(),
         404
     );
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unsupported_dead_props_extended_mkcol_and_multi_range_match_mountx() {
+    let server = server().await;
+    let client = reqwest::Client::new();
+    let base = server.url();
+
+    let created = client
+        .put(format!("{base}/resource"))
+        .body("abcdef")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201);
+
+    let unknown_propfind = client
+        .request(method("PROPFIND"), format!("{base}/resource"))
+        .header("Depth", "0")
+        .body(
+            r#"<D:propfind xmlns:D="DAV:" xmlns:Z="urn:example"><D:prop><Z:dead/></D:prop></D:propfind>"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown_propfind.status(), 207);
+    let unknown_body = unknown_propfind.text().await.unwrap();
+    assert!(unknown_body.contains("HTTP/1.1 404 Not Found"));
+    assert!(unknown_body.contains(r#"<dead xmlns="urn:example"></dead>"#));
+
+    let dead_patch = client
+        .request(method("PROPPATCH"), format!("{base}/resource"))
+        .body(
+            r#"<D:propertyupdate xmlns:D="DAV:" xmlns:Z="urn:example"><D:set><D:prop><Z:dead>value</Z:dead></D:prop></D:set></D:propertyupdate>"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(dead_patch.status(), 207);
+    let dead_body = dead_patch.text().await.unwrap();
+    assert!(dead_body.contains("HTTP/1.1 403 Forbidden"));
+    assert!(dead_body.contains("cannot-modify-protected-property"));
+    assert!(dead_body.contains(r#"<dead xmlns="urn:example"></dead>"#));
+
+    let still_unknown = client
+        .request(method("PROPFIND"), format!("{base}/resource"))
+        .header("Depth", "0")
+        .body(
+            r#"<D:propfind xmlns:D="DAV:" xmlns:Z="urn:example"><D:prop><Z:dead/></D:prop></D:propfind>"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(still_unknown.status(), 207);
+    assert!(
+        still_unknown
+            .text()
+            .await
+            .unwrap()
+            .contains("HTTP/1.1 404 Not Found")
+    );
+
+    let extended_mkcol = client
+        .request(method("MKCOL"), format!("{base}/extended"))
+        .body(r#"<D:mkcol xmlns:D="DAV:"><D:set/></D:mkcol>"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(extended_mkcol.status(), 415);
+    assert_eq!(
+        client
+            .get(format!("{base}/extended"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        404
+    );
+
+    let multi_range = client
+        .get(format!("{base}/resource"))
+        .header("Range", "bytes=0-1,3-4")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(multi_range.status(), 200);
+    assert!(multi_range.headers().get("content-range").is_none());
+    assert_eq!(multi_range.text().await.unwrap(), "abcdef");
+
     server.close().await.unwrap();
 }
 
