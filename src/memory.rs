@@ -433,7 +433,7 @@ impl MemoryFs {
         syscall: &str,
         depth: usize,
     ) -> Result<Entry> {
-        if depth > MAX_SYMLINK_DEPTH {
+        if depth >= MAX_SYMLINK_DEPTH {
             return Err(FsError::new(ErrorCode::Eloop)
                 .with_syscall(syscall)
                 .with_path(normalize_path(path)));

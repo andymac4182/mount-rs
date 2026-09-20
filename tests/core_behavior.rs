@@ -63,6 +63,28 @@ async fn rename_rejects_resolved_descendants_through_symlinks() {
     assert_eq!(fs.read_file("/dir/file").await.unwrap(), b"unchanged");
 }
 
+#[tokio::test]
+async fn symlink_resolution_enforces_mountx_depth_limit() {
+    let fs = memory().await;
+    fs.mkdir("/chain", MkdirOptions::default()).await.unwrap();
+    fs.write_file("/chain/target", b"reachable").await.unwrap();
+    for index in 0..=40 {
+        let target = if index == 40 {
+            "target".to_owned()
+        } else {
+            format!("s{}", index + 1)
+        };
+        fs.symlink(&target, &format!("/chain/s{index}"))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        fs.read_file("/chain/s0").await.unwrap_err().code,
+        ErrorCode::Eloop
+    );
+}
+
 #[test]
 fn malformed_snapshots_are_rejected_before_restoration() {
     let bytes = MemoryFs::empty().snapshot_bytes().unwrap();

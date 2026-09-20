@@ -33,10 +33,22 @@ const S_IFIFO = 0o010000;
 const S_IFCHR = 0o020000;
 const binary = [0, 1, 2, 127, 128, 255];
 
+const symlinkDepthTrace = [
+  { op: "mkdir_recursive", path: "/chain", mode: 0o755 },
+  { op: "write", path: "/chain/target", data: [114, 101, 97, 99, 104, 97, 98, 108, 101] },
+  ...Array.from({ length: 41 }, (_, index) => ({
+    op: "symlink",
+    target: index === 40 ? "target" : `s${index + 1}`,
+    path: `/chain/s${index}`,
+  })),
+  { op: "read", path: "/chain/s0" },
+];
+
 // One serial trace deliberately stays on the memory driver and exercises the
 // public loopback contract. Dynamic ctime/birthtime values are represented by
 // presence booleans; explicit utimes/lutimes values remain exact.
 const trace = [
+  ...symlinkDepthTrace,
   { op: "mkdir_recursive", path: "/work/./nested/../nested/deep", mode: 0o755 },
   { op: "write", path: "/work/nested/deep/blob", data: binary },
   { op: "stat", path: "/work/nested/deep/./blob", exact_times: false },
