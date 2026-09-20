@@ -1,4 +1,4 @@
-mod memory_factory;
+pub mod memory_factory;
 
 use std::future::Future;
 use std::pin::Pin;

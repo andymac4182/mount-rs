@@ -22,7 +22,7 @@ fn process_id(env: &Env, property: &str) -> napi::Result<u32> {
     }
 
     let getter: Function<(), u32> = process.get_named_property(property)?;
-    getter.apply(&process, ())
+    getter.apply(process, ())
 }
 
 /// Construct the N-API memory driver with the same identity and mode defaults
