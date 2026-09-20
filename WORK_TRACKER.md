@@ -358,6 +358,12 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W17 — Multi-drive HTTP server
 
+- [x] Root-integrate the separate HTTP crate and shared lockfile. Real loopback
+  clients exercise isolated memory/SQLite drives, bounded requests, streaming
+  disconnect cleanup, and shutdown retries. Main passed 7 unit and 6 integration
+  tests locally. Listener completion is cached under one mutex, with a
+  deterministic cancellation-after-join regression. Hosted, Node/CLI, remote
+  backend, and distributed-cache acceptance remain open.
 - [ ] W17.1 Implement a separately packaged server and drive registry/config;
   expose several named drives, including unmounted drives.
 - [ ] W17.2 Define discovery, routing, filesystem operations, streaming/ranges,

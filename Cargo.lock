@@ -1094,6 +1094,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-http"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "mount-rs-core",
+ "mount-rs-sqlite",
+ "percent-encoding",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-kv"
 version = "0.1.0"
 dependencies = [
