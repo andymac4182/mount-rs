@@ -17,6 +17,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(120);
+const GATEWAY_FAILURE_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn local_config() -> R2Config {
     let config = R2Config::from_env().expect("Ozone R2-compatible test environment is required");
@@ -269,6 +270,34 @@ async fn real_ozone_reopen_after_service_restart() {
         blocks.delete(&id).await.unwrap();
         std::fs::remove_file(&fixture).unwrap();
         println!("OZONE_RESTART_REOPEN_PASS prefix={} block={}", prefix, id.0);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_ozone_gateway_failure_is_bounded() {
+    assert_timeout(async {
+        let config = local_config();
+        let prefix = test_prefix();
+        let object_store = config.build_store().unwrap();
+        let fixture = std::fs::read_to_string(fixture_path())
+            .expect("restart fixture must exist during the gateway fault window");
+        let restart_id = fixture.lines().next().expect("restart fixture block ID");
+        let path = object_path(&prefix, restart_id);
+
+        let result = tokio::time::timeout(GATEWAY_FAILURE_TIMEOUT, object_store.head(&path)).await;
+        match result {
+            Ok(Ok(_)) => panic!("Ozone served a read while its gateway was stopped"),
+            Ok(Err(object_store::Error::NotFound { .. })) => {
+                panic!("Ozone gateway answered NotFound while its service was stopped")
+            }
+            Ok(Err(error)) => {
+                println!("OZONE_GATEWAY_FAILURE_PASS prefix={} error={error}", prefix)
+            }
+            Err(_) => {
+                panic!("Ozone gateway request did not fail within {GATEWAY_FAILURE_TIMEOUT:?}")
+            }
+        }
     })
     .await;
 }

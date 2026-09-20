@@ -13,6 +13,32 @@ ozone_bucket="mount-rs-ozone-test"
 ozone_access_key="mount-rs-ozone-test"
 ozone_secret_key="mount-rs-ozone-test-secret"
 ozone_region="us-east-1"
+ozone_startup_timeout=${MOUNT_RS_OZONE_STARTUP_TIMEOUT_SECONDS:-180}
+ozone_action_timeout=${MOUNT_RS_OZONE_ACTION_TIMEOUT_SECONDS:-30}
+ozone_client_timeout=${MOUNT_RS_OZONE_CLIENT_TIMEOUT_SECONDS:-10}
+ozone_stop_timeout=${MOUNT_RS_OZONE_STOP_TIMEOUT_SECONDS:-30}
+ozone_test_timeout=${MOUNT_RS_OZONE_TEST_TIMEOUT_SECONDS:-600}
+
+validate_positive_timeout() {
+  timeout_value=$1
+  timeout_name=$2
+  case "$timeout_value" in
+    ''|*[!0-9]*)
+      echo "$timeout_name must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$timeout_value" -le 0 ]; then
+    echo "$timeout_name must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+validate_positive_timeout "$ozone_startup_timeout" MOUNT_RS_OZONE_STARTUP_TIMEOUT_SECONDS
+validate_positive_timeout "$ozone_action_timeout" MOUNT_RS_OZONE_ACTION_TIMEOUT_SECONDS
+validate_positive_timeout "$ozone_client_timeout" MOUNT_RS_OZONE_CLIENT_TIMEOUT_SECONDS
+validate_positive_timeout "$ozone_stop_timeout" MOUNT_RS_OZONE_STOP_TIMEOUT_SECONDS
+validate_positive_timeout "$ozone_test_timeout" MOUNT_RS_OZONE_TEST_TIMEOUT_SECONDS
 
 bounded_docker_command_for_timeout() {
   bounded_timeout=$1
@@ -31,13 +57,37 @@ bounded_docker_command_for_timeout() {
 }
 
 bounded_docker_command() {
-  bounded_timeout=${MOUNT_RS_OZONE_ACTION_TIMEOUT_SECONDS:-30}
-  bounded_docker_command_for_timeout "$bounded_timeout" "$@"
+  bounded_docker_command_for_timeout "$ozone_action_timeout" "$@"
 }
 
 bounded_docker_startup_command() {
-  bounded_timeout=${MOUNT_RS_OZONE_STARTUP_TIMEOUT_SECONDS:-180}
-  bounded_docker_command_for_timeout "$bounded_timeout" "$@"
+  bounded_docker_command_for_timeout "$ozone_startup_timeout" "$@"
+}
+
+bounded_process_command_for_timeout() {
+  bounded_timeout=$1
+  action_name=$2
+  shift 2
+  python3 "$repo_dir/scripts/rustfs-bounded-docker.py" \
+    "$bounded_timeout" \
+    "$action_name" \
+    "$@"
+}
+
+begin_startup_budget() {
+  ozone_startup_deadline=$(($(date +%s) + ozone_startup_timeout))
+}
+
+startup_budget_expired() {
+  [ "$(date +%s)" -ge "$ozone_startup_deadline" ]
+}
+
+begin_stop_budget() {
+  ozone_stop_deadline=$(($(date +%s) + ozone_stop_timeout))
+}
+
+stop_budget_expired() {
+  [ "$(date +%s)" -ge "$ozone_stop_deadline" ]
 }
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -89,13 +139,20 @@ else
 fi
 
 temp_root=${TMPDIR:-/tmp}
-if [ "$temp_root" != "/" ]; then
+if [ "$temp_root" = "/" ]; then
+  temp_pattern="/mount-rs-ozone.XXXXXX"
+  run_dir_prefix="/mount-rs-ozone."
+else
   temp_root=${temp_root%/}
+  temp_pattern="$temp_root/mount-rs-ozone.XXXXXX"
+  run_dir_prefix="$temp_root/mount-rs-ozone."
 fi
 run_dir=""
 fixture_file=""
-container_name="mount-rs-ozone-$$-$(date +%s)"
+container_name=""
 ownership_label="mount-rs-ozone-test"
+ozone_startup_deadline=""
+ozone_stop_deadline=""
 
 inspect_owned_container() {
   inspect_output=""
@@ -127,7 +184,7 @@ validate_run_dir() {
   [ -d "$run_dir" ] || return 1
   [ ! -L "$run_dir" ] || return 1
   case "$run_dir" in
-    "$temp_root"/mount-rs-ozone.??????) ;;
+    "$run_dir_prefix"??????) ;;
     *) return 1 ;;
   esac
   [ -f "$run_dir/.mount-rs-ozone-owned" ] || return 1
@@ -187,7 +244,7 @@ bounded_remove_container() {
 }
 
 cleanup() {
-  exit_code=$?
+  exit_code=$1
   trap - EXIT INT TERM
   if [ "${MOUNT_RS_OZONE_KEEP:-0}" = "1" ]; then
     echo "OZONE_KEEP=1 container=$container_name endpoint=${ozone_endpoint:-unknown} data=${run_dir:-unknown}" >&2
@@ -217,10 +274,14 @@ cleanup() {
   exit "$exit_code"
 }
 
-run_dir=$(mktemp -d "$temp_root/mount-rs-ozone.XXXXXX")
+run_dir=$(mktemp -d "$temp_pattern")
+run_id=${run_dir##*/}
+container_name="mount-rs-ozone-$run_id"
 fixture_file="$run_dir/restart-fixture"
 printf '%s\n' "$container_name" >"$run_dir/.mount-rs-ozone-owned"
-trap cleanup EXIT INT TERM
+trap 'cleanup "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if inspect_owned_container; then
   echo "Apache Ozone test container name is already in use: $container_name" >&2
@@ -233,6 +294,7 @@ else
   fi
 fi
 
+begin_startup_budget
 if bounded_docker_startup_command "run-service" docker run --detach --platform "$ozone_platform" \
   --name "$container_name" \
   --label "com.mount-rs.ozone-test=$ownership_label" \
@@ -251,6 +313,11 @@ refresh_endpoint() {
   ozone_port=""
   port_ticks=0
   while :; do
+    if startup_budget_expired; then
+      show_logs
+      echo "Timed out waiting for Apache Ozone S3 Gateway port" >&2
+      return 1
+    fi
     port_output=""
     if port_output=$(bounded_docker_command "port" docker port "$container_name" 9878/tcp 2>&1); then
       :
@@ -267,11 +334,6 @@ refresh_endpoint() {
       ozone_endpoint="http://127.0.0.1:$ozone_port"
       export R2_ENDPOINT="$ozone_endpoint"
       return 0
-    fi
-    if [ "$port_ticks" -ge 30 ]; then
-      show_logs
-      echo "Apache Ozone did not publish an S3 Gateway port" >&2
-      return 1
     fi
     sleep 1
     port_ticks=$((port_ticks + 1))
@@ -299,6 +361,11 @@ wait_for_gateway() {
     if [ "$http_code" != "000" ]; then
       return 0
     fi
+    if startup_budget_expired; then
+      show_logs
+      echo "Timed out waiting for Apache Ozone S3 Gateway at $ozone_endpoint" >&2
+      return 1
+    fi
     if container_is_running; then
       :
     else
@@ -307,7 +374,7 @@ wait_for_gateway() {
       echo "Apache Ozone container exited before S3 Gateway readiness (inspect status $inspect_status)" >&2
       return 1
     fi
-    if [ "$gateway_ticks" -ge 180 ]; then
+    if startup_budget_expired; then
       show_logs
       echo "Timed out waiting for Apache Ozone S3 Gateway at $ozone_endpoint" >&2
       return 1
@@ -321,7 +388,7 @@ wait_for_stopped() {
   stopped_ticks=0
   while :; do
     if container_is_running; then
-      if [ "$stopped_ticks" -ge 30 ]; then
+      if stop_budget_expired; then
         echo "Apache Ozone container remained running after stop" >&2
         return 1
       fi
@@ -329,6 +396,10 @@ wait_for_stopped() {
       inspect_status=$?
       [ "$inspect_status" -eq 1 ] && return 0
       echo "Could not verify Apache Ozone container stopped" >&2
+      return 1
+    fi
+    if stop_budget_expired; then
+      echo "Timed out waiting for Apache Ozone container to stop" >&2
       return 1
     fi
     sleep 1
@@ -340,9 +411,28 @@ bootstrap_bucket() {
   bucket_ticks=0
   bucket_log="$run_dir/bucket-bootstrap.log"
   while :; do
-    if node "$repo_dir/tests/ozone/create-bucket.mjs" >"$bucket_log" 2>&1; then
+    if startup_budget_expired; then
+      cat "$bucket_log" >&2 || true
+      show_logs
+      echo "Timed out waiting for Apache Ozone S3 bucket readiness" >&2
+      return 1
+    fi
+    if bounded_process_command_for_timeout "$ozone_client_timeout" "ozone-bucket-bootstrap" \
+      node "$repo_dir/tests/ozone/create-bucket.mjs" >"$bucket_log" 2>&1; then
       cat "$bucket_log"
       return 0
+    fi
+    bucket_status=$?
+    if [ "$bucket_status" -eq 124 ] || [ "$bucket_status" -eq 125 ]; then
+      cat "$bucket_log" >&2 || true
+      echo "Apache Ozone bucket bootstrap exceeded its bounded client timeout" >&2
+      return 1
+    fi
+    if startup_budget_expired; then
+      cat "$bucket_log" >&2 || true
+      show_logs
+      echo "Timed out waiting for Apache Ozone S3 bucket readiness" >&2
+      return 1
     fi
     if container_is_running; then
       :
@@ -352,7 +442,7 @@ bootstrap_bucket() {
       echo "Apache Ozone container exited before S3 bucket readiness" >&2
       return 1
     fi
-    if [ "$bucket_ticks" -ge 180 ]; then
+    if startup_budget_expired; then
       cat "$bucket_log" >&2 || true
       show_logs
       echo "Timed out waiting for Apache Ozone S3 bucket readiness" >&2
@@ -382,12 +472,31 @@ bounded_docker_action() {
   return 1
 }
 
+bounded_cargo_test() {
+  test_name=$1
+  shift
+  if bounded_process_command_for_timeout "$ozone_test_timeout" "ozone-cargo-$test_name" \
+    cargo test \
+      --manifest-path "$repo_dir/tests/ozone/Cargo.toml" \
+      --locked \
+      -- "$test_name" --exact --test-threads=1 --nocapture "$@"; then
+    return 0
+  fi
+  test_status=$?
+  if [ "$test_status" -eq 124 ] || [ "$test_status" -eq 125 ]; then
+    echo "Apache Ozone cargo test exceeded its bounded timeout: $test_name" >&2
+  else
+    echo "Apache Ozone cargo test failed with status $test_status: $test_name" >&2
+  fi
+  return "$test_status"
+}
+
 refresh_endpoint
 export R2_BUCKET="$ozone_bucket"
 export R2_ACCESS_KEY_ID="$ozone_access_key"
 export R2_SECRET_ACCESS_KEY="$ozone_secret_key"
 export OZONE_REGION="$ozone_region"
-export OZONE_TEST_PREFIX="mount-rs-ozone/$(date +%s)-$$"
+export OZONE_TEST_PREFIX="mount-rs-ozone/$run_id"
 export OZONE_FIXTURE_FILE="$fixture_file"
 export OZONE_IMAGE="$ozone_image"
 
@@ -396,11 +505,9 @@ echo "OZONE_HEALTHY endpoint=$ozone_endpoint release=$ozone_version digest=$ozon
 bootstrap_bucket
 echo "OZONE_READY endpoint=$ozone_endpoint image=$ozone_image"
 
-cargo test \
-  --manifest-path "$repo_dir/tests/ozone/Cargo.toml" \
-  --locked \
-  -- "real_ozone_block_contract" --exact --test-threads=1 --nocapture
+bounded_cargo_test "real_ozone_block_contract"
 
+begin_stop_budget
 bounded_docker_action "stop" docker stop --time=10 "$container_name" || {
   echo "Could not stop Apache Ozone container" >&2
   exit 1
@@ -408,6 +515,9 @@ bounded_docker_action "stop" docker stop --time=10 "$container_name" || {
 wait_for_stopped
 echo "OZONE_FAULT_WINDOW_PASS container=$container_name"
 
+bounded_cargo_test "real_ozone_gateway_failure_is_bounded"
+
+begin_startup_budget
 bounded_docker_action "start" docker start "$container_name" || {
   echo "Could not restart Apache Ozone container" >&2
   exit 1
@@ -417,9 +527,6 @@ wait_for_gateway
 bootstrap_bucket
 echo "OZONE_RESTART_READY endpoint=$ozone_endpoint"
 
-cargo test \
-  --manifest-path "$repo_dir/tests/ozone/Cargo.toml" \
-  --locked \
-  -- "real_ozone_reopen_after_service_restart" --exact --test-threads=1 --nocapture
+bounded_cargo_test "real_ozone_reopen_after_service_restart"
 
 echo "OZONE_INTEGRATION_PASS endpoint=$ozone_endpoint bucket=$ozone_bucket prefix=$OZONE_TEST_PREFIX"
