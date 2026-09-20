@@ -74,7 +74,9 @@ That adapter is not yet the oracle contract boundary:
 - `js-driver.mjs` now includes `structural-factories.mjs`: plain drivers pass
   through all server factories, with capability/missing-method comparisons,
   cleanup and eight WebDAV DELETE oracle cases. Main reran these successfully.
-  Mount coverage here is invalid-option rejection, not native acceptance.
+  A rebuilt addon also passes the opt-in macOS NFS structural mount lifecycle,
+  including mounted write/readback and callback reachability; Linux, other
+  transports and Windows hosted execution remain unverified.
   The parent suite still skips when `MOUNTX_SOURCE` is unset.
 
 **Required closure evidence:** a non-skipped oracle-backed test must pass the
@@ -239,11 +241,11 @@ The Rust and Node CLI SDK paths now have focused, mount-free read/write
 evidence. They do not close the next core parity gates, which are ordered here
 from the smallest contract boundary to the larger environment boundary:
 
-1. **Structural-driver native mount (P0/P1 seam):** server factories accept
-   structural drivers, but the native `mount` path has only invalid-option or
-   mount-free coverage. A privileged, platform-specific test must mount a
-   structural driver and verify read/write/unmount before this boundary is
-   promoted.
+1. **Structural-driver native mount (P0/P1 seam):** the opt-in macOS NFS
+   lifecycle now mounts a structural driver and verifies read/write/unmount.
+   Repeat the same acceptance on Linux and the supported transport choices,
+   then retain explicit unsupported results on platforms that cannot provide
+   the required native mount.
 2. **Capability-limited Unstorage behavior (P1):** focused oracle-backed
    capability, unsupported-operation, metadata and ownership-overlay checks
    now pass. The remaining inventory still identifies hardlinks (6 rows),
