@@ -172,6 +172,33 @@ dependencies out of core crates.
   stops and verifies unmount/cleanup on macOS and Linux. Parser-only tests do
   not satisfy this mount integration requirement.
 
+## ZeroFS feature and benchmark comparison
+
+Include [Barre/ZeroFS](https://github.com/Barre/ZeroFS) as an additional
+feature-set reference and measured benchmark competitor, not a replacement
+for the pinned mountx behavioral oracle.
+
+- Produce a revision-pinned, source-backed feature matrix: mount protocols,
+  config-driven CLI, object storage, metadata/data placement, caching,
+  compression/encryption, durability barriers, locking, recovery, and platform
+  support. Label each mount-rs item implemented, verified, missing, or future;
+  reference features are comparison candidates, not implied parity claims.
+- Run shared mounted-filesystem workloads against both implementations where
+  supported: ComputeSDK-aligned file sizes, small-file/metadata operations,
+  sequential and random I/O, concurrency, and SQLite transactions/recovery.
+  Report unsupported combinations and unavailable external services explicitly.
+- Pin ZeroFS revision/build and capture hardware, OS, transport/mount options,
+  backend/region, cache state, compression/encryption, concurrency, dataset,
+  synchronization/durability policy, raw samples, latency percentiles and
+  throughput. Separate cold and warm cache runs; do not compare unlike
+  durability policies or direct-driver timings with mounted timings as equal.
+- Review its filesystem conformance and fault-injection approaches for relevant
+  additions to our acceptance suite. Independently verify mount-rs results;
+  upstream claims and benchmark availability do not establish our correctness.
+- Preserve minimal dependencies and inspect licensing before any code reuse.
+  Additional systems such as NBD or HA require an explicit scope decision;
+  copy-on-write remains the future requirement below.
+
 ## Future requirement: copy-on-write
 
 Track copy-on-write as future work, not a current feature or a requirement to

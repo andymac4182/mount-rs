@@ -19,6 +19,11 @@
 
 ## Benchmark alignment
 
+- [Barre/ZeroFS](https://github.com/Barre/ZeroFS): user-selected feature and
+  benchmark comparison target for object-backed mounted filesystems. Review
+  its configuration, NFS/9P access, durability and recovery tests, caching,
+  and storage behavior. Track comparisons under
+  [ZeroFS comparison acceptance](REQUIREMENTS.md#zerofs-feature-and-benchmark-comparison).
 - [ComputeSDK storage benchmarks](https://github.com/computesdk/benchmarks/tree/master/benchmarks/storage):
   workload and reporting reference for the required storage benchmark suite.
   See [benchmark acceptance](REQUIREMENTS.md#storage-benchmark-acceptance).
