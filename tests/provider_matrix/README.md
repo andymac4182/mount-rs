@@ -36,6 +36,11 @@ node tests/provider_matrix/node-sdk.mjs
 node tests/provider_matrix/cli.mjs
 \`\`\`
 
+The CLI matrix also runs the portable Rust-backed Node CLI SDK self-test. The
+Rust CLI runtime rows construct filesystems through `mount-rs-sdk`; native
+mount self-tests remain explicit platform gates because they require a usable
+FUSE/NFS transport.
+
 The Node SDK command expects the checked-out native addon at
 \`integrations/mount-rs-napi/mount-rs.darwin-arm64.node\` (or the corresponding
 platform build). The CLI command builds/runs only the focused CLI package

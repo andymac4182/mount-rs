@@ -56,6 +56,12 @@ async function commandCase(label, command, args) {
   }
 }
 
+await commandCase(
+  "node-sdk-self-test",
+  process.execPath,
+  ["examples/node-cli/index.mjs", "--driver", "memory", "--sdk-self-test"],
+);
+
 for (const [label, path] of configFiles) {
   await commandCase(
     label,

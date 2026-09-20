@@ -17,6 +17,8 @@ Options:
   --transport <auto|fuse|9p|nfs>  Select the native transport (default: auto).
   --mountpoint <path>     Directory to mount.
   --root <path>           Host-driver root (default: current directory).
+  --sdk-self-test         Load the Node SDK, write/read through its driver,
+                          and exit without creating a native mount.
   --self-test             Write and read one file through the mounted path, then exit.
   --check                 Validate arguments without loading the SDK or mounting.
   --help                  Show this help.
@@ -42,6 +44,7 @@ function parseArgs(argv) {
     help: false,
     mountpoint: undefined,
     root: undefined,
+    sdkSelfTest: false,
     selfTest: false,
     transport: "auto",
   };
@@ -58,6 +61,9 @@ function parseArgs(argv) {
         break;
       case "--self-test":
         parsed.selfTest = true;
+        break;
+      case "--sdk-self-test":
+        parsed.sdkSelfTest = true;
         break;
       case "--driver":
         parsed.driver = takeValue(argv, index, argument).toLowerCase();
@@ -81,7 +87,9 @@ function parseArgs(argv) {
   }
 
   if (parsed.help) return parsed;
-  if (!parsed.mountpoint) throw new CliConfigError("--mountpoint is required");
+  if (!parsed.mountpoint && !parsed.sdkSelfTest) {
+    throw new CliConfigError("--mountpoint is required unless --sdk-self-test is used");
+  }
   if (!DRIVERS.has(parsed.driver)) {
     throw new CliConfigError("--driver must be memory or host");
   }
@@ -91,13 +99,16 @@ function parseArgs(argv) {
   if (parsed.driver === "memory" && parsed.root !== undefined) {
     throw new CliConfigError("--root is only valid with --driver host");
   }
-  if (parsed.check && parsed.selfTest) {
-    throw new CliConfigError("--check and --self-test cannot be used together");
+  if (parsed.check && (parsed.selfTest || parsed.sdkSelfTest)) {
+    throw new CliConfigError("--check cannot be combined with a self-test");
+  }
+  if (parsed.selfTest && parsed.sdkSelfTest) {
+    throw new CliConfigError("--self-test and --sdk-self-test cannot be used together");
   }
 
   return {
     ...parsed,
-    mountpoint: resolve(parsed.mountpoint),
+    mountpoint: resolve(parsed.mountpoint ?? process.cwd()),
     root: resolve(parsed.root ?? process.cwd()),
   };
 }
@@ -172,6 +183,20 @@ async function runSelfTest(mountpoint, driver) {
   }
 }
 
+async function runSdkSelfTest(filesystem, driver) {
+  const filename = `.mount-rs-node-sdk-direct-${process.pid}-${Date.now()}.txt`;
+  const path = `/${filename}`;
+  const expected = `mount-rs Node SDK direct driver wrote this file (${driver})\n`;
+  try {
+    await filesystem.writeFile(path, expected);
+    const actual = Buffer.from(await filesystem.readFile(path)).toString("utf8");
+    if (actual !== expected) throw new Error("Node SDK direct-driver readback mismatch");
+    console.log(`sdk self-test passed: Node SDK wrote and read ${filename}`);
+  } finally {
+    await filesystem.unlink(path).catch(() => {});
+  }
+}
+
 async function waitForSigint(closeMount) {
   await new Promise((resolvePromise, rejectPromise) => {
     let stopping = false;
@@ -199,6 +224,14 @@ async function run(configuration) {
 
   const { mount, sdk } = await loadSdk();
   const driver = await selectDriver(sdk, configuration);
+  if (configuration.sdkSelfTest) {
+    try {
+      await runSdkSelfTest(driver, configuration.driver);
+    } finally {
+      await driver.shutdown();
+    }
+    return;
+  }
   const mountOptions = configuration.transport === "auto"
     ? undefined
     : { transport: configuration.transport };

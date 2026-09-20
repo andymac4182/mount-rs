@@ -49,6 +49,13 @@ const invalidRoot = await runCli([
 assert.equal(invalidRoot.code, 2, output(invalidRoot));
 assert.match(invalidRoot.stderr, /--root is only valid/);
 
+const sdkSelfTest = await runCli([
+  "--driver", "memory", "--sdk-self-test",
+]);
+assert.equal(sdkSelfTest.code, 0, output(sdkSelfTest));
+assert.match(sdkSelfTest.stdout, /sdk self-test passed: Node SDK wrote and read/);
+assert.doesNotMatch(output(sdkSelfTest), /^mounted\s+/im);
+
 const checkMountpoint = await fs.mkdtemp(resolve("/tmp", "mount-rs-node-cli-check-"));
 try {
   for (const driver of ["memory", "host"]) {

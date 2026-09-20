@@ -1,0 +1,28 @@
+# mount-rs Rust SDK
+
+`mount-rs-sdk` is the public Rust consumer facade. It keeps filesystem
+construction and provider lifecycle management out of applications and the
+configuration-driven CLI while leaving each backend in its own integration
+crate.
+
+The CLI is an SDK consumer: `mount-rs-cli` creates a `Filesystem` through this
+crate and only owns argument/configuration parsing plus transport lifecycle.
+
+```rust
+use mount_rs_core::Loopback;
+use mount_rs_sdk::{Filesystem, MemoryOptions};
+
+# #[tokio::main]
+# async fn main() -> mount_rs_core::Result<()> {
+let filesystem = Filesystem::memory(MemoryOptions::default());
+let view = Loopback::from_arc(filesystem.driver());
+view.write_file("/hello.txt", b"hello from Rust").await?;
+assert_eq!(view.read_file("/hello.txt").await?, b"hello from Rust");
+filesystem.shutdown().await?;
+# Ok(())
+# }
+```
+
+Use [`SplitOptions`] when metadata and byte storage need different providers.
+The SDK owns the provider handles and closes PGlite connections after the
+chunked filesystem has released its writer lease.

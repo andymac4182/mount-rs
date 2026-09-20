@@ -14,6 +14,15 @@ node examples/node-cli/index.mjs \
   --check
 ```
 
+Run the SDK-backed driver example without a native mount. This is the portable
+consumer smoke test used by the integration suite:
+
+```sh
+node examples/node-cli/index.mjs \
+  --driver memory \
+  --sdk-self-test
+```
+
 Run the bounded self-test on a host with a usable native transport:
 
 ```sh
@@ -31,5 +40,5 @@ addon at `integrations/mount-rs-napi/index.js`. A published install can resolve
 `@mount-rs/core`, or override resolution with `MOUNT_RS_NAPI_PACKAGE`.
 
 The CLI never accepts or reads provider credentials. Native mounting is an
-explicit operation; `--check` is mount-free and is the default path used by the
-Node CLI integration test.
+explicit operation; `--check` is mount-free and the SDK self-test exercises the
+public driver API without a transport. The integration test runs both paths.

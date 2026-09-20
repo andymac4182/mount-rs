@@ -1,23 +1,23 @@
 [package]
-name = "mount-rs-provider-matrix"
+name = "mount-rs-sdk"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-publish = false
-
-# Keep this harness out of the repository workspace. It is intentionally an
-# executable consumer of the published-looking crate APIs, not another root
-# integration target.
-[workspace]
+description = "Public Rust SDK for constructing and using mount-rs filesystems"
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/mount-rs"
+readme = "README.md"
 
 [dependencies]
 async-trait = "0.1"
+mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
+mount-rs-host = { path = "../../integrations/mount-rs-host" }
 mount-rs-memory = { path = "../../integrations/mount-rs-memory" }
 mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
 mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
-mount-rs-sdk = { path = "../../crates/mount-rs-sdk" }
 mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
-object_store = { version = "0.12", default-features = false, features = ["aws"] }
+
+[dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -13,15 +13,10 @@ path = "src/main.rs"
 [dependencies]
 async-trait = "0.1"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
-mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
-mount-rs-host = { path = "../../integrations/mount-rs-host" }
 mount-rs-http = { path = "../mount-rs-http" }
-mount-rs-memory = { path = "../../integrations/mount-rs-memory" }
 mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
-mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
-mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
-mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+mount-rs-sdk = { path = "../mount-rs-sdk" }
 serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
 

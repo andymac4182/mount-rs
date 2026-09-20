@@ -21,6 +21,7 @@ members = [
     "transports/mount-rs-s3",
     "transports/mount-rs-auto",
     "crates/mount-rs-cli",
+    "crates/mount-rs-sdk",
     "crates/mount-rs-http",
 ]
 resolver = "3"

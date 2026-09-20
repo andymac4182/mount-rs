@@ -10,26 +10,25 @@ use std::task::Poll;
 use std::time::Duration;
 
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
-use mount_rs_core::{ErrorCode, FsDriver, FsError, MemoryFs, MemoryOptions, Result as FsResult};
-use mount_rs_host::{HostFs, HostFsOptions};
+use mount_rs_core::{ErrorCode, FsDriver, FsError, Result as FsResult};
 use mount_rs_http::{
     DriveConfig as HttpDriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions,
 };
-use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
-use mount_rs_sqlite::{SqliteBlockStore, SqliteFs, SqliteMetadataStore, open_sqlite};
+use mount_rs_sdk::{
+    Filesystem, FilesystemKind, HostOptions, MemoryOptions, SplitOptions, StoreConfig,
+};
 
 use crate::color::Color;
 use crate::config::{
-    ConfigError, HttpServiceConfig, load_config, redact_diagnostic, resolve_cli_options,
-    unique_default_owner, validate_config_file, validate_owner,
+    ConfigError, DEFAULT_CHUNK_SIZE_BYTES, EnvReference, HttpServiceConfig, StorageProvider,
+    load_config, redact_diagnostic, resolve_cli_options, unique_default_owner,
+    validate_config_file, validate_owner,
 };
 use crate::parser::{
     CliOptions, Command, DriverChoice, ParseError, TransportChoice, help_text, parse_args,
     version_text,
 };
 use crate::stale::{stale_command_line, unmount_stale};
-use crate::storage::{ErasedBlockStore, ErasedMetadataStore, StorageResources, open_storage};
 use crate::watch::{WatchOptions, watch_driver};
 
 #[derive(Debug, Clone)]
@@ -127,125 +126,140 @@ impl From<FsError> for CliError {
 }
 
 #[derive(Clone)]
-enum DriverRuntime {
-    Memory(MemoryFs),
-    Host(HostFs),
-    Sqlite(SqliteFs),
-    SplitMemory(ChunkedFs<MemoryMetadataStore, MemoryBlockStore>),
-    SplitSqlite(ChunkedFs<SqliteMetadataStore, SqliteBlockStore>),
-    SplitDynamic(
-        ChunkedFs<ErasedMetadataStore, ErasedBlockStore>,
-        StorageResources,
-    ),
+struct DriverRuntime {
+    filesystem: Filesystem,
 }
 
 impl DriverRuntime {
     async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
-        let runtime = match options.driver {
-            DriverChoice::Memory => Ok(Self::Memory(MemoryFs::new(MemoryOptions {
+        let filesystem = match options.driver {
+            DriverChoice::Memory => Filesystem::memory(MemoryOptions {
                 uid,
                 gid,
                 ..MemoryOptions::default()
-            }))),
+            }),
             DriverChoice::Host => {
                 let root = options
                     .root
                     .as_deref()
                     .map(expand_path)
                     .unwrap_or(std::env::current_dir().map_err(io_error)?);
-                Ok(Self::Host(HostFs::with_options(
+                Filesystem::host(
                     root,
-                    HostFsOptions {
+                    HostOptions {
                         read_only: options.read_only,
                     },
-                )))
+                )
             }
             DriverChoice::Sqlite => {
                 let database = options
                     .database
                     .as_deref()
                     .ok_or_else(|| CliError::usage("--driver sqlite requires --database <path>"))?;
-                Ok(Self::Sqlite(open_sqlite(expand_path(database)).await?))
+                Filesystem::sqlite(expand_path(database)).await?
             }
             DriverChoice::SplitStore => {
-                if let Some(storage) = &options.storage {
-                    if let Some(owner) = &storage.owner {
-                        validate_owner(owner)?;
-                    }
-                    let owner = storage.owner.clone().unwrap_or_else(unique_default_owner);
-                    let chunk_options = ChunkedOptions::fixed(owner, storage.chunk_size_bytes)
-                        .map_err(CliError::from)?
-                        .with_identity(uid, gid, 0);
-                    let opened = open_storage(storage).await.map_err(CliError::from)?;
-                    let resources = opened.resources.clone();
-                    return match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options)
-                        .await
-                    {
-                        Ok(driver) => Ok(Self::SplitDynamic(driver, resources)),
-                        Err(error) => {
-                            let _ = resources.close().await;
-                            Err(CliError::from(error))
-                        }
-                    };
-                }
-                let chunk_options = ChunkedOptions::default().with_identity(uid, gid, 0);
-                match (&options.database, &options.blocks) {
-                    (None, None) => Ok(Self::SplitMemory(
-                        ChunkedFs::open(
-                            MemoryMetadataStore::new(),
-                            MemoryBlockStore::new(),
-                            chunk_options,
-                        )
-                        .await?,
-                    )),
-                    (Some(metadata), Some(blocks)) => Ok(Self::SplitSqlite(
-                        ChunkedFs::open(
-                            SqliteMetadataStore::open(expand_path(metadata))?,
-                            SqliteBlockStore::open(expand_path(blocks))?,
-                            chunk_options,
-                        )
-                        .await?,
-                    )),
-                    _ => Err(CliError::usage(
-                        "splitstore needs both --database <metadata.db> and --blocks <blocks.db>, or neither for volatile storage",
-                    )),
-                }
+                let split = split_options(options, uid, gid)?;
+                Filesystem::split(split).await?
             }
-        }?;
+        };
 
         if options.driver == DriverChoice::Sqlite {
-            configure_sqlite_root_owner(&runtime.driver(), options, uid, gid).await?;
+            configure_sqlite_root_owner(&filesystem.driver(), options, uid, gid).await?;
         }
-        Ok(runtime)
+        Ok(Self { filesystem })
     }
 
     fn driver(&self) -> Arc<dyn FsDriver> {
-        match self {
-            Self::Memory(driver) => Arc::new(driver.clone()),
-            Self::Host(driver) => Arc::new(driver.clone()),
-            Self::Sqlite(driver) => Arc::new(driver.clone()),
-            Self::SplitMemory(driver) => Arc::new(driver.clone()),
-            Self::SplitSqlite(driver) => Arc::new(driver.clone()),
-            Self::SplitDynamic(driver, _) => Arc::new(driver.clone()),
-        }
+        self.filesystem.driver()
     }
 
     async fn shutdown(&self) -> FsResult<()> {
-        match self {
-            Self::SplitMemory(driver) => driver.shutdown().await,
-            Self::SplitSqlite(driver) => driver.shutdown().await,
-            Self::SplitDynamic(driver, resources) => {
-                let driver_result = driver.shutdown().await;
-                let resources_result = resources.close().await;
-                driver_result.and(resources_result)
-            }
-            Self::Memory(_) | Self::Host(_) | Self::Sqlite(_) => Ok(()),
-        }
+        self.filesystem.shutdown().await
     }
 
     fn is_memory(&self) -> bool {
-        matches!(self, Self::Memory(_))
+        self.filesystem.kind() == FilesystemKind::Memory
     }
+}
+
+fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOptions, CliError> {
+    if let Some(storage) = &options.storage {
+        if let Some(owner) = &storage.owner {
+            validate_owner(owner)?;
+        }
+        return Ok(SplitOptions {
+            metadata: sdk_store_config(&storage.metadata)?,
+            blocks: sdk_store_config(&storage.blocks)?,
+            chunk_size_bytes: storage.chunk_size_bytes,
+            owner: storage.owner.clone().unwrap_or_else(unique_default_owner),
+            uid,
+            gid,
+            umask: 0,
+        });
+    }
+
+    let (metadata, blocks) = match (&options.database, &options.blocks) {
+        (None, None) => (StoreConfig::Memory, StoreConfig::Memory),
+        (Some(metadata), Some(blocks)) => (
+            StoreConfig::Sqlite {
+                path: expand_path(metadata),
+            },
+            StoreConfig::Sqlite {
+                path: expand_path(blocks),
+            },
+        ),
+        _ => {
+            return Err(CliError::usage(
+                "splitstore needs both --database <metadata.db> and --blocks <blocks.db>, or neither for volatile storage",
+            ));
+        }
+    };
+    Ok(SplitOptions {
+        metadata,
+        blocks,
+        chunk_size_bytes: DEFAULT_CHUNK_SIZE_BYTES,
+        owner: unique_default_owner(),
+        uid,
+        gid,
+        umask: 0,
+    })
+}
+
+fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError> {
+    match provider {
+        StorageProvider::Memory => Ok(StoreConfig::Memory),
+        StorageProvider::Sqlite { path } => Ok(StoreConfig::Sqlite { path: path.clone() }),
+        StorageProvider::Pglite {
+            connection,
+            volume_key,
+            durable,
+        } => Ok(StoreConfig::Pglite {
+            connection: resolve_storage_env(connection)?,
+            volume_key: volume_key.clone(),
+            durable: *durable,
+        }),
+        StorageProvider::R2 {
+            endpoint,
+            bucket,
+            prefix,
+            access_key_id,
+            secret_access_key,
+            durable,
+        } => Ok(StoreConfig::R2 {
+            endpoint: endpoint.clone(),
+            bucket: bucket.clone(),
+            prefix: prefix.clone(),
+            access_key_id: resolve_storage_env(access_key_id)?,
+            secret_access_key: resolve_storage_env(secret_access_key)?,
+            durable: *durable,
+        }),
+    }
+}
+
+fn resolve_storage_env(reference: &EnvReference) -> Result<String, CliError> {
+    std::env::var(&reference.name)
+        .map_err(|_| CliError::runtime(format!("missing environment variable {}", reference.name)))
 }
 
 /// Configure the ownership metadata of the virtual SQLite root before a

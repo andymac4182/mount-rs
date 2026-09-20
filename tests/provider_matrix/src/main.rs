@@ -8,11 +8,12 @@
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore, Namespace, NodeData};
-use mount_rs_core::{FsError, Loopback, MemoryFs, MkdirOptions};
-use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
+use mount_rs_core::{FsError, Loopback, MkdirOptions};
+use mount_rs_memory::MemoryMetadataStore;
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
-use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+use mount_rs_sdk::{Filesystem, MemoryOptions, SplitOptions, StoreConfig};
+use mount_rs_sqlite::SqliteMetadataStore;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use std::collections::BTreeSet;
@@ -49,10 +50,10 @@ fn safe_run_id() -> String {
     }
 }
 
-async fn exercise_memfs() -> MatrixResult<()> {
-    let filesystem = Loopback::new(MemoryFs::empty());
-    filesystem
-        .mkdir(
+async fn exercise_sdk(filesystem: Filesystem) -> MatrixResult<()> {
+    let view = Loopback::from_arc(filesystem.driver());
+    let result = async {
+        view.mkdir(
             "/provider-matrix",
             MkdirOptions {
                 recursive: true,
@@ -61,18 +62,49 @@ async fn exercise_memfs() -> MatrixResult<()> {
         )
         .await
         .map_err(fs_code)?;
-    filesystem
-        .write_file("/provider-matrix/value", PAYLOAD)
-        .await
-        .map_err(fs_code)?;
-    let actual = filesystem
-        .read_file("/provider-matrix/value")
-        .await
-        .map_err(fs_code)?;
-    if actual != PAYLOAD {
-        return Err("readback-mismatch".to_owned());
+        view.write_file("/provider-matrix/value", PAYLOAD)
+            .await
+            .map_err(fs_code)?;
+        let actual = view
+            .read_file("/provider-matrix/value")
+            .await
+            .map_err(fs_code)?;
+        if actual != PAYLOAD {
+            return Err("readback-mismatch".to_owned());
+        }
+        let stat = view.stat("/provider-matrix/value").await.map_err(fs_code)?;
+        if stat.size != PAYLOAD.len() as u64 {
+            return Err("size-mismatch".to_owned());
+        }
+        view.syncfs().await.map_err(fs_code)
     }
-    filesystem.syncfs().await.map_err(fs_code)
+    .await;
+    let shutdown = filesystem.shutdown().await.map_err(fs_code);
+    match (result, shutdown) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("shutdown-{error}")),
+        (Err(error), Err(shutdown_error)) => Err(format!("{error};shutdown-{shutdown_error}")),
+    }
+}
+
+async fn exercise_sdk_split(
+    metadata: StoreConfig,
+    blocks: StoreConfig,
+    label: &str,
+) -> MatrixResult<()> {
+    let filesystem = Filesystem::split(SplitOptions {
+        metadata,
+        blocks,
+        chunk_size_bytes: CHUNK_SIZE,
+        owner: format!("provider-matrix-sdk-{label}"),
+        uid: 0,
+        gid: 0,
+        umask: 0,
+    })
+    .await
+    .map_err(fs_code)?;
+    exercise_sdk(filesystem).await
 }
 
 fn block_ids(namespace: &Namespace) -> Vec<BlockId> {
@@ -344,25 +376,29 @@ async fn main() {
         fail: 0,
     };
 
-    report.case("memfs", exercise_memfs()).await;
+    report
+        .case(
+            "memfs",
+            exercise_sdk(Filesystem::memory(MemoryOptions::default())),
+        )
+        .await;
     report
         .case("memory/memory", async {
-            exercise_chunked(
-                MemoryMetadataStore::new(),
-                MemoryBlockStore::new(),
-                "provider-matrix-memory-memory",
-            )
-            .await
-            .map(|_| ())
+            exercise_sdk_split(StoreConfig::Memory, StoreConfig::Memory, "memory-memory").await
         })
         .await;
     report
         .case("sqlite/sqlite", async {
-            let metadata = SqliteMetadataStore::in_memory().map_err(fs_code)?;
-            let blocks = SqliteBlockStore::in_memory().map_err(fs_code)?;
-            exercise_chunked(metadata, blocks, "provider-matrix-sqlite-sqlite")
-                .await
-                .map(|_| ())
+            exercise_sdk_split(
+                StoreConfig::Sqlite {
+                    path: ":memory:".into(),
+                },
+                StoreConfig::Sqlite {
+                    path: ":memory:".into(),
+                },
+                "sqlite-sqlite",
+            )
+            .await
         })
         .await;
 

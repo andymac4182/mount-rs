@@ -1133,15 +1133,10 @@ dependencies = [
  "async-trait",
  "libc",
  "mount-rs-auto",
- "mount-rs-chunked",
  "mount-rs-core",
- "mount-rs-host",
  "mount-rs-http",
- "mount-rs-memory",
  "mount-rs-nfs",
- "mount-rs-pglite",
- "mount-rs-r2",
- "mount-rs-sqlite",
+ "mount-rs-sdk",
  "serde_json",
  "tokio",
 ]
@@ -1327,6 +1322,22 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "mount-rs-sdk"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-auto",
+ "mount-rs-chunked",
+ "mount-rs-core",
+ "mount-rs-host",
+ "mount-rs-memory",
+ "mount-rs-pglite",
+ "mount-rs-r2",
+ "mount-rs-sqlite",
  "tokio",
 ]
 
