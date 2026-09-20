@@ -92,6 +92,11 @@ pub struct CliOptions {
     pub root: Option<PathBuf>,
     pub database: Option<PathBuf>,
     pub blocks: Option<PathBuf>,
+    /// Optional virtual-root ownership configured by a SQLite JSON config.
+    /// These values are metadata for the mounted filesystem, not host-file
+    /// ownership or forged NFS credentials.
+    pub root_uid: Option<u32>,
+    pub root_gid: Option<u32>,
     /// Optional versioned JSON configuration. Runtime resolves this before a
     /// mount; the parser itself remains filesystem-free.
     pub config: Option<PathBuf>,
@@ -134,6 +139,8 @@ impl PartialEq for CliOptions {
             && self.root == other.root
             && self.database == other.database
             && self.blocks == other.blocks
+            && self.root_uid == other.root_uid
+            && self.root_gid == other.root_gid
             && self.config == other.config
             && self.storage == other.storage
     }
@@ -156,6 +163,8 @@ impl Default for CliOptions {
             root: None,
             database: None,
             blocks: None,
+            root_uid: None,
+            root_gid: None,
             config: None,
             storage: None,
             overrides: CliOverrides::default(),

@@ -42,7 +42,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W14 | Versioned filesystems | Implementing | Jason |
 | W15 | Mount-free SQLite VFS | Implementing | Hume |
 | W16 | just-bash / Mastra adapters | Implementing | Confucius |
-| W17 | Multi-drive HTTP server | Planned | Unassigned |
+| W17 | Multi-drive HTTP server | Implementing | Copernicus |
 | W18 | Benchmarks and dependency budget | Partial implementation | Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
@@ -55,6 +55,8 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 - [ ] **D01 — Live R2:** obtain dedicated test bucket and credentials through a
   safe channel. Do not put secrets in this tracker or substitute RustFS evidence.
+  User authorized setup through their Cloudflare MCP; current tool/resource and
+  plugin discovery did not expose that server. Connection must become available.
 - [ ] **D02 — License:** resolve root Apache-2.0 versus MIT package declarations
   with the user before release; do not silently select a license.
 - [ ] **D03 — FSKit:** obtain signing/install/activation authorization and host
@@ -190,12 +192,15 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [x] Land strict configuration and CLI (`f20f1e3`).
 - [x] Land actual macOS NFS host-backed mount/IO/unmount lifecycle and CI gate
   (`c4058f2`); main native test and strict Clippy passed.
-- [ ] W11.1 Review and land draft SQLite-backed native lifecycle and UID/GID config.
-- [ ] W11.2 Fix review finding: explicit ownership mismatch on read-only config
+- [x] W11.1 Review SQLite-backed native lifecycle and UID/GID config; main's
+  33 unit + seven integration tests and formatting passed. Landing with this update.
+- [x] W11.2 Fix review finding: explicit ownership mismatch on read-only config
   must not mutate persisted root ownership.
-- [ ] W11.3 Fix review finding: an existing `0:0` root is not proof of a new
+- [x] W11.3 Fix review finding: an existing `0:0` root is not proof of a new
   filesystem. Preserve existing ownership; avoid check-then-create races.
-- [ ] W11.4 Run actual config→mount→SQLite workload→unmount→reopen tests.
+- [x] W11.4 Main ran actual macOS config→NFS mount→SQLite workload→unmount→
+  fresh-process reopen: PASS, SQLite 3.51.0, DELETE journal, synchronous FULL.
+  Process locking/recovery passed; mount-service crash was not tested here.
 - [ ] W11.5 Extend configuration and lifecycle coverage to all new providers,
   version views, FSKit and multi-drive HTTP without silently falling back.
 

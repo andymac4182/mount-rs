@@ -92,7 +92,7 @@ enum DriverRuntime {
 
 impl DriverRuntime {
     async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
-        match options.driver {
+        let runtime = match options.driver {
             DriverChoice::Memory => Ok(Self::Memory(MemoryFs::new(MemoryOptions {
                 uid,
                 gid,
@@ -162,7 +162,12 @@ impl DriverRuntime {
                     )),
                 }
             }
+        }?;
+
+        if options.driver == DriverChoice::Sqlite {
+            configure_sqlite_root_owner(&runtime.driver(), options, uid, gid).await?;
         }
+        Ok(runtime)
     }
 
     fn driver(&self) -> Arc<dyn FsDriver> {
@@ -192,6 +197,48 @@ impl DriverRuntime {
     fn is_memory(&self) -> bool {
         matches!(self, Self::Memory(_))
     }
+}
+
+/// Configure the ownership metadata of the virtual SQLite root before a
+/// native mount is created. This intentionally goes through FsDriver only:
+/// the provider remains responsible for persistence, and the host SQLite
+/// database file is never chmod/chowned by the CLI.
+async fn configure_sqlite_root_owner(
+    driver: &Arc<dyn FsDriver>,
+    options: &CliOptions,
+    uid: u32,
+    gid: u32,
+) -> Result<(), CliError> {
+    let configured = match (options.root_uid, options.root_gid) {
+        (Some(uid), Some(gid)) => Some((uid, gid)),
+        (None, None) => None,
+        _ => {
+            return Err(CliError::usage(
+                "sqlite root ownership requires both uid and gid",
+            ));
+        }
+    };
+    let stats = driver.stat("/").await?;
+    let desired = configured.unwrap_or((uid, gid));
+    if stats.uid == desired.0 && stats.gid == desired.1 {
+        return Ok(());
+    }
+
+    if options.read_only {
+        return Err(CliError::runtime(format!(
+            "read-only SQLite mount would need virtual root ownership {}:{} -> {}:{}, refusing to mutate persisted metadata; use matching driver.uid and driver.gid or a writable explicit migration",
+            stats.uid, stats.gid, desired.0, desired.1
+        )));
+    }
+    if configured.is_none() {
+        return Err(CliError::runtime(format!(
+            "SQLite virtual root is owned by {}:{}, but this process requests {}:{}; set driver.uid and driver.gid for an explicit writable ownership migration",
+            stats.uid, stats.gid, uid, gid
+        )));
+    }
+
+    driver.chown("/", desired.0, desired.1).await?;
+    Ok(())
 }
 
 /// Parse and execute the CLI. Only the mount command reaches native
@@ -711,5 +758,102 @@ mod tests {
         runtime.shutdown().await.unwrap();
         let _ = std::fs::remove_file(metadata_path);
         let _ = std::fs::remove_file(blocks_path);
+    }
+
+    #[tokio::test]
+    async fn sqlite_root_owner_is_metadata_and_persists_across_reopen() {
+        let database = std::env::temp_dir().join(format!(
+            "mount-rs-cli-root-owner-{}.db",
+            unique_default_owner()
+        ));
+        let options = CliOptions {
+            driver: DriverChoice::Sqlite,
+            database: Some(database.clone()),
+            root_uid: Some(501),
+            root_gid: Some(20),
+            ..CliOptions::default()
+        };
+
+        let runtime = DriverRuntime::open(&options, 1000, 1000).await.unwrap();
+        let root = runtime.driver().stat("/").await.unwrap();
+        assert_eq!((root.uid, root.gid), (501, 20));
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+
+        let reopened = DriverRuntime::open(&options, 2000, 2000).await.unwrap();
+        let root = reopened.driver().stat("/").await.unwrap();
+        assert_eq!((root.uid, root.gid), (501, 20));
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        let _ = std::fs::remove_file(database);
+    }
+
+    #[tokio::test]
+    async fn sqlite_persisted_zero_root_is_not_implicitly_taken_or_readonly_migrated() {
+        let database = std::env::temp_dir().join(format!(
+            "mount-rs-cli-default-root-owner-{}.db",
+            unique_default_owner()
+        ));
+        let initial = CliOptions {
+            driver: DriverChoice::Sqlite,
+            database: Some(database.clone()),
+            root_uid: Some(0),
+            root_gid: Some(0),
+            ..CliOptions::default()
+        };
+
+        let runtime = DriverRuntime::open(&initial, 1000, 1001).await.unwrap();
+        let handle = runtime
+            .driver()
+            .open("/sentinel", "w", 0o644)
+            .await
+            .unwrap();
+        assert_eq!(handle.write(b"root-owned", Some(0)).await.unwrap(), 10);
+        handle.close().await.unwrap();
+        runtime.shutdown().await.unwrap();
+        drop(runtime);
+
+        let implicit = CliOptions {
+            root_uid: None,
+            root_gid: None,
+            ..initial.clone()
+        };
+        let error = match DriverRuntime::open(&implicit, 2000, 2001).await {
+            Ok(_) => panic!("a persisted 0:0 root must not be implicitly taken over"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("explicit writable ownership migration")
+        );
+
+        let read_only_mismatch = CliOptions {
+            read_only: true,
+            root_uid: Some(2000),
+            root_gid: Some(2001),
+            ..initial.clone()
+        };
+        let error = match DriverRuntime::open(&read_only_mismatch, 2000, 2001).await {
+            Ok(_) => panic!("read-only ownership mismatch must not mutate persisted metadata"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("refusing to mutate"));
+
+        let preserved = CliOptions {
+            read_only: true,
+            ..initial
+        };
+        let reopened = DriverRuntime::open(&preserved, 2000, 2001).await.unwrap();
+        let root = reopened.driver().stat("/").await.unwrap();
+        assert_eq!((root.uid, root.gid), (0, 0));
+        let handle = reopened.driver().open("/sentinel", "r", 0).await.unwrap();
+        let mut bytes = [0_u8; 10];
+        assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
+        assert_eq!(&bytes, b"root-owned");
+        handle.close().await.unwrap();
+        reopened.shutdown().await.unwrap();
+        drop(reopened);
+        let _ = std::fs::remove_file(database);
     }
 }

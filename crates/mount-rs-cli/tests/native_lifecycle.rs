@@ -271,6 +271,54 @@ fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
     fs::remove_dir(&backing_path).expect("remove disposable host-driver backing directory");
 }
 
+#[test]
+#[cfg(target_os = "macos")]
+#[ignore = "requires opt-in macOS NFS access and Python sqlite3"]
+fn cli_nfs_sqlite_config_binary_hosts_sqlite_and_reopens() {
+    require_opt_in("MOUNT_RS_CLI_NATIVE_NFS");
+
+    let mountpoint = unique_mountpoint();
+    let stem = mountpoint
+        .file_name()
+        .expect("unique mountpoint has a file name")
+        .to_string_lossy();
+    let config_path = std::env::temp_dir().join(format!("{stem}-sqlite-config"));
+    let database_path = std::env::temp_dir().join(format!("{stem}-sqlite-backend.db"));
+    let (uid, gid) = effective_test_identity();
+    fs::create_dir(&mountpoint).expect("create disposable SQLite NFS mountpoint");
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "version": 1,
+  "mountpoint": "{}",
+  "transport": "nfs",
+  "sqlite_single_host": true,
+  "driver": {{
+    "kind": "sqlite",
+    "database": "{}",
+    "uid": {},
+    "gid": {}
+  }}
+}}"#,
+            mountpoint.display(),
+            database_path.display(),
+            uid,
+            gid
+        ),
+    )
+    .expect("write SQLite NFS config");
+
+    run_configured_mount_cycle(&config_path, &mountpoint, |target| {
+        run_sqlite_delete_fixture(target)
+    });
+    run_configured_mount_cycle(&config_path, &mountpoint, verify_sqlite_reopen);
+
+    fs::remove_dir(&mountpoint).expect("remove disposable SQLite NFS mountpoint");
+    fs::remove_file(&config_path).expect("remove disposable SQLite NFS config");
+    fs::remove_file(&database_path).expect("remove disposable SQLite backend");
+}
+
 #[cfg(target_os = "macos")]
 fn run_configured_mount_cycle<F>(config_path: &std::path::Path, mountpoint: &std::path::Path, io: F)
 where
@@ -351,6 +399,122 @@ where
         "config-backed macOS NFS remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
     );
     child_guard.disarm();
+}
+
+#[cfg(target_os = "macos")]
+fn run_sqlite_delete_fixture(target: &std::path::Path) -> std::io::Result<()> {
+    let script =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/sqlite_hosting.py");
+    run_python_fixture(
+        SQLITE_DELETE_DRIVER,
+        &script,
+        target,
+        "SQLite DELETE hosting fixture",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn verify_sqlite_reopen(target: &std::path::Path) -> std::io::Result<()> {
+    run_python_fixture(
+        SQLITE_REOPEN_DRIVER,
+        std::path::Path::new("-"),
+        target,
+        "SQLite reopen fixture",
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn run_python_fixture(
+    program: &str,
+    script: &std::path::Path,
+    target: &std::path::Path,
+    description: &str,
+) -> std::io::Result<()> {
+    let mut child = if script == std::path::Path::new("-") {
+        let mut command = Command::new("python3");
+        command
+            .args([
+                "-c",
+                program,
+                target.join("delete.sqlite").to_str().unwrap(),
+            ])
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        command.spawn()?
+    } else {
+        let mut command = Command::new("python3");
+        command
+            .args(["-c", program])
+            .arg(script)
+            .arg(target)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit());
+        command.spawn()?
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(180);
+    loop {
+        if let Some(status) = child.try_wait()? {
+            if status.success() {
+                return Ok(());
+            }
+            return Err(std::io::Error::other(format!(
+                "{description} exited with {status}"
+            )));
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(std::io::Error::other(format!(
+                "{description} exceeded 180 seconds"
+            )));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(target_os = "macos")]
+const SQLITE_DELETE_DRIVER: &str = r#"
+import runpy
+import sys
+from pathlib import Path
+fixture = runpy.run_path(sys.argv[1])
+fixture["run_case"](Path(sys.argv[2]), "DELETE")
+"#;
+
+#[cfg(target_os = "macos")]
+const SQLITE_REOPEN_DRIVER: &str = r#"
+import sqlite3
+import sys
+path = sys.argv[1]
+db = sqlite3.connect(path, timeout=0.1)
+try:
+    assert db.execute("PRAGMA journal_mode").fetchone()[0].upper() == "DELETE"
+    db.execute("PRAGMA synchronous=FULL")
+    assert db.execute("PRAGMA synchronous").fetchone()[0] == 2
+    assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+    assert db.execute("SELECT count(*) FROM items").fetchone()[0] == 17
+    print(f"CLI_SQLITE_REOPEN_OK sqlite={sqlite3.sqlite_version} journal=DELETE synchronous=FULL", flush=True)
+finally:
+    db.close()
+"#;
+
+#[cfg(target_os = "macos")]
+fn effective_test_identity() -> (u32, u32) {
+    let uid = std::env::var("SUDO_UID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            // SAFETY: getuid has no pointer arguments or retained state.
+            unsafe { libc::getuid() as u32 }
+        });
+    let gid = std::env::var("SUDO_GID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(|| {
+            // SAFETY: getgid has no pointer arguments or retained state.
+            unsafe { libc::getgid() as u32 }
+        });
+    (uid, gid)
 }
 
 fn require_opt_in(variable: &str) {

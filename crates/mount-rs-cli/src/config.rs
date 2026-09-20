@@ -90,6 +90,11 @@ pub struct ConfigSpec {
     pub root: Option<PathBuf>,
     pub database: Option<PathBuf>,
     pub blocks: Option<PathBuf>,
+    /// Desired ownership of the virtual SQLite filesystem root. The JSON
+    /// spelling is driver.uid/driver.gid; the internal names avoid
+    /// confusing this metadata with the host process identity.
+    pub root_uid: Option<u32>,
+    pub root_gid: Option<u32>,
     pub storage: Option<SplitStorageConfig>,
 }
 
@@ -227,7 +232,7 @@ fn parse_driver(value: &Value, base_dir: &Path, spec: &mut ConfigSpec) -> Result
             spec.root = Some(required_path(object, "root", "config.driver", base_dir)?);
         }
         "sqlite" => {
-            reject_unknown(object, &["kind", "database"], "config.driver")?;
+            reject_unknown(object, &["kind", "database", "uid", "gid"], "config.driver")?;
             spec.driver = Some(DriverChoice::Sqlite);
             spec.database = Some(required_path(
                 object,
@@ -235,6 +240,14 @@ fn parse_driver(value: &Value, base_dir: &Path, spec: &mut ConfigSpec) -> Result
                 "config.driver",
                 base_dir,
             )?);
+            spec.root_uid = optional_u32(object, "uid", "config.driver")?;
+            spec.root_gid = optional_u32(object, "gid", "config.driver")?;
+            if spec.root_uid.is_some() != spec.root_gid.is_some() {
+                return Err(ConfigError::at(
+                    "config.driver",
+                    "uid and gid must be supplied together",
+                ));
+            }
         }
         "splitstore" => {
             spec.driver = Some(DriverChoice::SplitStore);
@@ -423,6 +436,20 @@ fn validate_spec(spec: &ConfigSpec) -> Result<ConfigSpec, ConfigError> {
             "structured storage is only valid for splitstore and cannot be mixed with legacy paths",
         ));
     }
+    if spec.root_uid.is_some() != spec.root_gid.is_some() {
+        return Err(ConfigError::at(
+            "config.driver",
+            "uid and gid must be supplied together",
+        ));
+    }
+    if (spec.root_uid.is_some() || spec.root_gid.is_some())
+        && spec.driver != Some(DriverChoice::Sqlite)
+    {
+        return Err(ConfigError::at(
+            "config.driver",
+            "uid and gid are only valid for the sqlite driver",
+        ));
+    }
     Ok(spec.clone())
 }
 
@@ -472,6 +499,8 @@ pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), Conf
             if options.root.is_some()
                 || options.database.is_some()
                 || options.blocks.is_some()
+                || options.root_uid.is_some()
+                || options.root_gid.is_some()
                 || options.storage.is_some() =>
         {
             Err(ConfigError::new(
@@ -481,6 +510,8 @@ pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), Conf
         DriverChoice::Host
             if options.database.is_some()
                 || options.blocks.is_some()
+                || options.root_uid.is_some()
+                || options.root_gid.is_some()
                 || options.storage.is_some() =>
         {
             Err(ConfigError::new(
@@ -519,6 +550,19 @@ pub(crate) fn validate_resolved_options(options: &CliOptions) -> Result<(), Conf
         _ => Ok(()),
     }?;
 
+    if options.root_uid.is_some() != options.root_gid.is_some() {
+        return Err(ConfigError::new(
+            "sqlite root ownership requires both uid and gid",
+        ));
+    }
+    if (options.root_uid.is_some() || options.root_gid.is_some())
+        && options.driver != DriverChoice::Sqlite
+    {
+        return Err(ConfigError::new(
+            "sqlite root uid/gid are only valid with --driver sqlite",
+        ));
+    }
+
     if options.sqlite_single_host
         && matches!(
             options.transport,
@@ -547,6 +591,8 @@ impl ConfigSpec {
             root: self.root.clone(),
             database: self.database.clone(),
             blocks: self.blocks.clone(),
+            root_uid: self.root_uid,
+            root_gid: self.root_gid,
             config: None,
             storage: self.storage.clone().map(Box::new),
             overrides: CliOverrides::default(),
@@ -583,6 +629,30 @@ fn required_u64(object: &Map<String, Value>, key: &str, path: &str) -> Result<u6
         .ok_or_else(|| ConfigError::at(&format!("{path}.{key}"), "is required"))?
         .as_u64()
         .ok_or_else(|| ConfigError::at(&format!("{path}.{key}"), "must be an unsigned integer"))
+}
+
+fn optional_u32(
+    object: &Map<String, Value>,
+    key: &str,
+    path: &str,
+) -> Result<Option<u32>, ConfigError> {
+    object
+        .get(key)
+        .map(|value| {
+            let value = value.as_u64().ok_or_else(|| {
+                ConfigError::at(
+                    &format!("{path}.{key}"),
+                    "must be an unsigned integer in the u32 range",
+                )
+            })?;
+            u32::try_from(value).map_err(|_| {
+                ConfigError::at(
+                    &format!("{path}.{key}"),
+                    "must be an unsigned integer in the u32 range",
+                )
+            })
+        })
+        .transpose()
 }
 
 fn required_string<'a>(
@@ -906,6 +976,93 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message().contains("block-only"));
+    }
+
+    #[test]
+    fn sqlite_root_owner_is_an_unsigned_pair() {
+        let spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "sqlite",
+                    "database": "state.db",
+                    "uid": 501,
+                    "gid": 20
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap();
+        assert_eq!(spec.root_uid, Some(501));
+        assert_eq!(spec.root_gid, Some(20));
+        let options = spec.to_options();
+        assert_eq!(options.root_uid, Some(501));
+        assert_eq!(options.root_gid, Some(20));
+    }
+
+    #[test]
+    fn sqlite_root_owner_rejects_partial_or_out_of_range_values() {
+        let partial = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "sqlite",
+                    "database": "state.db",
+                    "uid": 501
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap_err();
+        assert!(partial.message().contains("uid and gid"));
+
+        let out_of_range = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "sqlite",
+                    "database": "state.db",
+                    "uid": 4294967296,
+                    "gid": 20
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap_err();
+        assert!(out_of_range.message().contains("u32 range"));
+
+        let negative = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "sqlite",
+                    "database": "state.db",
+                    "uid": -1,
+                    "gid": 20
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap_err();
+        assert!(negative.message().contains("unsigned integer"));
+    }
+
+    #[test]
+    fn sqlite_root_owner_is_rejected_for_other_drivers() {
+        let error = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "memory",
+                    "uid": 501,
+                    "gid": 20
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("config.driver."));
+        assert!(error.message().contains("unknown field"));
     }
 
     #[test]

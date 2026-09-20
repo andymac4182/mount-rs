@@ -26,6 +26,8 @@ The built-in driver choices are:
   the current directory. Host paths are kept below the configured root by the
   host integration.
 - --driver sqlite --database PATH: the durable SQLite snapshot integration.
+  In JSON configuration, optional driver.uid and driver.gid set the virtual
+  root ownership used by the mounted filesystem.
 - --driver splitstore: independent metadata and immutable block stores. With
   no paths it is volatile memory; with both --database METADATA and --blocks
   BLOCKS it uses two durable SQLite databases.
@@ -45,9 +47,41 @@ the mount command has resolved the config.
 
 The top-level version is currently 1. The driver object is discriminated and
 strict: memory accepts only kind; host accepts kind and root; sqlite accepts
-kind and database; and splitstore accepts either the legacy database plus
-blocks pair or one structured storage object. Structured splitstore.storage
-must not be combined with root, database, or blocks.
+kind, database, and an optional uid/gid pair; and splitstore accepts either the
+legacy database plus blocks pair or one structured storage object. Structured
+splitstore.storage must not be combined with root, database, or blocks.
+
+For writable SQLite hosting through the native NFS transport, configure the
+virtual root owner explicitly:
+
+    {
+      "version": 1,
+      "transport": "nfs",
+      "sqlite_single_host": true,
+      "driver": {
+        "kind": "sqlite",
+        "database": "./state.sqlite",
+        "uid": 501,
+        "gid": 20
+      }
+    }
+
+uid and gid must be unsigned 32-bit values and must be supplied together.
+They are filesystem metadata, not a request to change the host SQLite file's
+ownership and not a way to forge NFS client credentials. Before the native
+mount, the CLI reads virtual "/" through FsDriver and calls FsDriver::chown
+only when its persisted metadata differs. PersistedFs stores that root change
+in the SQLite snapshot, so reopening the same database retains the configured
+owner. A different explicit pair is an intentional persisted root-owner
+migration.
+
+When uid/gid are omitted, the CLI never infers that a 0:0 root is new and
+never changes persisted ownership implicitly. A writable mount whose persisted
+root does not match the effective identity fails and asks for an explicit
+uid/gid migration. A read-only mount with any ownership mismatch also fails
+without mutating the database; use a matching pair for read-only access.
+This policy only addresses the virtual filesystem root; SQLite journal/WAL and
+transaction safety still require the native hosting acceptance tests below.
 
 Structured storage has independent metadata and blocks providers. Each
 provider is strict and supports memory, sqlite, and pglite; r2 is supported
@@ -121,8 +155,9 @@ backing directory in a fresh child to verify persistence before removing the
 test file. It is ignored in ordinary test runs, but explicitly running the
 ignored test without `MOUNT_RS_CLI_NATIVE_NFS=1` fails rather than silently
 passing. The test never invokes `sudo`, installs a helper, or changes host
-configuration. SQLite hosting is tested separately by the CLI/config/provider
-suites; this host-backed lifecycle pass does not satisfy the separate SQLite
-native-NFS acceptance requirement. The host-backed case keeps the NFS
-server's backing-directory ownership aligned with the unprivileged macOS
-kernel client.
+configuration. This host-backed lifecycle pass does not satisfy the separate
+SQLite native-NFS acceptance requirement. The SQLite case must use an explicit
+driver.uid/gid pair and record the SQLite version, journal mode, synchronous
+setting, locking/recovery results, and cleanup evidence. The host-backed case
+keeps the NFS server's backing-directory ownership aligned with the
+unprivileged macOS kernel client.

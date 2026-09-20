@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "nfs",
+  "sqlite_single_host": true,
+  "driver": {
+    "kind": "sqlite",
+    "database": "./state/mount-rs.sqlite",
+    "uid": 501,
+    "gid": 20
+  }
+}
