@@ -314,6 +314,9 @@ async fn native_webdav_mount_probe_and_round_trip() {
         std::process::id()
     ));
     fs::create_dir(&mountpoint).expect("create empty mountpoint");
+    // macOS's temporary directory may use /var while mount(8) reports its
+    // canonical /private/var path. Compare and unmount the same identity.
+    let mountpoint = fs::canonicalize(mountpoint).expect("canonicalize empty mountpoint");
 
     let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
     let loopback = Loopback::from_arc(Arc::clone(&driver));
