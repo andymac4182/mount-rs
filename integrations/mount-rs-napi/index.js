@@ -784,6 +784,12 @@ module.exports.JsDirEntry = nativeBinding.JsDirEntry
 module.exports.JsMountx = nativeBinding.JsMountx
 module.exports.JsStats = nativeBinding.JsStats
 module.exports.JsStatsFs = nativeBinding.JsStatsFs
+module.exports.Mounted = nativeBinding.Mounted
 module.exports.createChunkedDriver = nativeBinding.createChunkedDriver
+module.exports.createNodeFsDriver = nativeBinding.createNodeFsDriver
+module.exports.liveMounts = nativeBinding.liveMounts
+module.exports.mount = nativeBinding.mount
+module.exports.probeTransports = nativeBinding.probeTransports
+module.exports.unmountAll = nativeBinding.unmountAll
 
 require('./postlude.cjs')(module.exports)

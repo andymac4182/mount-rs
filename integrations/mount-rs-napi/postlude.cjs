@@ -78,6 +78,27 @@ function timeArgument(value) {
   return value instanceof Date ? value.getTime() / 1000 : value
 }
 
+function normalizeOptional(value) {
+  return value === null ? undefined : value
+}
+
+function normalizeTransportProbe(probe) {
+  if (!probe) return probe
+  return { ...probe, reason: normalizeOptional(probe.reason) }
+}
+
+function normalizeAutoProbe(probe) {
+  if (!probe) return probe
+  return {
+    ...probe,
+    chosen: normalizeOptional(probe.chosen),
+    fuse: normalizeTransportProbe(probe.fuse),
+    "9p": normalizeTransportProbe(probe["9p"]),
+    nfs: normalizeTransportProbe(probe.nfs),
+    reason: normalizeOptional(probe.reason),
+  }
+}
+
 module.exports = function install(binding) {
   const Filesystem = binding.Filesystem
   const FileHandle = binding.FileHandle
@@ -135,6 +156,11 @@ module.exports = function install(binding) {
     wrapAsync(Mountx.prototype, "mknod")
   }
 
+  const Mounted = binding.Mounted
+  if (Mounted) {
+    wrapAsync(Mounted.prototype, "unmount")
+  }
+
   // Free N-API functions are exported separately from the Filesystem class.
   // Adapt rejected provider/configuration opens to the same node:fs-shaped
   // errors as class factories, while leaving the native function's argument
@@ -161,11 +187,72 @@ module.exports = function install(binding) {
     })
   }
 
+  for (const name of ["mount", "unmountAll"]) {
+    const nativeFunction = binding[name]
+    if (typeof nativeFunction !== "function" || nativeFunction.__mountRsWrapped) continue
+    function wrapped(...args) {
+      let result
+      try {
+        result = nativeFunction(...args)
+      } catch (error) {
+        throw structuredError(error)
+      }
+      return Promise.resolve(result).then((value) => value).catch((error) => {
+        throw structuredError(error)
+      })
+    }
+    Object.defineProperty(wrapped, "__mountRsWrapped", { value: true })
+    Object.defineProperty(binding, name, {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: wrapped,
+    })
+  }
+
+  const nativeProbeTransports = binding.probeTransports
+  if (typeof nativeProbeTransports === "function" && !nativeProbeTransports.__mountRsWrapped) {
+    function probeTransports(...args) {
+      let result
+      try {
+        result = nativeProbeTransports(...args)
+      } catch (error) {
+        throw structuredError(error)
+      }
+      return Promise.resolve(result)
+        .then(normalizeAutoProbe)
+        .catch((error) => {
+          throw structuredError(error)
+        })
+    }
+    Object.defineProperty(probeTransports, "__mountRsWrapped", { value: true })
+    Object.defineProperty(binding, "probeTransports", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: probeTransports,
+    })
+  }
+
   // Static N-API factory properties cannot be replaced in place. A small JS
   // facade adapts backend-open failures just like instance operations. Its
   // custom instanceof hook keeps native factory results recognizable as
   // Filesystem instances even though the static facade is a separate class.
   class FilesystemFacade {
+    // Keep the native constructor usable for callers such as the upstream
+    // conformance harness. Without an explicit forwarding constructor,
+    // `new FilesystemFacade()` creates a plain JavaScript object whose
+    // inherited N-API getters cannot unwrap a native Filesystem receiver.
+    constructor(...args) {
+      if (args.length !== 0) {
+        throw new TypeError("Filesystem constructor does not accept arguments")
+      }
+      // The Rust class intentionally has no public N-API constructor. Its
+      // memory factory is the native equivalent of the upstream default
+      // constructor and returns a receiver with the required internal slot.
+      return Filesystem.memory()
+    }
+
     static memory() {
       return Filesystem.memory()
     }

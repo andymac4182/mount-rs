@@ -15,7 +15,8 @@ use mount_rs_core::storage::{
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
+use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
 
@@ -72,7 +73,8 @@ impl Default for PgliteStorageOptions {
 
 #[derive(Clone)]
 struct Database {
-    client: Arc<Mutex<Client>>,
+    client: Arc<Mutex<Option<Client>>>,
+    connection: Arc<Mutex<Option<JoinHandle<()>>>>,
     volume_key: String,
     durable: bool,
 }
@@ -91,11 +93,12 @@ impl Database {
         let (client, connection) = tokio_postgres::connect(connection_string, NoTls)
             .await
             .map_err(postgres_error)?;
-        tokio::spawn(async move {
+        let connection = tokio::spawn(async move {
             let _ = connection.await;
         });
         let database = Self {
-            client: Arc::new(Mutex::new(client)),
+            client: Arc::new(Mutex::new(Some(client))),
+            connection: Arc::new(Mutex::new(Some(connection))),
             volume_key: options.volume_key,
             durable: options.durable,
         };
@@ -103,16 +106,41 @@ impl Database {
             .client
             .lock()
             .await
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .batch_execute(schema)
             .await
             .map_err(postgres_error)?;
         Ok(database)
     }
 
+    async fn lock_client(&self) -> Result<MutexGuard<'_, Option<Client>>> {
+        let client = self.client.lock().await;
+        if client.is_none() {
+            return Err(connection_closed());
+        }
+        Ok(client)
+    }
+
+    /// Close the client and wait for the PostgreSQL-wire task to observe the
+    /// dropped sender. Waiting here is important for PGlite's bounded server:
+    /// a subsequent filesystem may connect immediately after shutdown without
+    /// racing the old socket's teardown.
+    async fn close(&self) -> Result<()> {
+        let client = self.client.lock().await.take();
+        drop(client);
+        let connection = self.connection.lock().await.take();
+        if let Some(connection) = connection {
+            let _ = connection.await;
+        }
+        Ok(())
+    }
+
     async fn ensure_metadata_row(&self) -> Result<()> {
-        self.client
-            .lock()
-            .await
+        let client = self.lock_client().await?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .execute_typed(
                 "INSERT INTO mount_rs_metadata
                     (volume_key, revision, namespace, owner, fence, expires)
@@ -129,9 +157,10 @@ impl Database {
         // Successful execute/commit calls already received the server's
         // acknowledgement. This round trip is the provider barrier and also
         // propagates a dead connection to fsync callers.
-        self.client
-            .lock()
-            .await
+        let client = self.lock_client().await?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .batch_execute("SELECT 1")
             .await
             .map_err(postgres_error)
@@ -167,6 +196,13 @@ impl PgliteMetadataStore {
         database.ensure_metadata_row().await?;
         Ok(Self(database))
     }
+
+    /// Close the underlying PostgreSQL-wire client. This is idempotent and is
+    /// intended for owners that retain the store behind an `Arc`, such as the
+    /// N-API chunked filesystem shutdown callback.
+    pub async fn close(&self) -> Result<()> {
+        self.0.close().await
+    }
 }
 
 /// Immutable blocks persisted in a table independent from metadata.
@@ -195,6 +231,15 @@ impl PgliteBlockStore {
             Database::connect(connection_string, BLOCK_SCHEMA, options).await?,
         ))
     }
+
+    /// Close the underlying PostgreSQL-wire client. This is idempotent.
+    pub async fn close(&self) -> Result<()> {
+        self.0.close().await
+    }
+}
+
+fn connection_closed() -> FsError {
+    FsError::new(ErrorCode::Ebadf).with_syscall("PGlite connection")
 }
 
 fn ttl_ms(ttl: Duration) -> Result<i64> {
@@ -227,8 +272,10 @@ impl MetadataStore for PgliteMetadataStore {
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        let client = self.0.client.lock().await;
+        let client = self.0.lock_client().await?;
         let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 "SELECT revision, namespace FROM mount_rs_metadata WHERE volume_key = $1",
                 &[(&self.0.volume_key, Type::TEXT)],
@@ -260,8 +307,10 @@ impl MetadataStore for PgliteMetadataStore {
                AND fence<9223372036854775807 AND $3<=9223372036854775807-{NOW}
              RETURNING fence, expires"
         );
-        let client = self.0.client.lock().await;
+        let client = self.0.lock_client().await?;
         let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 &sql,
                 &[
@@ -289,8 +338,10 @@ impl MetadataStore for PgliteMetadataStore {
                AND $5<=9223372036854775807-{NOW}
              RETURNING expires"
         );
-        let client = self.0.client.lock().await;
+        let client = self.0.lock_client().await?;
         let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 &sql,
                 &[
@@ -316,8 +367,10 @@ impl MetadataStore for PgliteMetadataStore {
             "UPDATE mount_rs_metadata SET owner=NULL, expires=0
              WHERE volume_key=$1 AND owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}"
         );
-        let client = self.0.client.lock().await;
+        let client = self.0.lock_client().await?;
         let changed = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .execute_typed(
                 &sql,
                 &[
@@ -349,8 +402,13 @@ impl MetadataStore for PgliteMetadataStore {
         let (fence, expires) = lease_numbers(lease)?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
 
-        let mut client = self.0.client.lock().await;
-        let tx = client.transaction().await.map_err(postgres_error)?;
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
         let state = match tx
             .query_typed_opt(
                 &format!(
@@ -441,17 +499,21 @@ impl BlockStore for PgliteBlockStore {
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let bytes = bytes.to_vec();
-        let client = self.0.client.lock().await;
+        let client = self.0.lock_client().await?;
         // PostgreSQL's built-in md5/encode functions give the same opaque
         // identity for equal bytes without requiring a PGlite extension.
         // A collision is checked below and never aliases different content.
         let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt("SELECT md5(encode($1, 'hex'))", &[(&bytes, Type::BYTEA)])
             .await
             .map_err(postgres_error)?
             .ok_or_else(|| backend_error("PGlite did not return a block identity"))?;
         let id = row.get::<_, String>(0);
         let changed = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .execute_typed(
                 "INSERT INTO mount_rs_blocks (volume_key, id, bytes) VALUES ($1, $2, $3)
                  ON CONFLICT (volume_key, id) DO NOTHING",
@@ -468,6 +530,8 @@ impl BlockStore for PgliteBlockStore {
         }
 
         let existing = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 "SELECT bytes FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
                 &[(&self.0.volume_key, Type::TEXT), (&id, Type::TEXT)],
@@ -484,8 +548,10 @@ impl BlockStore for PgliteBlockStore {
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        let client = self.0.client.lock().await;
+        let client = self.0.lock_client().await?;
         client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 "SELECT bytes FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
                 &[(&self.0.volume_key, Type::TEXT), (&id.0, Type::TEXT)],
@@ -501,10 +567,10 @@ impl BlockStore for PgliteBlockStore {
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        self.0
-            .client
-            .lock()
-            .await
+        let client = self.0.lock_client().await?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .execute_typed(
                 "DELETE FROM mount_rs_blocks WHERE volume_key=$1 AND id=$2",
                 &[(&self.0.volume_key, Type::TEXT), (&id.0, Type::TEXT)],

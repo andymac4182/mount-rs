@@ -9,6 +9,10 @@ assert.deepEqual(fs.getCapabilities(), fs.capabilities);
 assert.throws(() => {
   fs.capabilities = {};
 }, TypeError);
+const directlyConstructed = new Filesystem();
+assert.equal(directlyConstructed instanceof Filesystem, true);
+assert.equal(typeof directlyConstructed.capabilities, "object");
+await directlyConstructed.shutdown();
 await fs.mkdir("/demo", true);
 await fs.writeFile("/demo/hello", Buffer.from("hello"));
 assert.equal((await fs.readFile("/demo/hello")).toString(), "hello");

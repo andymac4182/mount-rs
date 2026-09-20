@@ -4,6 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use mount_rs_auto::{
+    AutoMount, AutoMountError, AutoMountOptions, AutoTransport, Transport, TransportProbe,
+};
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
@@ -12,9 +15,10 @@ use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, MemoryFs,
     MkdirOptions, OpenFlags, Result as CoreResult, Stats, StatsFs,
 };
+use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{
-    PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions, connect_pglite,
+    PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions, connect_pglite_with_store,
 };
 use mount_rs_r2::{R2BlockStore, R2Config, open_r2};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore, open_sqlite};
@@ -602,6 +606,42 @@ pub struct JsR2Options {
     pub state_key: Option<String>,
 }
 
+#[napi(object)]
+pub struct JsNodeFsOptions {
+    pub read_only: Option<bool>,
+}
+
+#[napi(object)]
+pub struct JsAutoMountOptions {
+    pub transport: Option<String>,
+    pub read_only: Option<bool>,
+    pub unmount_timeout_ms: Option<f64>,
+}
+
+#[napi(object)]
+pub struct JsTransportProbe {
+    pub usable: bool,
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+pub struct JsAutoProbe {
+    pub platform: String,
+    pub chosen: Option<String>,
+    pub preference: Vec<String>,
+    pub fuse: JsTransportProbe,
+    #[napi(js_name = "9p")]
+    pub nine_p: JsTransportProbe,
+    pub nfs: JsTransportProbe,
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+pub struct JsMountFailure {
+    pub transport: Option<String>,
+    pub message: String,
+}
+
 /// One independently configured provider used by `createChunkedDriver`.
 /// `kind` is intentionally a closed string set validated by Rust; an unknown
 /// backend never falls back to an in-memory store.
@@ -787,6 +827,363 @@ impl BlockStore for DynBlockStore {
     }
 }
 
+/// An owned forwarding driver for the native transport facade. The N-API
+/// `Filesystem` class keeps its driver behind an `Arc`; transport crates take
+/// ownership of a concrete `FsDriver`, so this small adapter preserves the
+/// same shared driver without adding another async runtime dependency.
+#[derive(Clone)]
+struct MountDriver(Arc<dyn FsDriver>);
+
+impl FsDriver for MountDriver {
+    fn capabilities(&self) -> Capabilities {
+        self.0.capabilities()
+    }
+
+    fn syncfs<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        Box::pin(async move { inner.syncfs().await })
+    }
+
+    fn stat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Stats>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.stat(&path).await })
+    }
+
+    fn lstat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Stats>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.lstat(&path).await })
+    }
+
+    fn statfs<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<StatsFs>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.statfs(&path).await })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<DirEntry>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.readdir(&path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        let flags = flags.to_owned();
+        Box::pin(async move { inner.open(&path, &flags, mode).await })
+    }
+
+    fn open_flags<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.open_flags(&path, flags, mode).await })
+    }
+
+    fn mkdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        options: MkdirOptions,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Option<String>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.mkdir(&path, options).await })
+    }
+
+    fn rmdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.rmdir(&path).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.unlink(&path).await })
+    }
+
+    fn rename<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        old_path: &'b str,
+        new_path: &'c str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let old_path = old_path.to_owned();
+        let new_path = new_path.to_owned();
+        Box::pin(async move { inner.rename(&old_path, &new_path).await })
+    }
+
+    fn link<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        existing_path: &'b str,
+        new_path: &'c str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let existing_path = existing_path.to_owned();
+        let new_path = new_path.to_owned();
+        Box::pin(async move { inner.link(&existing_path, &new_path).await })
+    }
+
+    fn symlink<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        target: &'b str,
+        path: &'c str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let target = target.to_owned();
+        let path = path.to_owned();
+        Box::pin(async move { inner.symlink(&target, &path).await })
+    }
+
+    fn readlink<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<String>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.readlink(&path).await })
+    }
+
+    fn chmod<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.chmod(&path, mode).await })
+    }
+
+    fn chown<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        uid: u32,
+        gid: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.chown(&path, uid, gid).await })
+    }
+
+    fn lchown<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        uid: u32,
+        gid: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.lchown(&path, uid, gid).await })
+    }
+
+    fn truncate<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        length: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.truncate(&path, length).await })
+    }
+
+    fn has_utimens(&self) -> bool {
+        self.0.has_utimens()
+    }
+
+    fn utimens<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        atime_ns: i128,
+        mtime_ns: i128,
+        follow_symlinks: bool,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move {
+            inner
+                .utimens(&path, atime_ns, mtime_ns, follow_symlinks)
+                .await
+        })
+    }
+
+    fn utimes<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        atime_ms: i64,
+        mtime_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.utimes(&path, atime_ms, mtime_ms).await })
+    }
+
+    fn lutimes<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        atime_ms: i64,
+        mtime_ms: i64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.lutimes(&path, atime_ms, mtime_ms).await })
+    }
+
+    fn mknod<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        mode: u32,
+        dev: u64,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let path = path.to_owned();
+        Box::pin(async move { inner.mknod(&path, mode, dev).await })
+    }
+}
+
 fn config_error(message: impl Into<String>) -> Error {
     to_js_error(
         FsError::new(ErrorCode::Einval)
@@ -834,7 +1231,11 @@ fn validate_chunk_size(value: f64) -> Result<usize, Error> {
 
 fn validate_ttl(value: Option<f64>) -> Result<Duration, Error> {
     let value = value.unwrap_or(30_000.0);
-    if !value.is_finite() || value.fract() != 0.0 || value <= 0.0 || value > MAX_SAFE_INTEGER {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value == 0.0
+        || !(0.0..=MAX_SAFE_INTEGER).contains(&value)
+    {
         return Err(range_error("ttlMs", "> 0 and <= 9007199254740991", value));
     }
     Ok(Duration::from_millis(value as u64))
@@ -848,7 +1249,7 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
 
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
-) -> Result<Arc<dyn MetadataStore>, Error> {
+) -> Result<(Arc<dyn MetadataStore>, Option<PgliteMetadataStore>), Error> {
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "metadata.uri")?;
@@ -858,7 +1259,7 @@ async fn build_metadata_store(
             reject_set(&options.bucket, "metadata.bucket")?;
             reject_set(&options.access_key_id, "metadata.accessKeyId")?;
             reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
-            Ok(Arc::new(MemoryMetadataStore::new()))
+            Ok((Arc::new(MemoryMetadataStore::new()), None))
         }
         "sqlite" => {
             let uri = required_string(&options.uri, "metadata.uri")?;
@@ -868,8 +1269,9 @@ async fn build_metadata_store(
             reject_set(&options.bucket, "metadata.bucket")?;
             reject_set(&options.access_key_id, "metadata.accessKeyId")?;
             reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
-            Ok(Arc::new(
-                SqliteMetadataStore::open(uri).map_err(to_js_error)?,
+            Ok((
+                Arc::new(SqliteMetadataStore::open(uri).map_err(to_js_error)?),
+                None,
             ))
         }
         "pglite" => {
@@ -881,11 +1283,10 @@ async fn build_metadata_store(
             reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
             let storage =
                 PgliteStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
-            Ok(Arc::new(
-                PgliteMetadataStore::connect_with_options(&uri, storage)
-                    .await
-                    .map_err(to_js_error)?,
-            ))
+            let store = PgliteMetadataStore::connect_with_options(&uri, storage)
+                .await
+                .map_err(to_js_error)?;
+            Ok((Arc::new(store.clone()), Some(store)))
         }
         "r2" => Err(config_error(
             "R2 is a block-only backend; metadata must use memory, sqlite, or pglite",
@@ -894,7 +1295,9 @@ async fn build_metadata_store(
     }
 }
 
-async fn build_block_store(options: &JsChunkedStoreOptions) -> Result<Arc<dyn BlockStore>, Error> {
+async fn build_block_store(
+    options: &JsChunkedStoreOptions,
+) -> Result<(Arc<dyn BlockStore>, Option<PgliteBlockStore>), Error> {
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "blocks.uri")?;
@@ -904,7 +1307,7 @@ async fn build_block_store(options: &JsChunkedStoreOptions) -> Result<Arc<dyn Bl
             reject_set(&options.bucket, "blocks.bucket")?;
             reject_set(&options.access_key_id, "blocks.accessKeyId")?;
             reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
-            Ok(Arc::new(MemoryBlockStore::new()))
+            Ok((Arc::new(MemoryBlockStore::new()), None))
         }
         "sqlite" => {
             let uri = required_string(&options.uri, "blocks.uri")?;
@@ -914,7 +1317,10 @@ async fn build_block_store(options: &JsChunkedStoreOptions) -> Result<Arc<dyn Bl
             reject_set(&options.bucket, "blocks.bucket")?;
             reject_set(&options.access_key_id, "blocks.accessKeyId")?;
             reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
-            Ok(Arc::new(SqliteBlockStore::open(uri).map_err(to_js_error)?))
+            Ok((
+                Arc::new(SqliteBlockStore::open(uri).map_err(to_js_error)?),
+                None,
+            ))
         }
         "pglite" => {
             let uri = required_string(&options.uri, "blocks.uri")?;
@@ -925,11 +1331,10 @@ async fn build_block_store(options: &JsChunkedStoreOptions) -> Result<Arc<dyn Bl
             reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
             let storage =
                 PgliteStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
-            Ok(Arc::new(
-                PgliteBlockStore::connect_with_options(&uri, storage)
-                    .await
-                    .map_err(to_js_error)?,
-            ))
+            let store = PgliteBlockStore::connect_with_options(&uri, storage)
+                .await
+                .map_err(to_js_error)?;
+            Ok((Arc::new(store.clone()), Some(store)))
         }
         "r2" => {
             let prefix = required_string(&options.key, "blocks.key")?;
@@ -956,7 +1361,7 @@ async fn build_block_store(options: &JsChunkedStoreOptions) -> Result<Arc<dyn Bl
                 None => R2BlockStore::from_config(&config, prefix),
             }
             .map_err(to_js_error)?;
-            Ok(Arc::new(blocks))
+            Ok((Arc::new(blocks), None))
         }
         other => Err(config_error(format!("unknown block backend: {other}"))),
     }
@@ -973,6 +1378,146 @@ fn chunked_owner(owner: Option<String>) -> Result<String, Error> {
     }
     let sequence = NEXT_CHUNKED_OWNER.fetch_add(1, Ordering::Relaxed);
     Ok(format!("mount-rs-napi-{}-{sequence}", std::process::id()))
+}
+
+fn transport_name(transport: Transport) -> String {
+    match transport {
+        Transport::Fuse => "fuse",
+        Transport::P9 => "9p",
+        Transport::Nfs => "nfs",
+    }
+    .to_owned()
+}
+
+fn transport_probe(probe: TransportProbe) -> JsTransportProbe {
+    JsTransportProbe {
+        usable: probe.usable,
+        reason: probe.reason,
+    }
+}
+
+fn auto_probe(probe: mount_rs_auto::AutoProbe) -> JsAutoProbe {
+    // Rust names the Darwin target `macos`, while Node's public platform
+    // contract (and the upstream TypeScript facade) uses `darwin`.
+    let platform = match probe.platform.as_str() {
+        "macos" => "darwin".to_owned(),
+        platform => platform.to_owned(),
+    };
+    JsAutoProbe {
+        platform,
+        chosen: probe.chosen.map(transport_name),
+        preference: probe.preference.into_iter().map(transport_name).collect(),
+        fuse: transport_probe(probe.fuse),
+        nine_p: transport_probe(probe.p9),
+        nfs: transport_probe(probe.nfs),
+        reason: probe.reason,
+    }
+}
+
+fn parse_auto_transport(value: Option<String>) -> Result<AutoTransport, Error> {
+    match value.as_deref().unwrap_or("auto") {
+        "auto" => Ok(AutoTransport::Auto),
+        "fuse" => Ok(AutoTransport::Fuse),
+        "9p" => Ok(AutoTransport::P9),
+        "nfs" => Ok(AutoTransport::Nfs),
+        other => Err(config_error(format!(
+            "unknown transport {other}; expected auto, fuse, 9p, or nfs"
+        ))),
+    }
+}
+
+fn validate_unmount_timeout(value: Option<f64>) -> Result<Option<Duration>, Error> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=MAX_SAFE_INTEGER).contains(&value) {
+        return Err(range_error(
+            "unmountTimeoutMs",
+            ">= 0 and <= 9007199254740991",
+            value,
+        ));
+    }
+    Ok(Some(Duration::from_millis(value as u64)))
+}
+
+fn auto_options(options: Option<JsAutoMountOptions>) -> Result<AutoMountOptions, Error> {
+    let options = options.unwrap_or(JsAutoMountOptions {
+        transport: None,
+        read_only: None,
+        unmount_timeout_ms: None,
+    });
+    Ok(AutoMountOptions {
+        transport: parse_auto_transport(options.transport)?,
+        read_only: options.read_only,
+        unmount_timeout: validate_unmount_timeout(options.unmount_timeout_ms)?,
+        fuse: None,
+        p9: None,
+        nfs: None,
+    })
+}
+
+fn auto_mount_error(error: AutoMountError, syscall: &str, path: Option<&str>) -> Error {
+    let code = match &error {
+        AutoMountError::NoTransport(_) => ErrorCode::Enodev,
+        AutoMountError::Fuse(_) | AutoMountError::P9(_) | AutoMountError::Nfs(_) => ErrorCode::Eio,
+    };
+    let message = error.to_string();
+    let error = FsError::new(code)
+        .with_syscall(syscall)
+        .with_message(message);
+    match path {
+        Some(path) => to_js_error(error.with_path(path)),
+        None => to_js_error(error),
+    }
+}
+
+fn mount_failure(error: AutoMountError) -> JsMountFailure {
+    let transport = match &error {
+        AutoMountError::NoTransport(_) => None,
+        AutoMountError::Fuse(_) => Some("fuse"),
+        AutoMountError::P9(_) => Some("9p"),
+        AutoMountError::Nfs(_) => Some("nfs"),
+    };
+    JsMountFailure {
+        transport: transport.map(str::to_owned),
+        message: error.to_string(),
+    }
+}
+
+#[napi]
+pub struct Mounted {
+    inner: Arc<AutoMount>,
+}
+
+#[napi]
+impl Mounted {
+    #[napi(getter)]
+    pub fn transport(&self) -> String {
+        transport_name(self.inner.transport())
+    }
+
+    #[napi(getter)]
+    pub fn mountpoint(&self) -> String {
+        self.inner.mountpoint().to_string_lossy().into_owned()
+    }
+
+    #[napi(getter)]
+    pub fn source(&self) -> Option<String> {
+        self.inner.source().map(str::to_owned)
+    }
+
+    #[napi(getter)]
+    pub fn active(&self) -> bool {
+        self.inner.active()
+    }
+
+    #[napi]
+    pub async fn unmount(&self) -> napi::Result<()> {
+        self.inner
+            .unmount()
+            .await
+            .map_err(|error| auto_mount_error(error, "unmount", None))
+    }
 }
 
 #[napi(object)]
@@ -1123,13 +1668,18 @@ impl Filesystem {
 
     #[napi(factory)]
     pub async fn pglite(connection_string: String) -> napi::Result<Self> {
-        connect_pglite(&connection_string)
+        let (filesystem, store) = connect_pglite_with_store(&connection_string, "mount-rs")
             .await
-            .map(|filesystem| Self {
-                driver: Arc::new(filesystem),
-                shutdown: None,
-            })
-            .map_err(to_js_error)
+            .map_err(to_js_error)?;
+        let shutdown_store = store.clone();
+        let shutdown: Arc<ShutdownCallback> = Arc::new(move || {
+            let store = shutdown_store.clone();
+            Box::pin(async move { store.close().await })
+        });
+        Ok(Self {
+            driver: Arc::new(filesystem),
+            shutdown: Some(shutdown),
+        })
     }
 
     #[napi(factory)]
@@ -1497,10 +2047,37 @@ impl Filesystem {
 /// Construct a filesystem over independently selected metadata and immutable
 /// block providers. The returned driver's `shutdown()` releases its writer
 /// lease; callers should invoke it when the driver is no longer in use.
+async fn shutdown_chunked_filesystem(
+    filesystem: ChunkedFs<DynMetadataStore, DynBlockStore>,
+    metadata: Option<PgliteMetadataStore>,
+    blocks: Option<PgliteBlockStore>,
+) -> CoreResult<()> {
+    // Always attempt provider teardown even if lease release reports an
+    // error. A stale lease must not keep the PostgreSQL-wire clients alive
+    // until JavaScript garbage-collects the retained Filesystem object.
+    let filesystem_result = filesystem.shutdown().await;
+    let metadata_result = match metadata {
+        Some(store) => store.close().await,
+        None => Ok(()),
+    };
+    let blocks_result = match blocks {
+        Some(store) => store.close().await,
+        None => Ok(()),
+    };
+
+    filesystem_result
+        .err()
+        .or_else(|| metadata_result.err())
+        .or_else(|| blocks_result.err())
+        .map_or(Ok(()), Err)
+}
+
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
-    let metadata = DynMetadataStore(build_metadata_store(&options.metadata).await?);
-    let blocks = DynBlockStore(build_block_store(&options.blocks).await?);
+    let (metadata_store, metadata_close) = build_metadata_store(&options.metadata).await?;
+    let (block_store, blocks_close) = build_block_store(&options.blocks).await?;
+    let metadata = DynMetadataStore(metadata_store);
+    let blocks = DynBlockStore(block_store);
     let owner = chunked_owner(options.owner)?;
     let chunk_size = validate_chunk_size(options.chunk_size)?;
     let ttl = validate_ttl(options.ttl_ms)?;
@@ -1518,14 +2095,82 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         .await
         .map_err(to_js_error)?;
     let shutdown_filesystem = filesystem.clone();
+    let shutdown_metadata = metadata_close;
+    let shutdown_blocks = blocks_close;
     let shutdown: Arc<ShutdownCallback> = Arc::new(move || {
         let filesystem = shutdown_filesystem.clone();
-        Box::pin(async move { filesystem.shutdown().await })
+        let metadata = shutdown_metadata.clone();
+        let blocks = shutdown_blocks.clone();
+        Box::pin(async move { shutdown_chunked_filesystem(filesystem, metadata, blocks).await })
     });
     Ok(Filesystem {
         driver: Arc::new(filesystem),
         shutdown: Some(shutdown),
     })
+}
+
+/// Create the rooted host-filesystem driver used by the upstream
+/// `createNodeFsDriver` API. Construction is synchronous; host I/O remains
+/// asynchronous inside the Rust driver and the root is resolved lexically.
+#[napi]
+pub fn create_node_fs_driver(root: String, options: Option<JsNodeFsOptions>) -> Filesystem {
+    let read_only = options
+        .and_then(|options| options.read_only)
+        .unwrap_or(false);
+    Filesystem {
+        driver: Arc::new(HostFs::with_options(root, HostFsOptions { read_only })),
+        shutdown: None,
+    }
+}
+
+/// Probe host facts without attempting a mount. This is safe and rootless on
+/// macOS and Linux; it reports the exact automatic preference and reasons.
+#[napi]
+pub async fn probe_transports() -> JsAutoProbe {
+    auto_probe(mount_rs_auto::probe_transports())
+}
+
+/// Mount a filesystem through the named transport or the automatic facade.
+/// The Rust transport remains authoritative for platform prerequisites; this
+/// function never silently falls back after a named transport fails.
+#[napi]
+pub async fn mount(
+    driver: &Filesystem,
+    mountpoint: String,
+    options: Option<JsAutoMountOptions>,
+) -> napi::Result<Mounted> {
+    let options = auto_options(options)?;
+    let mountpoint_for_error = mountpoint.clone();
+    let mounted =
+        mount_rs_auto::mount(MountDriver(Arc::clone(&driver.driver)), mountpoint, options)
+            .await
+            .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))?;
+    Ok(Mounted {
+        inner: Arc::new(mounted),
+    })
+}
+
+/// Return facade-visible live mounts. The result contains shared lifecycle
+/// handles; callers still own explicit `unmount()` responsibility.
+#[napi]
+pub async fn live_mounts() -> Vec<Mounted> {
+    mount_rs_auto::live_mounts()
+        .into_iter()
+        .map(|mount| Mounted {
+            inner: Arc::new(mount),
+        })
+        .collect()
+}
+
+/// Tear down every mount visible to the automatic facade and return failures
+/// individually instead of rejecting the cleanup operation.
+#[napi]
+pub async fn unmount_all() -> Vec<JsMountFailure> {
+    mount_rs_auto::unmount_all()
+        .await
+        .into_iter()
+        .map(mount_failure)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1613,5 +2258,24 @@ mod tests {
             "caller-owner"
         );
         assert!(chunked_owner(Some("  ".to_owned())).is_err());
+    }
+
+    #[test]
+    fn auto_facade_preserves_node_platform_names_and_async_option_bounds() {
+        let probe = auto_probe(mount_rs_auto::probe_transports_for("macos"));
+        assert_eq!(probe.platform, "darwin");
+        assert_eq!(probe.preference, vec!["nfs", "fuse", "9p"]);
+
+        assert_eq!(parse_auto_transport(None).unwrap(), AutoTransport::Auto);
+        assert_eq!(
+            parse_auto_transport(Some("9p".to_owned())).unwrap(),
+            AutoTransport::P9
+        );
+        assert!(parse_auto_transport(Some("bogus".to_owned())).is_err());
+        assert_eq!(
+            validate_unmount_timeout(Some(0.0)).unwrap(),
+            Some(Duration::ZERO)
+        );
+        assert!(validate_unmount_timeout(Some(1.5)).is_err());
     }
 }

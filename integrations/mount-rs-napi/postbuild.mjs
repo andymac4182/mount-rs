@@ -3,6 +3,14 @@ import { readFile, writeFile } from "node:fs/promises"
 const loader = new URL("./index.js", import.meta.url)
 const marker = "require('./postlude.cjs')(module.exports)"
 const chunkedExportMarker = "module.exports.createChunkedDriver = nativeBinding.createChunkedDriver"
+const facadeExportMarkers = [
+  "module.exports.Mounted = nativeBinding.Mounted",
+  "module.exports.createNodeFsDriver = nativeBinding.createNodeFsDriver",
+  "module.exports.probeTransports = nativeBinding.probeTransports",
+  "module.exports.mount = nativeBinding.mount",
+  "module.exports.liveMounts = nativeBinding.liveMounts",
+  "module.exports.unmountAll = nativeBinding.unmountAll",
+]
 let source = await readFile(loader, "utf8")
 let changed = false
 if (!source.includes(marker)) {
@@ -16,5 +24,11 @@ if (!source.includes(marker)) {
 if (!source.includes(chunkedExportMarker)) {
   source += `\n${chunkedExportMarker}\n`
   changed = true
+}
+for (const exportMarker of facadeExportMarkers) {
+  if (!source.includes(exportMarker)) {
+    source += `\n${exportMarker}\n`
+    changed = true
+  }
 }
 if (changed) await writeFile(loader, source)

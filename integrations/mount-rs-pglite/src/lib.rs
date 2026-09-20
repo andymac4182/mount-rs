@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mount_rs_core::{Result, backend_error};
+use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mount_rs_persist::{LoadedSnapshot, PersistedFs, StateStore, snapshot_conflict};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, MutexGuard};
+use tokio::task::JoinHandle;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
 
@@ -27,7 +28,8 @@ fn postgres_error(error: tokio_postgres::Error) -> mount_rs_core::FsError {
 
 #[derive(Clone)]
 pub struct PgliteStore {
-    client: Arc<Mutex<Client>>,
+    client: Arc<Mutex<Option<Client>>>,
+    connection: Arc<Mutex<Option<JoinHandle<()>>>>,
     state_key: String,
 }
 
@@ -43,21 +45,43 @@ impl PgliteStore {
         let (client, connection) = tokio_postgres::connect(connection_string, NoTls)
             .await
             .map_err(postgres_error)?;
-        tokio::spawn(async move {
+        let connection = tokio::spawn(async move {
             let _ = connection.await;
         });
         let store = Self {
-            client: Arc::new(Mutex::new(client)),
+            client: Arc::new(Mutex::new(Some(client))),
+            connection: Arc::new(Mutex::new(Some(connection))),
             state_key: state_key.into(),
         };
         store.init().await?;
         Ok(store)
     }
 
+    async fn lock_client(&self) -> Result<MutexGuard<'_, Option<Client>>> {
+        let client = self.client.lock().await;
+        if client.is_none() {
+            return Err(connection_closed());
+        }
+        Ok(client)
+    }
+
+    /// Close the PostgreSQL-wire client and wait for its connection task to
+    /// finish. This is idempotent for explicit N-API filesystem shutdown.
+    pub async fn close(&self) -> Result<()> {
+        let client = self.client.lock().await.take();
+        drop(client);
+        let connection = self.connection.lock().await.take();
+        if let Some(connection) = connection {
+            let _ = connection.await;
+        }
+        Ok(())
+    }
+
     async fn init(&self) -> Result<()> {
-        self.client
-            .lock()
-            .await
+        let client = self.lock_client().await?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .batch_execute(
                 "CREATE TABLE IF NOT EXISTS mount_rs_state (
                 id TEXT PRIMARY KEY,
@@ -72,6 +96,10 @@ impl PgliteStore {
     }
 }
 
+fn connection_closed() -> FsError {
+    FsError::new(ErrorCode::Ebadf).with_syscall("PGlite connection")
+}
+
 #[async_trait]
 impl StateStore for PgliteStore {
     // PGlite socket clients share a PostgreSQL backend. Named prepared
@@ -83,8 +111,10 @@ impl StateStore for PgliteStore {
     }
 
     async fn load_versioned(&self) -> Result<LoadedSnapshot> {
-        let client = self.client.lock().await;
+        let client = self.lock_client().await?;
         let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .query_typed_opt(
                 "SELECT revision, snapshot FROM mount_rs_state WHERE id = $1",
                 &[(&self.state_key, Type::TEXT)],
@@ -104,9 +134,10 @@ impl StateStore for PgliteStore {
     }
 
     async fn save(&self, snapshot: Vec<u8>) -> Result<()> {
-        self.client
-            .lock()
-            .await
+        let client = self.lock_client().await?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
             .execute_typed(
                 "INSERT INTO mount_rs_state (id, revision, snapshot) VALUES ($1, 1, $2)
              ON CONFLICT(id) DO UPDATE SET
@@ -130,9 +161,10 @@ impl StateStore for PgliteStore {
             .checked_add(1)
             .ok_or_else(|| backend_error("PGlite snapshot revision overflow"))?;
         let changed = if expected == 0 {
-            self.client
-                .lock()
-                .await
+            let client = self.lock_client().await?;
+            client
+                .as_ref()
+                .ok_or_else(connection_closed)?
                 .execute_typed(
                     "INSERT INTO mount_rs_state (id, revision, snapshot) VALUES ($1, 1, $2)
                  ON CONFLICT(id) DO UPDATE SET
@@ -144,9 +176,10 @@ impl StateStore for PgliteStore {
                 .await
                 .map_err(postgres_error)?
         } else {
-            self.client
-                .lock()
-                .await
+            let client = self.lock_client().await?;
+            client
+                .as_ref()
+                .ok_or_else(connection_closed)?
                 .execute_typed(
                     "UPDATE mount_rs_state
                  SET revision = $1, snapshot = $2
@@ -171,14 +204,29 @@ impl StateStore for PgliteStore {
 pub type PgliteFs = PersistedFs<PgliteStore>;
 
 pub async fn connect_pglite(connection_string: &str) -> Result<PgliteFs> {
-    PersistedFs::open(PgliteStore::connect(connection_string).await?).await
+    let (filesystem, _store) = connect_pglite_with_store(connection_string, "mount-rs").await?;
+    Ok(filesystem)
+}
+
+/// Open the legacy snapshot filesystem and return a shared store handle for
+/// owners that need deterministic connection shutdown. The filesystem keeps
+/// its own `Arc` clone, so closing the returned store closes the live client
+/// even when the filesystem is retained by JavaScript.
+pub async fn connect_pglite_with_store(
+    connection_string: &str,
+    state_key: impl Into<String>,
+) -> Result<(PgliteFs, PgliteStore)> {
+    let store = PgliteStore::connect_with_key(connection_string, state_key).await?;
+    let filesystem = PersistedFs::open(store.clone()).await?;
+    Ok((filesystem, store))
 }
 
 pub async fn connect_pglite_with_key(
     connection_string: &str,
     state_key: impl Into<String>,
 ) -> Result<PgliteFs> {
-    PersistedFs::open(PgliteStore::connect_with_key(connection_string, state_key).await?).await
+    let (filesystem, _store) = connect_pglite_with_store(connection_string, state_key).await?;
+    Ok(filesystem)
 }
 
 #[cfg(test)]

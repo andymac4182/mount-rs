@@ -129,12 +129,38 @@ export declare class JsStatsFs {
   get filesFree(): number
 }
 
-/**
- * Construct a filesystem over independently selected metadata and immutable
- * block providers. The returned driver's `shutdown()` releases its writer
- * lease; callers should invoke it when the driver is no longer in use.
- */
+export declare class Mounted {
+  get transport(): string
+  get mountpoint(): string
+  get source(): string | null
+  get active(): boolean
+  unmount(): Promise<void>
+}
+
 export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
+
+/**
+ * Create the rooted host-filesystem driver used by the upstream
+ * `createNodeFsDriver` API. Construction is synchronous; host I/O remains
+ * asynchronous inside the Rust driver and the root is resolved lexically.
+ */
+export declare function createNodeFsDriver(root: string, options?: JsNodeFsOptions | undefined | null): Filesystem
+
+export interface JsAutoMountOptions {
+  transport?: string
+  readOnly?: boolean
+  unmountTimeoutMs?: number
+}
+
+export interface JsAutoProbe {
+  platform: string
+  chosen?: string
+  preference: Array<string>
+  fuse: JsTransportProbe
+  '9p': JsTransportProbe
+  nfs: JsTransportProbe
+  reason?: string
+}
 
 export interface JsCapabilities {
   handles: boolean
@@ -185,6 +211,15 @@ export interface JsMkdirOptions {
   mode?: number
 }
 
+export interface JsMountFailure {
+  transport?: string
+  message: string
+}
+
+export interface JsNodeFsOptions {
+  readOnly?: boolean
+}
+
 export interface JsR2Options {
   endpoint: string
   bucket: string
@@ -202,7 +237,37 @@ export interface JsReadResult {
   buffer: Uint8Array
 }
 
+export interface JsTransportProbe {
+  usable: boolean
+  reason?: string
+}
+
 export interface JsWriteResult {
   bytesWritten: number
   buffer: Uint8Array
 }
+
+/**
+ * Return facade-visible live mounts. The result contains shared lifecycle
+ * handles; callers still own explicit `unmount()` responsibility.
+ */
+export declare function liveMounts(): Promise<Array<Mounted>>
+
+/**
+ * Mount a filesystem through the named transport or the automatic facade.
+ * The Rust transport remains authoritative for platform prerequisites; this
+ * function never silently falls back after a named transport fails.
+ */
+export declare function mount(driver: Filesystem, mountpoint: string, options?: JsAutoMountOptions | undefined | null): Promise<Mounted>
+
+/**
+ * Probe host facts without attempting a mount. This is safe and rootless on
+ * macOS and Linux; it reports the exact automatic preference and reasons.
+ */
+export declare function probeTransports(): Promise<JsAutoProbe>
+
+/**
+ * Tear down every mount visible to the automatic facade and return failures
+ * individually instead of rejecting the cleanup operation.
+ */
+export declare function unmountAll(): Promise<Array<JsMountFailure>>
