@@ -1,8 +1,11 @@
 //! Runtime driver selection and native mount lifecycle for the mount-rs CLI.
 
 use std::fmt::{self, Display, Formatter};
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 use std::time::Duration;
 
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
@@ -58,6 +61,48 @@ impl Display for CliError {
 }
 
 impl std::error::Error for CliError {}
+
+/// A Ctrl-C listener whose registration is completed before native mount
+/// readiness can be reported. Tokio installs the process signal handler on the
+/// first poll of `signal::ctrl_c`; merely constructing the future is not
+/// sufficient for a caller that may receive SIGINT during mount startup.
+struct CtrlCHandler {
+    signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>>,
+}
+
+impl CtrlCHandler {
+    async fn install() -> Result<Self, CliError> {
+        let mut signal: Pin<Box<dyn Future<Output = std::io::Result<()>> + Send>> =
+            Box::pin(tokio::signal::ctrl_c());
+        let received = poll_signal_registration(signal.as_mut()).await?;
+        if received {
+            return Err(CliError::runtime(
+                "received SIGINT before native mount startup completed",
+            ));
+        }
+        Ok(Self { signal })
+    }
+
+    async fn wait(&mut self) -> Result<(), CliError> {
+        self.signal.as_mut().await.map_err(io_error)
+    }
+}
+
+/// Poll a signal future exactly once. `false` means the listener returned
+/// `Pending`, which is the registration acknowledgement; `true` means a
+/// signal arrived during the initial poll and startup should stop.
+async fn poll_signal_registration<F>(mut signal: Pin<&mut F>) -> Result<bool, CliError>
+where
+    F: Future<Output = std::io::Result<()>> + ?Sized,
+{
+    std::future::poll_fn(|context| {
+        Poll::Ready(match signal.as_mut().poll(context) {
+            Poll::Pending => Ok(false),
+            Poll::Ready(result) => result.map(|()| true).map_err(io_error),
+        })
+    })
+    .await
+}
 
 impl From<ParseError> for CliError {
     fn from(error: ParseError) -> Self {
@@ -320,6 +365,14 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         ..AutoMountOptions::default()
     };
 
+    let mut ctrl_c = match CtrlCHandler::install().await {
+        Ok(handler) => handler,
+        Err(error) => {
+            let _ = runtime.shutdown().await;
+            return Err(error);
+        }
+    };
+
     let mounted = match mount_rs_auto::mount(watched, &mountpoint, mount_options).await {
         Ok(mounted) => mounted,
         Err(error) => {
@@ -362,7 +415,7 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         );
     }
 
-    let lifecycle = wait_for_shutdown(&mounted).await;
+    let lifecycle = wait_for_shutdown(&mounted, &mut ctrl_c).await;
     let shutdown = runtime.shutdown().await.map_err(CliError::from);
     lifecycle?;
     shutdown?;
@@ -428,13 +481,13 @@ async fn seed_readme(driver: Arc<dyn FsDriver>) -> Result<(), CliError> {
     result.and(close).map_err(CliError::from)
 }
 
-async fn wait_for_shutdown(mounted: &AutoMount) -> Result<(), CliError> {
+async fn wait_for_shutdown(mounted: &AutoMount, ctrl_c: &mut CtrlCHandler) -> Result<(), CliError> {
     match mounted {
         AutoMount::Fuse { mount, .. } => {
             tokio::select! {
                 result = wait_fuse_closed(mount.as_ref()) => result,
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(io_error)?;
+                signal = ctrl_c.wait() => {
+                    signal?;
                     mounted.unmount().await.map_err(auto_error)
                 }
             }
@@ -442,16 +495,16 @@ async fn wait_for_shutdown(mounted: &AutoMount) -> Result<(), CliError> {
         AutoMount::P9 { mount, .. } => {
             tokio::select! {
                 () = mount.wait_closed() => Ok(()),
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(io_error)?;
+                signal = ctrl_c.wait() => {
+                    signal?;
                     mounted.unmount().await.map_err(auto_error)
                 }
             }
         }
         AutoMount::Nfs { .. } => loop {
             tokio::select! {
-                signal = tokio::signal::ctrl_c() => {
-                    signal.map_err(io_error)?;
+                signal = ctrl_c.wait() => {
+                    signal?;
                     mounted.unmount().await.map_err(auto_error)?;
                     return Ok(())
                 }
@@ -618,6 +671,32 @@ mod tests {
     use super::*;
     use crate::config::{SplitStorageConfig, StorageProvider};
     use crate::parser::parse_args;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct RegistrationProbe {
+        registered: Arc<AtomicBool>,
+    }
+
+    impl Future for RegistrationProbe {
+        type Output = std::io::Result<()>;
+
+        fn poll(self: Pin<&mut Self>, context: &mut std::task::Context<'_>) -> Poll<Self::Output> {
+            self.registered.store(true, Ordering::Release);
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+
+    #[tokio::test]
+    async fn signal_registration_is_acknowledged_before_mount_start() {
+        let registered = Arc::new(AtomicBool::new(false));
+        let mut signal = Box::pin(RegistrationProbe {
+            registered: Arc::clone(&registered),
+        });
+
+        assert!(!poll_signal_registration(signal.as_mut()).await.unwrap());
+        assert!(registered.load(Ordering::Acquire));
+    }
 
     #[test]
     fn mountpoint_expansion_is_cross_platform_and_shell_like() {
