@@ -536,6 +536,10 @@ export declare function fuseDecodeOpenOut(body: Uint8Array, context?: NativeFuse
 
 export declare function fuseDecodeOutHeader(bytes: Uint8Array): NativeFuseOutHeader
 
+export declare function fuseDecodePollIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFusePollIn
+
+export declare function fuseDecodePollOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFusePollOut
+
 export declare function fuseDecodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseReadIn
 
 export declare function fuseDecodeReadlinkIn(body: Uint8Array): NativeFuseEmpty
@@ -615,6 +619,10 @@ export declare function fuseEncodeOpenIn(value: NativeFuseOpenIn, context?: Nati
 export declare function fuseEncodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeOutHeader(value: NativeFuseOutHeader): Buffer
+
+export declare function fuseEncodePollIn(value: NativeFusePollIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodePollOut(value: NativeFusePollOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -1060,6 +1068,17 @@ export interface NativeFuseOutHeader {
   len: number
   error: number
   unique: bigint
+}
+
+export interface NativeFusePollIn {
+  fh: bigint
+  kh: bigint
+  flags: number
+  events: number
+}
+
+export interface NativeFusePollOut {
+  revents: number
 }
 
 export interface NativeFuseProtocolContext {
