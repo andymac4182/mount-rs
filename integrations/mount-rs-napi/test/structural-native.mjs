@@ -139,25 +139,15 @@ try {
       const seed = await withTimeout(readFile(join(mountpoint, "seed.txt"), "utf8"), 30_000, "mounted read")
       assert.equal(seed, "seed through structural driver")
       const mountedPath = join(mountpoint, "written-through-native.txt")
-      const writeError = await withTimeout(
-        writeFile(mountedPath, "write through structural native mount").then(
-          () => undefined,
-          (error) => error,
-        ),
-        30_000,
-        "mounted write",
-      )
-      assert.ok(writeError, "structural native write unexpectedly succeeded")
-      assert.ok(
-        new Set(["EIO", "ENOSYS", "ENOTSUP", "EOPNOTSUPP"]).has(writeError.code),
-        `structural native write returned an unexpected error: ${writeError.code ?? writeError.message}`,
-      )
+      const writtenValue = "write through structural native mount"
+      await withTimeout(writeFile(mountedPath, writtenValue), 30_000, "mounted write")
+      assert.equal(await withTimeout(readFile(mountedPath, "utf8"), 30_000, "mounted readback"), writtenValue)
       assert.ok((calls.open ?? 0) > 0, "native I/O did not reach structural open callback")
       assert.ok(
         (calls.stat ?? 0) + (calls.lstat ?? 0) > 0,
         "native I/O did not reach structural stat callback",
       )
-      console.log(`structural native mount: PASS (${mounted.transport}; read-only boundary=${writeError.code})`)
+      console.log(`structural native mount: PASS (${mounted.transport}; read/write callback reachability)`)
     } catch (error) {
       teardownFailure = error
     } finally {
@@ -194,6 +184,7 @@ try {
       }
     }
     if (teardownFailure) throw teardownFailure
+    assert.equal(await backing.readFile("/written-through-native.txt").then((value) => Buffer.from(value).toString()), "write through structural native mount")
   }
 } finally {
   // Native mounts do not own the caller's structural driver's shutdown. Keep
