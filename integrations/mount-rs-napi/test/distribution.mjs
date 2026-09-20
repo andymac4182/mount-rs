@@ -6,6 +6,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+// Windows .cmd shims require cmd.exe; execFile cannot execute them directly.
+// The shell command is a fixed literal, never assembled from paths or input.
+const [packCommand, packArguments] = process.platform === "win32"
+  ? ["cmd.exe", ["/d", "/s", "/c", "pnpm.cmd pack --dry-run --json"]]
+  : ["pnpm", ["pack", "--dry-run", "--json"]];
 const packageDirectory = new URL("..", import.meta.url);
 const packageJson = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -51,8 +56,8 @@ assert.equal(
 );
 
 const { stdout } = await execFileAsync(
-  "pnpm",
-  ["pack", "--dry-run", "--json"],
+  packCommand,
+  packArguments,
   { cwd: fileURLToPath(packageDirectory) },
 );
 const report = JSON.parse(stdout.trim());

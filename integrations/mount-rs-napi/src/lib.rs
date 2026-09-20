@@ -2884,7 +2884,11 @@ mod tests {
     impl CompletionWaker {
         fn observe(&self) {
             if matches!(
-                &*self.lifecycle.lifecycle.lock().expect("shutdown lifecycle lock"),
+                &*self
+                    .lifecycle
+                    .lifecycle
+                    .lock()
+                    .expect("shutdown lifecycle lock"),
                 ShutdownLifecycle::Running(_)
             ) {
                 self.observed_running.store(true, AtomicOrdering::SeqCst);
