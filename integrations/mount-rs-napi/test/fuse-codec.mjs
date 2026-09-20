@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import * as fuse from "../fuse.cjs";
 import {
+  decodeOpenIn as namedDecodeOpenIn,
+  encodeOpenIn as namedEncodeOpenIn,
+  decodeOpenOut as namedDecodeOpenOut,
+  encodeOpenOut as namedEncodeOpenOut,
   decodeReadIn as namedDecodeReadIn,
   encodeReadIn as namedEncodeReadIn,
   decodeReadOut as namedDecodeReadOut,
@@ -21,6 +25,10 @@ import {
 } from "../fuse.cjs";
 
 for (const [name, value] of [
+  ["decodeOpenIn", namedDecodeOpenIn],
+  ["encodeOpenIn", namedEncodeOpenIn],
+  ["decodeOpenOut", namedDecodeOpenOut],
+  ["encodeOpenOut", namedEncodeOpenOut],
   ["decodeReadIn", namedDecodeReadIn],
   ["encodeReadIn", namedEncodeReadIn],
   ["decodeReadOut", namedDecodeReadOut],
@@ -134,6 +142,26 @@ for (const ctx of [getattrContext, { minor: 8, setxattrExt: false }]) {
   assert.equal(setattrBody.length, 88);
   assert.deepEqual(fuse.decodeSetattrIn(setattrBody, ctx), setattrInput);
 }
+
+const openContext = { minor: 41, setxattrExt: false };
+const openInput = {
+  // Linux wire values; the FUSE barrel keeps the complete constant loop on
+  // require() but only its core constants are statically discoverable through
+  // Node's CommonJS-to-ESM bridge.
+  flags: 0o2 | 0o2000,
+  openFlags: 1,
+};
+const openBody = fuse.encodeOpenIn(openInput, openContext);
+assert.equal(openBody.length, 8);
+assert.deepEqual(fuse.decodeOpenIn(openBody, openContext), openInput);
+const openReplyValue = {
+  fh: 0x0102030405060708n,
+  openFlags: 1 | 2,
+  backingId: -7,
+};
+const openReplyBody = fuse.encodeOpenOut(openReplyValue, openContext);
+assert.equal(openReplyBody.length, 16);
+assert.deepEqual(fuse.decodeOpenOut(openReplyBody, openContext), openReplyValue);
 
 const classify = (fn) => {
   try {
@@ -275,6 +303,59 @@ if (source) {
     for (const body of [Buffer.alloc(0), Buffer.from([1, 2, 3]), actualReadReply]) {
       const decoded = fuse.decodeReadOut(body);
       assert.deepEqual([...decoded.data], [...body], "READ raw reply preserves arbitrary bytes");
+    }
+  }
+
+  for (const [opcode, name] of [
+    [fuse.FUSE_OPEN, "OPEN"],
+    [fuse.FUSE_OPENDIR, "OPENDIR"],
+  ]) {
+    for (const ctx of [openContext, { minor: 39, setxattrExt: false }, { minor: 8, setxattrExt: false }]) {
+      const oracleRequest = oracle.encodeRequestBody(opcode, openInput, ctx);
+      const actualRequest = fuse.encodeOpenIn(openInput, ctx);
+      assert.deepEqual([...actualRequest], [...oracleRequest], `${name} request bytes match oracle for minor ${ctx.minor}`);
+      assert.deepEqual(
+        fuse.decodeOpenIn(actualRequest, ctx),
+        oracle.decodeRequestBody(opcode, oracleRequest, ctx),
+        `${name} request decode matches oracle for minor ${ctx.minor}`,
+      );
+      for (let length = 0; length < actualRequest.length; length++) {
+        const body = actualRequest.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => fuse.decodeOpenIn(body, ctx)),
+          classifyProtocolError(() => oracle.decodeRequestBody(opcode, body, ctx)),
+          `${name} request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeOpenIn(requestTrailing, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(opcode, requestTrailing, ctx)),
+        `${name} request trailing-byte classification for minor ${ctx.minor}`,
+      );
+
+      const oracleReply = oracle.encodeReplyBody(opcode, openReplyValue, ctx);
+      const actualReply = fuse.encodeOpenOut(openReplyValue, ctx);
+      assert.deepEqual([...actualReply], [...oracleReply], `${name} reply bytes match oracle for minor ${ctx.minor}`);
+      assert.deepEqual(
+        fuse.decodeOpenOut(actualReply, ctx),
+        oracle.decodeReplyBody(opcode, oracleReply, ctx),
+        `${name} typed reply decode matches oracle for minor ${ctx.minor}`,
+      );
+      for (let length = 0; length < actualReply.length; length++) {
+        const body = actualReply.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => fuse.decodeOpenOut(body, ctx)),
+          classifyProtocolError(() => oracle.decodeReplyBody(opcode, body, ctx)),
+          `${name} reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      const replyTrailing = Buffer.concat([actualReply, Buffer.from([0])]);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeOpenOut(replyTrailing, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(opcode, replyTrailing, ctx)),
+        `${name} reply trailing-byte classification for minor ${ctx.minor}`,
+      );
     }
   }
 
@@ -458,6 +539,7 @@ if (source) {
   console.log("mount-rs N-API FUSE WRITE request/reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE GETATTR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -465,6 +547,7 @@ if (source) {
   console.log("mount-rs N-API FUSE WRITE request/reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE GETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
 console.log("mount-rs N-API FUSE codec subpath: PASS");
