@@ -696,6 +696,8 @@ function install(binding) {
     ["decodeEntryOut", "fuseDecodeEntryOut"], ["encodeEntryOut", "fuseEncodeEntryOut"],
     ["decodeAttrOut", "fuseDecodeAttrOut"], ["encodeAttrOut", "fuseEncodeAttrOut"],
     ["decodeOpenOut", "fuseDecodeOpenOut"], ["encodeOpenOut", "fuseEncodeOpenOut"],
+    ["decodeReadIn", "fuseDecodeReadIn"], ["encodeReadIn", "fuseEncodeReadIn"],
+    ["decodeReadOut", "fuseDecodeReadOut"], ["encodeReadOut", "fuseEncodeReadOut"],
     ["decodeWriteIn", "fuseDecodeWriteIn"], ["encodeWriteIn", "fuseEncodeWriteIn"],
     ["decodeWriteOut", "fuseDecodeWriteOut"], ["encodeWriteOut", "fuseEncodeWriteOut"],
     ["decodeInitIn", "fuseDecodeInitIn"], ["encodeInitIn", "fuseEncodeInitIn"],
@@ -707,6 +709,9 @@ function install(binding) {
     binding[publicName] = (...args) => {
       if (args.length > 1) args[1] = context(args[1])
       if (publicName === "encodeWriteIn" && args[0] !== undefined) {
+        args[0] = { ...args[0], data: copyBytes(args[0].data) }
+      }
+      if (publicName === "encodeReadOut" && args[0] !== undefined) {
         args[0] = { ...args[0], data: copyBytes(args[0].data) }
       }
       if (args[0] && args[0].buffer !== undefined && typeof args[0] !== "object") args[0] = copyBytes(args[0])
