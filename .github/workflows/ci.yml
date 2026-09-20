@@ -7,7 +7,7 @@ on:
 jobs:
   rustfs:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
@@ -17,6 +17,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tests/rustfs -> target
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - name: Install real PGlite and Node factory prerequisites
+        run: |
+          pnpm --dir tests/pglite install --frozen-lockfile
+          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir integrations/mount-rs-napi build
+      - name: Verify nested process timeout cleanup
+        run: sh scripts/test-rustfs-combo-timeout.sh
+      - name: Verify bounded Docker command cleanup
+        run: sh scripts/test-rustfs-bounded-docker.sh
       - name: Verify real RustFS block contract and restart persistence
         run: ./scripts/test-rustfs.sh
 

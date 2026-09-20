@@ -166,12 +166,16 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [x] Land isolated real-service harness and Linux CI job (`f5759cc`).
 - [x] Main verified actual pinned RustFS contract tests, concurrent CAS, ranges,
   restart/fresh reads and guarded container/data cleanup; baseline run passed.
-- [ ] W06.1 Review and land current split SQLite/PGlite metadata, Node factory
-  and CLI extensions. These are active uncommitted changes.
+- [x] W06.1 Land real split SQLite/PGlite metadata and Node-factory gates,
+  bounded Docker/process-group cleanup, and isolated combo orchestration.
+  Main reran both timeout regressions and the full real-service harness after
+  the final script changes: exit 0, block/split-provider/Node/restart gates
+  passed. CLI integration beyond existing configuration tests remains open.
 - [ ] W06.2 Verify the hosted RustFS CI job, not just its configuration.
   Hosted runs `35493800880` / `35493696795` passed block/restart tests but
   failed cleanup of container-owned `.rustfs.sys` bind-mount files with permission
-  denied. Hooke owns validated ownership-aware cleanup and a Linux regression.
+  denied. Ownership-validated cleanup is implemented and locally passed;
+  hosted Linux confirmation is still required.
 - [ ] W06.3 Add fault and benchmark workloads with reproducible service settings.
 - [ ] W06.4 Provide isolated RustFS service orchestration for W07.6 and W08.5;
   test actual composed filesystems rather than unrelated backend smoke tests.

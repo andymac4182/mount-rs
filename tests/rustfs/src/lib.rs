@@ -5,13 +5,19 @@
 //! harness owns an empty RustFS container and bucket, so this gate cannot be
 //! turned into a mock or accidentally pointed at a live Cloudflare R2 account.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::ErrorCode;
-use mount_rs_core::storage::{BlockId, BlockStore};
+use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
+use mount_rs_core::{Loopback, MkdirOptions};
+use mount_rs_pglite::PgliteMetadataStore;
 use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_sqlite::SqliteMetadataStore;
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
@@ -48,6 +54,120 @@ fn object_path(prefix: &str, name: &str) -> ObjectPath {
 
 fn block_id(value: &str) -> BlockId {
     BlockId(value.to_owned())
+}
+
+#[derive(Clone)]
+struct TrackedR2Blocks {
+    inner: R2BlockStore,
+    created: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl TrackedR2Blocks {
+    fn new(config: &R2Config, prefix: String, created: Arc<Mutex<BTreeSet<String>>>) -> Self {
+        Self {
+            inner: R2BlockStore::from_config(config, prefix).unwrap(),
+            created,
+        }
+    }
+
+    async fn delete_created(&self) {
+        let ids = self
+            .created
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for id in ids {
+            self.inner.delete(&block_id(&id)).await.unwrap();
+        }
+    }
+}
+
+#[async_trait]
+impl BlockStore for TrackedR2Blocks {
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
+
+    async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<BlockId> {
+        let id = self.inner.put(bytes).await?;
+        self.created.lock().unwrap().insert(id.0.clone());
+        Ok(id)
+    }
+
+    async fn get(&self, id: &BlockId) -> mount_rs_core::Result<Vec<u8>> {
+        self.inner.get(id).await
+    }
+
+    async fn flush(&self) -> mount_rs_core::Result<()> {
+        self.inner.flush().await
+    }
+
+    async fn delete(&self, id: &BlockId) -> mount_rs_core::Result<()> {
+        self.inner.delete(id).await
+    }
+}
+
+fn split_prefix(name: &str) -> String {
+    format!("{}/split-{name}", test_prefix())
+}
+
+fn sqlite_metadata_file() -> PathBuf {
+    std::env::var_os("RUSTFS_SQLITE_METADATA_FILE")
+        .map(PathBuf::from)
+        .expect("RUSTFS_SQLITE_METADATA_FILE must be set")
+}
+
+fn pglite_url() -> String {
+    std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL must be set")
+}
+
+async fn write_split_file<M, B>(metadata: M, blocks: B, owner: &str) -> Vec<u8>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    let filesystem = ChunkedFs::open(
+        metadata,
+        blocks,
+        ChunkedOptions::fixed(owner, 7).expect("valid test chunk size"),
+    )
+    .await
+    .unwrap();
+    let loopback = Loopback::new(filesystem.clone());
+    loopback
+        .mkdir("/split", MkdirOptions::default())
+        .await
+        .unwrap();
+    let expected = (0..91).map(|index| (index * 37) as u8).collect::<Vec<_>>();
+    let file = loopback.open("/split/file", "w+", 0o640).await.unwrap();
+    file.write(&expected, Some(0)).await.unwrap();
+    file.sync().await.unwrap();
+    assert_eq!(loopback.read_file("/split/file").await.unwrap(), expected);
+    file.close().await.unwrap();
+    drop(loopback);
+    filesystem.shutdown().await.unwrap();
+    expected
+}
+
+async fn read_split_file<M, B>(metadata: M, blocks: B, owner: &str) -> Vec<u8>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    let filesystem = ChunkedFs::open(
+        metadata,
+        blocks,
+        ChunkedOptions::fixed(owner, 4096).expect("valid reopen chunk size"),
+    )
+    .await
+    .unwrap();
+    let loopback = Loopback::new(filesystem.clone());
+    let result = loopback.read_file("/split/file").await.unwrap();
+    drop(loopback);
+    filesystem.shutdown().await.unwrap();
+    result
 }
 
 async fn assert_timeout<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -231,6 +351,119 @@ async fn real_rustfs_reopen_after_service_restart() {
         println!(
             "RUSTFS_RESTART_REOPEN_PASS prefix={} block={}",
             prefix, id.0
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_rustfs_sqlite_metadata_round_trip() {
+    assert_timeout(async {
+        let config = local_config();
+        let prefix = split_prefix("sqlite-metadata");
+        let created = Arc::new(Mutex::new(BTreeSet::new()));
+        let first_blocks = TrackedR2Blocks::new(&config, prefix.clone(), Arc::clone(&created));
+        let expected = write_split_file(
+            SqliteMetadataStore::open(sqlite_metadata_file()).unwrap(),
+            first_blocks,
+            "rustfs-split-sqlite-first",
+        )
+        .await;
+        let reopened_blocks = TrackedR2Blocks::new(&config, prefix, created.clone());
+        let actual = read_split_file(
+            SqliteMetadataStore::open(sqlite_metadata_file()).unwrap(),
+            reopened_blocks.clone(),
+            "rustfs-split-sqlite-reopen",
+        )
+        .await;
+        assert_eq!(actual, expected);
+        reopened_blocks.delete_created().await;
+        println!("RUSTFS_SPLIT_SQLITE_METADATA_PASS");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_rustfs_pglite_metadata_round_trip() {
+    assert_timeout(async {
+        let config = local_config();
+        let prefix = split_prefix("pglite-metadata");
+        let created = Arc::new(Mutex::new(BTreeSet::new()));
+        let blocks = TrackedR2Blocks::new(&config, prefix.clone(), Arc::clone(&created));
+        let key = format!("{}/pglite-metadata", test_prefix());
+        let first_metadata = PgliteMetadataStore::connect_with_key(&pglite_url(), key.clone())
+            .await
+            .unwrap();
+        let expected = write_split_file(
+            first_metadata.clone(),
+            blocks.clone(),
+            "rustfs-split-pglite-first",
+        )
+        .await;
+        first_metadata.close().await.unwrap();
+
+        let reopened_metadata = PgliteMetadataStore::connect_with_key(&pglite_url(), key)
+            .await
+            .unwrap();
+        let reopened_blocks = TrackedR2Blocks::new(&config, prefix, created.clone());
+        let actual = read_split_file(
+            reopened_metadata.clone(),
+            reopened_blocks.clone(),
+            "rustfs-split-pglite-reopen",
+        )
+        .await;
+        reopened_metadata.close().await.unwrap();
+        assert_eq!(actual, expected);
+        reopened_blocks.delete_created().await;
+        println!("RUSTFS_SPLIT_PGLITE_METADATA_PASS");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn real_rustfs_block_benchmark() {
+    assert_timeout(async {
+        const BLOCK_COUNT: usize = 8;
+        const BLOCK_BYTES: usize = 16 * 1024;
+
+        let config = local_config();
+        let prefix = format!("{}/benchmark", test_prefix());
+        let created = Arc::new(Mutex::new(BTreeSet::new()));
+        let blocks = TrackedR2Blocks::new(&config, prefix, Arc::clone(&created));
+        let payload = (0..BLOCK_BYTES)
+            .map(|index| (index as u8).wrapping_mul(31))
+            .collect::<Vec<_>>();
+
+        let started = Instant::now();
+        let mut writes = Vec::with_capacity(BLOCK_COUNT);
+        for _ in 0..BLOCK_COUNT {
+            let blocks = blocks.clone();
+            let payload = payload.clone();
+            writes.push(tokio::spawn(async move {
+                blocks.put(&payload).await
+            }));
+        }
+        let mut ids = Vec::with_capacity(BLOCK_COUNT);
+        for write in writes {
+            ids.push(write.await.unwrap().unwrap());
+        }
+        blocks.flush().await.unwrap();
+        let write_ms = started.elapsed().as_millis();
+
+        let read_started = Instant::now();
+        for id in &ids {
+            assert_eq!(blocks.get(id).await.unwrap(), payload);
+        }
+        let read_ms = read_started.elapsed().as_millis();
+        blocks.delete_created().await;
+
+        println!(
+            "RUSTFS_BLOCK_BENCHMARK_PASS blocks={} block_bytes={} write_ms={} read_ms={} total_ms={}",
+            BLOCK_COUNT,
+            BLOCK_BYTES,
+            write_ms,
+            read_ms,
+            started.elapsed().as_millis()
         );
     })
     .await;

@@ -8,7 +8,11 @@ publish = false
 [workspace]
 
 [dependencies]
+async-trait = "0.1"
+mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
+mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
 mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
+mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
