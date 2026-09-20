@@ -362,13 +362,18 @@ async fn metadata_overlay_and_read_only_capabilities() {
         "f",
         KeyValueMetadata {
             size: Some(1234),
+            atime_ms: Some(1_699_999_999_000),
             mtime_ms: Some(1_700_000_000_000),
-            ..Default::default()
+            ctime_ms: Some(1_700_000_000_500),
+            birthtime_ms: Some(1_699_999_998_000),
         },
     );
     let stats = fs.stat("/f").await.expect("stat");
     assert_eq!(stats.size, 1234);
+    assert_eq!(stats.atime_ms, 1_699_999_999_000);
     assert_eq!(stats.mtime_ms, 1_700_000_000_000);
+    assert_eq!(stats.ctime_ms, 1_700_000_000_500);
+    assert_eq!(stats.birthtime_ms, 1_699_999_998_000);
     fs.chmod("/f", 0o600).await.expect("chmod");
     fs.utimes("/f", 1000, 2000).await.expect("utimes");
     let stats = fs.stat("/f").await.expect("stat overlay");
