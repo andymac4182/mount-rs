@@ -514,11 +514,10 @@ function install(binding) {
   binding.direntType = (mode) => call("fuseDirentType", [mode])
 
   // `READDIR` bodies are variable-length records rather than one of the
-  // fixed-size structs owned by the Rust codec. Keep this small body codec in
-  // the public postlude so it follows the pinned oracle without adding a
-  // second native allocation layer. `READDIRPLUS` remains intentionally open;
-  // it also needs the negotiated `fuse_entry_out` layout and is a separate
-  // compatibility slice.
+  // fixed-size structs owned by the Rust codec. Keep these small body codecs
+  // in the public postlude so they follow the pinned oracle without adding a
+  // second native allocation layer. `fuse_entry_out` itself is still encoded
+  // and decoded by the already-tested native protocol implementation.
   const direntName = (name) => {
     if (name.includes("\0")) throw new ProtocolError("dirent name contains a NUL byte")
     return Buffer.from(name)
@@ -582,6 +581,113 @@ function install(binding) {
       }
       offset = padded
       entries.push({ ino, off, type, name })
+    }
+    return entries
+  }
+
+  const plusContext = (value) => value == null ? undefined : context(value)
+  const plusEntryFieldSizes = (minor) => minor >= 9
+    ? [8, 8, 8, 8, 4, 4, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+    : [8, 8, 8, 8, 4, 4, 8, 8, 8, 8, 8, 8, 4, 4, 4, 4, 4, 4, 4, 4]
+  const plusEntrySize = (ctx) => binding.entryOutSize(
+    (ctx ?? binding.DEFAULT_PROTOCOL).minor,
+  )
+  const plusEntryTruncation = (body, start, entrySize, minor) => {
+    const available = body.length - start
+    if (available >= entrySize) return
+    let relative = 0
+    for (const size of plusEntryFieldSizes(minor)) {
+      if (relative + size > available) {
+        const offset = start + relative
+        throw new ProtocolError(
+          `truncated fuse_direntplus: need ${size} byte(s) at offset ${offset}, have ${body.length - offset}`,
+          { offset },
+        )
+      }
+      relative += size
+    }
+    // The field list is kept in lockstep with fuse_entry_out. This is an
+    // internal invariant, but retain the public error type if it ever drifts.
+    throw new ProtocolError("truncated fuse_direntplus: incomplete fuse_entry_out", {
+      offset: start + relative,
+    })
+  }
+  binding.packDirentsPlus = (entries, maxSize, ctx) => {
+    const normalized = plusContext(ctx)
+    const entrySize = plusEntrySize(normalized)
+    const limit = Math.max(0, Math.trunc(maxSize))
+    const chunks = []
+    let used = 0
+    for (const value of entries) {
+      if (value.entry === undefined) {
+        throw new ProtocolError("fuse_direntplus needs a fuse_entry_out")
+      }
+      const dirent = value.dirent
+      const name = direntName(dirent.name)
+      const total = binding.direntAlign(entrySize + 24 + name.length)
+      if (used + total > limit) break
+      const chunk = Buffer.alloc(total)
+      const encodedEntry = binding.encodeEntryOut(value.entry, normalized)
+      encodedEntry.copy(chunk, 0)
+      const at = entrySize
+      chunk.writeBigUInt64LE(BigInt.asUintN(64, dirent.ino), at)
+      chunk.writeBigUInt64LE(BigInt.asUintN(64, dirent.off), at + 8)
+      chunk.writeUInt32LE(name.length >>> 0, at + 16)
+      chunk.writeUInt32LE(dirent.type >>> 0, at + 20)
+      name.copy(chunk, at + 24)
+      chunks.push(chunk)
+      used += total
+    }
+    return { buffer: Buffer.concat(chunks, used), packed: chunks.length }
+  }
+  binding.unpackDirentsPlus = (value, ctx) => {
+    const { body, read } = direntBody(value, "fuse_direntplus")
+    const normalized = plusContext(ctx)
+    const minor = (normalized ?? binding.DEFAULT_PROTOCOL).minor
+    const entrySize = plusEntrySize(normalized)
+    const entries = []
+    let offset = 0
+    while (offset < body.length) {
+      const start = offset
+      plusEntryTruncation(body, start, entrySize, minor)
+      const entry = binding.decodeEntryOut(
+        body.subarray(start, start + entrySize),
+        normalized,
+      )
+      offset += entrySize
+
+      const inoAt = offset
+      read(inoAt, 8)
+      const ino = body.readBigUInt64LE(inoAt)
+      offset += 8
+      const offAt = offset
+      read(offAt, 8)
+      const off = body.readBigUInt64LE(offAt)
+      offset += 8
+      const nameLengthAt = offset
+      read(nameLengthAt, 4)
+      const namelen = body.readUInt32LE(nameLengthAt)
+      offset += 4
+      const typeAt = offset
+      read(typeAt, 4)
+      const type = body.readUInt32LE(typeAt)
+      offset += 4
+      if (namelen > body.length - offset) {
+        throw new ProtocolError(
+          `fuse_dirent.namelen is ${namelen} but only ${body.length - offset} byte(s) remain`,
+          { offset },
+        )
+      }
+      const name = body.toString("utf8", offset, offset + namelen)
+      offset += namelen
+      const padded = start + binding.direntAlign(offset - start)
+      if (padded > body.length) {
+        throw new ProtocolError("fuse_direntplus padding runs past the end of the buffer", {
+          offset,
+        })
+      }
+      offset = padded
+      entries.push({ entry, dirent: { ino, off, type, name } })
     }
     return entries
   }
