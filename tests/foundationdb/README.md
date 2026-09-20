@@ -34,7 +34,18 @@ RUSTFS_COMBO_COMMAND='./scripts/test-foundationdb.sh' \
 ```
 
 The FoundationDB script owns its isolated server, cluster file, client library,
-network, and cleanup for that run. An externally supplied cluster is an
-explicit diagnostic mode only and must pass the opt-in and identity checks
-documented by the provider README; the composition still uses a unique
-`RUSTFS_COMBO_PREFIX` namespace.
+network, and cleanup for that run. In the composed lane it runs the first client
+against the live providers, restarts the owned FoundationDB container, and then
+runs `foundationdb_rustfs_chunked_restart_reopen` in a fresh client process.
+That second process reopens the persisted namespace, reads the RustFS-backed
+multi-chunk file, reruns metadata CAS/fencing checks, and performs exact
+owned-prefix cleanup. The lane therefore requires an owned disposable server;
+an externally supplied FoundationDB cluster is rejected instead of being
+reported as service-restart evidence.
+
+The standalone provider-only command owns a disposable FoundationDB server and
+does not claim RustFS or service-restart coverage:
+
+```shell
+./scripts/test-foundationdb.sh
+```
