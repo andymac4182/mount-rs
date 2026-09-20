@@ -534,6 +534,10 @@ export declare function fuseDecodeOutHeader(bytes: Uint8Array): NativeFuseOutHea
 
 export declare function fuseDecodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseReadIn
 
+export declare function fuseDecodeReadlinkIn(body: Uint8Array): NativeFuseEmpty
+
+export declare function fuseDecodeReadlinkOut(body: Uint8Array): NativeFuseReadlinkOut
+
 export declare function fuseDecodeReadOut(body: Uint8Array): NativeFuseRawData
 
 export declare function fuseDecodeReleaseIn(body: Uint8Array): NativeFuseReleaseIn
@@ -541,6 +545,8 @@ export declare function fuseDecodeReleaseIn(body: Uint8Array): NativeFuseRelease
 export declare function fuseDecodeSetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseSetattrIn
 
 export declare function fuseDecodeSetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
+
+export declare function fuseDecodeStatfsIn(body: Uint8Array): NativeFuseEmpty
 
 export declare function fuseDecodeStatfsOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseKstatfs
 
@@ -604,6 +610,10 @@ export declare function fuseEncodeOutHeader(value: NativeFuseOutHeader): Buffer
 
 export declare function fuseEncodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
+export declare function fuseEncodeReadlinkIn(value: NativeFuseEmpty): Buffer
+
+export declare function fuseEncodeReadlinkOut(value: NativeFuseReadlinkOut): Buffer
+
 export declare function fuseEncodeReadOut(value: NativeFuseRawData): Buffer
 
 export declare function fuseEncodeReleaseIn(value: NativeFuseReleaseIn): Buffer
@@ -613,6 +623,8 @@ export declare function fuseEncodeReply(unique: bigint, body?: Uint8Array): Buff
 export declare function fuseEncodeSetattrIn(value: NativeFuseSetattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeSetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeStatfsIn(value: NativeFuseEmpty): Buffer
 
 export declare function fuseEncodeStatfsOut(value: NativeFuseKstatfs, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -885,6 +897,10 @@ export interface NativeFuseCreateOut {
   open: NativeFuseOpenOut
 }
 
+export interface NativeFuseEmpty {
+
+}
+
 export interface NativeFuseEntryOut {
   nodeid: bigint
   generation: bigint
@@ -1041,6 +1057,10 @@ export interface NativeFuseReadIn {
   readFlags: number
   lockOwner: bigint
   flags: number
+}
+
+export interface NativeFuseReadlinkOut {
+  target: string
 }
 
 export interface NativeFuseReleaseIn {
