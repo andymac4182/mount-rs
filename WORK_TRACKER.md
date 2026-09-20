@@ -1233,6 +1233,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
   tests with restart/reopen, ranges, conditional immutable writes and cleanup.
   AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance.
+- [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The W25 worker verified formatting, strict Clippy, AWS-crate compilation and 10 R2 plus 12 chunked unit tests; the two actual AWS-service tests remain ignored until the local `myroot` SSO session is renewed. No live AWS acceptance is claimed yet.
 
 ## W26 — Apache Ozone S3 backend
 
