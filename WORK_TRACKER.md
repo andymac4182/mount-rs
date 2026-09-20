@@ -119,6 +119,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   Upstream suite passed with skips; all eight trace lanes passed five seeds of
   621 operations each. This local run does not replace hosted/live-R2 evidence.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
+  Run `35493696795`, job `106032856390`, still failed bounded close/reopen with
+  a server communication error. Copernicus owns the handshake-race investigation;
+  the newer local pass does not close this intermittent hosted failure.
 - [ ] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
 
 ## W05 — Cloudflare R2
@@ -149,6 +152,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [ ] W06.1 Review and land current split SQLite/PGlite metadata, Node factory
   and CLI extensions. These are active uncommitted changes.
 - [ ] W06.2 Verify the hosted RustFS CI job, not just its configuration.
+  Hosted runs `35493800880` / `35493696795` passed block/restart tests but
+  failed cleanup of container-owned `.rustfs.sys` bind-mount files with permission
+  denied. Hooke owns validated ownership-aware cleanup and a Linux regression.
 - [ ] W06.3 Add fault and benchmark workloads with reproducible service settings.
 - [ ] W06.4 Provide isolated RustFS service orchestration for W07.6 and W08.5;
   test actual composed filesystems rather than unrelated backend smoke tests.
