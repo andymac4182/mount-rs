@@ -361,6 +361,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the Node CLI with the matching SQLite reopen example, and adds public
   `READDIRPLUS` codec differential coverage. The focused CLI/N-API/provider
   gates pass; PGlite, R2, native and hosted platform gates remain open.
+- [x] `655cf19` records the SDK-backed Rust and Node CLI consumers as runnable
+  examples and process-level integration tests. The Rust CLI constructs its
+  filesystem through the public SDK, the Node CLI does the same through the
+  napi-rs package, and both exercise durable SQLite shutdown/reopen paths.
 - [x] `fd5eb04` forwards decoded numeric `open_flags` through the structural
   N-API adapter and changes the opt-in native lifecycle from an expected write
   refusal to mounted write/readback. The local macOS NFS run passed; other
@@ -1131,6 +1135,7 @@ cross-drive isolation.
 | `0dca1d1` | Node SDK CLI example and integration test | Argument checks plus opt-in actual macOS NFS SDK self-test passed |
 | `b6800f7` | W01 concurrency, provider/consumer and SQLite acceptance packets | Full root gate exit 0; PGlite rows passed; R2/live native and hosted platform gates remain open |
 | `29337f7` | Public Rust SDK facade, Rust CLI routing and Node SDK CLI self-test | SDK unit/example, Rust/Node/provider matrix and CLI self-tests passed locally; live remote/native/hosted lanes remain open |
+| `655cf19` | SDK-backed Rust and Node CLI consumer packet | Actual Rust binary and Node CLI examples, SQLite reopen checks, provider matrix and FUSE READDIRPLUS differential pass locally; live PGlite/R2/native/hosted lanes remain open |
 | `d6b80f4` | Chunked persistence, SQLite VFS failure handling and Windows HostFs acceptance packets | Focused local chunked, SQLite and HostFs gates passed; hosted Windows and remote-provider lanes remain open |
 | `3042d09` | Rust-backed FUSE inode state in napi-rs | Rust/Node inode parity, generated package checks and complete local N-API suite passed; native mount remains open |
 | `71e826f` | Pinned-oracle W01 parity audit and closure queue | Core/concurrency traces passed with zero mismatches; structural native, NFS handle, Unstorage and durability gaps remain explicit |
