@@ -159,6 +159,15 @@ async fn execute(
             .await?;
             Ok(Value::Null)
         }
+        "lchown" => {
+            fs.lchown(
+                path(command),
+                command["uid"].as_u64().expect("uid must be an integer") as u32,
+                command["gid"].as_u64().expect("gid must be an integer") as u32,
+            )
+            .await?;
+            Ok(Value::Null)
+        }
         "link" => {
             fs.link(
                 command["existing_path"]
