@@ -1,0 +1,17 @@
+[package]
+name = "mount-rs-aws-s3-tests"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+
+[dependencies]
+mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-core = { path = "../.." }
+mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
+mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+object_store = { version = "0.12", default-features = false, features = ["aws"] }
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
