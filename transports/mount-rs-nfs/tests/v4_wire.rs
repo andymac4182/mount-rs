@@ -8,7 +8,9 @@
 use std::time::Duration;
 
 use mount_rs_core::MemoryFs;
-use mount_rs_nfs::v4::CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
+use mount_rs_nfs::v4::{
+    CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_SHARE_DENIED, UNSTABLE4,
+};
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
     decode_reply, encode_call, frame_record,
@@ -18,6 +20,7 @@ use tokio::net::TcpStream;
 use tokio::runtime::Builder;
 
 const OP_CLOSE: u32 = 4;
+const OP_COMMIT: u32 = 5;
 const OP_BACKCHANNEL_CTL: u32 = 40;
 const OP_GETATTR: u32 = 9;
 const OP_GETFH: u32 = 10;
@@ -196,14 +199,18 @@ fn parse_create_session(mut reader: XdrReader<'_>) -> [u8; 16] {
     session
 }
 
-fn exchange_args() -> Vec<u8> {
+fn exchange_args_for(owner: &[u8]) -> Vec<u8> {
     op(OP_EXCHANGE_ID, |writer| {
         writer.fixed_opaque(b"v4-test!", 8);
-        writer.var_opaque(b"mount-rs-v4-wire");
+        writer.var_opaque(owner);
         writer.u32(0);
         writer.u32(0);
         writer.u32(0);
     })
+}
+
+fn exchange_args() -> Vec<u8> {
+    exchange_args_for(b"mount-rs-v4-wire")
 }
 
 fn create_session_args(clientid: u64) -> Vec<u8> {
@@ -371,7 +378,11 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
 
                     client.sequence += 1;
                     let open = op(OP_OPEN, |writer| {
-                        writer.u32(1);
+                        // OPEN's owner seqid is independent from the returned
+                        // stateid seqid. Linux starts a new owner at zero,
+                        // while RFC 8881 requires the first stateid seqid to
+                        // be one.
+                        writer.u32(0);
                         writer.u32(3);
                         writer.u32(0);
                         writer.u64(client.clientid);
@@ -407,6 +418,11 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     parse_result_header(&mut response, OP_PUTROOTFH);
                     parse_result_header(&mut response, OP_OPEN);
                     let stateid = response.fixed_opaque(16, "open stateid").unwrap();
+                    assert_eq!(
+                        u32::from_be_bytes(stateid[..4].try_into().unwrap()),
+                        1,
+                        "a newly created OPEN stateid starts at seqid one"
+                    );
                     let _ = response.bool("open cinfo atomic").unwrap();
                     let _ = response.u64("open cinfo before").unwrap();
                     let _ = response.u64("open cinfo after").unwrap();
@@ -421,7 +437,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     let write = op(OP_WRITE, |writer| {
                         writer.fixed_opaque(&stateid, 16);
                         writer.u64(0);
-                        writer.u32(2);
+                        writer.u32(UNSTABLE4);
                         writer.var_opaque(b"nfs v4.1 wire\n");
                     });
                     let mut response = rpc(
@@ -448,9 +464,36 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     parse_result_header(&mut response, OP_PUTFH);
                     parse_result_header(&mut response, OP_WRITE);
                     assert_eq!(response.u32("write count").unwrap(), 14);
-                    assert_eq!(response.u32("write committed").unwrap(), 2);
+                    assert_eq!(response.u32("write committed").unwrap(), UNSTABLE4);
                     let _ = response.fixed_opaque(8, "write verifier").unwrap();
                     response.end("write response").unwrap();
+
+                    // UNSTABLE4 is deliberately followed by COMMIT with a
+                    // non-zero range. This exercises both COMMIT argument
+                    // consumption and the FileHandle::sync barrier.
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        18,
+                        compound(
+                            "commit",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_COMMIT, |writer| {
+                                    writer.u64(4);
+                                    writer.u32(10);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "commit");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    parse_result_header(&mut response, OP_COMMIT);
+                    let _ = response.fixed_opaque(8, "commit verifier").unwrap();
+                    response.end("commit response").unwrap();
 
                     client.sequence += 1;
                     let mut response = rpc(
@@ -787,4 +830,237 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
         .expect("spawn v4 wire test thread")
         .join()
         .expect("v4 wire test thread panicked");
+}
+
+#[test]
+fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
+    std::thread::Builder::new()
+        .name("nfs-v4-open-share-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 share test runtime")
+                .block_on(async {
+                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen rootless NFS server");
+                    let mut stream = TcpStream::connect(address)
+                        .await
+                        .expect("connect first NFS client");
+                    let clientid = parse_exchange(
+                        rpc(&mut stream, 101, compound("exchange", &[exchange_args()])).await,
+                    );
+                    let session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            102,
+                            compound("create-session", &[create_session_args(clientid)]),
+                        )
+                        .await,
+                    );
+                    let mut client = Client {
+                        session,
+                        clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    parse_sequence_and_handle(
+                        rpc(
+                            &mut stream,
+                            103,
+                            compound(
+                                "root",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_GETFH, |_| {}),
+                                ],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    client.sequence += 1;
+                    let open = op(OP_OPEN, |writer| {
+                        writer.u32(0);
+                        writer.u32(1);
+                        writer.u32(0);
+                        writer.u64(client.clientid);
+                        writer.var_opaque(b"same-owner");
+                        writer.u32(1);
+                        writer.u32(0);
+                        empty_attrs(writer);
+                        writer.u32(0);
+                        writer.string("share-file");
+                    });
+                    let mut response = rpc(
+                        &mut stream,
+                        104,
+                        compound(
+                            "open",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                open,
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 4);
+                    consume_sequence_result(&mut response, "initial open");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    parse_result_header(&mut response, OP_OPEN);
+                    let initial_stateid = response.fixed_opaque(16, "initial stateid").unwrap();
+                    assert_eq!(
+                        u32::from_be_bytes(initial_stateid[..4].try_into().unwrap()),
+                        1
+                    );
+                    let _ = response.bool("initial cinfo atomic").unwrap();
+                    let _ = response.u64("initial cinfo before").unwrap();
+                    let _ = response.u64("initial cinfo after").unwrap();
+                    let _ = response.u32("initial rflags").unwrap();
+                    let _ =
+                        response.array(16, "initial attrset", |reader| reader.u32("attrset word"));
+                    assert_eq!(response.u32("initial delegation").unwrap(), 0);
+                    parse_result_header(&mut response, OP_GETFH);
+                    let file_handle = response.var_opaque(128, "share file handle").unwrap();
+                    response.end("initial open response").unwrap();
+
+                    // The same client and open owner may widen the existing
+                    // reservation.  The resulting stateid is the same state
+                    // with a fresh seqid, rather than SHARE_DENIED.
+                    client.sequence += 1;
+                    let same_owner_upgrade = op(OP_OPEN, |writer| {
+                        writer.u32(0);
+                        writer.u32(3);
+                        writer.u32(1);
+                        writer.u64(client.clientid);
+                        writer.var_opaque(b"same-owner");
+                        writer.u32(0);
+                        writer.u32(CLAIM_FH);
+                    });
+                    let mut response = rpc(
+                        &mut stream,
+                        105,
+                        compound(
+                            "same-owner-upgrade",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                same_owner_upgrade,
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "same-owner upgrade");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    parse_result_header(&mut response, OP_OPEN);
+                    let upgraded_stateid = response.fixed_opaque(16, "upgraded stateid").unwrap();
+                    assert_eq!(
+                        u32::from_be_bytes(upgraded_stateid[..4].try_into().unwrap()),
+                        2,
+                        "same-owner OPEN widens the state and bumps its seqid"
+                    );
+                    let _ = response.bool("upgrade cinfo atomic").unwrap();
+                    let _ = response.u64("upgrade cinfo before").unwrap();
+                    let _ = response.u64("upgrade cinfo after").unwrap();
+                    let _ = response.u32("upgrade rflags").unwrap();
+                    let _ =
+                        response.array(16, "upgrade attrset", |reader| reader.u32("attrset word"));
+                    assert_eq!(response.u32("upgrade delegation").unwrap(), 0);
+                    response.end("same-owner upgrade response").unwrap();
+
+                    let mut stream_two = TcpStream::connect(address)
+                        .await
+                        .expect("connect second NFS client");
+                    let clientid_two = parse_exchange(
+                        rpc(
+                            &mut stream_two,
+                            201,
+                            compound(
+                                "exchange-two",
+                                &[exchange_args_for(b"mount-rs-v4-wire-two")],
+                            ),
+                        )
+                        .await,
+                    );
+                    let session_two = parse_create_session(
+                        rpc(
+                            &mut stream_two,
+                            202,
+                            compound("create-session-two", &[create_session_args(clientid_two)]),
+                        )
+                        .await,
+                    );
+                    let mut client_two = Client {
+                        session: session_two,
+                        clientid: clientid_two,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    parse_sequence_and_handle(
+                        rpc(
+                            &mut stream_two,
+                            203,
+                            compound(
+                                "root-two",
+                                &[
+                                    sequence(&client_two),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_GETFH, |_| {}),
+                                ],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    client_two.sequence += 1;
+                    let cross_client_open = op(OP_OPEN, |writer| {
+                        writer.u32(0);
+                        writer.u32(1);
+                        writer.u32(0);
+                        writer.u64(client_two.clientid);
+                        writer.var_opaque(b"same-owner");
+                        writer.u32(0);
+                        writer.u32(CLAIM_FH);
+                    });
+                    let mut response = rpc(
+                        &mut stream_two,
+                        204,
+                        compound(
+                            "cross-client-deny",
+                            &[
+                                sequence(&client_two),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                cross_client_open,
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 3),
+                        NFS4ERR_SHARE_DENIED
+                    );
+                    consume_sequence_result(&mut response, "cross-client deny");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    assert_eq!(
+                        parse_result_status(&mut response, OP_OPEN),
+                        NFS4ERR_SHARE_DENIED,
+                        "a different client cannot bypass the upgraded deny reservation"
+                    );
+                    response.end("cross-client deny response").unwrap();
+
+                    let _ = initial_stateid;
+                    let _ = upgraded_stateid;
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn v4 share test thread")
+        .join()
+        .expect("v4 share test thread panicked");
 }

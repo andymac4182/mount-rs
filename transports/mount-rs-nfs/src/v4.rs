@@ -7,6 +7,7 @@
 //! delegations, and uses the process-local NFS file-handle table as its
 //! persistent-handle boundary.
 
+use std::cmp::Ordering as SeqidOrdering;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -299,6 +300,8 @@ pub const NF4CHR: u32 = 4;
 pub const NF4LNK: u32 = 5;
 pub const NF4SOCK: u32 = 6;
 pub const NF4FIFO: u32 = 7;
+pub const NF4ATTRDIR: u32 = 8;
+pub const NF4NAMEDATTR: u32 = 9;
 
 pub const FATTR4_SUPPORTED_ATTRS: u32 = 0;
 pub const FATTR4_TYPE: u32 = 1;
@@ -439,9 +442,34 @@ struct Fattr4 {
     unsupported: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct ApplyAttrsOptions {
+    skip_size: bool,
+    skip_mode: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AppliedAttrs {
+    status: u32,
+    bits: Vec<u32>,
+}
+
+impl AppliedAttrs {
+    fn failed(status: u32) -> Self {
+        Self {
+            status,
+            bits: Vec::new(),
+        }
+    }
+
+    fn with_status(status: u32, bits: Vec<u32>) -> Self {
+        Self { status, bits }
+    }
+}
+
 #[derive(Debug, Clone)]
 struct OpenArgs {
-    seqid: u32,
+    _seqid: u32,
     share_access: u32,
     share_deny: u32,
     owner_clientid: u64,
@@ -458,7 +486,10 @@ struct OpenArgs {
 enum Op {
     Access(u32),
     Close(u32, Stateid4),
-    Commit,
+    Commit {
+        offset: u64,
+        count: u32,
+    },
     Create {
         kind: u32,
         name: String,
@@ -689,6 +720,12 @@ fn read_bitmap(reader: &mut XdrReader<'_>) -> Result<Vec<u32>, XdrError> {
 
 fn write_bitmap(writer: &mut XdrWriter, bitmap: &[u32]) {
     writer.array(bitmap, |writer, word| writer.u32(*word));
+}
+
+fn bitmap_body(bitmap: &[u32]) -> Vec<u8> {
+    let mut writer = XdrWriter::with_capacity(4 + bitmap.len() * 4);
+    write_bitmap(&mut writer, bitmap);
+    writer.into_bytes()
 }
 
 fn bitmap_has(bitmap: &[u32], bit: u32) -> bool {
@@ -989,7 +1026,7 @@ fn read_open(reader: &mut XdrReader<'_>) -> Result<OpenArgs, XdrError> {
         _ => return Err(XdrError::new("unsupported OPEN claim", reader.offset())),
     };
     Ok(OpenArgs {
-        seqid,
+        _seqid: seqid,
         share_access,
         share_deny,
         owner_clientid,
@@ -1037,10 +1074,12 @@ fn parse_op(reader: &mut XdrReader<'_>) -> Result<Op, XdrError> {
     Ok(match op {
         OP_ACCESS => Op::Access(reader.u32("ACCESS.access")?),
         OP_CLOSE => Op::Close(reader.u32("CLOSE.seqid")?, read_stateid(reader)?),
-        OP_COMMIT => Op::Commit,
+        OP_COMMIT => Op::Commit {
+            offset: reader.u64("COMMIT.offset")?,
+            count: reader.u32("COMMIT.count")?,
+        },
         OP_CREATE => {
             let kind = reader.u32("CREATE.type")?;
-            let name = reader.string(NFS4_MAX_COMPONENT, "CREATE.name")?;
             let mut link = None;
             let mut dev = None;
             match kind {
@@ -1051,9 +1090,10 @@ fn parse_op(reader: &mut XdrReader<'_>) -> Result<Op, XdrError> {
                         reader.u32("CREATE.specdata2")?,
                     ))
                 }
-                NF4REG | NF4DIR | NF4FIFO | NF4SOCK => {}
-                _ => return Err(XdrError::new("unknown CREATE type", reader.offset())),
+                NF4REG | NF4DIR | NF4FIFO | NF4SOCK | NF4ATTRDIR | NF4NAMEDATTR => {}
+                _ => {}
             }
+            let name = reader.string(NFS4_MAX_COMPONENT, "CREATE.name")?;
             let attrs = read_attrs(reader)?;
             Op::Create {
                 kind,
@@ -1221,11 +1261,16 @@ struct V4OpResult {
 
 impl V4OpResult {
     fn new(op: u32, status: u32) -> Self {
-        Self {
-            op,
-            status,
-            body: Vec::new(),
-        }
+        let body = if op == OP_SETATTR {
+            // SETATTR4res always contains attrsset, including on failure.
+            // Whole-request failures have not applied any attributes.
+            let mut body = XdrWriter::with_capacity(4);
+            write_bitmap(&mut body, &[]);
+            body.into_bytes()
+        } else {
+            Vec::new()
+        };
+        Self { op, status, body }
     }
 
     fn with_body(op: u32, status: u32, body: Vec<u8>) -> Self {
@@ -1244,7 +1289,7 @@ impl Op {
         match self {
             Self::Access(_) => OP_ACCESS,
             Self::Close(_, _) => OP_CLOSE,
-            Self::Commit => OP_COMMIT,
+            Self::Commit { .. } => OP_COMMIT,
             Self::Create { .. } => OP_CREATE,
             Self::Getattr(_) => OP_GETATTR,
             Self::Getfh => OP_GETFH,
@@ -1316,8 +1361,8 @@ fn sequence_body(
 
 fn invalid_stateid() -> Stateid4 {
     Stateid4 {
-        seqid: 0,
-        other: [0xff; NFS4_OTHER_SIZE],
+        seqid: u32::MAX,
+        other: [0; NFS4_OTHER_SIZE],
     }
 }
 
@@ -1326,7 +1371,7 @@ fn is_zero_stateid(stateid: &Stateid4) -> bool {
 }
 
 fn is_invalid_stateid(stateid: &Stateid4) -> bool {
-    stateid.seqid == 0 && stateid.other == [0xff; NFS4_OTHER_SIZE]
+    stateid.seqid == u32::MAX && stateid.other == [0; NFS4_OTHER_SIZE]
 }
 
 fn supported_attr(bit: u32) -> bool {
@@ -1953,7 +1998,7 @@ impl Nfs4Session {
                 self.readdir(*cookie, verifier, *dircount, *maxcount, attrs, cursor)
                     .await
             }
-            Op::Commit => self.commit(cursor).await,
+            Op::Commit { offset, count } => self.commit(*offset, *count, cursor).await,
             Op::Create {
                 kind,
                 name,
@@ -2310,7 +2355,7 @@ impl Nfs4Session {
         }
         open.access = access;
         open.deny = share_deny;
-        open.stateid.seqid = open.stateid.seqid.saturating_add(1).max(1);
+        open.stateid.seqid = bump_stateid_seq(open.stateid.seqid);
         let result = open.stateid.clone();
         cursor.stateid = result.clone();
         let mut body = XdrWriter::with_capacity(16);
@@ -2651,18 +2696,28 @@ impl Nfs4Session {
         V4OpResult::with_body(OP_READDIR, NFS4_OK, body.into_bytes())
     }
 
-    async fn commit(&self, cursor: &Cursor) -> V4OpResult {
+    async fn commit(&self, _offset: u64, _count: u32, cursor: &Cursor) -> V4OpResult {
         let path = match self.current_path(cursor) {
             Ok(path) => path,
             Err(error) => return V4OpResult::new(OP_COMMIT, error_status(&error)),
         };
+        // WRITE may have acknowledged UNSTABLE4, so COMMIT must provide the
+        // FileHandle::sync barrier even though offset/count only select the
+        // committed range at the protocol level.  Resolve the path first so a
+        // stale current filehandle remains an error before opening it.
+        if let Err(error) = self.stat_of(&path).await {
+            return V4OpResult::new(OP_COMMIT, error_status(&error));
+        }
         let handle = match self.driver.open_flags(&path, OpenFlags::READ_ONLY, 0).await {
             Ok(handle) => handle,
             Err(error) => return V4OpResult::new(OP_COMMIT, error_status(&error)),
         };
-        let result = handle.sync().await;
-        let _ = handle.close().await;
-        if let Err(error) = result {
+        let sync_result = handle.sync().await;
+        let close_result = handle.close().await;
+        if let Err(error) = sync_result {
+            return V4OpResult::new(OP_COMMIT, error_status(&error));
+        }
+        if let Err(error) = close_result {
             return V4OpResult::new(OP_COMMIT, error_status(&error));
         }
         let mut body = XdrWriter::with_capacity(8);
@@ -2695,10 +2750,7 @@ impl Nfs4Session {
             .await
             .ok()
             .map(|stats| stat_change(&stats));
-        let mode = attrs
-            .values
-            .mode
-            .unwrap_or(if kind == NF4DIR { 0o777 } else { 0o666 });
+        let mode = attrs.values.mode.unwrap_or(0o777) & 0o7777;
         let operation = match kind {
             NF4DIR => self
                 .driver
@@ -2711,19 +2763,8 @@ impl Nfs4Session {
                 )
                 .await
                 .map(|_| ()),
-            NF4REG => {
-                let flags = OpenFlags {
-                    read: true,
-                    write: true,
-                    create: true,
-                    truncate: false,
-                    append: false,
-                    exclusive: true,
-                };
-                match self.driver.open_flags(&path, flags, mode & 0o7777).await {
-                    Ok(handle) => handle.close().await,
-                    Err(error) => Err(error),
-                }
+            NF4REG | NF4ATTRDIR | NF4NAMEDATTR => {
+                return V4OpResult::new(OP_CREATE, NFS4ERR_BADTYPE);
             }
             NF4LNK => self.driver.symlink(link.unwrap_or_default(), &path).await,
             NF4BLK | NF4CHR => {
@@ -2733,22 +2774,35 @@ impl Nfs4Session {
                 self.driver
                     .mknod(
                         &path,
-                        if kind == NF4BLK { S_IFBLK } else { S_IFCHR } | mode,
-                        (u64::from(major) << 32) | u64::from(minor),
+                        (if kind == NF4BLK { S_IFBLK } else { S_IFCHR }) | mode,
+                        (u64::from(major) << 8) | u64::from(minor & 0xff),
                     )
                     .await
             }
             NF4FIFO => self.driver.mknod(&path, S_IFIFO | mode, 0).await,
-            NF4SOCK => Err(FsError::enotsup("create socket")),
-            _ => Err(FsError::new(ErrorCode::Einval)),
+            NF4SOCK => self.driver.mknod(&path, S_IFSOCK | mode, 0).await,
+            _ => return V4OpResult::new(OP_CREATE, NFS4ERR_BADTYPE),
         };
         if let Err(error) = operation {
             return V4OpResult::new(OP_CREATE, error_status(&error));
         }
-        let applied = match self.apply_attrs(&path, attrs).await {
-            Ok(applied) => applied,
-            Err(status) => return V4OpResult::new(OP_CREATE, status),
-        };
+        let applied = self
+            .apply_attrs_with_options(
+                &path,
+                attrs,
+                ApplyAttrsOptions {
+                    skip_size: true,
+                    skip_mode: kind == NF4LNK,
+                },
+            )
+            .await;
+        if applied.status != NFS4_OK {
+            return V4OpResult::new(OP_CREATE, applied.status);
+        }
+        let mut applied = applied.bits;
+        if kind != NF4LNK && attrs.values.mode.is_some() {
+            applied.push(FATTR4_MODE);
+        }
         let after = match self.stat_of(&path).await {
             Ok(stats) => stats,
             Err(error) => return V4OpResult::new(OP_CREATE, error_status(&error)),
@@ -2923,27 +2977,44 @@ impl Nfs4Session {
     }
 
     async fn apply_attrs(&self, path: &str, attrs: &Fattr4) -> Result<Vec<u32>, u32> {
+        let applied = self
+            .apply_attrs_with_options(path, attrs, ApplyAttrsOptions::default())
+            .await;
+        if applied.status == NFS4_OK {
+            Ok(bitmap_of(applied.bits))
+        } else {
+            Err(applied.status)
+        }
+    }
+
+    async fn apply_attrs_with_options(
+        &self,
+        path: &str,
+        attrs: &Fattr4,
+        options: ApplyAttrsOptions,
+    ) -> AppliedAttrs {
         if attrs.unsupported {
-            return Err(NFS4ERR_ATTRNOTSUPP);
+            return AppliedAttrs::failed(NFS4ERR_ATTRNOTSUPP);
         }
         for bit in bitmap_bits(&attrs.mask) {
             if !supported_attr(bit) {
-                return Err(NFS4ERR_ATTRNOTSUPP);
+                return AppliedAttrs::failed(NFS4ERR_ATTRNOTSUPP);
             }
             if !settable_attr(bit) {
-                return Err(NFS4ERR_INVAL);
+                return AppliedAttrs::failed(NFS4ERR_INVAL);
             }
         }
-        let current = self
-            .stat_of(path)
-            .await
-            .map_err(|error| error_status(&error))?;
+        let current = match self.stat_of(path).await {
+            Ok(current) => current,
+            Err(error) => return AppliedAttrs::failed(error_status(&error)),
+        };
         let mut applied = Vec::new();
-        if let Some(mode) = attrs.values.mode {
-            self.driver
-                .chmod(path, mode & 0o7777)
-                .await
-                .map_err(|error| error_status(&error))?;
+        if !options.skip_mode
+            && let Some(mode) = attrs.values.mode
+        {
+            if let Err(error) = self.driver.chmod(path, mode & 0o7777).await {
+                return AppliedAttrs::with_status(error_status(&error), applied);
+            }
             applied.push(FATTR4_MODE);
         }
         if attrs.values.owner.is_some() || attrs.values.owner_group.is_some() {
@@ -2956,7 +3027,7 @@ impl Nfs4Session {
             if attrs.values.owner.is_some()
                 && parse_numeric_owner(attrs.values.owner.as_deref().unwrap_or_default()).is_none()
             {
-                return Err(NFS4ERR_BADOWNER);
+                return AppliedAttrs::with_status(NFS4ERR_BADOWNER, applied);
             }
             let gid = attrs
                 .values
@@ -2968,16 +3039,17 @@ impl Nfs4Session {
                 && parse_numeric_owner(attrs.values.owner_group.as_deref().unwrap_or_default())
                     .is_none()
             {
-                return Err(NFS4ERR_BADOWNER);
+                return AppliedAttrs::with_status(NFS4ERR_BADOWNER, applied);
             }
-            match self.driver.lchown(path, uid, gid).await {
-                Ok(()) => {}
-                Err(error) if error.code == ErrorCode::Enosys => self
-                    .driver
-                    .chown(path, uid, gid)
-                    .await
-                    .map_err(|error| error_status(&error))?,
-                Err(error) => return Err(error_status(&error)),
+            let result = match self.driver.lchown(path, uid, gid).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.code == ErrorCode::Enosys => {
+                    self.driver.chown(path, uid, gid).await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                return AppliedAttrs::with_status(error_status(&error), applied);
             }
             if attrs.values.owner.is_some() {
                 applied.push(FATTR4_OWNER);
@@ -2986,33 +3058,42 @@ impl Nfs4Session {
                 applied.push(FATTR4_OWNER_GROUP);
             }
         }
-        if let Some(size) = attrs.values.size {
-            self.driver
-                .truncate(
-                    path,
-                    offset(size, "truncate").map_err(|error| error_status(&error))?,
-                )
-                .await
-                .map_err(|error| error_status(&error))?;
+        if !options.skip_size
+            && let Some(size) = attrs.values.size
+        {
+            let size = match offset(size, "truncate") {
+                Ok(size) => size,
+                Err(error) => return AppliedAttrs::with_status(error_status(&error), applied),
+            };
+            if let Err(error) = self.driver.truncate(path, size).await {
+                return AppliedAttrs::with_status(error_status(&error), applied);
+            }
             applied.push(FATTR4_SIZE);
         }
-        let access = requested_time(attrs.values.time_access_set)?;
-        let modify = requested_time(attrs.values.time_modify_set)?;
+        let access = match requested_time(attrs.values.time_access_set) {
+            Ok(access) => access,
+            Err(status) => return AppliedAttrs::with_status(status, applied),
+        };
+        let modify = match requested_time(attrs.values.time_modify_set) {
+            Ok(modify) => modify,
+            Err(status) => return AppliedAttrs::with_status(status, applied),
+        };
         if access.is_some() || modify.is_some() {
-            let latest = self
-                .stat_of(path)
-                .await
-                .map_err(|error| error_status(&error))?;
+            let latest = match self.stat_of(path).await {
+                Ok(latest) => latest,
+                Err(error) => return AppliedAttrs::with_status(error_status(&error), applied),
+            };
             let atime = access.unwrap_or(latest.atime_ms);
             let mtime = modify.unwrap_or(latest.mtime_ms);
-            match self.driver.lutimes(path, atime, mtime).await {
-                Ok(()) => {}
-                Err(error) if error.code == ErrorCode::Enosys => self
-                    .driver
-                    .utimes(path, atime, mtime)
-                    .await
-                    .map_err(|error| error_status(&error))?,
-                Err(error) => return Err(error_status(&error)),
+            let result = match self.driver.lutimes(path, atime, mtime).await {
+                Ok(()) => Ok(()),
+                Err(error) if error.code == ErrorCode::Enosys => {
+                    self.driver.utimes(path, atime, mtime).await
+                }
+                Err(error) => Err(error),
+            };
+            if let Err(error) = result {
+                return AppliedAttrs::with_status(error_status(&error), applied);
             }
             if access.is_some() {
                 applied.push(FATTR4_TIME_ACCESS_SET);
@@ -3021,26 +3102,33 @@ impl Nfs4Session {
                 applied.push(FATTR4_TIME_MODIFY_SET);
             }
         }
-        Ok(bitmap_of(applied))
+        AppliedAttrs::with_status(NFS4_OK, applied)
     }
 
     async fn setattr(&self, stateid: &Stateid4, attrs: &Fattr4, cursor: &Cursor) -> V4OpResult {
-        if let Err(status) = self.validate_stateid(stateid, cursor, None) {
-            return V4OpResult::new(OP_SETATTR, status);
+        if attrs.values.size.is_some()
+            && let Err(status) =
+                self.validate_stateid(stateid, cursor, Some(OPEN4_SHARE_ACCESS_WRITE))
+        {
+            return V4OpResult::with_body(OP_SETATTR, status, bitmap_body(&[]));
         }
         let path = match self.current_path(cursor) {
             Ok(path) => path,
-            Err(error) => return V4OpResult::new(OP_SETATTR, error_status(&error)),
-        };
-        match self.apply_attrs(&path, attrs).await {
-            Ok(applied) => {
-                self.forget_exclusive(&path);
-                let mut body = XdrWriter::with_capacity(32);
-                write_bitmap(&mut body, &applied);
-                V4OpResult::with_body(OP_SETATTR, NFS4_OK, body.into_bytes())
+            Err(error) => {
+                return V4OpResult::with_body(OP_SETATTR, error_status(&error), bitmap_body(&[]));
             }
-            Err(status) => V4OpResult::new(OP_SETATTR, status),
+        };
+        let applied = self
+            .apply_attrs_with_options(&path, attrs, ApplyAttrsOptions::default())
+            .await;
+        if applied.status == NFS4_OK {
+            self.forget_exclusive(&path);
         }
+        V4OpResult::with_body(
+            OP_SETATTR,
+            applied.status,
+            bitmap_body(&bitmap_of(applied.bits)),
+        )
     }
 
     async fn verify(&self, attrs: &Fattr4, cursor: &Cursor, negated: bool) -> V4OpResult {
@@ -3098,8 +3186,15 @@ impl Nfs4Session {
         let Some(open) = state.opens.get(&stateid.other).cloned() else {
             return Err(NFS4ERR_BAD_STATEID);
         };
-        if cursor.clientid != Some(open.clientid) || open.stateid.seqid != stateid.seqid {
+        if cursor.clientid != Some(open.clientid) {
             return Err(NFS4ERR_BAD_STATEID);
+        }
+        if stateid.seqid != 0 {
+            match compare_stateid_seqid(stateid.seqid, open.stateid.seqid) {
+                SeqidOrdering::Greater => return Err(NFS4ERR_BAD_STATEID),
+                SeqidOrdering::Less => return Err(NFS4ERR_OLD_STATEID),
+                SeqidOrdering::Equal => {}
+            }
         }
         if let Some(access) = required_access
             && open.access & access == 0
@@ -3516,43 +3611,64 @@ impl Nfs4Session {
         };
         let entry = self.handles.bind(&path, &stats);
         let clientid = cursor.clientid.unwrap_or(args.owner_clientid);
-        let stateid = open_stateid(args.seqid, clientid, entry.fileid, &args.owner);
-        {
+        let stateid = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let share_conflict = state.opens.values().any(|open| {
-                open.clientid == clientid
-                    && open.file_id == entry.fileid
-                    && open.owner != args.owner
+                open.file_id == entry.fileid
+                    && !(open.clientid == clientid && open.owner == args.owner)
                     && (open.deny & access != 0 || args.share_deny & open.access != 0)
             });
             if share_conflict {
                 return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
             }
-            if should_create
-                && exclusive
-                && let Some(verifier) = args.create_verf
-            {
-                state.exclusive_creates.insert(
-                    path.clone(),
-                    ExclusiveV4 {
-                        verifier,
-                        attrset: attrset.clone(),
+
+            let existing_key = state
+                .opens
+                .iter()
+                .find(|(_, open)| {
+                    open.clientid == clientid
+                        && open.file_id == entry.fileid
+                        && open.owner == args.owner
+                })
+                .map(|(key, _)| *key);
+            if let Some(key) = existing_key {
+                let open = state
+                    .opens
+                    .get_mut(&key)
+                    .expect("open state found while holding state lock");
+                open.access |= access;
+                open.deny |= args.share_deny;
+                open.stateid.seqid = bump_stateid_seq(open.stateid.seqid);
+                open.stateid.clone()
+            } else {
+                let stateid = open_stateid(1, clientid, entry.fileid, &args.owner);
+                if should_create
+                    && exclusive
+                    && let Some(verifier) = args.create_verf
+                {
+                    state.exclusive_creates.insert(
+                        path.clone(),
+                        ExclusiveV4 {
+                            verifier,
+                            attrset: attrset.clone(),
+                        },
+                    );
+                }
+                state.opens.insert(
+                    stateid.other,
+                    OpenState {
+                        stateid: stateid.clone(),
+                        clientid,
+                        file_id: entry.fileid,
+                        path: path.clone(),
+                        access,
+                        deny: args.share_deny,
+                        owner: args.owner.clone(),
                     },
                 );
+                stateid
             }
-            state.opens.insert(
-                stateid.other,
-                OpenState {
-                    stateid: stateid.clone(),
-                    clientid,
-                    file_id: entry.fileid,
-                    path: path.clone(),
-                    access,
-                    deny: args.share_deny,
-                    owner: args.owner.clone(),
-                },
-            );
-        }
+        };
         cursor.current = Some(self.handles.encode(&entry));
         cursor.stateid = stateid.clone();
         let after = self
@@ -3940,7 +4056,18 @@ fn lock_denied_body(range: &LockRange, clientid: u64, owner: &[u8]) -> Vec<u8> {
 }
 
 fn bump_stateid_seq(seqid: u32) -> u32 {
-    seqid.saturating_add(1).max(1)
+    if seqid == u32::MAX { 1 } else { seqid + 1 }
+}
+
+/// Compare stateid seqids using the serial-number arithmetic in RFC 7530
+/// Section 9.1.3. Stateid seqids advance from UINT32_MAX to one, and the
+/// half-range boundary is deliberately treated as older rather than newer.
+fn compare_stateid_seqid(requested: u32, current: u32) -> SeqidOrdering {
+    match requested.wrapping_sub(current) {
+        0 => SeqidOrdering::Equal,
+        0x8000_0000.. => SeqidOrdering::Less,
+        _ => SeqidOrdering::Greater,
+    }
 }
 
 fn lock_stateid(seqid: u32, clientid: u64, fileid: u64, owner: &[u8]) -> Stateid4 {
@@ -4003,4 +4130,22 @@ fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {
         } else {
             0
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SeqidOrdering, bump_stateid_seq, compare_stateid_seqid};
+
+    #[test]
+    fn stateid_seqids_use_serial_arithmetic_at_wrap() {
+        assert_eq!(bump_stateid_seq(u32::MAX), 1);
+        assert_eq!(compare_stateid_seqid(1, u32::MAX), SeqidOrdering::Greater);
+        assert_eq!(compare_stateid_seqid(u32::MAX, 1), SeqidOrdering::Less);
+        assert_eq!(
+            compare_stateid_seqid(0x8000_0001, 1),
+            SeqidOrdering::Less,
+            "the half-range boundary is treated as older"
+        );
+        assert_eq!(compare_stateid_seqid(17, 17), SeqidOrdering::Equal);
+    }
 }
