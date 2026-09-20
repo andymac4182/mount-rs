@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 
-// CLI consumer checks. Config validation is intentionally mount-free: it
-// proves the public schema and provider selection without opening a database,
-// resolving credentials, or contacting PGlite/R2.
+// CLI consumer checks. The config-validation rows are intentionally mount-free:
+// they prove the public schema and provider selection without opening a
+// database, resolving credentials, or contacting PGlite/R2. The opt-in
+// PGlite row below is the separate configured SDK read/write/reopen exercise.
 
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const matrixDirectory = dirname(fileURLToPath(import.meta.url));
@@ -18,6 +21,7 @@ const configFiles = [
 const failures = [];
 let passes = 0;
 let skips = 0;
+const providerRunId = process.env.MOUNT_RS_PROVIDER_MATRIX_RUN_ID || `pid-${process.pid}`;
 
 function run(command, args, timeoutMs = 120_000) {
   return new Promise((resolveResult) => {
@@ -61,6 +65,53 @@ await commandCase(
   process.execPath,
   ["examples/node-cli/index.mjs", "--driver", "memory", "--sdk-self-test"],
 );
+
+// Exercise the actual Node CLI's config-to-SDK path when the PGlite harness is
+// running. The config deliberately has no mountpoint: this is a portable,
+// mount-free consumer test that still opens the configured public SDK driver,
+// writes and reads a file, shuts down, reopens, and reads the committed bytes.
+if (process.env.PGLITE_DATABASE_URL) {
+  const configDirectory = await mkdtemp(join(tmpdir(), "mount-rs-cli-provider-"));
+  const configPath = join(configDirectory, "pglite.json");
+  const config = {
+    version: 1,
+    driver: {
+      kind: "splitstore",
+      storage: {
+        metadata: {
+          kind: "pglite",
+          connection: { env: "PGLITE_DATABASE_URL" },
+          volume_key: `provider-matrix-cli-${providerRunId}-metadata`,
+          durable: false,
+        },
+        blocks: {
+          kind: "pglite",
+          connection: { env: "PGLITE_DATABASE_URL" },
+          volume_key: `provider-matrix-cli-${providerRunId}-blocks`,
+          durable: false,
+        },
+        chunk_size_bytes: 7,
+        owner: `provider-matrix-cli-${providerRunId}`,
+      },
+    },
+  };
+  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await commandCase(
+    "node-cli-pglite-config-reopen",
+    process.execPath,
+    [
+      "examples/node-cli/index.mjs",
+      "--config",
+      configPath,
+      "--sdk-self-test",
+      "--reopen",
+    ],
+  );
+  await rm(configDirectory, { recursive: true, force: true });
+} else {
+  skips += 1;
+  console.log("SKIP cli case=node-cli-pglite-config-reopen gate=PGLITE_DATABASE_URL");
+}
 
 for (const [label, path] of configFiles) {
   await commandCase(
