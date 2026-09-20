@@ -30,7 +30,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Jason |
 | W04 | PGlite | Verifying | Copernicus / Main |
-| W05 | Cloudflare R2 | Credentials verified; integration pending | Main |
+| W05 | Cloudflare R2 | Live local tests passed; acceptance incomplete | Main |
 | W06 | RustFS integration service | Landed; extending | Hooke |
 | W07 | FoundationDB | Implementing | Hilbert |
 | W08 | TiDB | Implementing | Arendt |
@@ -39,7 +39,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W11 | Config-driven CLI | Landed; extending | Chandrasekhar |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
 | W13 | macOS FSKit | Implementing | James |
-| W14 | Versioned filesystems | Implementing | Jason |
+| W14 | Versioned filesystems | Review fixes in progress | Chandrasekhar |
 | W15 | Mount-free SQLite VFS | Implementing | Hume |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Confucius / Main |
 | W17 | Multi-drive HTTP server | Implementing | Copernicus |
@@ -49,7 +49,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W21 | Reference review and learnings | Ongoing | Main |
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
-| W24 | Domain and marketing site | Planned; approval needed | User / Main |
+| W24 | Domain and marketing site | Site draft ready; deployment pending | Main |
 | W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
 | W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
 | W27 | Native Windows support and CI | CI added; qualification pending | Main |
@@ -68,8 +68,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   prerequisites when executable extension testing is ready.
 - [ ] **D04 — Distributed cache:** discuss topology, consistency and service
   choice with the user after the primary implementation is accepted.
-- [ ] **D05 — Launch:** confirm AWS account, domain cost/renewal and Vercel
-  deployment/account choices before purchase or production changes.
+- [ ] **D05 — Launch:** user initiated domain registration and authorized the
+  existing Vercel Hobby plan. Verify registration, AWS account and DNS access;
+  no duplicate purchase, paid upgrade or additional paid resources.
 - [ ] **D06 — Publication:** obtain authorization for package publication;
   permission to commit and push is not permission to publish packages.
 
@@ -125,6 +126,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   Run `35493696795`, job `106032856390`, still failed bounded close/reopen with
   a server communication error. Copernicus owns the handshake-race investigation;
   the newer local pass does not close this intermittent hosted failure.
+  Main's latest local regression run passed both Node cleanup suites and both
+  Rust bounded/shared-close tests. A review found duplicate close-listener
+  registrations can be collapsed during restoration; add regression coverage
+  and preserve listener multiplicity before landing the reconnect fix.
 - [ ] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
 
 ## W05 — Cloudflare R2
