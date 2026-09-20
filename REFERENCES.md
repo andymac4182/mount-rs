@@ -8,6 +8,14 @@
 
 ## Inspiration and design references
 
+- [Tensorlake: Firecracker disk snapshots in O(changed bytes)](https://www.tensorlake.ai/blog/firecracker-disk-snapshots-o-changed-bytes):
+  storage/diffing reference for versioned filesystems and later copy-on-write.
+  Evaluate write-path dirty tracking, explicit zero extents, immutable layers,
+  content-addressed blocks, versioned manifests, and layer compaction. Measure
+  snapshot pause time separately from durable upload completion, varying total
+  state, changed bytes, layer depth, and outstanding dirty data. Its VM block
+  design and vendor benchmarks are inspiration, not proof of filesystem-level
+  or SQLite snapshot correctness in mount-rs; compare cache and fsync policies.
 - [Tensorlake filesystems / TLFS](https://docs.tensorlake.ai/filesystems/introduction):
   versioned-filesystem reference reviewed for the explicit versioning requirement.
   The guide distinguishes retained autosaves from permanent snapshots, supports
