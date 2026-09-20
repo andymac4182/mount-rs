@@ -18,7 +18,7 @@ use tokio::net::TcpListener;
 #[cfg(unix)]
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, Notify, Semaphore};
-use tokio::task::JoinSet;
+use tokio::task::{JoinHandle, JoinSet};
 
 use crate::constants::{P9_DEFAULT_MAX_FRAME, P9_HDRSZ};
 use crate::locks::P9LockTable;
@@ -183,9 +183,12 @@ pub struct P9Server {
     locks: P9LockTable,
     shutdown: Arc<Notify>,
     closed: AtomicBool,
+    serving: AtomicBool,
     next_id: AtomicU64,
     connections: Arc<StdMutex<HashMap<u64, P9Connection>>>,
     tcp_addr: StdMutex<Option<SocketAddr>>,
+    #[cfg(target_os = "linux")]
+    adoption: Mutex<()>,
 }
 
 impl P9Server {
@@ -210,9 +213,12 @@ impl P9Server {
             locks,
             shutdown: Arc::new(Notify::new()),
             closed: AtomicBool::new(false),
+            serving: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
             connections: Arc::new(StdMutex::new(HashMap::new())),
             tcp_addr: StdMutex::new(None),
+            #[cfg(target_os = "linux")]
+            adoption: Mutex::new(()),
         }
     }
 
@@ -303,13 +309,15 @@ impl P9Server {
 
     /// Return live connections in arrival order.
     pub fn clients(&self) -> io::Result<Vec<P9Connection>> {
-        Ok(self
+        let mut clients = self
             .connections
             .lock()
             .map_err(|_| io::Error::other("connection lock poisoned"))?
             .values()
             .cloned()
-            .collect())
+            .collect::<Vec<_>>();
+        clients.sort_by_key(P9Connection::id);
+        Ok(clients)
     }
 
     pub fn connection_count(&self) -> io::Result<usize> {
@@ -346,6 +354,41 @@ impl P9Server {
 
     /// Accept connections until [`P9Server::shutdown`] or [`P9Server::close`].
     pub async fn serve(&self) -> io::Result<()> {
+        if self.serving.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "server is already serving",
+            ));
+        }
+        let result = self.serve_inner().await;
+        self.serving.store(false, Ordering::Release);
+        result
+    }
+
+    /// Start accepting in a spawned Tokio task. A shared server may already be
+    /// serving; callers can treat `AlreadyExists` as an existing accept loop.
+    pub fn start(self: &Arc<Self>) -> io::Result<JoinHandle<io::Result<()>>> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "9P server is closed",
+            ));
+        }
+        if self.serving.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "server is already serving",
+            ));
+        }
+        let server = Arc::clone(self);
+        Ok(tokio::spawn(async move {
+            let result = server.serve_inner().await;
+            server.serving.store(false, Ordering::Release);
+            result
+        }))
+    }
+
+    async fn serve_inner(&self) -> io::Result<()> {
         let listener = self.listener.lock().await.take().ok_or_else(|| {
             io::Error::new(io::ErrorKind::AlreadyExists, "server has no listener")
         })?;
@@ -358,6 +401,11 @@ impl P9Server {
 
     pub async fn run(&self) -> io::Result<()> {
         self.serve().await
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn adoption_lock(&self) -> &Mutex<()> {
+        &self.adoption
     }
 
     /// Serve an already-connected stream, such as a socketpair end or a test

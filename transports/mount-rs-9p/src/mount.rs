@@ -99,8 +99,11 @@ pub enum P9MountTransport {
     Tcp,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct P9MountOptions {
+    /// Reuse a previously bound server. Its accept loop is started if it is
+    /// not already running, and it is closed when this mount tears down.
+    pub server: Option<Arc<P9Server>>,
     pub transport: P9MountTransport,
     pub host: String,
     pub port: Option<u16>,
@@ -119,6 +122,7 @@ pub struct P9MountOptions {
 impl Default for P9MountOptions {
     fn default() -> Self {
         Self {
+            server: None,
             transport: P9MountTransport::Unix,
             host: "127.0.0.1".to_owned(),
             port: None,
@@ -153,7 +157,7 @@ pub struct P9Mount {
 
 struct MountState {
     stopping: AtomicBool,
-    unmount_started: AtomicBool,
+    teardown_started: AtomicBool,
     done: AtomicBool,
     complete: Notify,
     failure: Mutex<Option<String>>,
@@ -172,8 +176,14 @@ impl P9Mount {
     pub async fn wait_closed(&self) {
         self.connection.wait_closed().await;
         self.state.stopping.store(true, Ordering::Release);
-        if !self.state.done.load(Ordering::Acquire) {
-            let _ = self.finish_resources().await;
+        if self
+            .state
+            .teardown_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            let result = self.state.finish_resources().await;
+            self.state.record_result(result).await;
         }
         self.wait_completion().await;
     }
@@ -183,7 +193,7 @@ impl P9Mount {
     pub async fn unmount(&self) -> io::Result<()> {
         if self
             .state
-            .unmount_started
+            .teardown_started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_err()
         {
@@ -193,6 +203,11 @@ impl P9Mount {
         let result = self.unmount_once().await;
         if let Err(error) = &result {
             self.state.failure.lock().await.replace(error.to_string());
+            // The mount is still live, so keep answering it and allow a later
+            // call to retry after the process holding the mount lets go.
+            self.state.stopping.store(false, Ordering::Release);
+            self.state.teardown_started.store(false, Ordering::Release);
+            return Err(io::Error::other(error.to_string()));
         }
         self.state.done.store(true, Ordering::Release);
         self.state.complete.notify_waiters();
@@ -201,7 +216,7 @@ impl P9Mount {
 
     async fn unmount_once(&self) -> io::Result<()> {
         if !is_mounted_at(&self.mountpoint)? {
-            return self.finish_resources().await;
+            return self.state.finish_resources().await;
         }
         let first = run_command("umount", &[self.mountpoint.as_os_str()], self.state.timeout).await;
         let detached = match first {
@@ -209,7 +224,7 @@ impl P9Mount {
             Ok(_) | Err(_) => false,
         };
         if detached {
-            return self.finish_resources().await;
+            return self.state.finish_resources().await;
         }
 
         // v9fs implements forced cancellation. Lazy detach is the final
@@ -220,7 +235,7 @@ impl P9Mount {
         ] {
             let _ = run_command("umount", &args, self.state.timeout).await;
             if !is_mounted_at(&self.mountpoint)? {
-                return self.finish_resources().await;
+                return self.state.finish_resources().await;
             }
         }
         Err(io::Error::new(
@@ -231,15 +246,17 @@ impl P9Mount {
             ),
         ))
     }
+}
 
+impl MountState {
     async fn finish_resources(&self) -> io::Result<()> {
-        let server_result = self.state.server.close().await;
-        if let Some(task) = self.state.serve_task.lock().await.take() {
+        let server_result = self.server.close().await;
+        if let Some(task) = self.serve_task.lock().await.take() {
             match task.await {
                 Ok(Ok(())) | Ok(Err(_)) | Err(_) => {}
             }
         }
-        if let Some(directory) = &self.state.socket_dir {
+        if let Some(directory) = &self.socket_dir {
             match std::fs::remove_dir_all(directory) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -249,6 +266,16 @@ impl P9Mount {
         server_result
     }
 
+    async fn record_result(&self, result: io::Result<()>) {
+        if let Err(error) = result {
+            self.failure.lock().await.replace(error.to_string());
+        }
+        self.done.store(true, Ordering::Release);
+        self.complete.notify_waiters();
+    }
+}
+
+impl P9Mount {
     async fn wait_completion(&self) {
         while !self.state.done.load(Ordering::Acquire) {
             self.state.complete.notified().await;
@@ -347,6 +374,21 @@ pub fn tcp_source_refusal(host: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
+fn plausible_mount_connection(
+    target: &P9MountTarget,
+    source: &str,
+    connection: &crate::server::P9Connection,
+) -> bool {
+    if target.transport != P9MountTransport::Tcp || !source.starts_with("127.") {
+        return true;
+    }
+    connection.peer.as_deref().is_some_and(|peer| {
+        let peer = peer.strip_prefix("::ffff:").unwrap_or(peer);
+        peer.starts_with("127.")
+    })
+}
+
+#[cfg(target_os = "linux")]
 async fn mount_9p_linux<D>(
     driver: D,
     mountpoint: &Path,
@@ -376,69 +418,135 @@ where
         ));
     }
 
-    let mut socket_dir = None;
-    let (server, source, target) = match options.transport {
-        P9MountTransport::Unix => {
-            let (directory, socket) = match options.socket_path.clone() {
-                Some(path) => (None, path),
-                None => {
-                    let directory = create_private_socket_directory()?;
-                    let socket = directory.join("9p.sock");
-                    (Some(directory), socket)
-                }
-            };
-            socket_path_refusal(&socket).map_or(Ok(()), |reason| {
-                Err(io::Error::new(io::ErrorKind::InvalidInput, reason))
-            })?;
-            let server_options = P9ServerOptions {
-                msize: Some(mount_msize(options.mount_msize)),
-                read_only: options.read_only,
-                ..P9ServerOptions::default()
-            };
-            let server = P9Server::bind_unix(driver, &socket, server_options).await?;
-            socket_dir = directory;
-            (
-                Arc::new(server),
-                socket.to_string_lossy().into_owned(),
-                P9MountTarget {
-                    transport: P9MountTransport::Unix,
-                    port: None,
-                },
-            )
-        }
-        P9MountTransport::Tcp => {
-            let host = options.host.clone();
-            if let Some(reason) = tcp_source_refusal(&host) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
+    let (server, source, target, socket_dir) = if let Some(server) = options.server.clone() {
+        let transport = if server.unix_path().is_some() {
+            P9MountTransport::Unix
+        } else {
+            P9MountTransport::Tcp
+        };
+        match transport {
+            P9MountTransport::Unix => {
+                let socket = server
+                    .unix_path()
+                    .ok_or_else(|| io::Error::other("Unix 9P server has no socket path"))?
+                    .to_path_buf();
+                socket_path_refusal(&socket).map_or(Ok(()), |reason| {
+                    Err(io::Error::new(io::ErrorKind::InvalidInput, reason))
+                })?;
+                (
+                    server,
+                    socket.to_string_lossy().into_owned(),
+                    P9MountTarget {
+                        transport,
+                        port: None,
+                    },
+                    None,
+                )
             }
-            let server_options = P9ServerOptions {
-                host: host.clone(),
-                port: options.port.unwrap_or(0),
-                msize: Some(mount_msize(options.mount_msize)),
-                read_only: options.read_only,
-                ..P9ServerOptions::default()
-            };
-            let server = P9Server::bind(driver, server_options).await?;
-            let port = server.local_addr()?.port();
-            (
-                Arc::new(server),
-                host,
-                P9MountTarget {
-                    transport: P9MountTransport::Tcp,
-                    port: Some(port),
-                },
-            )
+            P9MountTransport::Tcp => {
+                let host = server.options().host.clone();
+                if let Some(reason) = tcp_source_refusal(&host) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
+                }
+                let port = server.local_addr()?.port();
+                (
+                    server,
+                    host,
+                    P9MountTarget {
+                        transport,
+                        port: Some(port),
+                    },
+                    None,
+                )
+            }
+        }
+    } else {
+        match options.transport {
+            P9MountTransport::Unix => {
+                let (directory, socket) = match options.socket_path.clone() {
+                    Some(path) => (None, path),
+                    None => {
+                        let directory = create_private_socket_directory()?;
+                        let socket = directory.join("9p.sock");
+                        (Some(directory), socket)
+                    }
+                };
+                if let Some(reason) = socket_path_refusal(&socket) {
+                    cleanup_socket_directory(directory.as_deref());
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
+                }
+                let server_options = P9ServerOptions {
+                    msize: Some(mount_msize(options.mount_msize)),
+                    read_only: options.read_only,
+                    ..P9ServerOptions::default()
+                };
+                let server = match P9Server::bind_unix(driver, &socket, server_options).await {
+                    Ok(server) => server,
+                    Err(error) => {
+                        cleanup_socket_directory(directory.as_deref());
+                        return Err(error);
+                    }
+                };
+                (
+                    Arc::new(server),
+                    socket.to_string_lossy().into_owned(),
+                    P9MountTarget {
+                        transport: P9MountTransport::Unix,
+                        port: None,
+                    },
+                    directory,
+                )
+            }
+            P9MountTransport::Tcp => {
+                let host = options.host.clone();
+                if let Some(reason) = tcp_source_refusal(&host) {
+                    return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
+                }
+                let server_options = P9ServerOptions {
+                    host: host.clone(),
+                    port: options.port.unwrap_or(0),
+                    msize: Some(mount_msize(options.mount_msize)),
+                    read_only: options.read_only,
+                    ..P9ServerOptions::default()
+                };
+                let server = P9Server::bind(driver, server_options).await?;
+                let port = server.local_addr()?.port();
+                (
+                    Arc::new(server),
+                    host,
+                    P9MountTarget {
+                        transport: P9MountTransport::Tcp,
+                        port: Some(port),
+                    },
+                    None,
+                )
+            }
         }
     };
 
-    let serve_server = Arc::clone(&server);
-    let serve_task = tokio::spawn(async move { serve_server.serve().await });
+    let _adoption = server.adoption_lock().lock().await;
     let before = server
         .clients()?
         .into_iter()
         .map(|connection| connection.id())
         .collect::<std::collections::HashSet<_>>();
-    let mount_options = p9_mount_options(&target, &options)?;
+    let mount_options = match p9_mount_options(&target, &options) {
+        Ok(options) => options,
+        Err(error) => {
+            let _ = server.close().await;
+            cleanup_socket_directory(socket_dir.as_deref());
+            return Err(error);
+        }
+    };
+    let serve_task = match server.start() {
+        Ok(task) => Some(task),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => None,
+        Err(error) => {
+            let _ = server.close().await;
+            cleanup_socket_directory(socket_dir.as_deref());
+            return Err(error);
+        }
+    };
     let output = Command::new("mount")
         .args(["-i", "-t", "9p", "-o", &mount_options, "--"])
         .arg(&source)
@@ -449,7 +557,9 @@ where
         Ok(output) if output.status.success() => output,
         Ok(output) => {
             let _ = server.close().await;
-            let _ = serve_task.await;
+            if let Some(task) = serve_task {
+                let _ = task.await;
+            }
             cleanup_socket_directory(socket_dir.as_deref());
             return Err(io::Error::other(format!(
                 "mount -t 9p failed ({}): {}",
@@ -459,28 +569,57 @@ where
         }
         Err(error) => {
             let _ = server.close().await;
-            let _ = serve_task.await;
+            if let Some(task) = serve_task {
+                let _ = task.await;
+            }
             cleanup_socket_directory(socket_dir.as_deref());
             return Err(error);
         }
     };
     let _ = output;
 
-    let connection = server
-        .clients()?
-        .into_iter()
-        .find(|connection| !before.contains(&connection.id()))
-        .ok_or_else(|| io::Error::other("mount succeeded but no 9P connection arrived"))?;
+    let connection = match server.clients()?.into_iter().find(|connection| {
+        !before.contains(&connection.id())
+            && plausible_mount_connection(&target, &source, connection)
+    }) {
+        Some(connection) => connection,
+        None => {
+            let _ = run_command("umount", &[mountpoint.as_os_str()], options.unmount_timeout).await;
+            let _ = server.close().await;
+            if let Some(task) = serve_task {
+                let _ = task.await;
+            }
+            cleanup_socket_directory(socket_dir.as_deref());
+            return Err(io::Error::other(
+                "mount succeeded but no 9P connection arrived",
+            ));
+        }
+    };
+    drop(_adoption);
+    let connection_for_monitor = connection.clone();
     let state = Arc::new(MountState {
         stopping: AtomicBool::new(false),
-        unmount_started: AtomicBool::new(false),
+        teardown_started: AtomicBool::new(false),
         done: AtomicBool::new(false),
         complete: Notify::new(),
         failure: Mutex::new(None),
         server: Arc::clone(&server),
         socket_dir,
-        serve_task: Mutex::new(Some(serve_task)),
+        serve_task: Mutex::new(serve_task),
         timeout: options.unmount_timeout,
+    });
+    let monitor_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        connection_for_monitor.wait_closed().await;
+        if monitor_state
+            .teardown_started
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            monitor_state.stopping.store(true, Ordering::Release);
+            let result = monitor_state.finish_resources().await;
+            monitor_state.record_result(result).await;
+        }
     });
     let mount = P9Mount {
         mountpoint,

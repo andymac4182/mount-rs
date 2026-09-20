@@ -1211,35 +1211,60 @@ impl P9Session {
             } else {
                 None
             };
-            let now = mount_rs_core::types::now_ms();
-            let atime = if valid & P9_SETATTR_ATIME == 0 {
-                current.as_ref().map_or(now, |stats| stats.atime_ms)
-            } else if valid & P9_SETATTR_ATIME_SET != 0 {
-                time_to_ms(request.atime)
+            if self.inner.driver.driver.has_utimens() {
+                let now_ns = i128::from(mount_rs_core::types::now_ms()) * 1_000_000;
+                let atime_ns = if valid & P9_SETATTR_ATIME == 0 {
+                    nonnegative_ms_to_ns(current.as_ref().map_or(0, |stats| stats.atime_ms))
+                } else if valid & P9_SETATTR_ATIME_SET != 0 {
+                    time_to_ns(request.atime)
+                } else {
+                    now_ns
+                };
+                let mtime_ns = if valid & P9_SETATTR_MTIME == 0 {
+                    nonnegative_ms_to_ns(current.as_ref().map_or(0, |stats| stats.mtime_ms))
+                } else if valid & P9_SETATTR_MTIME_SET != 0 {
+                    time_to_ns(request.mtime)
+                } else {
+                    now_ns
+                };
+                // A fid names the final path component.  Preserve 9P's
+                // no-follow metadata semantics when the driver offers the
+                // exact timestamp extension.
+                self.inner
+                    .driver
+                    .utimens(&snapshot.path, atime_ns, mtime_ns, false)
+                    .await?;
             } else {
-                now
-            };
-            let mtime = if valid & P9_SETATTR_MTIME == 0 {
-                current.as_ref().map_or(now, |stats| stats.mtime_ms)
-            } else if valid & P9_SETATTR_MTIME_SET != 0 {
-                time_to_ms(request.mtime)
-            } else {
-                now
-            };
-            match self
-                .inner
-                .driver
-                .lutimes(&snapshot.path, atime, mtime)
-                .await
-            {
-                Ok(()) => {}
-                Err(error) if error.is(ErrorCode::Enosys) => {
-                    self.inner
-                        .driver
-                        .utimes(&snapshot.path, atime, mtime)
-                        .await?
+                let now = mount_rs_core::types::now_ms();
+                let atime = if valid & P9_SETATTR_ATIME == 0 {
+                    current.as_ref().map_or(now, |stats| stats.atime_ms)
+                } else if valid & P9_SETATTR_ATIME_SET != 0 {
+                    time_to_ms(request.atime)
+                } else {
+                    now
+                };
+                let mtime = if valid & P9_SETATTR_MTIME == 0 {
+                    current.as_ref().map_or(now, |stats| stats.mtime_ms)
+                } else if valid & P9_SETATTR_MTIME_SET != 0 {
+                    time_to_ms(request.mtime)
+                } else {
+                    now
+                };
+                match self
+                    .inner
+                    .driver
+                    .lutimes(&snapshot.path, atime, mtime)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(error) if error.is(ErrorCode::Enosys) => {
+                        self.inner
+                            .driver
+                            .utimes(&snapshot.path, atime, mtime)
+                            .await?
+                    }
+                    Err(error) => return Err(error),
                 }
-                Err(error) => return Err(error),
             }
         }
         self.frame(header, P9_RSETATTR, 8, |_| Ok(()))
@@ -1527,6 +1552,14 @@ fn time_to_ms(time: P9Time) -> i64 {
         .saturating_mul(1_000_000_000)
         .saturating_add(time.nsec);
     (nanos / 1_000_000).min(i64::MAX as u64) as i64
+}
+
+fn time_to_ns(time: P9Time) -> i128 {
+    i128::from(time.sec) * 1_000_000_000 + i128::from(time.nsec)
+}
+
+fn nonnegative_ms_to_ns(milliseconds: i64) -> i128 {
+    i128::from(milliseconds.max(0)) * 1_000_000
 }
 
 fn write_intent(flags: u32) -> bool {
