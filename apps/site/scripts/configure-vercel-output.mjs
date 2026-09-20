@@ -27,16 +27,6 @@ if (config.version !== 3 || !fallback) {
 
 config.routes = [
   {
-    src: '/downloads/(.*)',
-    continue: true,
-    headers: {
-      ...securityHeaders,
-      'content-disposition': 'attachment',
-      'content-encoding': 'identity',
-      'content-type': 'application/octet-stream',
-    },
-  },
-  {
     src: '/assets/(.*)',
     continue: true,
     headers: {

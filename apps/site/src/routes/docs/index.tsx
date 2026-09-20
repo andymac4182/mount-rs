@@ -76,23 +76,24 @@ function DocsOverview() {
 
       <section className="cli-artifact-card" aria-labelledby="cli-artifact-heading">
         <div className="cli-artifact-copy">
-          <p className="eyebrow">Built CLI artifact</p>
+          <p className="eyebrow">GitHub Release · Preview</p>
           <h2 id="cli-artifact-heading">mount-rs 0.1.0</h2>
           <p>
-            A release-mode <code>mount-rs</code> executable built from the
-            repository's only CLI target. This artifact is platform-specific
-            and does not imply a complete release matrix or native-mount
-            qualification.
+            The repository's only CLI target, built in release mode and
+            published as a GitHub prerelease. This artifact is
+            platform-specific and does not imply a complete release matrix or
+            native-mount qualification.
           </p>
         </div>
         <div className="cli-artifact-meta">
           <div><span>Target</span><code>aarch64-apple-darwin</code></div>
           <div><span>Artifact</span><code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code></div>
-          <a className="button button-warm" href="/downloads/mount-rs-0.1.0-aarch64-apple-darwin.tar.gz" download>
-            Download built CLI
+          <div><span>SHA-256</span><code>437f9068bd1fe274abd3cafe42eb7eca7e7c71f15c7220dd2edd6c3c31a50f18</code></div>
+          <a className="button button-warm" href="https://github.com/andymac4182/mount-rs/releases/download/v0.1.0-cli-preview/mount-rs-0.1.0-aarch64-apple-darwin.tar.gz" target="_blank" rel="noreferrer">
+            Download from GitHub
           </a>
-          <a className="cli-artifact-checksums" href="/downloads/SHA256SUMS">
-            SHA-256 checksums <span aria-hidden="true">↗</span>
+          <a className="cli-artifact-checksums" href="https://github.com/andymac4182/mount-rs/releases/tag/v0.1.0-cli-preview" target="_blank" rel="noreferrer">
+            GitHub Release + checksum manifest <span aria-hidden="true">↗</span>
           </a>
         </div>
       </section>
