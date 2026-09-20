@@ -138,6 +138,35 @@ async function capture(operation) {
   }
 }
 
+/**
+ * Compare one capability-limited operation without deciding its errno in the
+ * native test first. The pinned oracle decides whether the row is supported;
+ * an unsupported row must produce the oracle's own ENOSYS/ENOTSUP answer.
+ */
+async function compareCapabilityRow({
+  label,
+  supported,
+  syscall,
+  oracleOperation,
+  nativeOperation,
+}) {
+  const [expected, actual] = await Promise.all([
+    capture(oracleOperation),
+    capture(nativeOperation),
+  ]);
+  assert.deepEqual(actual, expected, `${label}: native result differs from oracle`);
+  if (supported) {
+    assert.equal(expected, null, `${label}: oracle claims support but rejected the operation`);
+    return "implemented";
+  }
+  assert.ok(
+    expected && (expected.code === "ENOSYS" || expected.code === "ENOTSUP"),
+    `${label}: oracle did not classify the unsupported operation as ENOSYS/ENOTSUP`,
+  );
+  assert.equal(expected.syscall, syscall, `${label}: oracle syscall classification changed`);
+  return "unsupported";
+}
+
 function makeOracle() {
   const backing = memoryStorageDriver();
   const storage = createStorage({
@@ -160,6 +189,8 @@ function makeNative() {
 
 const oracle = makeOracle();
 const native = makeNative();
+const capabilityCounts = { implemented: 0, unsupported: 0, skipped: 0 };
+let capabilityRowCount = 0;
 try {
   // The capability profile is the oracle for everything the flat key space
   // cannot represent. In particular, root-shaped ownership does not promote
@@ -193,11 +224,35 @@ try {
   mutableSnapshot.extensions.push("mknod");
   assert.deepEqual(capabilityView(native.fs.capabilities), expectedCapabilities);
 
-  const unsupported = [
-    ["hardlink", (fs) => fs.link("/file", "/hardlink")],
-    ["symlink", (fs) => fs.symlink("file", "/symlink")],
-    ["readlink", (fs) => fs.readlink("/file")],
-    ["statfs", (fs) => fs.statfs("/")],
+  const capabilityRows = [
+    {
+      label: "hardlink",
+      capability: "hardlinks",
+      syscall: "link",
+      oracleOperation: () => oracle.fs.link("/file", "/hardlink"),
+      nativeOperation: () => native.fs.link("/file", "/hardlink"),
+    },
+    {
+      label: "symlink",
+      capability: "symlinks",
+      syscall: "symlink",
+      oracleOperation: () => oracle.fs.symlink("file", "/symlink"),
+      nativeOperation: () => native.fs.symlink("file", "/symlink"),
+    },
+    {
+      label: "readlink",
+      capability: "symlinks",
+      syscall: "readlink",
+      oracleOperation: () => oracle.fs.readlink("/file"),
+      nativeOperation: () => native.fs.readlink("/file"),
+    },
+    {
+      label: "statfs",
+      capability: "statfs",
+      syscall: "statfs",
+      oracleOperation: () => oracle.fs.statfs("/"),
+      nativeOperation: () => native.fs.statfs("/"),
+    },
   ];
   const fileBytes = new Uint8Array([1, 2, 3]);
   await oracle.storage.setItemRaw("file", fileBytes);
@@ -218,41 +273,52 @@ try {
   assert.equal(nativeMetadataStats.ctimeMs, fileMetadata.ctime.getTime());
   assert.equal(nativeMetadataStats.birthtimeMs, fileMetadata.birthtime.getTime());
   native.store.metadata.delete("file");
-  for (const [label, operation] of unsupported) {
-    const [expected, actual] = await Promise.all([
-      capture(() => operation(oracle.fs)),
-      capture(() => operation(native.fs)),
-    ]);
-    assert.deepEqual(actual, expected, `${label}: native result differs from oracle`);
-    assert.deepEqual(actual, {
-      code: "ENOSYS",
-      syscall: label === "hardlink" ? "link" : label,
-      path: null,
-      dest: null,
-    });
+  capabilityRowCount = capabilityRows.length + 1;
+  for (const row of capabilityRows) {
+    const supported = expectedCapabilities[row.capability] === true;
+    // These rows are intentionally exercised even when the oracle says they
+    // are absent. A missing optional method is part of the oracle contract;
+    // it is not a reason to skip the comparison.
+    const classification = await compareCapabilityRow({ ...row, supported });
+    capabilityCounts[classification] += 1;
   }
 
   // The mknod surface is an extension in mountx, not a normal FsDriver method.
-  // The oracle therefore has no mountx extension; the Rust facade still
-  // exposes its compatibility method, which must remain an explicit ENOSYS.
+  // Compare the actual oracle extension classification before constructing the
+  // expected refusal. There is no callable oracle method when the extension is
+  // absent; the pinned oracle's transport contract uses its own fsError helper
+  // to answer ENOSYS for a non-regular mknod request in that case.
+  const oracleMknod = oracle.fs.mountx?.mknod;
+  const oracleMknodSupported =
+    expectedCapabilities.extensions.includes("mknod") && typeof oracleMknod === "function";
   assert.equal(oracle.fs.mountx, undefined);
-  const mknodExpected = errorView(errors.fsError("ENOSYS", { syscall: "mknod" }));
-  assert.deepEqual(errorView(await (async () => {
-    try {
-      await native.fs.mknod("/fifo", 0o010644, 0);
-      return null;
-    } catch (error) {
-      return error;
+  assert.equal(oracleMknodSupported, false);
+  const oracleMknodOperation = (path) => {
+    if (oracleMknodSupported) {
+      return oracleMknod.call(oracle.fs.mountx, path, 0o010644, 0);
     }
-  })()), mknodExpected);
-  assert.deepEqual(errorView(await (async () => {
-    try {
-      await native.fs.mountx.mknod("/fifo-mountx", 0o010644, 0);
-      return null;
-    } catch (error) {
-      return error;
-    }
-  })()), mknodExpected);
+    return Promise.reject(errors.fsError("ENOSYS", { syscall: "mknod" }));
+  };
+  const nativeMknod = native.fs.mknod;
+  assert.equal(typeof nativeMknod, "function");
+  capabilityCounts[await compareCapabilityRow({
+    label: "mknod",
+    supported: oracleMknodSupported,
+    syscall: "mknod",
+    oracleOperation: () => oracleMknodOperation("/fifo"),
+    nativeOperation: () => nativeMknod.call(native.fs, "/fifo", 0o010644, 0),
+  })] += 1;
+
+  // The compatibility namespace and the direct convenience method must make
+  // the same oracle-backed classification, not merely both happen to reject.
+  const nativeMountxMknod = native.fs.mountx?.mknod;
+  assert.equal(typeof nativeMountxMknod, "function");
+  const [mountxExpected, mountxActual] = await Promise.all([
+    capture(() => oracleMknodOperation("/fifo-mountx")),
+    capture(() => nativeMountxMknod.call(native.fs.mountx, "/fifo-mountx", 0o010644, 0)),
+  ]);
+  assert.deepEqual(mountxActual, mountxExpected, "mountx.mknod: native result differs from oracle");
+  assert.equal(mountxExpected?.code, "ENOSYS");
 
   // Permissions and link-aware timestamp calls are supported as overlays. In
   // a no-symlink profile lstat/lutimes are intentionally indistinguishable
@@ -315,4 +381,9 @@ try {
   await oracle.fs.shutdown?.();
 }
 
-console.log("mount-rs Unstorage capability parity: PASS");
+console.log(
+  `mount-rs Unstorage capability parity: PASS (${capabilityRowCount} rows: ` +
+    `${capabilityCounts.implemented} implemented, ${capabilityCounts.unsupported} ` +
+    `oracle-classified unsupported, ${capabilityCounts.skipped} skipped; ` +
+    "lstat/stat parity covered)",
+);
