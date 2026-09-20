@@ -724,7 +724,6 @@ fn cleanup_native_mount(mountpoint: &std::path::Path, transport: &str) {
         if let Err(error) = cleanup_native_mount_bounded(mountpoint) {
             eprintln!("bounded native mount cleanup failed: {error}");
         }
-        return;
     }
 
     #[cfg(target_os = "macos")]
