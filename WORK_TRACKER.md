@@ -124,13 +124,18 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
-- [ ] W05.1 Unblock D01 and run authenticated tests against actual Cloudflare R2.
-  Bucket provisioning succeeded through the connected MCP on 2026-09-20;
-  token-management authorization remains required. No live data tests passed yet.
+- [x] W05.1 Unblock D01 and run authenticated tests against actual Cloudflare R2.
+  On 2026-09-20, main passed the explicit live filesystem contract test and
+  SQLite-metadata/R2-chunk roundtrip/reopen test (two tests, no skips). Credentials
+  remain in Keychain; this is local dirty-worktree evidence, not release acceptance.
 - [ ] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
 - [ ] W05.4 Record service identity and revision without recording credentials.
+- [ ] W05.5 Fix live Node factory expected-byte assertion and guarantee unique
+  cloud fixture keys with exact cleanup. The full PGlite/R2 run stopped at the
+  factory assertion: overwriting three bytes of `r2:one` correctly returned
+  `twoone`; the test expected `two:one`. Remaining gates did not execute.
 
 ## W06 — RustFS integration service
 
