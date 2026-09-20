@@ -407,6 +407,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   pinned revision. Record exact source paths, transaction/locking/durability
   assumptions, ambiguous-commit behavior and recovery tests; map adopt/adapt/
   reject decisions to W07/W12/W15/W28 and preserve applicable attribution.
+  Source review recorded at [Rivet Actors review](docs/reviews/rivet-actors.md),
+  pinned to `78336a1a0ee33bb45e6b15e89963cbe91713353b`: Apache-2.0, no code
+  copied. Relevant implementation is UDB/Postgres/RocksDB rather than a direct
+  FoundationDB client. Stable operation IDs, fencing and explicit sync/commit
+  boundaries are applicable; single-actor no-op SQLite locks are not. Mapping
+  all lessons into implemented acceptance tests remains open.
 
 ## W22 — Distributed cache: discuss after primary work
 
