@@ -660,6 +660,29 @@ fn setattr_in(value: NativeFuseSetattrIn) -> protocol::FuseSetattrIn {
 }
 
 #[napi(object)]
+pub struct NativeFuseOpenIn {
+    pub flags: u32,
+    #[napi(js_name = "openFlags")]
+    pub open_flags: u32,
+}
+
+impl From<protocol::FuseOpenIn> for NativeFuseOpenIn {
+    fn from(value: protocol::FuseOpenIn) -> Self {
+        Self {
+            flags: value.flags,
+            open_flags: value.open_flags,
+        }
+    }
+}
+
+fn open_in(value: NativeFuseOpenIn) -> protocol::FuseOpenIn {
+    protocol::FuseOpenIn {
+        flags: value.flags,
+        open_flags: value.open_flags,
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseOpenOut {
     pub fh: BigInt,
     #[napi(js_name = "openFlags")]
@@ -936,6 +959,39 @@ impl From<protocol::FuseGetxattrOut> for NativeFuseGetxattrOut {
     fn from(value: protocol::FuseGetxattrOut) -> Self {
         Self { size: value.size }
     }
+}
+
+#[napi(js_name = "fuseDecodeOpenIn")]
+pub fn fuse_decode_open_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseOpenIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_OPEN,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Open(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_OPEN did not decode as an open request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeOpenIn")]
+pub fn fuse_encode_open_in(
+    value: NativeFuseOpenIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_OPEN,
+        &protocol::FuseRequestBody::Open(open_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeEntryOut")]
