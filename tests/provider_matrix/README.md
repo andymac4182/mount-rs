@@ -14,7 +14,7 @@ objects created below their run-owned prefix.
 | --- | --- | --- | --- |
 | direct memfs | \`memfs\` | \`memfs\` factory | memory config/runtime |
 | memory metadata + memory blocks | \`memory/memory\` | \`chunked-memory/memory\` | memory config/runtime |
-| SQLite metadata + SQLite blocks | \`sqlite/sqlite\` using \`:memory:\` | \`chunked-sqlite/sqlite\` using \`:memory:\` plus the SQLite factory | SQLite config/runtime |
+| SQLite metadata + SQLite blocks | \`sqlite/sqlite\` using \`:memory:\` | \`chunked-sqlite/sqlite\` using \`:memory:\` plus the SQLite factory | SQLite config plus real CLI SDK reopen |
 | PGlite metadata + PGlite blocks | gated by \`PGLITE_DATABASE_URL\` or \`MOUNT_RS_PGLITE_URL\` | gated by \`PGLITE_DATABASE_URL\` | config validation only |
 | memory/SQLite metadata + Cloudflare R2 blocks | gated by all four \`R2_*\` variables | \`Filesystem.r2\` factory gated by all four \`R2_*\` variables | config validation only |
 | PGlite metadata + Cloudflare R2 blocks | gated by both PGlite and R2 | not duplicated here | config validation only |
@@ -36,10 +36,10 @@ node tests/provider_matrix/node-sdk.mjs
 node tests/provider_matrix/cli.mjs
 \`\`\`
 
-The CLI matrix also runs the portable Rust-backed Node CLI SDK self-test. The
-Rust CLI runtime rows construct filesystems through `mount-rs-sdk`; native
-mount self-tests remain explicit platform gates because they require a usable
-FUSE/NFS transport.
+The CLI matrix runs both process-level SDK CLIs: the real Rust binary's
+mount-free `sdk-self-test` (memory and SQLite reopen) and the Rust-backed Node
+CLI's SDK self-test. Native mount self-tests remain explicit platform gates
+because they require a usable FUSE/NFS transport.
 
 The Node SDK command expects the checked-out native addon at
 \`integrations/mount-rs-napi/mount-rs.darwin-arm64.node\` (or the corresponding
@@ -65,5 +65,7 @@ behavior is intentionally not counted as Cloudflare evidence.
 Each runner emits \`PASS\`, \`SKIP\`, or \`FAIL\` lines and exits nonzero on a
 failure. \`validate-config\` is deliberately static: the CLI PGlite/R2 config
 row proves schema and provider selection only, and does not prove service or
-credential access. Native mounting and full live CLI/R2 acceptance remain the
-repository's existing opt-in acceptance gates.
+credential access. The memory and SQLite CLI self-tests are real SDK-backed
+process checks; PGlite and R2 CLI reopen/remote acceptance remain opt-in gates.
+Native mounting and full live CLI/R2 acceptance remain the repository's
+existing opt-in acceptance gates.
