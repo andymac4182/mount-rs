@@ -100,6 +100,57 @@ fn protocol_context(value: Option<NativeFuseProtocolContext>) -> Option<protocol
     })
 }
 
+fn ioctl_take<'a>(
+    body: &'a [u8],
+    offset: &mut usize,
+    size: usize,
+    what: &str,
+) -> Result<&'a [u8], ProtocolError> {
+    let end = offset
+        .checked_add(size)
+        .ok_or_else(|| ProtocolError::at(format!("{what} length overflows"), *offset))?;
+    if end > body.len() {
+        return Err(ProtocolError::at(
+            format!(
+                "truncated {what}: need {size} byte(s), {} remain",
+                body.len().saturating_sub(*offset)
+            ),
+            *offset,
+        ));
+    }
+    let value = &body[*offset..end];
+    *offset = end;
+    Ok(value)
+}
+
+fn ioctl_u32(body: &[u8], offset: &mut usize, what: &str) -> Result<u32, ProtocolError> {
+    Ok(u32::from_le_bytes(
+        ioctl_take(body, offset, 4, what)?.try_into().unwrap(),
+    ))
+}
+
+fn ioctl_i32(body: &[u8], offset: &mut usize, what: &str) -> Result<i32, ProtocolError> {
+    Ok(i32::from_le_bytes(
+        ioctl_take(body, offset, 4, what)?.try_into().unwrap(),
+    ))
+}
+
+fn ioctl_u64(body: &[u8], offset: &mut usize, what: &str) -> Result<u64, ProtocolError> {
+    Ok(u64::from_le_bytes(
+        ioctl_take(body, offset, 8, what)?.try_into().unwrap(),
+    ))
+}
+
+fn ioctl_finish(body: &[u8], offset: usize, what: &str) -> Result<(), ProtocolError> {
+    if offset != body.len() {
+        return Err(ProtocolError::at(
+            format!("trailing bytes in {what}: {} byte(s)", body.len() - offset),
+            offset,
+        ));
+    }
+    Ok(())
+}
+
 #[napi(object)]
 pub struct NativeFuseInHeader {
     pub len: u32,
@@ -623,6 +674,74 @@ fn interrupt_in(value: NativeFuseInterruptIn) -> protocol::FuseInterruptIn {
     protocol::FuseInterruptIn {
         unique: u64_from_bigint(&value.unique),
     }
+}
+
+#[napi(object)]
+pub struct NativeFuseIoctlIn {
+    pub fh: BigInt,
+    pub flags: u32,
+    pub cmd: u32,
+    pub arg: BigInt,
+    #[napi(js_name = "inSize")]
+    pub in_size: u32,
+    #[napi(js_name = "outSize")]
+    pub out_size: u32,
+}
+
+fn decode_ioctl_in(body: &[u8]) -> Result<NativeFuseIoctlIn, ProtocolError> {
+    let mut offset = 0;
+    let value = NativeFuseIoctlIn {
+        fh: bigint(ioctl_u64(body, &mut offset, "fuse_ioctl_in.fh")?),
+        flags: ioctl_u32(body, &mut offset, "fuse_ioctl_in.flags")?,
+        cmd: ioctl_u32(body, &mut offset, "fuse_ioctl_in.cmd")?,
+        arg: bigint(ioctl_u64(body, &mut offset, "fuse_ioctl_in.arg")?),
+        in_size: ioctl_u32(body, &mut offset, "fuse_ioctl_in.in_size")?,
+        out_size: ioctl_u32(body, &mut offset, "fuse_ioctl_in.out_size")?,
+    };
+    ioctl_finish(body, offset, "fuse_ioctl_in")?;
+    Ok(value)
+}
+
+fn encode_ioctl_in(value: NativeFuseIoctlIn) -> Vec<u8> {
+    let mut body = Vec::with_capacity(32);
+    body.extend_from_slice(&u64_from_bigint(&value.fh).to_le_bytes());
+    body.extend_from_slice(&value.flags.to_le_bytes());
+    body.extend_from_slice(&value.cmd.to_le_bytes());
+    body.extend_from_slice(&u64_from_bigint(&value.arg).to_le_bytes());
+    body.extend_from_slice(&value.in_size.to_le_bytes());
+    body.extend_from_slice(&value.out_size.to_le_bytes());
+    body
+}
+
+#[napi(object)]
+pub struct NativeFuseIoctlOut {
+    pub result: i32,
+    pub flags: u32,
+    #[napi(js_name = "inIovs")]
+    pub in_iovs: u32,
+    #[napi(js_name = "outIovs")]
+    pub out_iovs: u32,
+}
+
+fn decode_ioctl_out(body: &[u8]) -> Result<NativeFuseIoctlOut, ProtocolError> {
+    let mut offset = 0;
+    let value = NativeFuseIoctlOut {
+        result: ioctl_i32(body, &mut offset, "fuse_ioctl_out.result")?,
+        flags: ioctl_u32(body, &mut offset, "fuse_ioctl_out.flags")?,
+        in_iovs: ioctl_u32(body, &mut offset, "fuse_ioctl_out.in_iovs")?,
+        out_iovs: ioctl_u32(body, &mut offset, "fuse_ioctl_out.out_iovs")?,
+    };
+    ioctl_finish(body, offset, "fuse_ioctl_out")?;
+    Ok(value)
+}
+
+fn encode_ioctl_out(value: NativeFuseIoctlOut) -> Vec<u8> {
+    let mut body = Vec::with_capacity(16);
+    body.extend_from_slice(&value.result.to_le_bytes());
+    body.extend_from_slice(&value.flags.to_le_bytes());
+    body.extend_from_slice(&value.in_iovs.to_le_bytes());
+    body.extend_from_slice(&value.out_iovs.to_le_bytes());
+    body
 }
 
 #[napi(object)]
@@ -2196,6 +2315,30 @@ pub fn fuse_encode_interrupt_in(value: NativeFuseInterruptIn) -> napi::Result<Bu
     )
     .map(Buffer::from)
     .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeIoctlIn")]
+pub fn fuse_decode_ioctl_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseIoctlIn> {
+    decode_ioctl_in(body.as_ref()).map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseEncodeIoctlIn")]
+pub fn fuse_encode_ioctl_in(value: NativeFuseIoctlIn) -> Buffer {
+    Buffer::from(encode_ioctl_in(value))
+}
+
+#[napi(js_name = "fuseDecodeIoctlOut")]
+pub fn fuse_decode_ioctl_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseIoctlOut> {
+    decode_ioctl_out(body.as_ref()).map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseEncodeIoctlOut")]
+pub fn fuse_encode_ioctl_out(value: NativeFuseIoctlOut) -> Buffer {
+    Buffer::from(encode_ioctl_out(value))
 }
 
 #[napi(js_name = "fuseDecodePollIn")]
