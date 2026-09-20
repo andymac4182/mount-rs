@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `2452463`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `decb71f`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -26,23 +26,23 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Verifying | Main |
+| W01 | Core and mountx parity | Verifying | Main / Linnaeus (ledger) |
 | W02 | Metadata/block split and chunking | Verifying | Main |
-| W03 | Memory and SQLite stores | Landed; extending | Jason |
-| W04 | PGlite | Verifying | Copernicus / Main |
+| W03 | Memory and SQLite stores | Landed; extending | Main |
+| W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Live local tests passed; acceptance incomplete | Main |
-| W06 | RustFS integration service | Landed; extending | Hooke |
-| W07 | FoundationDB | Implementing | Hilbert |
-| W08 | TiDB | Implementing | Arendt |
-| W09 | Node / napi-rs and public API | Verifying | Main / Jason |
+| W06 | RustFS integration service | Landed; extending | Main |
+| W07 | FoundationDB | Implementing | Ptolemy |
+| W08 | TiDB | Implementing | Main |
+| W09 | Node / napi-rs and public API | Verifying | Main / Lagrange |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | Landed; verifying | Main |
-| W11 | Config-driven CLI | Landed; extending | Chandrasekhar |
+| W11 | Config-driven CLI | Landed; extending | Main |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
-| W13 | macOS FSKit | Implementing | James |
+| W13 | macOS FSKit | Implementing | Lovelace |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
-| W15 | Mount-free SQLite VFS | Implementing | Hume |
-| W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Confucius / Main |
-| W17 | Multi-drive HTTP server | Implementing | Copernicus |
+| W15 | Mount-free SQLite VFS | Implementing | Peirce |
+| W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
+| W17 | Multi-drive HTTP server | Implementing | Epicurus |
 | W18 | Benchmarks and dependency budget | Partial implementation | Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
@@ -51,13 +51,19 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | Site draft ready; deployment pending | Main |
 | W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
-| W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
-| W27 | Native Windows support and CI | CI added; qualification pending | Main |
+| W26 | Apache Ozone S3 backend | Implementing; unverified | Darwin |
+| W27 | Native Windows support and CI | CI added; qualification pending | Lagrange / Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
 
 ## Decisions and external prerequisites
+
+- After the app restart, the nine prior worker handles were missing. Their
+  checkout edits were preserved. Seven replacement Luna Max workers were
+  started and verified running; current ownership is in the dashboard above.
+  Historical worker names in individual evidence entries identify earlier
+  work, not live sessions. Main owns integration, root manifests, and commits.
 
 - [x] **D01 — Live R2 credentials:** created bucket-scoped object read/write
   credentials for `mount-rs-integration-tests`, stored in macOS Keychain, expiring
