@@ -295,9 +295,9 @@ from the smallest contract boundary to the larger environment boundary:
    live-R2 and native transport concurrency remain separate acceptance gates.
 4. **Remaining public transport/API surface (P1):** the FUSE directory,
    `READ`/`WRITE`, `GETATTR`/`SETATTR`, `OPEN`/`OPENDIR`, `LOOKUP`,
-   `READLINK`, `STATFS`, `BATCH_FORGET`, and `INTERRUPT` body codecs are now
-   public and oracle-differentially tested. Expose the remaining request/reply
-   bodies, session and native-mount surfaces, then run
+   `READLINK`, `STATFS`, `BATCH_FORGET`, `INTERRUPT`, and `POLL` body codecs are
+   now public and oracle-differentially tested. Expose the remaining
+   request/reply bodies, session and native-mount surfaces, then run
    oracle-backed subpath tests for every exported transport rather than
    treating codec or inode fixture tests as transport completion.
 
@@ -522,6 +522,25 @@ the closure items listed above.
   Unstorage parity packet, and the prior macOS NFS Node CLI acceptance all
   exited 0. Hosted Linux/Windows, FSKit, live R2/PGlite and native kernel
   cancellation remain explicit boundaries.
+
+### W01 third parallel rotation evidence (2026-09-21)
+
+- **PASS** — `15026f2` Rust FUSE `POLL` session boundary: valid 24-byte
+  requests reach the explicit safe `ENOSYS` boundary; truncated, malformed and
+  trailing frames are rejected with `EINVAL`. The locked FUSE package suite
+  passed 50 tests and the scoped `-D warnings` Clippy gate passed.
+- **PASS** — `5b7f982` napi-rs FUSE `POLL` request/reply codecs: generated
+  JavaScript/declaration artifacts, protocol-minor pinned-oracle differentials,
+  malformed/truncated/trailing input checks, package build, TypeScript checks
+  and the full N-API suite passed. Existing FUSE declarations were retained.
+- **PASS** — `d28f31a` CI wiring: the Node SDK CLI native mount gate is scoped
+  to Linux/macOS, opt-in, prerequisite-probed and bounded. Local macOS NFS
+  acceptance passed; hosted CI results remain unverified.
+- **PASS** — combined current-tree gate: `cargo fmt --all -- --check`,
+  `cargo test --workspace --all-targets --all-features --locked --offline`,
+  and `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX pnpm test` in the N-API package
+  exited 0. FUSE `POLL` is still intentionally unsupported at the driver
+  semantics boundary, and hosted/native platform gates remain open.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
