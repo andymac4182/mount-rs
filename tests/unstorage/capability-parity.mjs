@@ -70,6 +70,14 @@ const options = {
   dirMode: 0o750,
 };
 
+const fileMetadata = {
+  size: 3,
+  atime: new Date(1_699_999_999_000),
+  mtime: new Date(1_700_000_000_000),
+  ctime: new Date(1_700_000_000_500),
+  birthtime: new Date(1_699_999_998_000),
+};
+
 function capabilityView(capabilities) {
   return {
     handles: capabilities.handles,
@@ -88,7 +96,7 @@ function capabilityView(capabilities) {
   };
 }
 
-function statView(stats, includeTimes = true) {
+function statView(stats, includeTimes = true, includeCreationTimes = false) {
   const value = {
     mode: stats.mode,
     nlink: stats.nlink,
@@ -104,6 +112,10 @@ function statView(stats, includeTimes = true) {
   if (includeTimes) {
     value.atimeMs = stats.atimeMs;
     value.mtimeMs = stats.mtimeMs;
+  }
+  if (includeCreationTimes) {
+    value.ctimeMs = stats.ctimeMs;
+    value.birthtimeMs = stats.birthtimeMs;
   }
   return value;
 }
@@ -127,7 +139,15 @@ async function capture(operation) {
 }
 
 function makeOracle() {
-  const storage = createStorage({ driver: memoryStorageDriver() });
+  const backing = memoryStorageDriver();
+  const storage = createStorage({
+    driver: {
+      ...backing,
+      getMeta(key) {
+        return key === "file" ? fileMetadata : {};
+      },
+    },
+  });
   const driver = createOracleDriver(storage, options);
   return { storage, driver, fs: createLoopback(driver) };
 }
@@ -179,8 +199,25 @@ try {
     ["readlink", (fs) => fs.readlink("/file")],
     ["statfs", (fs) => fs.statfs("/")],
   ];
-  await native.fs.writeFile("/file", new Uint8Array([1, 2, 3]));
-  await oracle.fs.writeFile("/file", new Uint8Array([1, 2, 3]));
+  const fileBytes = new Uint8Array([1, 2, 3]);
+  await oracle.storage.setItemRaw("file", fileBytes);
+  native.store.values.set("file", new Uint8Array(fileBytes));
+  native.store.metadata.set("file", fileMetadata);
+
+  // Native metadata is a supported read path. Seed the raw stores directly so
+  // the driver's process-local write overlay cannot mask the oracle metadata.
+  const [oracleMetadataStats, nativeMetadataStats] = await Promise.all([
+    oracle.fs.stat("/file"),
+    native.fs.stat("/file"),
+  ]);
+  assert.deepEqual(
+    statView(nativeMetadataStats, true, true),
+    statView(oracleMetadataStats, true, true),
+    "native metadata fields differ from the pinned oracle",
+  );
+  assert.equal(nativeMetadataStats.ctimeMs, fileMetadata.ctime.getTime());
+  assert.equal(nativeMetadataStats.birthtimeMs, fileMetadata.birthtime.getTime());
+  native.store.metadata.delete("file");
   for (const [label, operation] of unsupported) {
     const [expected, actual] = await Promise.all([
       capture(() => operation(oracle.fs)),
