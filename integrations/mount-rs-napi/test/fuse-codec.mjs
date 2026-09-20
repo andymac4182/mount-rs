@@ -10,6 +10,14 @@ import {
   encodeWriteIn as namedEncodeWriteIn,
   decodeWriteOut as namedDecodeWriteOut,
   encodeWriteOut as namedEncodeWriteOut,
+  decodeGetattrIn as namedDecodeGetattrIn,
+  encodeGetattrIn as namedEncodeGetattrIn,
+  decodeGetattrOut as namedDecodeGetattrOut,
+  encodeGetattrOut as namedEncodeGetattrOut,
+  decodeSetattrIn as namedDecodeSetattrIn,
+  encodeSetattrIn as namedEncodeSetattrIn,
+  decodeSetattrOut as namedDecodeSetattrOut,
+  encodeSetattrOut as namedEncodeSetattrOut,
 } from "../fuse.cjs";
 
 for (const [name, value] of [
@@ -21,6 +29,14 @@ for (const [name, value] of [
   ["encodeWriteIn", namedEncodeWriteIn],
   ["decodeWriteOut", namedDecodeWriteOut],
   ["encodeWriteOut", namedEncodeWriteOut],
+  ["decodeGetattrIn", namedDecodeGetattrIn],
+  ["encodeGetattrIn", namedEncodeGetattrIn],
+  ["decodeGetattrOut", namedDecodeGetattrOut],
+  ["encodeGetattrOut", namedEncodeGetattrOut],
+  ["decodeSetattrIn", namedDecodeSetattrIn],
+  ["encodeSetattrIn", namedEncodeSetattrIn],
+  ["decodeSetattrOut", namedDecodeSetattrOut],
+  ["encodeSetattrOut", namedEncodeSetattrOut],
 ]) {
   assert.equal(value, fuse[name], `FUSE named export ${name}`);
 }
@@ -91,6 +107,33 @@ assert.deepEqual(fuse.decodeWriteIn(writeBody, writeContext), {
   data: Buffer.from(writeInput.data),
 });
 assert.deepEqual(fuse.decodeWriteOut(fuse.encodeWriteOut({ size: 4 })), { size: 4 });
+
+const getattrContext = { minor: 41, setxattrExt: false };
+const getattrInput = { getattrFlags: fuse.FUSE_GETATTR_FH, fh: 0x3132333435363738n };
+const setattrInput = {
+  valid: fuse.FATTR_MODE | fuse.FATTR_SIZE | fuse.FATTR_ATIME | fuse.FATTR_MTIME,
+  fh: 0x0102030405060708n,
+  size: 0x1112131415161718n,
+  lockOwner: 0x2122232425262728n,
+  atime: 0x3132333435363738n,
+  mtime: 0x4142434445464748n,
+  ctime: 0x5152535455565758n,
+  atimensec: 101,
+  mtimensec: 202,
+  ctimensec: 303,
+  mode: 0o100640,
+  uid: 501,
+  gid: 20,
+};
+for (const ctx of [getattrContext, { minor: 8, setxattrExt: false }]) {
+  const getattrBody = fuse.encodeGetattrIn(getattrInput, ctx);
+  assert.equal(getattrBody.length, 16);
+  assert.deepEqual(fuse.decodeGetattrIn(getattrBody, ctx), getattrInput);
+
+  const setattrBody = fuse.encodeSetattrIn(setattrInput, ctx);
+  assert.equal(setattrBody.length, 88);
+  assert.deepEqual(fuse.decodeSetattrIn(setattrBody, ctx), setattrInput);
+}
 
 const classify = (fn) => {
   try {
@@ -235,6 +278,82 @@ if (source) {
     }
   }
 
+  const attrReply = {
+    attrValid: 9n,
+    attrValidNsec: 10,
+    attr: {
+      ino: 11n,
+      size: 12n,
+      blocks: 13n,
+      atime: 14n,
+      mtime: 15n,
+      ctime: 16n,
+      atimensec: 17,
+      mtimensec: 18,
+      ctimensec: 19,
+      mode: 0o100644,
+      nlink: 1,
+      uid: 501,
+      gid: 20,
+      rdev: 0,
+      blksize: 4096,
+      flags: 0,
+    },
+  };
+  for (const [opcode, name, decodeIn, encodeIn, decodeOut, encodeOut] of [
+    [fuse.FUSE_GETATTR, "GETATTR", fuse.decodeGetattrIn, fuse.encodeGetattrIn, fuse.decodeGetattrOut, fuse.encodeGetattrOut],
+    [fuse.FUSE_SETATTR, "SETATTR", fuse.decodeSetattrIn, fuse.encodeSetattrIn, fuse.decodeSetattrOut, fuse.encodeSetattrOut],
+  ]) {
+    const input = name === "GETATTR" ? getattrInput : setattrInput;
+    for (const ctx of [getattrContext, { minor: 8, setxattrExt: false }]) {
+      const oracleRequest = oracle.encodeRequestBody(opcode, input, ctx);
+      const actualRequest = encodeIn(input, ctx);
+      assert.deepEqual([...actualRequest], [...oracleRequest], `${name} request bytes match oracle for minor ${ctx.minor}`);
+      assert.deepEqual(
+        decodeIn(actualRequest, ctx),
+        oracle.decodeRequestBody(opcode, oracleRequest, ctx),
+        `${name} request decode matches oracle for minor ${ctx.minor}`,
+      );
+      for (let length = 0; length < actualRequest.length; length++) {
+        const body = actualRequest.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => decodeIn(body, ctx)),
+          classifyProtocolError(() => oracle.decodeRequestBody(opcode, body, ctx)),
+          `${name} request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+      assert.deepEqual(
+        classifyProtocolError(() => decodeIn(requestTrailing, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(opcode, requestTrailing, ctx)),
+        `${name} request trailing-byte classification for minor ${ctx.minor}`,
+      );
+
+      const oracleReply = oracle.encodeReplyBody(opcode, attrReply, ctx);
+      const actualReply = encodeOut(attrReply, ctx);
+      assert.deepEqual([...actualReply], [...oracleReply], `${name} reply bytes match oracle for minor ${ctx.minor}`);
+      assert.deepEqual(
+        decodeOut(actualReply, ctx),
+        oracle.decodeReplyBody(opcode, oracleReply, ctx),
+        `${name} typed reply decode matches oracle for minor ${ctx.minor}`,
+      );
+      for (let length = 0; length < actualReply.length; length++) {
+        const body = actualReply.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => decodeOut(body, ctx)),
+          classifyProtocolError(() => oracle.decodeReplyBody(opcode, body, ctx)),
+          `${name} reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      const replyTrailing = Buffer.concat([actualReply, Buffer.from([0])]);
+      assert.deepEqual(
+        classifyProtocolError(() => decodeOut(replyTrailing, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(opcode, replyTrailing, ctx)),
+        `${name} reply trailing-byte classification for minor ${ctx.minor}`,
+      );
+    }
+  }
+
   for (const ctx of [writeContext, { minor: 8, setxattrExt: false }]) {
     const oracleWrite = oracle.encodeRequestBody(fuse.FUSE_WRITE, writeInput, ctx);
     const actualWrite = fuse.encodeWriteIn(writeInput, ctx);
@@ -337,11 +456,15 @@ if (source) {
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE READ request/raw-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE WRITE request/reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE GETATTR request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READ request/raw-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE WRITE request/reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE GETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
 console.log("mount-rs N-API FUSE codec subpath: PASS");
