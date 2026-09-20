@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `5d9e513`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `d526c18`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -63,17 +63,19 @@ non-overlapping packet. The current bounded allocation is:
 
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
-| Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Checkpoint complete; Main integrating |
-| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Checkpoint complete; Main integrating |
-| Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Checkpoint complete; Main integrating |
-| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task active |
+| Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Integrated |
+| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Integrated |
+| Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Integrated checkpoint |
+| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task complete; deployment pending |
 | Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Closed; no change recommended |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
 design review), Raman (scoped napi-rs package distribution), Aristotle (the
 unsigned FSKit bridge checkpoint), Mill (the TiDB provider/harness checkpoint),
-Peirce (the SQLite VFS/WAL checkpoint), and Ohm (storage-dispatch review). Main
+Peirce (the SQLite VFS/WAL checkpoint), Russell (CLI/HTTP edge coverage),
+Aquinas (Windows CI parity), Cicero (parity audit), and Ohm (storage-dispatch
+review). Main
 rotates those slots rather than assigning multiple workers to the same files.
 
 ### Narrow-band completion order
@@ -114,20 +116,20 @@ complete.
 | W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying | Raman (complete slice) / Main |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
-| W11 | Config-driven CLI | HTTP landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
+| W11 | Config-driven CLI | HTTP edge coverage landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Russell (complete slice) / Main |
 | W12 | Safely hosting SQLite files | Local journal/WAL matrix and fail-closed gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
 | W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Rollback, process-local and host-local WAL gates landed; remote/Node/Windows acceptance pending | Peirce (checkpoint) / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
-| W17 | Multi-drive HTTP server | Server/CLI landed; local split-store demo passed; RustFS remote passed, Cloudflare acceptance pending | Main |
+| W17 | Multi-drive HTTP server | Server/CLI and local edge-case coverage landed; RustFS remote passed, Cloudflare acceptance pending | Russell (complete slice) / Main |
 | W18 | Benchmarks and dependency budget | Partial implementation | Ohm / Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
 | W21 | Reference review and learnings | Ongoing | Main |
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
-| W24 | Domain and marketing site | Site draft ready; deployment pending | Meitner / Main |
+| W24 | Domain and marketing site | TanStack Start draft and Vercel output hardening landed; deployment pending | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
 | W27 | Native Windows support and CI | Runtime qualification pending | Main |
@@ -375,6 +377,9 @@ complete.
   `4af2a30`: memory and split SQLite drives served, bearer isolation returned
   401, and split SQLite data survived a service restart. This is local
   evidence only and does not qualify live R2 or native-mount acceptance.
+- [x] `d526c18` extends the HTTP subprocess contract with streamed writes,
+  ranges, truncate, concurrent writes, aborted-write recovery and listener
+  cleanup; the focused CLI/HTTP tests and strict Clippy passed locally.
 
 ## W12 — Safely host SQLite database files
 
@@ -536,7 +541,10 @@ complete.
   stable errors and lifecycle; share the actual native/API drive namespace.
 - [ ] W17.3 Add per-drive authorization/isolation, limits and deployment/TLS guidance.
 - [ ] W17.4 Test multiple drives and mixed stores through real HTTP clients,
-  including concurrency, restart, failures and Node/CLI configuration.
+  including concurrency, restart, failures and Node/CLI configuration. The
+  local memory/split-store subprocess now covers concurrency, range reads,
+  truncate, aborted writes and process restart (`d526c18`); remote, Node and
+  crash-recovery coverage remain open.
 - [ ] W17.5 Define a cache integration boundary, but do not implement/select the
   distributed cache until the W22 discussion and primary acceptance.
 - [x] `4af2a30` records a runnable cross-platform local demo using independent
@@ -573,6 +581,9 @@ complete.
 
 ## W20 — CI, packaging and final acceptance
 
+- [ ] Windows pinned-oracle N-API parity and the portable HTTP tests are now in
+  the `windows-node` job (`d526c18`); hosted execution and Windows Rust/host
+  runtime qualification remain required.
 - [ ] W20.1 Obtain revision-matched green required hosted macOS/Linux jobs.
   Latest jobs were queued/in progress at this update; earlier Node/PGlite
   failures are not closed by local fixes alone.
@@ -639,6 +650,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W24.2 Build combined marketing/docs site with TanStack Start and deploy to
   the user's Vercel Hobby plan, explicitly authorized 2026-09-20. No paid plan
   upgrade or paid resources. Use verified capability claims and visible status.
+- [x] Site child task delivered Vercel prebuilt-output/header/route hardening in
+  `c9088aa` and `8cf0c5d`; these commits are site-only and do not prove a live
+  Vercel deployment.
 - [ ] W24.3 Verify public DNS, HTTPS and actual deployment, and record ownership/
   operational handoff. This backlog entry does not authorize spending now.
 
@@ -789,5 +803,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `95aca9c` | FSKit Rust/Swift/XPC bridge checkpoint | Local tests and unsigned arm64 Xcode builds; signing/activation/mount pending |
 | `ca57758` | TiDB metadata/block providers and pinned harness | Real single-node v8.5.7 ARM64 qualification passed; durable topology and RustFS composition remain open |
 | `5d9e513` | SQLite VFS/WAL reliability checkpoint | 4 unit, 15 SQLite-engine and 15 storage-bridge tests plus strict Clippy; Windows/remote/Node acceptance remains open |
+| `67498a2` | TiDB schema-test lint follow-up | Focused lint correction; no new service qualification |
+| `d526c18` | CLI HTTP edge cases and Windows pinned-oracle CI | Local CLI/HTTP tests and Clippy passed; hosted Windows/oracle execution remains pending |
+| `c9088aa` / `8cf0c5d` | TanStack Start/Vercel output hardening | Site-only commits; local output handling, not public deployment evidence |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
