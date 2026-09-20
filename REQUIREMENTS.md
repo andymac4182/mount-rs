@@ -151,6 +151,27 @@ SQLite version, journal mode, synchronous setting, and storage configuration.
 
 Until these gates have evidence, SQLite hosting is **not verified safe**.
 
+## Config-file CLI deliverable and integration acceptance
+
+Provide a usable CLI output that mounts from a documented, versioned config
+file, while retaining existing command-line use. Cover transport, mountpoint,
+read-only and SQLite single-host policy, driver selection, independent metadata
+and block providers, and fixed-size chunk parameters. Keep integration-specific
+dependencies out of core crates.
+
+- Document the config schema, relative-path resolution, defaults, and explicit
+  CLI override precedence. Reject unknown fields and invalid combinations before
+  mounting or modifying persistent stores.
+- Support credential environment references; never print resolved secrets in
+  errors, diagnostics, or example configs.
+- Provide runnable examples for local memory, SQLite, PGlite, and R2-backed
+  compositions, identifying required external configuration honestly.
+- Test the built CLI with real config files, including invalid config and
+  override cases. Add opt-in native integration coverage that starts the CLI,
+  mounts, performs filesystem I/O, verifies configured provider behavior, then
+  stops and verifies unmount/cleanup on macOS and Linux. Parser-only tests do
+  not satisfy this mount integration requirement.
+
 ## Future requirement: copy-on-write
 
 Track copy-on-write as future work, not a current feature or a requirement to
