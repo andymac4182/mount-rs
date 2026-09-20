@@ -16,6 +16,8 @@ import type {
   NativeFuseOpenOut,
   NativeFuseOutHeader,
   NativeFuseProtocolContext,
+  NativeFuseRawData,
+  NativeFuseReadIn,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
@@ -37,6 +39,8 @@ export type {
   NativeFuseOpenOut,
   NativeFuseOutHeader,
   NativeFuseProtocolContext,
+  NativeFuseRawData,
+  NativeFuseReadIn,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
@@ -137,6 +141,10 @@ export declare function decodeAttrOut(body: Uint8Array, context?: NativeFuseProt
 export declare function encodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseOpenOut
 export declare function encodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseReadIn
+export declare function encodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeReadOut(body: Uint8Array): NativeFuseRawData
+export declare function encodeReadOut(value: NativeFuseRawData): Buffer
 export declare function decodeWriteIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseWriteIn
 export declare function encodeWriteIn(value: NativeFuseWriteIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeWriteOut(body: Uint8Array): NativeFuseWriteOut
