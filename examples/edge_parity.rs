@@ -1,6 +1,5 @@
-use std::sync::Arc;
-
-use mount_rs_core::{ErrorCode, FsDriver, Loopback, MemoryFs, S_IFIFO};
+mod support;
+use mount_rs_core::{ErrorCode, S_IFIFO};
 use serde_json::json;
 
 fn error_code<T>(result: mount_rs_core::Result<T>) -> Option<&'static str> {
@@ -13,7 +12,7 @@ fn error_code<T>(result: mount_rs_core::Result<T>) -> Option<&'static str> {
 
 #[tokio::main]
 async fn main() {
-    let fs = Loopback::from_arc(Arc::new(MemoryFs::empty()) as Arc<dyn FsDriver>);
+    let fs = support::parity_filesystem().await;
     fs.write_file("/flags", b"abcdef").await.unwrap();
     let append = fs.open("/flags", "a", 0).await.unwrap();
     append.write(b"-g", None).await.unwrap();

@@ -9,6 +9,7 @@
 pub mod color;
 pub mod parser;
 pub mod runtime;
+mod stale;
 pub mod watch;
 
 pub use parser::{CliOptions, Command, DriverChoice, ParseError, TransportChoice, parse_args};

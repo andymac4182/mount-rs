@@ -125,6 +125,10 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 120s cargo test --locked -p mount-rs-auto --test native_fuse -- --ignored --nocapture
+      - name: Verify CLI subprocess mount and signal-triggered unmount
+        env:
+          MOUNT_RS_CLI_NATIVE_FUSE: '1'
+        run: timeout 180s cargo test --locked -p mount-rs-cli --test native_lifecycle -- --ignored --nocapture
       - name: Verify mounted memory and persisted backend operations
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
@@ -198,6 +202,7 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-edge-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-flags-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-auto-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-trace-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-inodes.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs

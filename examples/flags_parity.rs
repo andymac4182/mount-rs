@@ -1,9 +1,10 @@
-use mount_rs_core::{Loopback, MemoryFs, OpenFlags};
+mod support;
+use mount_rs_core::OpenFlags;
 use serde_json::json;
 
 #[tokio::main]
 async fn main() {
-    let fs = Loopback::new(MemoryFs::empty());
+    let fs = support::parity_filesystem().await;
     fs.write_file("/file", b"abcdef").await.unwrap();
     let flags = OpenFlags {
         read: true,

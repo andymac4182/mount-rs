@@ -28,7 +28,7 @@ use std::time::Duration;
 
 use mount_rs_core::FsDriver;
 
-pub use mount_rs_9p::{P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport};
+pub use mount_rs_9p::{P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport, P9Platform};
 pub use mount_rs_fuse::mount::{FuseMount, MountError as FuseMountError, MountMode, MountOptions};
 pub use mount_rs_nfs::{
     NativeNfsMount, NfsClientProbe, NfsMountError, NfsMountOptions, NfsPlatform, NfsVersion,
@@ -420,13 +420,19 @@ fn unusable(reason: impl Into<String>) -> TransportProbe {
 fn probe_fuse(platform: &str) -> TransportProbe {
     if platform != "linux" {
         return unusable(if platform == "darwin" || platform == "macos" {
-            "native FUSE needs Linux; macFUSE is a different protocol and is not used by mount-rs"
+            "FUSE needs Linux, and this is macOS — macFUSE is a third-party kernel extension "
+                .to_owned()
+                + "speaking its own protocol dialect, which mountx does not implement"
         } else {
-            "native FUSE needs Linux"
+            format!("FUSE needs Linux, this is {platform}")
         });
     }
     if !Path::new("/dev/fuse").exists() {
-        return unusable("no /dev/fuse — the FUSE kernel device is unavailable on this host");
+        return unusable(
+            "no /dev/fuse — the fuse module is not loaded, or this container was not given "
+                .to_owned()
+                + "the device (docker: --device /dev/fuse)",
+        );
     }
     if current_uid_is_root() || find_executable(&["fusermount3", "fusermount"]).is_some() {
         usable()
@@ -435,13 +441,84 @@ fn probe_fuse(platform: &str) -> TransportProbe {
     }
 }
 
-fn probe_p9(platform: &str) -> TransportProbe {
+fn p9_client_probe_for(platform: &str) -> P9ClientProbe {
+    let mut probe = if platform != "linux" {
+        P9ClientProbe {
+            usable: false,
+            platform: None,
+            kernel: false,
+            transport: false,
+            modules: false,
+            root: current_uid_is_root(),
+            reason: None,
+        }
+    } else if cfg!(target_os = "linux") {
+        mount_rs_9p::p9_client_probe()
+    } else {
+        // The TypeScript probe accepts a platform override for deterministic
+        // tests, but it only reads Linux's procfs when the actual process is
+        // Linux. Preserve that distinction instead of reporting this host's
+        // macOS/Windows facts as facts about the requested Linux host.
+        P9ClientProbe {
+            usable: false,
+            platform: Some(P9Platform::Linux),
+            kernel: false,
+            transport: false,
+            modules: false,
+            root: current_uid_is_root(),
+            reason: None,
+        }
+    };
+    probe.reason = p9_probe_reason(platform, &probe);
+    probe.usable = probe.reason.is_none();
+    probe
+}
+
+fn p9_probe_reason(platform: &str, probe: &P9ClientProbe) -> Option<String> {
     if platform != "linux" {
-        return unusable(format!(
-            "this is {platform}; native 9P mounts need Linux's v9fs client"
+        return Some(format!(
+            "this is {platform}; 9P mounts on Linux only — no other kernel has a v9fs client"
         ));
     }
-    let probe = mount_rs_9p::p9_client_probe();
+
+    let mut missing = Vec::new();
+    if !probe.root {
+        missing.push(
+            "mounting 9P needs root: mount(2) needs CAP_SYS_ADMIN and v9fs has no setuid helper "
+                .to_owned()
+                + "the way FUSE has fusermount3",
+        );
+    }
+    if !probe.kernel {
+        let release = kernel_release_for_probe().unwrap_or_else(|| "<unknown release>".to_owned());
+        missing.push(if probe.modules {
+            format!(
+                "no `9p` in /proc/filesystems (the module is not loaded; `modprobe 9p` should find it under /lib/modules/{release})"
+            )
+        } else {
+            format!(
+                "the kernel has no 9p filesystem and no module tree at /lib/modules/{release} to load one from"
+            )
+        });
+    }
+    (!missing.is_empty()).then(|| missing.join("; "))
+}
+
+#[cfg(target_os = "linux")]
+fn kernel_release_for_probe() -> Option<String> {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .map(|release| release.trim().to_owned())
+        .filter(|release| !release.is_empty())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kernel_release_for_probe() -> Option<String> {
+    None
+}
+
+fn probe_p9(platform: &str) -> TransportProbe {
+    let probe = p9_client_probe_for(platform);
     if !probe.usable {
         return unusable(
             probe
@@ -456,16 +533,49 @@ fn probe_p9(platform: &str) -> TransportProbe {
     }
 }
 
+fn nfs_probe_reason(platform: &str, probe: &NfsClientProbe) -> String {
+    let mut missing = Vec::new();
+    match platform {
+        "linux" => {
+            if !probe.root {
+                missing.push(
+                    "mounting NFS needs root on Linux and this process is not root".to_owned(),
+                );
+            }
+            if probe.helper.is_none() && !probe.kernel {
+                missing.push(
+                    "no /sbin/mount.nfs (install nfs-common / nfs-utils) and no `nfs` in "
+                        .to_owned()
+                        + "/proc/filesystems",
+                );
+            }
+        }
+        "darwin" => {
+            if probe.helper.is_none() && !probe.kernel {
+                missing
+                    .push("no /sbin/mount_nfs, which every macOS is supposed to have".to_owned());
+            }
+        }
+        _ => missing.push(format!(
+            "this is {platform}; the NFS transport mounts on Linux and macOS only"
+        )),
+    }
+    if missing.is_empty() {
+        probe
+            .reason
+            .clone()
+            .unwrap_or_else(|| "the host NFS client is unavailable".to_owned())
+    } else {
+        missing.join("; ")
+    }
+}
+
 fn probe_nfs(platform: &str) -> TransportProbe {
     let probe = mount_rs_nfs::native::nfs_client_probe_for(platform);
     if probe.usable {
         usable()
     } else {
-        unusable(
-            probe
-                .reason
-                .unwrap_or_else(|| "the host NFS client is unavailable".to_owned()),
-        )
+        unusable(nfs_probe_reason(platform, &probe))
     }
 }
 
@@ -476,11 +586,11 @@ pub fn p9_module_refusal(probe: &P9ClientProbe) -> Option<String> {
         return None;
     }
     Some(
-        "the Linux 9P filesystem is present but 9pnet_fd is neither loaded nor loadable; "
+        "the kernel has a 9p filesystem but no 9pnet_fd in /sys/module — the module registering "
             .to_owned()
-            + "the module registering the trans=unix transport is unavailable, so automatic "
-            + "selection refuses it because it cannot fall back after a mount failure; select "
-            + "--transport 9p (AutoTransport::P9) to try it explicitly",
+            + "the trans=unix this transport mounts with — and no module tree to load it from, "
+            + "which is what a virtio-only guest looks like; `mountx --transport 9p` will try it "
+            + "anyway",
     )
 }
 
@@ -666,9 +776,23 @@ mod tests {
         );
         let darwin = probe_transports_for("darwin");
         assert!(!darwin.fuse.usable);
-        assert!(darwin.fuse.reason.as_deref().unwrap().contains("macFUSE"));
+        assert_eq!(
+            darwin.fuse.reason.as_deref(),
+            Some(concat!(
+                "FUSE needs Linux, and this is macOS — macFUSE is a third-party kernel ",
+                "extension speaking its own protocol dialect, which mountx does not implement"
+            ))
+        );
         assert!(!darwin.p9.usable);
-        assert!(darwin.p9.reason.as_deref().unwrap().contains("v9fs"));
+        assert_eq!(
+            darwin.p9.reason.as_deref(),
+            Some("this is darwin; 9P mounts on Linux only — no other kernel has a v9fs client")
+        );
+        let win32 = probe_transports_for("win32");
+        assert_eq!(
+            win32.fuse.reason.as_deref(),
+            Some("FUSE needs Linux, this is win32")
+        );
     }
 
     #[test]
@@ -703,7 +827,14 @@ mod tests {
         assert!(refusal.contains("9pnet_fd"));
         assert!(refusal.contains("trans=unix"));
         assert!(refusal.contains("--transport 9p"));
-        assert!(refusal.contains("AutoTransport::P9"));
+        assert_eq!(
+            refusal,
+            "the kernel has a 9p filesystem but no 9pnet_fd in /sys/module — the module registering "
+                .to_owned()
+                + "the trans=unix this transport mounts with — and no module tree to load it from, "
+                + "which is what a virtio-only guest looks like; `mountx --transport 9p` will try it "
+                + "anyway"
+        );
 
         let unusable = p9_probe(|probe| {
             probe.usable = false;

@@ -17,6 +17,7 @@ use crate::parser::{
     CliOptions, Command, DriverChoice, ParseError, TransportChoice, help_text, parse_args,
     version_text,
 };
+use crate::stale::{stale_command_line, unmount_stale};
 use crate::watch::{WatchOptions, watch_driver};
 
 #[derive(Debug, Clone)]
@@ -191,7 +192,6 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         }
     }
     let mountpoint = resolve_mountpoint(options.mountpoint.as_deref())?;
-    std::fs::create_dir_all(&mountpoint).map_err(io_error)?;
     let (uid, gid) = effective_identity();
     let runtime = DriverRuntime::open(&options, uid, gid).await?;
 
@@ -200,6 +200,7 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         seed_readme(Arc::clone(&bare_driver)).await?;
     }
 
+    let color = Color::from_env();
     let watched = watch_driver(
         bare_driver,
         WatchOptions::new(
@@ -208,6 +209,10 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
             !options.quiet,
         ),
     );
+    // Match mountx: stale cleanup is scoped to the one mountpoint this start
+    // command resolved, and runs immediately before creating that directory.
+    unmount_stale(&mountpoint, current_uid(), color).await;
+    std::fs::create_dir_all(&mountpoint).map_err(io_error)?;
     let mount_options = AutoMountOptions {
         transport: options.transport.into(),
         read_only: Some(options.read_only),
@@ -226,7 +231,6 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         }
     };
 
-    let color = Color::from_env();
     println!(
         "{} {} at {} (source: {})",
         color.green("mounted"),
@@ -250,13 +254,44 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     } else {
         println!("Press Ctrl-C to unmount; the mounted view is read-only.");
     }
+    if let Some(command) = stale_command_line(
+        mounted.mountpoint(),
+        transport_name(mounted.transport()),
+        current_uid(),
+    ) {
+        println!(
+            "If this process exits without unmounting, clear it with {}.",
+            color.bold(command)
+        );
+    }
 
     let lifecycle = wait_for_shutdown(&mounted).await;
     let shutdown = runtime.shutdown().await.map_err(CliError::from);
     lifecycle?;
     shutdown?;
     println!("{}", color.yellow("unmounted"));
+    if let Some(stats) = session_stats(&mounted) {
+        println!("  {}", color.dim(stats));
+    }
     Ok(())
+}
+
+fn session_stats(mounted: &AutoMount) -> Option<String> {
+    match mounted {
+        AutoMount::Fuse { .. } => Some(
+            "session stats unavailable: mount-rs-fuse does not expose FUSE counters".to_owned(),
+        ),
+        AutoMount::P9 { mount, .. } => {
+            let stats = mount.connection.session.stats();
+            Some(format!(
+                "session stats: requests={} replies={} errors={} dropped={} flushed={}",
+                stats.requests, stats.replies, stats.errors, stats.dropped, stats.flushed
+            ))
+        }
+        // This follows the upstream CLI: NFS has no client-session close
+        // equivalent to the FUSE/9P connection lifecycle.
+        AutoMount::Nfs { .. } => None,
+    }
 }
 
 async fn seed_readme(driver: Arc<dyn FsDriver>) -> Result<(), CliError> {

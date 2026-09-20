@@ -50,3 +50,17 @@ protocol and is not treated as this crate's FUSE transport.
 The transport probe is an availability explanation, not a native mount test.
 Run a real mount explicitly on a disposable, user-owned mountpoint only when
 the host prerequisites are installed.
+
+## Native lifecycle acceptance
+
+The native FUSE subprocess check is intentionally ignored in ordinary tests;
+it is not a wire-test claim. On Linux, with `/dev/fuse` and the required
+mount capability available, run:
+
+    MOUNT_RS_CLI_NATIVE_FUSE=1 cargo test -p mount-rs-cli --test native_lifecycle -- --ignored --nocapture
+
+That test starts the actual `mount-rs` binary, waits for the kernel mount,
+sends SIGINT, checks the CLI's `unmounted` report, and checks
+`/proc/self/mounts` after exit. It is not run on macOS: this crate's native
+FUSE lifecycle is Linux-only, while macOS native NFS still depends on the
+host's mount_nfs privacy/ownership policy and is not asserted by this test.

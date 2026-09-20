@@ -1035,12 +1035,21 @@ where
         resolve(&namespace, path, true, "statfs")?;
         const BLOCKS: u64 = 1024 * 1024;
         const FILES: u64 = 1024 * 1024;
+        // Match the logical mountx filesystem accounting, not the physical
+        // provider's retained immutable objects or 512-byte stat.blocks units.
+        let used_blocks = namespace
+            .nodes
+            .values()
+            .filter(|node| node.stats.nlink > 0)
+            .fold(0_u64, |total, node| {
+                total.saturating_add(node.stats.size.div_ceil(BLOCK_SIZE))
+            });
         Ok(StatsFs {
             filesystem_type: 0x0102_1994,
             block_size: BLOCK_SIZE,
             blocks: BLOCKS,
-            blocks_free: BLOCKS,
-            blocks_available: BLOCKS,
+            blocks_free: BLOCKS.saturating_sub(used_blocks),
+            blocks_available: BLOCKS.saturating_sub(used_blocks),
             files: FILES,
             files_free: FILES
                 .saturating_sub(u64::try_from(namespace.nodes.len()).unwrap_or(u64::MAX)),

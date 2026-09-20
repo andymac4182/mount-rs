@@ -18,6 +18,7 @@ cargo test --workspace --all-targets --all-features --locked
 MOUNTX_SOURCE="$mountx_source" node scripts/check-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-edge-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-flags-parity.mjs
+MOUNTX_SOURCE="$mountx_source" node scripts/check-auto-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-trace-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-inodes.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-init.mjs

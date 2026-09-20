@@ -17,8 +17,9 @@ mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
 mount-rs-host = { path = "../../integrations/mount-rs-host" }
 mount-rs-memory = { path = "../../integrations/mount-rs-memory" }
+mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
 mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
-tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1", default-features = false, features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -1025,6 +1025,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-host",
  "mount-rs-memory",
+ "mount-rs-nfs",
  "mount-rs-sqlite",
  "tokio",
 ]
@@ -1034,9 +1035,12 @@ name = "mount-rs-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "mount-rs-auto",
  "mount-rs-chunked",
  "mount-rs-fuse",
+ "mount-rs-host",
  "mount-rs-memory",
+ "mount-rs-nfs",
  "mount-rs-persist",
  "mount-rs-pglite",
  "mount-rs-r2",
