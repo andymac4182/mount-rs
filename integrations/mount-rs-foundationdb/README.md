@@ -42,6 +42,11 @@ let storage = mount_rs_foundationdb::FoundationDbStorage::from_cluster_file(
 )?;
 ```
 
+The constructor intentionally does not select a lease clock. Block operations
+and metadata reads are available, but lease acquisition/publication returns
+`ENOTSUP` until the application supplies a protected shared `LeaseOracle` with
+`with_oracle`/`with_oracle_arc`.
+
 `FoundationDbStorageOptions::with_durable(true)` is an explicit application
 assertion. A successful FoundationDB commit is durable according to the
 cluster's configured storage policy, but this crate cannot infer whether a
@@ -51,14 +56,18 @@ development single-server cluster is failure tolerant.
 
 FoundationDB provides transactional ordering and commit versions, but it does
 not expose an authoritative server wall clock. The core `MetadataStore` contract
-requires provider-determined lease expiry, so this crate uses a concrete
-FoundationDB-backed `LeaseOracle` by default. The oracle stores one encoded
-Unix-epoch millisecond value under the volume's `meta/lease-oracle` key. Each
-oracle call reads and advances that value transactionally using
-`max(persisted_time, local_system_time)` and returns only the committed value.
-All writers therefore validate leases against the same durable value rather than
-using their local wall clocks directly. If the cluster or oracle transaction is
-unavailable, the call fails and lease operations fail closed.
+requires provider-determined lease expiry, so this crate does not select a lease
+clock by default. Applications must supply a protected shared `LeaseOracle` with
+`with_oracle`/`with_oracle_arc`; if they do not, lease operations fail closed with
+`ENOTSUP` while block operations and metadata reads remain available.
+
+The crate also exposes an explicit `with_persisted_lease_oracle` option for a
+single trusted authority or development/test cluster. That oracle stores one
+encoded Unix-epoch millisecond value under the volume's `meta/lease-oracle` key
+and advances it transactionally using `max(persisted_time, local_system_time)`.
+All writers then validate leases against the same durable value rather than
+using their local wall clocks directly, but the host clock remains an input to
+lease expiry and is not made safe merely by persistence.
 
 This is a durable logical clock with an explicit availability/safety tradeoff,
 not a trusted distributed wall-clock service and not proof that production lease
@@ -73,11 +82,10 @@ protect a stronger shared clock/lease authority through `LeaseOracle` and must
 document its clock-skew assumptions. The `with_oracle`/`with_oracle_arc` APIs
 accept that authority (the `with_clock` names remain compatibility aliases).
 
-`FoundationDbStorageOptions::without_lease_oracle` is the explicit fail-closed
-mode: block and metadata reads remain available, while lease operations return
-`ENOTSUP` until an oracle is supplied. `SystemLeaseClock` is available only
-through the explicitly named `with_system_clock` opt-in for single-host
-development; it is not a distributed authority.
+`FoundationDbStorageOptions::without_lease_oracle` makes that fail-closed mode
+explicit and is also the behavior of `new`/`default`. `SystemLeaseClock` is
+available only through the explicitly named `with_system_clock` opt-in for
+single-host development; it is not a distributed authority.
 
 Fencing remains transactional: every renew, release, and publication compares
 the stored owner, fence, and expiry in the same transaction that changes state.
@@ -142,9 +150,11 @@ value limit and must make the corresponding chunker choice explicit.
 
 The opt-in integration test uses `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE` (or the
 platform default cluster file when `MOUNT_RS_FOUNDATIONDB_USE_DEFAULT=1`). It
-uses a unique key prefix, exercises block immutability, the default persisted
-lease oracle, lease fencing, revision-conflict handling, metadata reload, and
-deletion against the real cluster. It separately opts out with
+uses a unique key prefix, proves the ordinary constructor fails closed, then
+explicitly selects the persisted single-authority lease oracle and exercises
+block immutability, lease fencing, revision-conflict handling, metadata reload,
+and deletion against the real cluster. It separately exercises the explicit
+opt-out with
 `without_lease_oracle` to prove the explicit fail-closed `ENOTSUP` path.
 
 The CI gate must be separate from the portable workspace gate:

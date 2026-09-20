@@ -145,26 +145,38 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
 
     // The default is intentionally checked against a live storage handle: a
     // distributed deployment must not accidentally acquire a lease with a
-    // process-local wall clock.
-    let without_clock = FoundationDbStorage::from_cluster_file(
+    // process-local wall clock or the persisted single-authority oracle.
+    let default_without_clock = FoundationDbStorage::from_cluster_file(
         cluster_file,
-        FoundationDbStorageOptions::new(format!("{prefix}/no-clock")).without_lease_oracle(),
+        FoundationDbStorageOptions::new(format!("{prefix}/no-clock-default")),
     )?;
-    let error = without_clock
+    let error = default_without_clock
         .metadata()
         .acquire_writer("no-clock", Duration::from_secs(5))
         .await
         .expect_err("lease acquisition without an authority must fail closed");
     assert_eq!(error.code, ErrorCode::Enotsup);
-    drop(without_clock);
+    drop(default_without_clock);
 
-    // The default storage configuration installs the FoundationDB-backed
-    // shared oracle. It is persisted in the volume keyspace and is therefore
-    // usable by every writer that opens this volume; no process-local lease
-    // clock is silently substituted.
+    let explicit_without_clock = FoundationDbStorage::from_cluster_file(
+        cluster_file,
+        FoundationDbStorageOptions::new(format!("{prefix}/no-clock-explicit"))
+            .without_lease_oracle(),
+    )?;
+    let error = explicit_without_clock
+        .metadata()
+        .acquire_writer("no-clock-explicit", Duration::from_secs(5))
+        .await
+        .expect_err("explicitly disabled lease authority must fail closed");
+    assert_eq!(error.code, ErrorCode::Enotsup);
+    drop(explicit_without_clock);
+
+    // The persisted FoundationDB oracle is an explicit single-authority/test
+    // choice. It is not a production cross-host clock authority, so the
+    // ordinary constructor above remains fail closed.
     let storage = FoundationDbStorage::from_cluster_file(
         cluster_file,
-        FoundationDbStorageOptions::new(&prefix),
+        FoundationDbStorageOptions::new(&prefix).with_persisted_lease_oracle(),
     )?;
     assert!(!storage.metadata().durable());
     assert!(!storage.blocks().durable());

@@ -290,11 +290,11 @@ impl FoundationDbStorageOptions {
             prefix: prefix.as_ref().to_vec(),
             durable: false,
             limits: FoundationDbLimits::default(),
-            // A storage-backed oracle is installed after the Database handle
-            // is opened. Callers can opt out explicitly with
-            // without_lease_oracle() when they require fail-closed behavior.
+            // Lease time is deliberately not inferred from the host clock.
+            // Callers must provide a shared oracle or explicitly opt into the
+            // persisted single-authority development oracle below.
             oracle: None,
-            auto_oracle: true,
+            auto_oracle: false,
         }
     }
 
@@ -325,6 +325,21 @@ impl FoundationDbStorageOptions {
         self
     }
 
+    /// Explicitly use the FoundationDB-backed persisted lease oracle.
+    ///
+    /// This oracle advances persisted time with
+    /// `max(persisted_time, local_system_time)`. It is suitable only when one
+    /// trusted authority controls this keyspace and the host clock, or for
+    /// development/test clusters. It is not a cross-host wall-clock
+    /// authority. Production deployments with independent writers must
+    /// provide their protected shared authority through [`Self::with_oracle`]
+    /// or [`Self::with_oracle_arc`].
+    pub fn with_persisted_lease_oracle(mut self) -> Self {
+        self.oracle = None;
+        self.auto_oracle = true;
+        self
+    }
+
     /// Backwards-compatible name for [`Self::with_oracle`].
     pub fn with_clock<C: LeaseClock + 'static>(self, clock: C) -> Self {
         self.with_oracle(clock)
@@ -335,10 +350,9 @@ impl FoundationDbStorageOptions {
         self.with_oracle_arc(clock)
     }
 
-    /// Disable the built-in FoundationDB-backed oracle.
+    /// Explicitly keep lease operations fail closed until an oracle is supplied.
     ///
-    /// This is an explicit fail-closed mode for deployments that require an
-    /// external oracle to be supplied later. Lease operations return
+    /// This is also the default for [`Self::new`]. Lease operations return
     /// `ENOTSUP` until an oracle is configured; block and metadata reads still
     /// work.
     pub fn without_lease_oracle(mut self) -> Self {
@@ -1585,10 +1599,13 @@ mod tests {
     }
 
     #[test]
-    fn system_clock_is_explicitly_selectable() {
+    fn lease_oracle_is_never_selected_by_default() {
         let default = FoundationDbStorageOptions::new("test");
         assert!(default.oracle.is_none());
-        assert!(default.auto_oracle);
+        assert!(!default.auto_oracle);
+        let persisted = FoundationDbStorageOptions::new("test").with_persisted_lease_oracle();
+        assert!(persisted.oracle.is_none());
+        assert!(persisted.auto_oracle);
         let options = FoundationDbStorageOptions::new("test").with_clock(TestClock::default());
         assert!(options.oracle.is_some());
         assert!(!options.auto_oracle);

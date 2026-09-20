@@ -5,7 +5,10 @@ opens `ChunkedFs` with `mount-rs-foundationdb` as the fenced metadata store and
 `mount-rs-r2::R2BlockStore` against the RustFS S3 endpoint as the immutable
 block store. The test performs multi-chunk binary writes, partial overwrites,
 truncate/extend operations, fresh provider reopen, metadata revision CAS, and
-stale-fence rejection.
+stale-fence rejection. Because the persisted FoundationDB lease oracle uses a
+host clock, the harness selects it explicitly for this single-authority test
+cluster; ordinary provider construction remains fail closed until a protected
+shared `LeaseOracle` is supplied.
 
 The focused command is:
 
