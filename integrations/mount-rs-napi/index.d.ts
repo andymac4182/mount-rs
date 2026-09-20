@@ -140,6 +140,13 @@ export declare class Mounted {
 export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
 
 /**
+ * Construct the N-API memory driver with the same identity and mode defaults
+ * as mountx's TypeScript memory driver. `Env` is used only to read Node's
+ * optional process identity helpers; the filesystem itself is entirely Rust.
+ */
+export declare function createMemoryDriver(options?: JsMemoryOptions | undefined | null): Filesystem
+
+/**
  * Create the rooted host-filesystem driver used by the upstream
  * `createNodeFsDriver` API. Construction is synchronous; host I/O remains
  * asynchronous inside the Rust driver and the root is resolved lexically.
@@ -204,6 +211,13 @@ export interface JsChunkedStoreOptions {
   bucket?: string
   accessKeyId?: string
   secretAccessKey?: string
+}
+
+export interface JsMemoryOptions {
+  uid?: number
+  gid?: number
+  umask?: number
+  rootMode?: number
 }
 
 export interface JsMkdirOptions {

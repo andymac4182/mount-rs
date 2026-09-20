@@ -786,6 +786,7 @@ module.exports.JsStats = nativeBinding.JsStats
 module.exports.JsStatsFs = nativeBinding.JsStatsFs
 module.exports.Mounted = nativeBinding.Mounted
 module.exports.createChunkedDriver = nativeBinding.createChunkedDriver
+module.exports.createMemoryDriver = nativeBinding.createMemoryDriver
 module.exports.createNodeFsDriver = nativeBinding.createNodeFsDriver
 module.exports.liveMounts = nativeBinding.liveMounts
 module.exports.mount = nativeBinding.mount

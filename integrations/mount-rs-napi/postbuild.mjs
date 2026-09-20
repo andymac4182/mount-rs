@@ -4,6 +4,7 @@ const loader = new URL("./index.js", import.meta.url)
 const marker = "require('./postlude.cjs')(module.exports)"
 const chunkedExportMarker = "module.exports.createChunkedDriver = nativeBinding.createChunkedDriver"
 const facadeExportMarkers = [
+  "module.exports.createMemoryDriver = nativeBinding.createMemoryDriver",
   "module.exports.Mounted = nativeBinding.Mounted",
   "module.exports.createNodeFsDriver = nativeBinding.createNodeFsDriver",
   "module.exports.probeTransports = nativeBinding.probeTransports",

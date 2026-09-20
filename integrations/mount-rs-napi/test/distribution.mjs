@@ -17,6 +17,11 @@ assert.deepEqual(packageJson.exports, {
     require: "./index.js",
     default: "./index.js",
   },
+  "./drivers/memory": {
+    types: "./types/memory.d.ts",
+    require: "./index.js",
+    default: "./index.js",
+  },
   "./package.json": "./package.json",
 });
 assert.deepEqual(packageJson.napi.targets, [
@@ -37,7 +42,7 @@ const { stdout } = await execFileAsync(
 );
 const report = JSON.parse(stdout.trim());
 const files = new Set(report.files.map(({ path }) => path));
-for (const required of ["index.js", "index.d.ts", "package.json", "postlude.cjs"]) {
+for (const required of ["index.js", "index.d.ts", "package.json", "postlude.cjs", "types/memory.d.ts"]) {
   assert.equal(files.has(required), true, `package is missing ${required}`);
 }
 assert.equal(

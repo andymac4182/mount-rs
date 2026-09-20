@@ -37,7 +37,7 @@ export const NATIVE_TARGETS = Object.freeze([
   }),
 ]);
 
-const ROOT_FILES = ["index.js", "index.d.ts", "postlude.cjs", "package.json"];
+const ROOT_FILES = ["index.js", "index.d.ts", "postlude.cjs", "package.json", "types"];
 
 async function walkFiles(directory) {
   const files = [];
@@ -92,7 +92,7 @@ async function run(command, args, cwd) {
 
 async function copyRootPackage(stagingDir) {
   for (const file of ROOT_FILES) {
-    await cp(join(packageRoot, file), join(stagingDir, file));
+    await cp(join(packageRoot, file), join(stagingDir, file), { recursive: true });
   }
 }
 
@@ -138,7 +138,7 @@ async function validateStagedPackages(stagingDir) {
 
   const report = await packDryRun(stagingDir);
   const files = packageFiles(report);
-  for (const required of ROOT_FILES) {
+  for (const required of [...ROOT_FILES.filter((path) => path !== "types"), "types/memory.d.ts"]) {
     assert(files.has(required), `staged package is missing ${required}`);
   }
   for (const target of NATIVE_TARGETS) {
