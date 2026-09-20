@@ -8,7 +8,9 @@
 //! persistent-handle boundary.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::fmt;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use mount_rs_core::{
     ErrorCode, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, S_IFBLK, S_IFCHR, S_IFDIR,
@@ -110,6 +112,134 @@ pub const NFS4ERR_FBIG: u32 = 27;
 pub const NFS4ERR_DQUOT: u32 = 69;
 pub const NFS4ERR_BADNAME: u32 = 10_041;
 pub const NFS4ERR_RESOURCE: u32 = 10_018;
+
+const V4_TRACE_ENV: &str = "MOUNT_RS_NFS_V4_TRACE";
+const V4_TRACE_EVENT_LIMIT: usize = 256;
+
+static V4_TRACE_EVENTS: AtomicUsize = AtomicUsize::new(0);
+static V4_TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+
+fn v4_trace_enabled() -> bool {
+    *V4_TRACE_ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var(V4_TRACE_ENV).as_deref(),
+            Ok("1") | Ok("true") | Ok("yes")
+        )
+    })
+}
+
+/// Emit bounded NFSv4 diagnostics for native-client interoperability work.
+///
+/// The trace deliberately contains only transport/protocol metadata: peer,
+/// XID, minor version, operation numbers/names, and NFS statuses. It never
+/// formats RPC credentials, path names, file handles, owners, or read/write
+/// payloads. The event cap is process-wide so a misbehaving client cannot turn
+/// an opt-in CI diagnostic into an unbounded log stream.
+fn v4_trace(event: &str, peer: Option<&str>, xid: u32, details: impl fmt::Display) {
+    if !v4_trace_enabled() {
+        return;
+    }
+    let index = V4_TRACE_EVENTS.fetch_add(1, Ordering::Relaxed);
+    if index < V4_TRACE_EVENT_LIMIT {
+        eprintln!(
+            "mount-rs-nfs: v4-trace event={event} peer={} xid={xid} {details}",
+            peer.unwrap_or("unknown")
+        );
+    } else if index == V4_TRACE_EVENT_LIMIT {
+        eprintln!(
+            "mount-rs-nfs: v4-trace event=limit peer={} xid={xid} limit={V4_TRACE_EVENT_LIMIT}",
+            peer.unwrap_or("unknown")
+        );
+    }
+}
+
+fn v4_op_name(op: u32) -> &'static str {
+    match op {
+        OP_ACCESS => "ACCESS",
+        OP_CLOSE => "CLOSE",
+        OP_COMMIT => "COMMIT",
+        OP_CREATE => "CREATE",
+        OP_GETATTR => "GETATTR",
+        OP_GETFH => "GETFH",
+        OP_LINK => "LINK",
+        OP_LOOKUP => "LOOKUP",
+        OP_LOOKUPP => "LOOKUPP",
+        OP_LOCK => "LOCK",
+        OP_LOCKT => "LOCKT",
+        OP_LOCKU => "LOCKU",
+        OP_NVERIFY => "NVERIFY",
+        OP_OPEN => "OPEN",
+        OP_OPEN_DOWNGRADE => "OPEN_DOWNGRADE",
+        OP_PUTFH => "PUTFH",
+        OP_PUTPUBFH => "PUTPUBFH",
+        OP_PUTROOTFH => "PUTROOTFH",
+        OP_READ => "READ",
+        OP_READDIR => "READDIR",
+        OP_READLINK => "READLINK",
+        OP_REMOVE => "REMOVE",
+        OP_RENAME => "RENAME",
+        OP_RESTOREFH => "RESTOREFH",
+        OP_SAVEFH => "SAVEFH",
+        OP_SECINFO => "SECINFO",
+        OP_SECINFO_NO_NAME => "SECINFO_NO_NAME",
+        OP_SETATTR => "SETATTR",
+        OP_VERIFY => "VERIFY",
+        OP_WRITE => "WRITE",
+        OP_BACKCHANNEL_CTL => "BACKCHANNEL_CTL",
+        OP_BIND_CONN_TO_SESSION => "BIND_CONN_TO_SESSION",
+        OP_EXCHANGE_ID => "EXCHANGE_ID",
+        OP_CREATE_SESSION => "CREATE_SESSION",
+        OP_DESTROY_SESSION => "DESTROY_SESSION",
+        OP_FREE_STATEID => "FREE_STATEID",
+        OP_DESTROY_CLIENTID => "DESTROY_CLIENTID",
+        OP_SEQUENCE => "SEQUENCE",
+        OP_TEST_STATEID => "TEST_STATEID",
+        OP_RECLAIM_COMPLETE => "RECLAIM_COMPLETE",
+        OP_ILLEGAL => "ILLEGAL",
+        _ => "UNKNOWN",
+    }
+}
+
+fn v4_opcodes(operations: &[Op]) -> String {
+    operations
+        .iter()
+        .map(|operation| {
+            let op = operation.opnum();
+            format!("{op}:{}", v4_op_name(op))
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn v4_trace_compound_reply(
+    peer: Option<&str>,
+    xid: u32,
+    status: u32,
+    result_count: usize,
+    cached: bool,
+) {
+    v4_trace(
+        "compound-reply",
+        peer,
+        xid,
+        format_args!("status={status} results={result_count} cached={cached}"),
+    );
+}
+
+fn v4_trace_body_reply(peer: Option<&str>, xid: u32, body: &[u8], cached: bool) {
+    let status = body
+        .get(..4)
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .unwrap_or(NFS4ERR_SERVERFAULT);
+    let result_count = body
+        .get(8..)
+        .and_then(|bytes| bytes.get(..4))
+        .and_then(|bytes| bytes.try_into().ok())
+        .map(u32::from_be_bytes)
+        .unwrap_or(0) as usize;
+    v4_trace_compound_reply(peer, xid, status, result_count, cached);
+}
 
 pub const OP_ACCESS: u32 = 3;
 pub const OP_CLOSE: u32 = 4;
@@ -1451,22 +1581,71 @@ impl Nfs4Session {
     pub async fn handle_call(
         &self,
         message: &[u8],
-        _context: crate::session::NfsRequestContext,
+        context: crate::session::NfsRequestContext,
     ) -> Option<Vec<u8>> {
+        let peer = context.peer.as_deref();
         let (call, mut args) = match decode_call(message) {
             Ok(value) => value,
-            Err(_) => return None,
+            Err(error) => {
+                v4_trace(
+                    "rpc-drop",
+                    peer,
+                    0,
+                    format_args!(
+                        "bytes={} decode_error_offset={}",
+                        message.len(),
+                        error.offset
+                    ),
+                );
+                return None;
+            }
         };
+        v4_trace(
+            "rpc-call",
+            peer,
+            call.xid,
+            format_args!(
+                "program={} version={} procedure={} args_bytes={}",
+                call.program,
+                call.version,
+                call.procedure,
+                args.remaining()
+            ),
+        );
         if call.rpc_version != RPC_VERSION {
+            v4_trace(
+                "rpc-reply",
+                peer,
+                call.xid,
+                format_args!("status=rpc-version-mismatch"),
+            );
             return Some(encode_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION));
         }
         if call.cred.flavor != AUTH_NONE && call.cred.flavor != AUTH_SYS {
+            v4_trace(
+                "rpc-reply",
+                peer,
+                call.xid,
+                format_args!("status=auth-too-weak"),
+            );
             return Some(encode_auth_error(call.xid, AUTH_TOOWEAK));
         }
         if call.program != NFS4_PROGRAM {
+            v4_trace(
+                "rpc-reply",
+                peer,
+                call.xid,
+                format_args!("status=program-unavailable"),
+            );
             return Some(encode_accept_error(call.xid, RPC_PROG_UNAVAIL, None));
         }
         if call.version != NFS_V4 {
+            v4_trace(
+                "rpc-reply",
+                peer,
+                call.xid,
+                format_args!("status=program-version-mismatch"),
+            );
             return Some(encode_accept_error(
                 call.xid,
                 RPC_PROG_MISMATCH,
@@ -1474,16 +1653,34 @@ impl Nfs4Session {
             ));
         }
         if call.procedure == NFSPROC4_NULL {
+            v4_trace("rpc-reply", peer, call.xid, format_args!("status=null"));
             return Some(encode_accepted_reply(call.xid, &[]));
         }
         if call.procedure != NFSPROC4_COMPOUND {
+            v4_trace(
+                "rpc-reply",
+                peer,
+                call.xid,
+                format_args!("status=procedure-unavailable"),
+            );
             return Some(encode_accept_error(call.xid, RPC_PROC_UNAVAIL, None));
         }
         let credentials = credentials_of(&call.cred);
         let _guard = self.path_lock.read().await;
-        match self.dispatch_compound(&mut args, &credentials).await {
+        match self
+            .dispatch_compound(&mut args, &credentials, peer, call.xid)
+            .await
+        {
             Ok(body) => Some(encode_accepted_reply(call.xid, &body)),
-            Err(_) => Some(encode_accept_error(call.xid, RPC_GARBAGE_ARGS, None)),
+            Err(error) => {
+                v4_trace(
+                    "compound-reply",
+                    peer,
+                    call.xid,
+                    format_args!("status=rpc-garbage-args offset={}", error.offset),
+                );
+                Some(encode_accept_error(call.xid, RPC_GARBAGE_ARGS, None))
+            }
         }
     }
 
@@ -1491,16 +1688,36 @@ impl Nfs4Session {
         &self,
         reader: &mut XdrReader<'_>,
         credentials: &RpcCredentials,
+        peer: Option<&str>,
+        xid: u32,
     ) -> Result<Vec<u8>, XdrError> {
         let tag = reader.string(NFS4_MAX_TAG, "COMPOUND.tag")?;
         let minor = reader.u32("COMPOUND.minorversion")?;
         let count = reader.u32("COMPOUND.argarray count")? as usize;
+        v4_trace(
+            "compound-header",
+            peer,
+            xid,
+            format_args!("minor={minor} declared_ops={count} tag_bytes={}", tag.len()),
+        );
         if count > NFS4_MAX_COMPOUND_OPS {
+            v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
             return Ok(compound_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
         }
         let mut operations = Vec::with_capacity(count);
         for _ in 0..count {
-            let operation = parse_op(reader)?;
+            let operation = match parse_op(reader) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    v4_trace(
+                        "compound-parse-error",
+                        peer,
+                        xid,
+                        format_args!("offset={}", error.offset),
+                    );
+                    return Err(error);
+                }
+            };
             let unsupported = matches!(operation, Op::Unsupported(_));
             operations.push(operation);
             if unsupported {
@@ -1511,28 +1728,50 @@ impl Nfs4Session {
             && !operations
                 .iter()
                 .any(|operation| matches!(operation, Op::Unsupported(_)))
+            && let Err(error) = reader.end("COMPOUND arguments")
         {
-            reader.end("COMPOUND arguments")?;
+            v4_trace(
+                "compound-parse-error",
+                peer,
+                xid,
+                format_args!("offset={}", error.offset),
+            );
+            return Err(error);
         }
+        let opcodes = v4_opcodes(&operations);
+        v4_trace(
+            "compound-ops",
+            peer,
+            xid,
+            format_args!(
+                "minor={minor} decoded_ops={} opcodes={opcodes}",
+                operations.len()
+            ),
+        );
         if minor != NFS4_MINOR_VERSION_1 {
+            v4_trace_compound_reply(peer, xid, NFS4ERR_MINOR_VERS_MISMATCH, 0, false);
             return Ok(compound_body(NFS4ERR_MINOR_VERS_MISMATCH, &tag, &[]));
         }
         if operations.is_empty() {
+            v4_trace_compound_reply(peer, xid, NFS4_OK, 0, false);
             return Ok(compound_body(NFS4_OK, &tag, &[]));
         }
 
         let first_is_sequence = matches!(operations.first(), Some(Op::Sequence { .. }));
         if !first_is_sequence {
             if operations.len() != 1 {
+                v4_trace_compound_reply(peer, xid, NFS4ERR_NOT_ONLY_OP, 0, false);
                 return Ok(compound_body(NFS4ERR_NOT_ONLY_OP, &tag, &[]));
             }
             if !is_sessionless(&operations[0]) {
+                v4_trace_compound_reply(peer, xid, NFS4ERR_OP_NOT_IN_SESSION, 0, false);
                 return Ok(compound_body(NFS4ERR_OP_NOT_IN_SESSION, &tag, &[]));
             }
             let result = self
                 .execute_op(&operations[0], &mut Cursor::default(), credentials)
                 .await;
             let status = result.status;
+            v4_trace_compound_reply(peer, xid, status, 1, false);
             return Ok(compound_body(status, &tag, &[result]));
         }
 
@@ -1549,10 +1788,12 @@ impl Nfs4Session {
         let session = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(session) = state.sessions.get_mut(sessionid) else {
+                v4_trace_compound_reply(peer, xid, NFS4ERR_BADSESSION, 0, false);
                 return Ok(compound_body(NFS4ERR_BADSESSION, &tag, &[]));
             };
             let slot_index = usize::try_from(*slot).unwrap_or(usize::MAX);
             if slot_index >= session.next_sequence.len() {
+                v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
                 return Ok(compound_body(NFS4ERR_BADSLOT, &tag, &[]));
             }
             let expected = session.next_sequence[slot_index];
@@ -1562,15 +1803,19 @@ impl Nfs4Session {
             } else if let Some(cached) = session.cached[slot_index].as_ref()
                 && cached.sequence == *sequence
             {
+                v4_trace_body_reply(peer, xid, &cached.body, true);
                 return Ok(cached.body.clone());
             } else {
+                v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_MISORDERED, 0, false);
                 return Ok(compound_body(NFS4ERR_SEQ_MISORDERED, &tag, &[]));
             }
         };
         if *highest >= session.next_sequence.len() as u32 && *highest != 0 {
+            v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
             return Ok(compound_body(NFS4ERR_BADSLOT, &tag, &[]));
         }
         if operations.len() > session.max_operations as usize {
+            v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
             return Ok(compound_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
         }
         debug_assert_eq!(session.id, *sessionid);
@@ -1596,10 +1841,21 @@ impl Nfs4Session {
             status = result.status;
             results.push(result);
             if status != NFS4_OK {
+                v4_trace(
+                    "compound-op-status",
+                    peer,
+                    xid,
+                    format_args!(
+                        "op={} name={} status={status}",
+                        operation.opnum(),
+                        v4_op_name(operation.opnum())
+                    ),
+                );
                 break;
             }
         }
         let body = compound_body(status, &tag, &results);
+        v4_trace_compound_reply(peer, xid, status, results.len(), false);
         if *cachethis && body.len() <= session.max_cached {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             if let Some(session) = state.sessions.get_mut(sessionid) {
