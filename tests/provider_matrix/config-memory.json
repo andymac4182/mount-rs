@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "mountpoint": "./provider-matrix-mnt",
+  "transport": "auto",
+  "empty": true,
+  "driver": {
+    "kind": "memory"
+  }
+}

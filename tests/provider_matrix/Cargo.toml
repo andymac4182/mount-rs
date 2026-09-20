@@ -1,0 +1,22 @@
+[package]
+name = "mount-rs-provider-matrix"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+# Keep this harness out of the repository workspace. It is intentionally an
+# executable consumer of the published-looking crate APIs, not another root
+# integration target.
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-core = { path = "../.." }
+mount-rs-memory = { path = "../../integrations/mount-rs-memory" }
+mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
+mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
+mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+object_store = { version = "0.12", default-features = false, features = ["aws"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

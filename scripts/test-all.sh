@@ -20,6 +20,17 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
 
+# Standalone acceptance packets keep the W01 concurrency, provider-consumer,
+# and SQLite reliability checks out of the root workspace while making them
+# part of the normal gate. Provider rows that need PGlite/R2 run inside the
+# isolated server lifecycle below.
+cargo fmt --manifest-path tests/core_concurrency/Cargo.toml -- --check
+cargo fmt --manifest-path tests/provider_matrix/Cargo.toml -- --check
+cargo fmt --manifest-path tests/sqlite_matrix/Cargo.toml -- --check
+MOUNTX_SOURCE="$mountx_source" node tests/core_concurrency/check.mjs
+cargo test --manifest-path tests/sqlite_matrix/Cargo.toml --quiet --locked
+cargo run --quiet --manifest-path tests/sqlite_matrix/Cargo.toml --locked
+
 MOUNTX_SOURCE="$mountx_source" node scripts/check-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-edge-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-flags-parity.mjs

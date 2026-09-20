@@ -81,6 +81,21 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   cargo test --locked -p mount-rs-core --test fuse_backends fuse_pglite_operations_survive_connection_reopen -- --ignored --nocapture
 
+# Run the provider matrix while this isolated PGlite server is alive. The
+# matrix reports missing R2 credentials as skips and scopes any live objects
+# to a per-run prefix; it never treats RustFS or local object storage as R2.
+provider_matrix_url="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable"
+provider_matrix_run_id="pglite-$port"
+PGLITE_DATABASE_URL="$provider_matrix_url" \
+MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$provider_matrix_run_id" \
+  cargo run --quiet --manifest-path "$repo_dir/tests/provider_matrix/Cargo.toml" --locked
+PGLITE_DATABASE_URL="$provider_matrix_url" \
+MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$provider_matrix_run_id" \
+  node "$repo_dir/tests/provider_matrix/node-sdk.mjs"
+PGLITE_DATABASE_URL="$provider_matrix_url" \
+MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$provider_matrix_run_id" \
+  node "$repo_dir/tests/provider_matrix/cli.mjs"
+
 if [ -n "${MOUNTX_SOURCE:-}" ]; then
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
     pnpm --dir "$repo_dir/tests/upstream" test

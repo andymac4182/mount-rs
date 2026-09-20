@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `d526c18`, plus explicitly identified uncommitted
+Updated: 2026-09-21. Baseline: `d526c18`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -45,6 +45,18 @@ Main also reran the full oracle-enabled Node package suite after `753df86`:
 exit 0, including harness/structural drivers, server protocols, 44 typed 9P
 cases, memory parity, distribution and artifact aggregation. PGlite/R2 factory
 and native-mount opt-ins were skipped in this run and remain separate gates.
+
+Current-cycle evidence on 2026-09-21 adds a mount-free W01 concurrency packet,
+an isolated provider/consumer matrix, and an eight-cell SQLite reliability
+matrix. The dedicated PGlite lifecycle gate passed the Rust SDK rows for memfs,
+memory/memory, SQLite/SQLite and PGlite/PGlite; the Node SDK rows for memfs,
+SQLite, chunked-memory, chunked-SQLite and chunked-PGlite; and the five CLI
+config/runtime rows. R2 rows remained explicit skips because this shell did not
+have the credential variables. The post-fix full gate also passed the Rust and
+Node suites, five-seed traces across memory/SQLite/object-store/chunked/PGlite
+backends, and the N-API distribution checks. The full root gate exited 0 with
+1,194 upstream tests passed and 40/40 seeded trace lanes passed; native mounts,
+hosted Windows/Linux runs and live R2 remain separate acceptance gates.
 
 ## How to read and maintain this tracker
 
@@ -194,6 +206,11 @@ the applicable oracle-backed cases are covered.
   seeds and revision-matched results for every required backend.
 - [ ] W01.4 Verify errors, paths, binary data, links, timestamps, handles,
   concurrency and lifecycle on supported macOS and Linux configurations.
+- [x] W01.5 Add a bounded deterministic concurrency packet: six scenarios,
+  five explicit unsupported classifications, zero oracle mismatches, and five
+  consecutive pinned-oracle runs. Cross-process/crash, exact append ordering,
+  cancellation/close races, durability/restart and transport/native concurrency
+  remain open by classification.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -203,15 +220,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   providers, transports or native mounts.
 - [x] `ae2f12d` adds the complete 88-row upstream skip inventory and a
   revision-checked trace-evidence runner. Five pinned seeds passed on the
-  memory backend, and the default six-backend lane passed seed 4182 with 621
-  operations per backend; the required all-seed/provider/platform matrix
-  remains open.
+  memory/SQLite/object-store/chunked six-backend lane, and the dedicated
+  PGlite lifecycle extended the same five-seed, 621-operation trace to
+  `pglite` and `chunked-pglite`; live R2 remains credential-gated.
 - [x] `dd65770` adds the Rust-backed N-API FUSE codec subpath and declarations;
   it is mount-free protocol coverage, not native FUSE session acceptance.
 - [x] `0d7f1f4` proves the Rust CLI's real macOS NFS mount path with independent
   Rust and Node filesystem clients; `0dca1d1` adds a separate Node SDK CLI and
   its opt-in real macOS NFS self-test. Linux and provider-backed SDK matrices
   remain unverified here.
+- [x] The isolated provider/consumer matrix exercises Rust SDK, Node SDK and
+  CLI consumers with machine-readable PASS/SKIP/FAIL output. Local Rust rows
+  are 3/3, local Node rows are 4/4, and CLI config/runtime rows are 5/5; the
+  PGlite lifecycle adds Rust and Node PGlite rows. R2 rows remain explicit
+  skips without credentials and do not count as live-provider acceptance.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -228,6 +250,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 
 ## W03 — Memory and SQLite persistence
 
+- [x] The standalone SQLite reliability packet passes 8/8 deterministic cells
+  across DELETE/WAL persistence reopen, supported single-writer contention,
+  ENOSPC block-put injection, post-publish unknown-commit recovery, FULL
+  synchronization and `integrity_check`.
 - [x] Land memory and SQLite filesystem, metadata and block integrations.
 - [x] Local provider run passed five memory and four SQLite library tests.
 - [x] Local draft SQLite schema reopening fix uses explicit INSERT columns;
@@ -248,6 +274,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   cancellation, disk restart, mixed stores, Node factories and userspace FUSE.
   Upstream suite passed with skips; all eight trace lanes passed five seeds of
   621 operations each. This local run does not replace hosted/live-R2 evidence.
+- [x] The bounded test-server teardown race is covered by an exact PostgreSQL
+  Terminate-frame cleanup path plus an I/O-turn barrier. The readiness slot test
+  passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
+  gates then passed without the prior `Eio` reconnect failure.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
   Run `35493696795`, job `106032856390`, still failed bounded close/reopen with
   a server communication error. Copernicus owns the handshake-race investigation;
@@ -915,3 +945,4 @@ cross-drive isolation.
 | `dd65770` | Rust-backed N-API FUSE codec subpath | Rebuilt-addon smoke, TypeScript declarations and codec test passed; native session remains open |
 | `0d7f1f4` | Rust CLI native end-to-end demo | Actual macOS NFS plus Rust/Node mounted-path I/O and cleanup passed |
 | `0dca1d1` | Node SDK CLI example and integration test | Argument checks plus opt-in actual macOS NFS SDK self-test passed |
+| `30c2596` | W01 concurrency, provider/consumer and SQLite acceptance packets | Full root gate exit 0; PGlite rows passed; R2/live native and hosted platform gates remain open |

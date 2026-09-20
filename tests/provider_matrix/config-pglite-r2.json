@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "mountpoint": "./provider-matrix-mnt",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "pglite",
+        "connection": {
+          "env": "PGLITE_DATABASE_URL"
+        },
+        "volume_key": "provider-matrix-cli",
+        "durable": false
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "https://account-id.r2.cloudflarestorage.com",
+        "bucket": "provider-matrix-bucket",
+        "prefix": "mount-rs-provider-matrix/cli",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 4096,
+      "owner": "provider-matrix-cli"
+    }
+  }
+}

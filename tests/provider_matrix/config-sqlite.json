@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "mountpoint": "./provider-matrix-mnt",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "sqlite",
+        "path": "./provider-matrix-state/metadata.sqlite"
+      },
+      "blocks": {
+        "kind": "sqlite",
+        "path": "./provider-matrix-state/blocks.sqlite"
+      },
+      "chunk_size_bytes": 4096,
+      "owner": "provider-matrix-cli"
+    }
+  }
+}

@@ -233,6 +233,22 @@ export function installPgliteSocketCleanup() {
     };
     handlerCloseListeners.set(this, shimCloseListener);
     socket.on("close", shimCloseListener);
+    socket.on("data", (chunk) => {
+      // tokio-postgres sends a five-byte frontend Terminate frame when the
+      // client is dropped. The upstream handler treats that frame like a
+      // normal protocol message, so its close event can arrive after a
+      // reconnect has already entered handleConnection. Release this test
+      // server's bounded slot as soon as the complete frame is observed.
+      // Keep this narrowly scoped to the exact frame; arbitrary SQL/query
+      // payloads must continue through the upstream handler unchanged.
+      if (
+        chunk.length >= 5 &&
+        chunk[chunk.length - 5] === 0x58 &&
+        chunk.readUInt32BE(chunk.length - 4) === 4
+      ) {
+        void closeHandler(this, true);
+      }
+    });
     socket.on("end", () => {
       // tokio-postgres half-closes after sending Terminate. On Node, the peer
       // may emit `end` before `close`; detach here so the rollback and handler
@@ -249,6 +265,11 @@ export function installPgliteSocketCleanup() {
   PGLiteSocketServer.prototype.handleConnection = function (...args) {
     const operation = (async () => {
       try {
+        // A PostgreSQL Terminate reaches the peer socket before Node always
+        // schedules its `end` listener. Yield through the I/O turn so the
+        // close shim can mark the old handler stale before the upstream
+        // bounded-connection check counts it.
+        await new Promise((resolve) => setImmediate(resolve));
         // A peer can destroy a socket before Node delivers its close event.
         // Drain such handlers before the upstream maxConnections check; the
         // cap itself remains unchanged and is still enforced by the original

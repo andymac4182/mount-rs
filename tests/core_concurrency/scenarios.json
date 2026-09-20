@@ -1,0 +1,252 @@
+{
+  "packet": "W01-core-concurrency-v1",
+  "oracle_revision": "85361a8212ff9bff8e69f62fa8993ef2c2ec51e8",
+  "scenarios": [
+    {
+      "id": "parallel_disjoint_creates",
+      "purpose": "Concurrent whole-file creates and writes in one directory.",
+      "setup": [
+        { "actor": "setup", "op": "mkdir", "path": "/parallel", "mode": 493 }
+      ],
+      "rounds": [
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "a", "op": "write_file", "path": "/parallel/a", "data": [0, 1, 2, 255] },
+            { "actor": "b", "op": "write_file", "path": "/parallel/b", "data": [255, 128, 2, 1] },
+            { "actor": "c", "op": "write_file", "path": "/parallel/c", "data": [42, 43, 44] },
+            { "actor": "d", "op": "write_file", "path": "/parallel/d", "data": [9, 0, 9, 0] }
+          ]
+        }
+      ],
+      "observe": [
+        { "id": "entries", "op": "list", "path": "/parallel", "sort": "name" },
+        { "id": "a", "op": "read", "path": "/parallel/a" },
+        { "id": "b", "op": "read", "path": "/parallel/b" },
+        { "id": "c", "op": "read", "path": "/parallel/c" },
+        { "id": "d", "op": "read", "path": "/parallel/d" },
+        { "id": "a_stat", "op": "stat", "path": "/parallel/a" }
+      ]
+    },
+    {
+      "id": "shared_handle_positional_interleave",
+      "purpose": "Two open handles apply disjoint positional writes, reads, flushes, and close operations in fixed rounds.",
+      "setup": [
+        { "actor": "setup", "op": "write_file", "path": "/shared", "data": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0] },
+        { "actor": "setup", "op": "open", "id": "left", "path": "/shared", "flags": "r+", "mode": 0 },
+        { "actor": "setup", "op": "open", "id": "right", "path": "/shared", "flags": "r+", "mode": 0 }
+      ],
+      "rounds": [
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "left", "op": "handle_write", "id": "left", "position": 0, "data": [10, 11, 12, 13] },
+            { "actor": "right", "op": "handle_write", "id": "right", "position": 8, "data": [20, 21, 22, 23] }
+          ]
+        },
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "left", "op": "handle_write", "id": "left", "position": 4, "data": [14, 15, 16, 17] },
+            { "actor": "right", "op": "handle_write", "id": "right", "position": 12, "data": [24, 25, 26, 27] }
+          ]
+        },
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "left", "op": "handle_read", "id": "left", "count": 4, "position": 0 },
+            { "actor": "right", "op": "handle_read", "id": "right", "count": 4, "position": 8 }
+          ]
+        },
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "left", "op": "handle_sync", "id": "left" },
+            { "actor": "right", "op": "handle_datasync", "id": "right" }
+          ]
+        },
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "left", "op": "handle_close", "id": "left" },
+            { "actor": "right", "op": "handle_close", "id": "right" }
+          ]
+        }
+      ],
+      "observe": [
+        { "id": "data", "op": "read", "path": "/shared" },
+        { "id": "closed_read", "op": "handle_read", "id": "left", "count": 1, "position": 0 },
+        { "id": "closed_stat", "op": "handle_stat", "id": "right" }
+      ]
+    },
+    {
+      "id": "rename_unlink_open_handle",
+      "purpose": "A held handle writes while its pathname is renamed, then unlinked; the handle remains usable until close.",
+      "setup": [
+        { "actor": "setup", "op": "mkdir", "path": "/rename", "mode": 493 },
+        { "actor": "setup", "op": "write_file", "path": "/rename/original", "data": [115, 116, 97, 114, 116] },
+        { "actor": "setup", "op": "open", "id": "held", "path": "/rename/original", "flags": "r+", "mode": 0 }
+      ],
+      "rounds": [
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "renamer", "op": "rename", "old_path": "/rename/original", "new_path": "/rename/moved" },
+            { "actor": "writer", "op": "handle_write", "id": "held", "position": 0, "data": [33] }
+          ]
+        },
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "writer", "op": "handle_write", "id": "held", "position": 1, "data": [64] },
+            { "actor": "remover", "op": "unlink", "path": "/rename/moved" }
+          ]
+        },
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "reader", "op": "handle_read", "id": "held", "count": 5, "position": 0 },
+            { "actor": "observer", "op": "stat", "path": "/rename/moved" }
+          ]
+        },
+        {
+          "mode": "ordered",
+          "ops": [
+            { "actor": "closer", "op": "handle_close", "id": "held" }
+          ]
+        }
+      ],
+      "observe": [
+        { "id": "original_missing", "op": "stat", "path": "/rename/original" },
+        { "id": "moved_missing", "op": "read", "path": "/rename/moved" },
+        { "id": "closed_read", "op": "handle_read", "id": "held", "count": 1, "position": 0 }
+      ]
+    },
+    {
+      "id": "parallel_append_records",
+      "purpose": "Concurrent append writes are compared as an exact fixed-size record multiset, not by scheduler-dependent completion order.",
+      "setup": [
+        { "actor": "setup", "op": "write_file", "path": "/append", "data": [] },
+        { "actor": "setup", "op": "open", "id": "a", "path": "/append", "flags": "a", "mode": 0 },
+        { "actor": "setup", "op": "open", "id": "b", "path": "/append", "flags": "a", "mode": 0 },
+        { "actor": "setup", "op": "open", "id": "c", "path": "/append", "flags": "a", "mode": 0 },
+        { "actor": "setup", "op": "open", "id": "d", "path": "/append", "flags": "a", "mode": 0 }
+      ],
+      "rounds": [
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "a", "op": "handle_write", "id": "a", "data": [0, 0, 170, 85] },
+            { "actor": "b", "op": "handle_write", "id": "b", "data": [1, 0, 170, 85] },
+            { "actor": "c", "op": "handle_write", "id": "c", "data": [2, 0, 170, 85] },
+            { "actor": "d", "op": "handle_write", "id": "d", "data": [3, 0, 170, 85] }
+          ]
+        },
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "a", "op": "handle_write", "id": "a", "data": [0, 1, 170, 85] },
+            { "actor": "b", "op": "handle_write", "id": "b", "data": [1, 1, 170, 85] },
+            { "actor": "c", "op": "handle_write", "id": "c", "data": [2, 1, 170, 85] },
+            { "actor": "d", "op": "handle_write", "id": "d", "data": [3, 1, 170, 85] }
+          ]
+        },
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "a", "op": "handle_write", "id": "a", "data": [0, 2, 170, 85] },
+            { "actor": "b", "op": "handle_write", "id": "b", "data": [1, 2, 170, 85] },
+            { "actor": "c", "op": "handle_write", "id": "c", "data": [2, 2, 170, 85] },
+            { "actor": "d", "op": "handle_write", "id": "d", "data": [3, 2, 170, 85] }
+          ]
+        },
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "a", "op": "handle_close", "id": "a" },
+            { "actor": "b", "op": "handle_close", "id": "b" },
+            { "actor": "c", "op": "handle_close", "id": "c" },
+            { "actor": "d", "op": "handle_close", "id": "d" }
+          ]
+        }
+      ],
+      "observe": [
+        { "id": "records", "op": "read_chunks", "path": "/append", "chunk_size": 4, "sort": "bytes" },
+        { "id": "stat", "op": "stat", "path": "/append" }
+      ]
+    },
+    {
+      "id": "recursive_mkdir_race",
+      "purpose": "Concurrent recursive mkdir calls must create one tree and report one first-created path plus idempotent successes.",
+      "setup": [],
+      "rounds": [
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "a", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "b", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "c", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "d", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "e", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "f", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "g", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 },
+            { "actor": "h", "op": "mkdir_recursive", "path": "/tree/a/b", "mode": 493 }
+          ]
+        }
+      ],
+      "observe": [
+        { "id": "root", "op": "list", "path": "/", "sort": "name" },
+        { "id": "tree", "op": "list", "path": "/tree", "sort": "name" },
+        { "id": "deep", "op": "stat", "path": "/tree/a/b" }
+      ]
+    },
+    {
+      "id": "exclusive_create_race",
+      "purpose": "Concurrent O_EXCL-style creates must produce one empty file and one EEXIST result.",
+      "setup": [
+        { "actor": "setup", "op": "mkdir", "path": "/exclusive", "mode": 493 }
+      ],
+      "rounds": [
+        {
+          "mode": "multiset",
+          "ops": [
+            { "actor": "left", "op": "open_discard", "path": "/exclusive/race", "flags": "wx", "mode": 384 },
+            { "actor": "right", "op": "open_discard", "path": "/exclusive/race", "flags": "wx", "mode": 384 }
+          ]
+        }
+      ],
+      "observe": [
+        { "id": "stat", "op": "stat", "path": "/exclusive/race" },
+        { "id": "data", "op": "read", "path": "/exclusive/race" }
+      ]
+    }
+  ],
+  "unsupported": [
+    {
+      "id": "cross_process_atomicity",
+      "status": "unsupported",
+      "reason": "This packet drives one in-process loopback per backend; process, crash, and OS-lock visibility are outside the memory-driver contract."
+    },
+    {
+      "id": "exact_append_completion_order",
+      "status": "unsupported",
+      "normalization": "fixed-size-record-multiset",
+      "reason": "Concurrent append completion order is scheduler-dependent; atomic record membership and final size are asserted instead."
+    },
+    {
+      "id": "cancellation_and_close_races",
+      "status": "unsupported",
+      "reason": "Cancellation or close racing an in-flight operation has no portable mountx core contract and is not asserted."
+    },
+    {
+      "id": "durability_and_restart",
+      "status": "unsupported",
+      "reason": "Both selected memory drivers are volatile; persistence and restart are separate W01 gates."
+    },
+    {
+      "id": "transport_and_native_concurrency",
+      "status": "unsupported",
+      "reason": "This packet compares mount-free driver calls only; FUSE, 9P, NFS, HTTP, and native mount scheduling are separate gates."
+    }
+  ]
+}
