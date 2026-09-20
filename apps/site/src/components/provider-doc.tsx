@@ -204,8 +204,13 @@ sqlite3 blocks.sqlite \
     metadata: (
       <>
         <code>mount_rs_metadata</code> stores one row per <code>volume_key</code>
-        with namespace text, revision, writer owner, fence, and expiry. The
-        metadata connection and block connection are independent.
+        with namespace text, revision, writer owner, fence, expiry, and a
+        stable <code>volume_id</code>. Versioning adds
+        <code>mount_rs_schema_versions</code>, <code>mount_rs_version_state</code>,
+        <code>mount_rs_versions</code>, and <code>mount_rs_version_pins</code>;
+        each record keeps sequence, parent/restore/fork links, namespace JSON,
+        block-store ID, kind, timestamp, durability, and lease-pin ownership
+        explicit. The metadata connection and block connection are independent.
       </>
     ),
     blocks: (
@@ -219,8 +224,12 @@ sqlite3 blocks.sqlite \
       <>
         The mount layer still owns fixed-size chunking and publishes block IDs
         in namespace JSON. PGlite's tables are provider storage, not a second
-        filesystem namespace; use separate <code>volume_key</code> values to
-        isolate independent compositions.
+        filesystem namespace. On startup the versioning schema records
+        <code>mount-rs-versioning</code> at schema version <code>1</code>, checks
+        that stored versions and pins belong to the metadata
+        <code>volume_id</code>, and keeps the current head plus next sequence in
+        <code>mount_rs_version_state</code>. Use separate
+        <code>volume_key</code> values to isolate independent compositions.
       </>
     ),
     consistency: (
@@ -239,6 +248,19 @@ SELECT volume_key, id, octet_length(bytes) AS block_bytes
 FROM mount_rs_blocks
 ORDER BY volume_key, id
 LIMIT 20;
+SELECT schema_name, schema_version
+FROM mount_rs_schema_versions
+ORDER BY schema_name;
+SELECT volume_key, volume_id, head_id, next_sequence, next_read_fence
+FROM mount_rs_version_state;
+SELECT volume_key, id, sequence, parent_id, restored_from, forked_from,
+       kind, block_store_id, created_at_ms, durable
+FROM mount_rs_versions
+ORDER BY volume_key, sequence
+LIMIT 20;
+SELECT volume_key, view_id, version_id, owner, fence, expires
+FROM mount_rs_version_pins
+ORDER BY volume_key, view_id;
 SQL`,
     cleanup: (
       <>
@@ -272,7 +294,10 @@ SQL`,
         10 passes and one explicit R2 skip. No config-validation row is counted
         as live R2 evidence. These are focused consumer checks, not
         live-provider or native-mount acceptance; hosted and release
-        acceptance remain separate.
+        acceptance remain separate. The current provider initializes and
+        validates durable version metadata on reconnect, including head,
+        sequence, volume identity, and pin invariants; a newer stored schema or
+        cross-volume version record fails closed.
       </>
     ),
     sources: [

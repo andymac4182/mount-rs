@@ -27,7 +27,7 @@ export const transportSpecs = {
     name: 'FUSE',
     eyebrow: 'Transport / kernel-facing Unix mount',
     maturity: 'Preview',
-    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; the latest recorded hosted Linux run passed the structural FUSE lifecycle at 37e9ba1 but predates newer codec packets, so current-tree requalification remains open while broader platform scope stays explicit.',
+    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; focused current-tree codec packets now cover additional FUSE operations and xattrs, while the latest recorded hosted Linux run passed the structural FUSE lifecycle at 37e9ba1 and current-tree requalification remains open.',
     summary: (
       <>
         FUSE is the kernel-facing route for a host that can provide the FUSE
@@ -82,12 +82,17 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>GETATTR</code>/<code>SETATTR</code>,
         <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>,
         <code>LOOKUP</code>, <code>READLINK</code>, <code>STATFS</code>,
-        <code>BATCH_FORGET</code>, <code>INTERRUPT</code>,
-        <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>, and
-        <code>FSYNC</code>/<code>FSYNCDIR</code> bodies, plus
-        <code>READDIR</code>/<code>READDIRPLUS</code> directory codecs.
-        Full request/reply, init negotiation, session, and native-mount surfaces
-        remain open; several typed operations still return <code>ENOSYS</code>.
+        <code>BATCH_FORGET</code>, <code>INTERRUPT</code>, <code>POLL</code>,
+        <code>FALLOCATE</code>, <code>RENAME2</code>, <code>LSEEK</code>, and
+        <code>COPY_FILE_RANGE</code>, <code>RELEASE</code>/<code>RELEASEDIR</code>,
+        <code>FLUSH</code>, and <code>FSYNC</code>/<code>FSYNCDIR</code> bodies,
+        plus <code>SETXATTR</code>/<code>GETXATTR</code>/<code>LISTXATTR</code>/
+        <code>REMOVEXATTR</code> request/reply codecs and
+        <code>READDIR</code>/<code>READDIRPLUS</code> directory codecs. These
+        are focused mount-free boundaries: malformed or trailing advanced
+        requests fail closed and valid unsupported operations still return
+        <code>ENOSYS</code>. Full request/reply, init negotiation, session, and
+        native-mount surfaces remain open.
         FUSE evidence does not qualify NFS, 9P, or FSKit.
       </>
     ),
@@ -99,6 +104,14 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>,
         <code>LOOKUP</code>, <code>READLINK</code>, and <code>STATFS</code>
         codecs alongside <code>BATCH_FORGET</code>/<code>INTERRUPT</code>,
+        <code>POLL</code>, <code>FALLOCATE</code>, <code>RENAME2</code>,
+        <code>LSEEK</code>, and <code>COPY_FILE_RANGE</code>. The advanced
+        operation packet validates framing and keeps unsupported valid requests
+        at <code>ENOSYS</code> without mutating the session. The N-API xattr
+        packet adds <code>SETXATTR</code>, <code>GETXATTR</code>,
+        <code>LISTXATTR</code>, and <code>REMOVEXATTR</code> codecs with
+        pinned-oracle coverage across protocol contexts, malformed,
+        truncated, trailing, and declared-size checks. The existing
         <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>,
         <code>FSYNC</code>/<code>FSYNCDIR</code>,
         <code>packDirents</code>/<code>unpackDirents</code>, and
@@ -111,8 +124,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         validation; six INIT tests cover negotiated <code>FUSE_INIT_EXT</code>
         and <code>flags2</code> handling. Hosted CI run 35499717435 passed Linux
         native FUSE/NFS/9P/WebDAV at 37e9ba1; newer current-tree CI is queued,
-        so full request/reply, session, and native-mount surfaces stay
-        open.
+        so full request/reply, session, and native-mount surfaces stay open.
       </>
     ),
     sources: [
@@ -405,11 +417,18 @@ curl -H 'Authorization: Bearer demo-memory' \
       <>
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
-        current tracker keeps broader multi-drive and hosted coverage open.
+        optional <code>mount-rs-observability</code> seam can attach a
+        caller-owned telemetry handle through
+        <code>HttpServerOptions::with_telemetry</code>; the OTLP variant accepts
+        only W3C trace propagation and emits bounded operation metadata without
+        paths, tokens, file contents, block IDs, or arbitrary headers. Collector
+        reachability and broader multi-drive and hosted coverage remain open.
       </>
     ),
     sources: [
       { label: 'HTTP transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/README.md' },
+      { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
+      { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/src/server.rs' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#quick-local-demo' },
     ],
   },
