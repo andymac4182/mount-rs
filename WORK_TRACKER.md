@@ -55,8 +55,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 - [ ] **D01 — Live R2:** obtain dedicated test bucket and credentials through a
   safe channel. Do not put secrets in this tracker or substitute RustFS evidence.
-  Cloudflare MCP is now connected. Actual bucket-list API returned error 10042:
-  R2 must first be enabled in the Cloudflare dashboard. No bucket/token created.
+  R2 is activated. Created `mount-rs-integration-tests` in Oceania, Standard
+  storage, default jurisdiction. Scoped account-token creation and permission
+  discovery both returned 9109 (unauthorized); bucket exists, credentials do not.
 - [ ] **D02 — License:** resolve root Apache-2.0 versus MIT package declarations
   with the user before release; do not silently select a license.
 - [ ] **D03 — FSKit:** obtain signing/install/activation authorization and host
@@ -123,6 +124,8 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
 - [ ] W05.1 Unblock D01 and run authenticated tests against actual Cloudflare R2.
+  Bucket provisioning succeeded through the connected MCP on 2026-09-20;
+  token-management authorization remains required. No live data tests passed yet.
 - [ ] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
