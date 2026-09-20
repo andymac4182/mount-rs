@@ -7,7 +7,7 @@ edit and refreshed against the current source, tests, and the pinned oracle:
 - repository baseline when the deleted file was recovered:
   `ac2161d27f4a6805b87580fbee20c1302e9cd9df`
 - current local integration baseline observed during this packet:
-  `6eac0d4`
+  `323231f`
 - oracle checkout: `/tmp/mountx-source.uWiHfX`
 - oracle revision: `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`
 
@@ -37,7 +37,7 @@ described as a complete session or native-mount implementation.
 | Boundary | Current implementation | Parity state |
 | --- | --- | --- |
 | Root filesystem, errors, path utilities, and driver factory | Native `Filesystem`/handle API, root utility aliases, and `createDriver` facade | **IMPLEMENTED (focused); PARTIAL** for oracle harness/type parity |
-| Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the native `mount` binding still requires a native `Filesystem` at runtime | **PARTIAL** |
+| Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the opt-in native mount lifecycle now accepts the plain structural object and passes macOS NFS read/write/unmount | **PARTIAL; UNVERIFIED** for hosted Linux/other platforms |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces and a Rust-backed `InodeTable` are exported through `./fuse`; full request/reply body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
@@ -64,8 +64,10 @@ That adapter is not yet the oracle contract boundary:
 
 - `mount`, `createNfsServer`, `createP9Server`, `createS3Server`, and
   `createWebdavServer` now accept native or structural drivers through the
-  JavaScript facade, with owned-adapter cleanup. Real server tests pass;
-  successful native mounting with a structural driver remains unverified.
+  JavaScript facade, with owned-adapter cleanup. Real server tests pass; the
+  opt-in macOS NFS structural mount passes read/write/unmount, and Linux FUSE
+  prerequisites plus the equivalent CI lifecycle are wired. Hosted Linux,
+  other transports and Windows execution remain unverified.
 - The root facade now exports `FsDriver`, `Loopback`, `ResolvedCapabilities`,
   `createLoopback`, and `resolveCapabilities`. Main passed the pinned-oracle
   harness comparison for declarations/inference, method binding and identity,
@@ -75,8 +77,8 @@ That adapter is not yet the oracle contract boundary:
   through all server factories, with capability/missing-method comparisons,
   cleanup and eight WebDAV DELETE oracle cases. Main reran these successfully.
   A rebuilt addon also passes the opt-in macOS NFS structural mount lifecycle,
-  including mounted write/readback and callback reachability; Linux, other
-  transports and Windows hosted execution remain unverified.
+  including mounted write/readback and callback reachability; the Linux FUSE
+  job is prerequisite-gated and still needs a hosted pass.
   The parent suite still skips when `MOUNTX_SOURCE` is unset.
 
 **Required closure evidence:** a non-skipped oracle-backed test must pass the
@@ -119,6 +121,10 @@ The Rust implementation has useful, tested FUSE pieces:
   [`record.rs`](../transports/mount-rs-fuse/src/record.rs#L1-L245);
 - [`notify_record.rs`](../transports/mount-rs-fuse/tests/notify_record.rs#L30-L257)
   contains upstream fixtures, malformed-input checks, and replay reports.
+- the N-API `./fuse` barrel now also exposes oracle-shaped `packDirents` and
+  `unpackDirents` for bounded `READDIR` bodies. UTF-8 names, 8-byte alignment,
+  bounded packing and malformed input are differentially tested against the
+  pinned oracle in [`fuse-codec.mjs`](../integrations/mount-rs-napi/test/fuse-codec.mjs);
 - the Rust-backed `InodeTable` is now exposed from the N-API `./fuse` barrel;
   its facade preserves oracle-shaped `Inode` views and `Set` paths while the
   state and mutation logic remain in Rust. The focused oracle test covers
@@ -130,8 +136,9 @@ The Rust implementation has useful, tested FUSE pieces:
 The oracle FUSE barrel also exports constants, init, inodes, mount, notify,
 protocol, record, and session, including a broad request/reply body codec.
 The N-API package still does not expose the complete request/reply body codec,
-init negotiation, session, or native mount objects. Therefore this packet
-proves the inode component only, not full FUSE transport parity.
+`READDIRPLUS`, init negotiation, session, or native mount objects. Therefore
+this packet proves focused body/inode components only, not full FUSE transport
+parity.
 
 ### P1 — auto/mount option and lifecycle parity: PARTIAL; UNVERIFIED
 
@@ -242,13 +249,13 @@ evidence. They do not close the next core parity gates, which are ordered here
 from the smallest contract boundary to the larger environment boundary:
 
 1. **Structural-driver native mount (P0/P1 seam):** the opt-in macOS NFS
-   lifecycle now mounts a structural driver and verifies read/write/unmount.
-   Repeat the same acceptance on Linux and the supported transport choices,
-   then retain explicit unsupported results on platforms that cannot provide
-   the required native mount.
+   lifecycle now mounts a structural driver and verifies read/write/unmount;
+   Linux FUSE prerequisites and the equivalent CI lifecycle are now wired.
+   Obtain a hosted Linux pass, repeat supported transport choices, and retain
+   explicit unsupported results on platforms that cannot provide the mount.
 2. **Capability-limited Unstorage behavior (P1):** focused oracle-backed
-   capability, unsupported-operation, metadata and ownership-overlay checks
-   now pass. The remaining inventory still identifies hardlinks (6 rows),
+   capability, unsupported-operation, ownership-overlay and timestamp metadata
+   checks now pass. The remaining inventory still identifies hardlinks (6 rows),
    symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
    creation (16 rows), and root-only permission cases (18 rows). Each remaining
    row needs an explicit unsupported assertion or adapter implementation; a
@@ -257,10 +264,11 @@ from the smallest contract boundary to the larger environment boundary:
    cancellation/close, fault-injection, SQLite and PGlite gates now cover the
    main storage paths, including the SDK-backed CLI reopen flow. Hosted crash,
    live-R2 and native transport concurrency remain separate acceptance gates.
-4. **Remaining public transport/API surface (P1):** expose the missing FUSE
-   request/reply body, session and native-mount surfaces, then run
-   oracle-backed subpath tests for every exported transport rather than treating
-   codec or inode fixture tests as transport completion.
+4. **Remaining public transport/API surface (P1):** the FUSE `READDIR` body
+   codec is now public and oracle-differentially tested. Expose the remaining
+   request/reply bodies, `READDIRPLUS`, session and native-mount surfaces, then
+   run oracle-backed subpath tests for every exported transport rather than
+   treating codec or inode fixture tests as transport completion.
 
 The first two items are behavior or environment gaps in the current W01 slice;
 the third and fourth retain broader acceptance boundaries. Provider,
