@@ -17,6 +17,8 @@
 			A10000000000000000000008 /* MountRsRustWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MountRsRustWorker.swift */; };
 			A10000000000000000000009 /* MountRsXPCService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* MountRsXPCService.swift */; };
 			A1000000000000000000000A /* MountRsRustWorker.swift in FSKit extension */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MountRsRustWorker.swift */; };
+			A1000000000000000000000B /* MountRsFSKit.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A10000000000000000000010 /* MountRsFSKit.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+			A1000000000000000000000C /* MountRsFSKitHostApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002B /* MountRsFSKitHostApp.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -33,7 +35,21 @@
 			A1000000000000000000001A /* MountRsXPCService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsXPCService.swift; sourceTree = SOURCE_ROOT; };
 			A1000000000000000000001B /* XPCService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/XPCService-Info.plist; sourceTree = SOURCE_ROOT; };
 			A1000000000000000000001C /* MountRsXPCService.xpc */ = {isa = PBXFileReference; explicitFileType = wrapper.xpc-service; includeInIndex = 0; path = MountRsXPCService.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+			A1000000000000000000002A /* mount-rs.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "mount-rs.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+			A1000000000000000000002B /* MountRsFSKitHostApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsFSKitHostApp.swift; sourceTree = SOURCE_ROOT; };
+			A1000000000000000000002C /* HostApp-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/HostApp-Info.plist; sourceTree = SOURCE_ROOT; };
+			A1000000000000000000002D /* MountRsHost.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Resources/MountRsHost.entitlements; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
+
+/* Begin PBXContainerItemProxy section */
+		A1000000000000000000002E /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000050 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000040;
+			remoteInfo = MountRsFSKit;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000020 /* Frameworks */ = {
@@ -45,6 +61,13 @@
 				runOnlyForDeploymentPostprocessing = 0;
 		};
 		A10000000000000000000023 /* XPC service frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000026 /* Host app frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -64,9 +87,12 @@
 				A10000000000000000000018 /* MountRsFSVolume.swift */,
 				A10000000000000000000019 /* MountRsRustWorker.swift */,
 				A1000000000000000000001A /* MountRsXPCService.swift */,
+				A1000000000000000000002B /* MountRsFSKitHostApp.swift */,
 				A10000000000000000000014 /* Info.plist */,
 				A10000000000000000000015 /* MountRsFSKit.entitlements */,
 				A1000000000000000000001B /* XPCService-Info.plist */,
+				A1000000000000000000002C /* HostApp-Info.plist */,
+				A1000000000000000000002D /* MountRsHost.entitlements */,
 			);
 			name = Sources;
 			path = .;
@@ -77,6 +103,7 @@
 			children = (
 				A10000000000000000000010 /* MountRsFSKit.appex */,
 				A1000000000000000000001C /* MountRsXPCService.xpc */,
+				A1000000000000000000002A /* mount-rs.app */,
 			);
 			name = Products;
 			sourceTree = BUILT_PRODUCTS_DIR;
@@ -127,7 +154,33 @@
 			productReference = A1000000000000000000001C /* MountRsXPCService.xpc */;
 			productType = "com.apple.product-type.xpc-service";
 		};
+		A10000000000000000000042 /* MountRsHost */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000063 /* Build configuration list for PBXNativeTarget "MountRsHost" */;
+			buildPhases = (
+				A10000000000000000000027 /* Host app sources */,
+				A10000000000000000000026 /* Host app frameworks */,
+				A10000000000000000000028 /* Host app resources */,
+				A10000000000000000000029 /* Embed App Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A1000000000000000000002F /* MountRsFSKit */,
+			);
+			name = MountRsHost;
+			productName = mount-rs;
+			productReference = A1000000000000000000002A /* mount-rs.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
+
+/* Begin PBXTargetDependency section */
+		A1000000000000000000002F /* MountRsFSKit */ = {
+			isa = PBXTargetDependency;
+			targetProxy = A1000000000000000000002E /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin PBXProject section */
 		A10000000000000000000050 /* Project object */ = {
@@ -140,6 +193,9 @@
 						CreatedOnToolsVersion = 2630;
 					};
 					A10000000000000000000041 = {
+						CreatedOnToolsVersion = 2630;
+					};
+					A10000000000000000000042 = {
 						CreatedOnToolsVersion = 2630;
 					};
 				};
@@ -159,6 +215,7 @@
 				targets = (
 					A10000000000000000000040 /* MountRsFSKit */,
 					A10000000000000000000041 /* MountRsXPCService */,
+					A10000000000000000000042 /* MountRsHost */,
 			);
 		};
 /* End PBXProject section */
@@ -178,7 +235,28 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A10000000000000000000028 /* Host app resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		A10000000000000000000029 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "$(EXTENSIONS_FOLDER_PATH)";
+			dstSubfolderSpec = 16;
+			files = (
+				A1000000000000000000000B /* MountRsFSKit.appex in Embed App Extensions */,
+			);
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		A10000000000000000000021 /* Sources */ = {
@@ -201,6 +279,14 @@
 				A10000000000000000000007 /* MountRsXPCDelegate.swift in XPC service */,
 				A10000000000000000000008 /* MountRsRustWorker.swift in Sources */,
 				A10000000000000000000009 /* MountRsXPCService.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000027 /* Host app sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1000000000000000000000C /* MountRsFSKitHostApp.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -329,6 +415,60 @@
 			};
 			name = Release;
 		};
+		A10000000000000000000076 /* Host app Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APPLICATION_EXTENSION_API_ONLY = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/MountRsHost.entitlements;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/HostApp-Info.plist;
+				INSTALL_PATH = "$(LOCAL_APPS_DIR)";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 15.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs;
+				PRODUCT_NAME = mount-rs;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				WRAPPER_EXTENSION = app;
+			};
+			name = Debug;
+		};
+		A10000000000000000000077 /* Host app Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APPLICATION_EXTENSION_API_ONLY = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = Resources/MountRsHost.entitlements;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/HostApp-Info.plist;
+				INSTALL_PATH = "$(LOCAL_APPS_DIR)";
+				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks";
+				MACOSX_DEPLOYMENT_TARGET = 15.4;
+				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs;
+				PRODUCT_NAME = mount-rs;
+				SDKROOT = macosx;
+				SKIP_INSTALL = NO;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				WRAPPER_EXTENSION = app;
+			};
+			name = Release;
+		};
 		A10000000000000000000072 /* Project Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -377,6 +517,15 @@
 			buildConfigurations = (
 				A10000000000000000000074 /* XPC service Debug */,
 				A10000000000000000000075 /* XPC service Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000063 /* Build configuration list for PBXNativeTarget "MountRsHost" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000076 /* Host app Debug */,
+				A10000000000000000000077 /* Host app Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

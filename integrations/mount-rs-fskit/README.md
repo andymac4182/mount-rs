@@ -1,8 +1,9 @@
 # mount-rs FSKit V1 and Rust-worker checkpoint
 
-This directory contains the macOS FSKit V1 adapter and its standalone Rust
-worker bridge. It is an unsigned compile/test checkpoint, not evidence of an
-installed or mounted FSKit product.
+This directory contains the macOS FSKit V1 adapter, its standalone Rust
+worker bridge, and a minimal containing application. It is an unsigned
+compile/package/test checkpoint, not evidence of an installed or mounted
+FSKit product.
 
 The extension target uses the FSKit V1 surface available in the installed SDK
 (`FSVolume.Operations`, `FSVolume.OpenCloseOperations`, and
@@ -78,6 +79,31 @@ errors retain the Rust provider's errno/code/path/syscall information.
 Data operations use fixed 128 KiB chunks; the Swift client transparently
 splits larger FSKit reads and writes while preserving the caller's offset.
 
+## Containing application
+
+`MountRsHost` is intentionally a minimal `NSApplication` target. Its only
+filesystem responsibility is embedding `MountRsFSKit.appex` in
+`Contents/Extensions`, which is the ExtensionKit location required by macOS.
+The Rust driver remains in the extension; the app is the installable container
+that can later be signed, installed, and enabled in System Settings.
+
+The current host has no valid Apple signing identity, so unsigned builds can
+verify the bundle layout and code paths but cannot establish FSKit activation.
+The signing gate must use a provisioning profile authorized for
+`com.apple.developer.fskit.fsmodule`, then be followed by the user approval
+step and a real `mount(8)`/`FSClient` lifecycle test.
+
+## Rust-only alternatives reviewed
+
+There is no maintained Rust-only FSKit target that removes Apple's app
+extension boundary. The `fsk` crate provides a cross-platform Rust filesystem
+trait and an install-once Swift bridge; `FSKitBridge` provides the same
+architecture through a local backend protocol. Both are useful references,
+but adopting either would still retain Swift and add another runtime boundary.
+mount-rs therefore keeps the Swift layer limited to FSKit callback translation
+and Rust ABI calls while the filesystem, storage, locking, and lifecycle logic
+remain in Rust.
+
 ## Verified commands
 
 Run from the repository root for Rust:
@@ -148,21 +174,29 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
   -scheme MountRsXPCService -configuration Debug -sdk macosx26.5 \
   -derivedDataPath /tmp/mount-rs-fskit-derived-xpc-arm64 \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
+  -scheme MountRsHost -configuration Debug -sdk macosx26.5 \
+  -derivedDataPath /tmp/mount-rs-fskit-derived-host-arm64 \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+test -f /tmp/mount-rs-fskit-derived-host-arm64/Build/Products/Debug/mount-rs.app/Contents/Extensions/MountRsFSKit.appex/Contents/MacOS/MountRsFSKit
 ```
 
-Both arm64 targets build and link. The extension also builds for x86_64
+All three arm64 targets build and link. The extension also builds for x86_64
 against the SDK. The XPC service cannot currently link x86_64 because the
 local Rust toolchain has `aarch64-apple-darwin` but not
 `x86_64-apple-darwin`; no toolchain target was installed for this checkpoint.
 
 ## Explicit boundaries
 
-This checkpoint does not claim full FSKit acceptance. The Xcode targets are
-deliberately unsigned (`CODE_SIGNING_ALLOWED=NO`) and skipped from install
-(`SKIP_INSTALL=YES`); this project does not contain a containing application,
-embedding phase, provisioning profile, launchd registration, or FSKit
-activation test. The in-process XPC lifecycle test is therefore transport and
-worker evidence only, not installed-service or mounted-volume evidence.
+This checkpoint does not claim full FSKit acceptance. The extension and host
+targets are deliberately unsigned (`CODE_SIGNING_ALLOWED=NO`); the extension
+is skipped from direct install (`SKIP_INSTALL=YES`) and is only embedded in the
+unsigned host package. The project still lacks a valid provisioning profile,
+launchd registration, and FSKit activation test. The in-process lifecycle
+tests are therefore transport and worker evidence only, not installed-service
+or mounted-volume evidence.
 Optional FSKit surfaces such as xattrs, kernel-offloaded I/O,
 extent/preallocation, and special-node creation remain separate gaps. Those
 gaps and the host packaging path must be closed and tested before any release

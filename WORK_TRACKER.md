@@ -418,6 +418,9 @@ complete.
   to rooted `HostFs` workers and its direct host-path lifecycle/reopen test
   passes; installed-volume concurrency and cross-mount visibility remain open.
 - [ ] W13.3 Complete packaging, entitlements and signing plan, then request D03.
+  A minimal `MountRsHost` containing app now embeds the FSKit appex in
+  `Contents/Extensions` and builds unsigned; Apple team/profile authorization
+  and activation remain open.
 - [ ] W13.4 Activate and test real FSKit mounts, CLI integration, persistence and
   supported SQLite workloads. NFS/FUSE fallback does not satisfy this stream.
 

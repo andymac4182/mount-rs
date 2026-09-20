@@ -315,8 +315,8 @@ final class MountRsFSVolume: FSVolume, FSVolume.Operations, FSVolume.OpenCloseOp
         replyHandler: @escaping ((any Error)?) -> Void
     ) {
         Task {
-            if let resourceURL = self.resourceURL {
-                defer { resourceURL.stopAccessingSecurityScopedResource() }
+            defer {
+                self.resourceURL?.stopAccessingSecurityScopedResource()
             }
             do {
                 try await self.worker.shutdown()
