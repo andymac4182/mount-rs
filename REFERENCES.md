@@ -17,6 +17,12 @@
   user-selected implementation and architecture reference; its Rust crates
   and macOS filesystem integration are relevant areas for investigation.
 
+## Benchmark alignment
+
+- [ComputeSDK storage benchmarks](https://github.com/computesdk/benchmarks/tree/master/benchmarks/storage):
+  workload and reporting reference for the required storage benchmark suite.
+  See [benchmark acceptance](REQUIREMENTS.md#storage-benchmark-acceptance).
+
 These references inform design, not compatibility promises. They do not add
 runtime dependencies or expand the current scope into a hosted compute service.
 Copy-on-write remains future work as specified in [REQUIREMENTS.md](REQUIREMENTS.md).

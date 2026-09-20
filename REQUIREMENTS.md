@@ -24,6 +24,41 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 - **Implement fixed-size chunking initially behind an extensible interface.**
   Persist algorithm/version and parameter identification. Additional algorithms
   are future extensions; the user selected fixed-size for initial delivery.
+- **Add and run aligned storage benchmarks.** Use the ComputeSDK storage suite
+  below as the workload reference; record reproducible results alongside, not
+  instead of, correctness and durability evidence.
+
+### Storage benchmark acceptance
+
+Align with [computesdk/benchmarks storage](https://github.com/computesdk/benchmarks/tree/master/benchmarks/storage).
+The inspected reference revision is `92fbbc9ba7739111899121195236acb4fc6a8bb5`.
+Pin that revision in the benchmark mapping and explicitly document any later
+updates or workload deviations.
+
+- Match the upload/write → full-byte download/read → delete lifecycle at
+  1, 4, 10, and 16 MiB. Include sequential concurrency-one runs and configurable
+  iterations/concurrency. Keep initialization outside the timed operations.
+- Report raw samples, upload/download milliseconds, download throughput in
+  decimal Mbps, median/p95/p99, failures, timeouts, success rate, and cleanup
+  failures. Do not count missing credentials or failed operations as successes.
+- Compare equivalent mountx and mount-rs workloads, including the Node binding,
+  across memfs, SQLite, real PGlite, and live R2-backed split storage. Identify
+  metadata/block providers separately. Label direct API versus mounted-path
+  measurements; they are not interchangeable.
+- Record revision, platform/architecture, runtime versions, chunk size,
+  payload sizes, iterations, concurrency, cache state, synchronization policy,
+  and remote region/network context. Separate volatile and durable results;
+  do not silently remove barriers to improve timings.
+- Validate returned bytes outside the timed download and clean up only objects
+  created by the run. Include a short CI smoke mode and a repeatable full-run
+  command with machine-readable results. Do not invent a performance threshold
+  or claim superiority from unmatched environments.
+- Track the reference's snapshot/fork benchmarks with the future copy-on-write
+  requirement. Do not emulate snapshots with full copies and present that as
+  implemented copy-on-write performance.
+
+Benchmark implementation and measured results remain pending; this section
+records the requested work, not completed evidence.
 
 ### Metadata, block storage, and chunking acceptance
 
