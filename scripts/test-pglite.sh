@@ -39,11 +39,19 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   cargo test --locked -p mount-rs-pglite configured_pglite_state_survives_reconnect -- --ignored --nocapture
 
+cargo test --locked -p mount-rs-pglite split_stores_enforce_durability_fencing_cas_and_immutable_blocks -- --ignored --nocapture
+
+PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+  cargo test --locked -p mount-rs-core --test split_store pglite_metadata_and_blocks_compose_independently -- --ignored --nocapture
+
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   node "$repo_dir/integrations/mount-rs-napi/test/pglite.mjs"
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   node "$repo_dir/integrations/mount-rs-napi/test/factories.mjs"
+
+PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+  node "$repo_dir/integrations/mount-rs-napi/test/chunked.mjs"
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   cargo test --locked -p mount-rs-core --test fuse_backends fuse_pglite_operations_survive_connection_reopen -- --ignored --nocapture

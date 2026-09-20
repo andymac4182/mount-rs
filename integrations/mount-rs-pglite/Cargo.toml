@@ -10,5 +10,6 @@ license = "MIT"
 async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 mount-rs-persist = { path = "../mount-rs-persist" }
+serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }

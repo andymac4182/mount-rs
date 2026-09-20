@@ -46,8 +46,17 @@ cases still require audit.
   tests and all five 621-operation TypeScript oracle seeds across memory,
   SQLite and local object-store block combinations. Actual SQLite hosting on
   the split stores is newly wired into Linux CI, not yet verified there.
-  Existing Node factories still use transitional snapshot persistence while
-  independently composable Node factories are being added.
+  Legacy Node factories retain transitional snapshot persistence; the new
+  `createChunkedDriver` factory independently selects providers and has local
+  Node integration coverage including real PGlite.
+- PGlite split providers have isolated-server fencing/CAS/immutable-block tests,
+  three mixed-store composition cases and five 621-operation differential
+  seeds. Volatile is the default durability policy; persistent configurations
+  require an explicit caller assertion.
+- A separate CLI crate provides help/probe/mount, driver/transport selection,
+  request logging and signal-triggered unmount, with 19 passing local tests.
+  Native CLI lifecycle and remaining upstream presentation/cleanup behavior
+  still require acceptance.
 - Automatic native transport selection and explicit overrides are implemented
   in a separate crate with five passing selection/options tests. An actual
   Linux FUSE facade test is wired into CI.

@@ -11,6 +11,10 @@ driver, and persisted drivers that use the same filesystem model.
 
 ## Backends
 
+- `ChunkedFs` — composes independently selected metadata and immutable block
+  providers with persisted fixed-size chunking, fenced writers and ordered
+  durability barriers. Memory, SQLite and PGlite implement both provider roles;
+  R2 provides block storage. Each integration is a separate crate.
 - `MemoryFs` — memfs-style in-memory filesystem with handles, links, symlinks,
   rename, timestamps, and special-node metadata.
 - `SqliteFs` — persisted state in SQLite, including an in-memory SQLite mode for
@@ -31,12 +35,39 @@ The full upstream transport surface is tracked explicitly in
 goal.
 
 Additional delivery requirements are tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
-Safe hosting of SQLite database files on mounts is required but not yet verified;
-SQLite backend support alone does not establish it. Copy-on-write is planned
-future work and is not currently implemented.
-Independent metadata/block stores and fixed-size chunking behind an extensible
-interface are required next architecture work. Current snapshot-based
-persistence is transitional; additional chunking algorithms are future work.
+Safe hosting of SQLite database files on mounts is required. Linux FUSE tests
+have passed actual DELETE/WAL transactions, competing processes, killed SQLite
+writers and reopen on split SQLite stores; mount-service crash tests and other
+platform/backend combinations remain acceptance work. See the revision-specific
+evidence in `PORTING_STATUS.md`, not a blanket production-safety claim.
+Copy-on-write and additional chunking algorithms are future work. The older
+`SqliteFs`, `R2Fs` and `PgliteFs` factories retain transitional snapshot storage.
+
+## Node split-store API
+
+After building the local napi-rs package:
+
+```js
+const { createChunkedDriver } = require('./integrations/mount-rs-napi');
+const fs = await createChunkedDriver({
+  metadata: { kind: 'sqlite', uri: './metadata.sqlite' },
+  blocks: { kind: 'sqlite', uri: './blocks.sqlite' },
+  chunkSize: 65536,
+});
+try {
+  await fs.writeFile('/hello', Buffer.from('hello'));
+  console.log(Buffer.from(await fs.readFile('/hello')).toString());
+} finally {
+  await fs.shutdown(); // release the writer lease explicitly
+}
+```
+
+PGlite providers require `uri` and a volume `key`; durability defaults to false
+unless the caller explicitly asserts a persistent server configuration. R2
+blocks require an isolated prefix `key`, `endpoint`, `bucket`, `accessKeyId`,
+and `secretAccessKey`. Keep credentials outside source control.
+
+The CLI can be run with `cargo run -p mount-rs-cli -- --help` or `-- probe`.
 
 ## Development
 

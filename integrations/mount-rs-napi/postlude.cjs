@@ -106,6 +106,7 @@ module.exports = function install(binding) {
     "lchown",
     "truncate",
     "mknod",
+    "shutdown",
   ]) {
     wrapAsync(Filesystem.prototype, name)
   }
@@ -132,6 +133,32 @@ module.exports = function install(binding) {
   }
   if (Mountx) {
     wrapAsync(Mountx.prototype, "mknod")
+  }
+
+  // Free N-API functions are exported separately from the Filesystem class.
+  // Adapt rejected provider/configuration opens to the same node:fs-shaped
+  // errors as class factories, while leaving the native function's argument
+  // validation untouched.
+  const nativeCreateChunkedDriver = binding.createChunkedDriver
+  if (typeof nativeCreateChunkedDriver === "function" && !nativeCreateChunkedDriver.__mountRsWrapped) {
+    function createChunkedDriver(...args) {
+      let result
+      try {
+        result = nativeCreateChunkedDriver(...args)
+      } catch (error) {
+        throw structuredError(error)
+      }
+      return Promise.resolve(result).catch((error) => {
+        throw structuredError(error)
+      })
+    }
+    Object.defineProperty(createChunkedDriver, "__mountRsWrapped", { value: true })
+    Object.defineProperty(binding, "createChunkedDriver", {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: createChunkedDriver,
+    })
   }
 
   // Static N-API factory properties cannot be replaced in place. A small JS

@@ -15,6 +15,7 @@ members = [
     "transports/mount-rs-webdav",
     "transports/mount-rs-s3",
     "transports/mount-rs-auto",
+    "crates/mount-rs-cli",
 ]
 resolver = "3"
 

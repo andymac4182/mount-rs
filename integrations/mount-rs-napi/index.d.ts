@@ -26,7 +26,6 @@ export declare class FileHandle {
   close(): Promise<void>
 }
 
-/** A Node.js-facing wrapper around any core driver. */
 export declare class Filesystem {
   static memory(): Filesystem
   static sqlite(path: string): Promise<Filesystem>
@@ -36,6 +35,11 @@ export declare class Filesystem {
   get capabilities(): JsCapabilities
   /** Compatibility alias for callers of the earlier Rust binding method. */
   getCapabilities(): JsCapabilities
+  /**
+   * Release the chunked metadata writer lease immediately. Legacy
+   * snapshot factories have no lease and therefore resolve successfully.
+   */
+  shutdown(): Promise<void>
   stat(path: string): Promise<JsStats>
   lstat(path: string): Promise<JsStats>
   statfs(path: string): Promise<JsStatsFs>
@@ -125,6 +129,13 @@ export declare class JsStatsFs {
   get filesFree(): number
 }
 
+/**
+ * Construct a filesystem over independently selected metadata and immutable
+ * block providers. The returned driver's `shutdown()` releases its writer
+ * lease; callers should invoke it when the driver is no longer in use.
+ */
+export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
+
 export interface JsCapabilities {
   handles: boolean
   hardlinks: boolean
@@ -139,6 +150,34 @@ export interface JsCapabilities {
   durableWrites: boolean
   mknod: boolean
   extensions: ReadonlyArray<string>
+}
+
+export interface JsChunkedOptions {
+  metadata: JsChunkedStoreOptions
+  blocks: JsChunkedStoreOptions
+  chunkSize: number
+  owner?: string
+  ttlMs?: number
+  uid?: number
+  gid?: number
+  umask?: number
+  rootMode?: number
+}
+
+/**
+ * One independently configured provider used by `createChunkedDriver`.
+ * `kind` is intentionally a closed string set validated by Rust; an unknown
+ * backend never falls back to an in-memory store.
+ */
+export interface JsChunkedStoreOptions {
+  kind: string
+  uri?: string
+  key?: string
+  durable?: boolean
+  endpoint?: string
+  bucket?: string
+  accessKeyId?: string
+  secretAccessKey?: string
 }
 
 export interface JsMkdirOptions {

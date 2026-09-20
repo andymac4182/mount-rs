@@ -82,6 +82,44 @@ async fn memory_metadata_with_memory_blocks() {
 }
 
 #[tokio::test]
+#[ignore = "requires the isolated real PGlite server from scripts/test-pglite.sh"]
+async fn pglite_metadata_and_blocks_compose_independently() {
+    use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore};
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let scope = format!(
+        "split-store-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    exercise(
+        PgliteMetadataStore::connect_with_key(&url, format!("{scope}-metadata-memory"))
+            .await
+            .unwrap(),
+        MemoryBlockStore::new(),
+    )
+    .await;
+    exercise(
+        SqliteMetadataStore::in_memory().unwrap(),
+        PgliteBlockStore::connect_with_key(&url, format!("{scope}-sqlite-blocks"))
+            .await
+            .unwrap(),
+    )
+    .await;
+    exercise(
+        PgliteMetadataStore::connect_with_key(&url, format!("{scope}-both"))
+            .await
+            .unwrap(),
+        PgliteBlockStore::connect_with_key(&url, format!("{scope}-both"))
+            .await
+            .unwrap(),
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn sqlite_metadata_with_memory_blocks() {
     let directory = tempfile::tempdir().unwrap();
     exercise(

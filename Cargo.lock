@@ -1015,6 +1015,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-cli"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "mount-rs-auto",
+ "mount-rs-chunked",
+ "mount-rs-core",
+ "mount-rs-host",
+ "mount-rs-memory",
+ "mount-rs-sqlite",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-core"
 version = "0.1.0"
 dependencies = [
@@ -1065,7 +1080,9 @@ dependencies = [
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
+ "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-memory",
  "mount-rs-pglite",
  "mount-rs-r2",
  "mount-rs-sqlite",
@@ -1097,6 +1114,7 @@ dependencies = [
  "async-trait",
  "mount-rs-core",
  "mount-rs-persist",
+ "serde_json",
  "tokio",
  "tokio-postgres",
 ]

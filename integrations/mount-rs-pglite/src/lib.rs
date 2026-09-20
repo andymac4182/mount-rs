@@ -9,6 +9,10 @@ use tokio::sync::Mutex;
 use tokio_postgres::types::Type;
 use tokio_postgres::{Client, NoTls};
 
+mod storage;
+
+pub use storage::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
+
 fn postgres_error(error: tokio_postgres::Error) -> mount_rs_core::FsError {
     if let Some(database) = error.as_db_error() {
         backend_error(format!(
@@ -180,15 +184,16 @@ pub async fn connect_pglite_with_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::test_support::PgliteServer;
     use mount_rs_core::FsDriver;
 
     /// This is opt-in because it talks to the caller-provided PGlite socket.
     /// It never runs against an ambient database merely because a URL exists.
     #[test]
-    #[ignore = "requires PGLITE_DATABASE_URL; run explicitly with --ignored"]
+    #[ignore = "requires the isolated tests/pglite Node server and its dependencies"]
     fn configured_pglite_state_survives_reconnect() {
-        let connection_string = std::env::var("PGLITE_DATABASE_URL")
-            .expect("PGLITE_DATABASE_URL is required when PGlite regression is enabled");
+        let server = PgliteServer::start();
+        let connection_string = server.connection_string();
         let state_key = format!(
             "mount-rs-regression/{}/{}",
             std::process::id(),
@@ -202,7 +207,7 @@ mod tests {
             .build()
             .expect("build Tokio test runtime");
         runtime.block_on(async {
-            let first = connect_pglite_with_key(&connection_string, state_key.clone())
+            let first = connect_pglite_with_key(connection_string, state_key.clone())
                 .await
                 .unwrap();
             let handle = first.open("/reopen", "w", 0o640).await.unwrap();
@@ -211,7 +216,7 @@ mod tests {
             drop(handle);
             drop(first);
 
-            let second = connect_pglite_with_key(&connection_string, state_key)
+            let second = connect_pglite_with_key(connection_string, state_key)
                 .await
                 .unwrap();
             let handle = second.open("/reopen", "r", 0).await.unwrap();

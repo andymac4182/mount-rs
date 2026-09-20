@@ -116,6 +116,23 @@ async fn main() {
             .await
             .unwrap(),
         ),
+        "chunked-pglite" => {
+            let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+            let key = format!("chunked-trace-{}", std::process::id());
+            Loopback::new(
+                mount_rs_chunked::ChunkedFs::open(
+                    mount_rs_pglite::PgliteMetadataStore::connect_with_key(&url, &key)
+                        .await
+                        .unwrap(),
+                    mount_rs_pglite::PgliteBlockStore::connect_with_key(&url, &key)
+                        .await
+                        .unwrap(),
+                    mount_rs_chunked::ChunkedOptions::fixed("trace", 7).unwrap(),
+                )
+                .await
+                .unwrap(),
+            )
+        }
         "pglite" => {
             let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
             Loopback::new(

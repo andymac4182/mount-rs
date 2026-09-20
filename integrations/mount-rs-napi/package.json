@@ -26,7 +26,7 @@
     "prepare:npm": "napi create-npm-dirs",
     "aggregate:artifacts": "node scripts/aggregate-artifacts.mjs",
     "test:distribution:aggregate": "node test/distribution-aggregate.mjs",
-    "test": "node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/differential.mjs && node test/distribution.mjs && node test/distribution-aggregate.mjs",
+    "test": "node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/chunked.mjs && node test/differential.mjs && node test/distribution.mjs && node test/distribution-aggregate.mjs",
     "prepublishOnly": "napi create-npm-dirs && napi pre-publish --root-publisher pnpm"
   },
   "napi": {

@@ -1,12 +1,23 @@
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_core::storage::{
+    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+};
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, MemoryFs,
-    MkdirOptions, OpenFlags, Stats, StatsFs,
+    MkdirOptions, OpenFlags, Result as CoreResult, Stats, StatsFs,
 };
-use mount_rs_pglite::connect_pglite;
-use mount_rs_r2::{R2Config, open_r2};
-use mount_rs_sqlite::open_sqlite;
+use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
+use mount_rs_pglite::{
+    PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions, connect_pglite,
+};
+use mount_rs_r2::{R2BlockStore, R2Config, open_r2};
+use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore, open_sqlite};
 use napi::bindgen_prelude::{Buffer, Either};
 use napi::{Error, Status};
 use napi_derive::napi;
@@ -591,6 +602,379 @@ pub struct JsR2Options {
     pub state_key: Option<String>,
 }
 
+/// One independently configured provider used by `createChunkedDriver`.
+/// `kind` is intentionally a closed string set validated by Rust; an unknown
+/// backend never falls back to an in-memory store.
+#[napi(object)]
+pub struct JsChunkedStoreOptions {
+    pub kind: String,
+    pub uri: Option<String>,
+    pub key: Option<String>,
+    pub durable: Option<bool>,
+    pub endpoint: Option<String>,
+    pub bucket: Option<String>,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
+}
+
+#[napi(object)]
+pub struct JsChunkedOptions {
+    pub metadata: JsChunkedStoreOptions,
+    pub blocks: JsChunkedStoreOptions,
+    pub chunk_size: f64,
+    pub owner: Option<String>,
+    pub ttl_ms: Option<f64>,
+    pub uid: Option<f64>,
+    pub gid: Option<f64>,
+    pub umask: Option<f64>,
+    pub root_mode: Option<f64>,
+}
+
+/// The selected provider is dynamic at the JavaScript boundary, while the
+/// chunked driver remains generic over concrete Rust types. These adapters
+/// forward the async-trait ABI manually so N-API does not need another direct
+/// runtime dependency just to erase the provider choice.
+#[derive(Clone)]
+struct DynMetadataStore(Arc<dyn MetadataStore>);
+
+impl MetadataStore for DynMetadataStore {
+    fn durable(&self) -> bool {
+        self.0.durable()
+    }
+
+    fn load<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<LoadedMetadata>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        Box::pin(async move { inner.load().await })
+    }
+
+    fn acquire_writer<'a, 'b, 'async_trait>(
+        &'a self,
+        owner: &'b str,
+        ttl: Duration,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let owner = owner.to_owned();
+        Box::pin(async move { inner.acquire_writer(&owner, ttl).await })
+    }
+
+    fn renew_writer<'a, 'b, 'async_trait>(
+        &'a self,
+        lease: &'b WriterLease,
+        ttl: Duration,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<WriterLease>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let lease = lease.clone();
+        Box::pin(async move { inner.renew_writer(&lease, ttl).await })
+    }
+
+    fn release_writer<'a, 'b, 'async_trait>(
+        &'a self,
+        lease: &'b WriterLease,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let lease = lease.clone();
+        Box::pin(async move { inner.release_writer(&lease).await })
+    }
+
+    fn publish<'a, 'b, 'async_trait>(
+        &'a self,
+        expected_revision: u64,
+        lease: &'b WriterLease,
+        namespace: Namespace,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<u64>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let lease = lease.clone();
+        Box::pin(async move { inner.publish(expected_revision, &lease, namespace).await })
+    }
+
+    fn flush<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        Box::pin(async move { inner.flush().await })
+    }
+}
+
+#[derive(Clone)]
+struct DynBlockStore(Arc<dyn BlockStore>);
+
+impl BlockStore for DynBlockStore {
+    fn durable(&self) -> bool {
+        self.0.durable()
+    }
+
+    fn put<'a, 'b, 'async_trait>(
+        &'a self,
+        bytes: &'b [u8],
+    ) -> Pin<Box<dyn Future<Output = CoreResult<BlockId>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let bytes = bytes.to_vec();
+        Box::pin(async move { inner.put(&bytes).await })
+    }
+
+    fn get<'a, 'b, 'async_trait>(
+        &'a self,
+        id: &'b BlockId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<u8>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let id = id.clone();
+        Box::pin(async move { inner.get(&id).await })
+    }
+
+    fn flush<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        Box::pin(async move { inner.flush().await })
+    }
+
+    fn delete<'a, 'b, 'async_trait>(
+        &'a self,
+        id: &'b BlockId,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let inner = Arc::clone(&self.0);
+        let id = id.clone();
+        Box::pin(async move { inner.delete(&id).await })
+    }
+}
+
+fn config_error(message: impl Into<String>) -> Error {
+    to_js_error(
+        FsError::new(ErrorCode::Einval)
+            .with_syscall("createChunkedDriver")
+            .with_message(message),
+    )
+}
+
+fn reject_set<T>(value: &Option<T>, field: &str) -> Result<(), Error> {
+    if value.is_some() {
+        Err(config_error(format!(
+            "{field} is not valid for this backend"
+        )))
+    } else {
+        Ok(())
+    }
+}
+
+fn required_string(value: &Option<String>, field: &str) -> Result<String, Error> {
+    let value = value
+        .as_deref()
+        .ok_or_else(|| config_error(format!("{field} is required")))?;
+    if value.trim().is_empty() {
+        return Err(config_error(format!("{field} must not be empty")));
+    }
+    Ok(value.to_owned())
+}
+
+fn validate_chunk_size(value: f64) -> Result<usize, Error> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value <= 0.0
+        || value > MAX_SAFE_INTEGER
+        || value > usize::MAX as f64
+    {
+        return Err(range_error(
+            "chunkSize",
+            "> 0, an integer, and platform-sized",
+            value,
+        ));
+    }
+    usize::try_from(value as u64)
+        .map_err(|_| range_error("chunkSize", "a platform-sized integer", value))
+}
+
+fn validate_ttl(value: Option<f64>) -> Result<Duration, Error> {
+    let value = value.unwrap_or(30_000.0);
+    if !value.is_finite() || value.fract() != 0.0 || value <= 0.0 || value > MAX_SAFE_INTEGER {
+        return Err(range_error("ttlMs", "> 0 and <= 9007199254740991", value));
+    }
+    Ok(Duration::from_millis(value as u64))
+}
+
+fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Error> {
+    value
+        .map(|value| validate_u32(name, value))
+        .unwrap_or(Ok(default))
+}
+
+async fn build_metadata_store(
+    options: &JsChunkedStoreOptions,
+) -> Result<Arc<dyn MetadataStore>, Error> {
+    match options.kind.as_str() {
+        "memory" => {
+            reject_set(&options.uri, "metadata.uri")?;
+            reject_set(&options.key, "metadata.key")?;
+            reject_set(&options.durable, "metadata.durable")?;
+            reject_set(&options.endpoint, "metadata.endpoint")?;
+            reject_set(&options.bucket, "metadata.bucket")?;
+            reject_set(&options.access_key_id, "metadata.accessKeyId")?;
+            reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
+            Ok(Arc::new(MemoryMetadataStore::new()))
+        }
+        "sqlite" => {
+            let uri = required_string(&options.uri, "metadata.uri")?;
+            reject_set(&options.key, "metadata.key")?;
+            reject_set(&options.durable, "metadata.durable")?;
+            reject_set(&options.endpoint, "metadata.endpoint")?;
+            reject_set(&options.bucket, "metadata.bucket")?;
+            reject_set(&options.access_key_id, "metadata.accessKeyId")?;
+            reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
+            Ok(Arc::new(
+                SqliteMetadataStore::open(uri).map_err(to_js_error)?,
+            ))
+        }
+        "pglite" => {
+            let uri = required_string(&options.uri, "metadata.uri")?;
+            let key = required_string(&options.key, "metadata.key")?;
+            reject_set(&options.endpoint, "metadata.endpoint")?;
+            reject_set(&options.bucket, "metadata.bucket")?;
+            reject_set(&options.access_key_id, "metadata.accessKeyId")?;
+            reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
+            let storage =
+                PgliteStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+            Ok(Arc::new(
+                PgliteMetadataStore::connect_with_options(&uri, storage)
+                    .await
+                    .map_err(to_js_error)?,
+            ))
+        }
+        "r2" => Err(config_error(
+            "R2 is a block-only backend; metadata must use memory, sqlite, or pglite",
+        )),
+        other => Err(config_error(format!("unknown metadata backend: {other}"))),
+    }
+}
+
+async fn build_block_store(options: &JsChunkedStoreOptions) -> Result<Arc<dyn BlockStore>, Error> {
+    match options.kind.as_str() {
+        "memory" => {
+            reject_set(&options.uri, "blocks.uri")?;
+            reject_set(&options.key, "blocks.key")?;
+            reject_set(&options.durable, "blocks.durable")?;
+            reject_set(&options.endpoint, "blocks.endpoint")?;
+            reject_set(&options.bucket, "blocks.bucket")?;
+            reject_set(&options.access_key_id, "blocks.accessKeyId")?;
+            reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
+            Ok(Arc::new(MemoryBlockStore::new()))
+        }
+        "sqlite" => {
+            let uri = required_string(&options.uri, "blocks.uri")?;
+            reject_set(&options.key, "blocks.key")?;
+            reject_set(&options.durable, "blocks.durable")?;
+            reject_set(&options.endpoint, "blocks.endpoint")?;
+            reject_set(&options.bucket, "blocks.bucket")?;
+            reject_set(&options.access_key_id, "blocks.accessKeyId")?;
+            reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
+            Ok(Arc::new(SqliteBlockStore::open(uri).map_err(to_js_error)?))
+        }
+        "pglite" => {
+            let uri = required_string(&options.uri, "blocks.uri")?;
+            let key = required_string(&options.key, "blocks.key")?;
+            reject_set(&options.endpoint, "blocks.endpoint")?;
+            reject_set(&options.bucket, "blocks.bucket")?;
+            reject_set(&options.access_key_id, "blocks.accessKeyId")?;
+            reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
+            let storage =
+                PgliteStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+            Ok(Arc::new(
+                PgliteBlockStore::connect_with_options(&uri, storage)
+                    .await
+                    .map_err(to_js_error)?,
+            ))
+        }
+        "r2" => {
+            let prefix = required_string(&options.key, "blocks.key")?;
+            let endpoint = required_string(&options.endpoint, "blocks.endpoint")?;
+            let bucket = required_string(&options.bucket, "blocks.bucket")?;
+            let access_key_id = required_string(&options.access_key_id, "blocks.accessKeyId")?;
+            let secret_access_key =
+                required_string(&options.secret_access_key, "blocks.secretAccessKey")?;
+            reject_set(&options.uri, "blocks.uri")?;
+            let config = R2Config {
+                endpoint,
+                bucket,
+                access_key_id,
+                secret_access_key,
+                // The chunked provider only uses R2 for immutable blocks. The
+                // snapshot state key is retained solely to satisfy the shared
+                // R2 configuration type and is never opened here.
+                state_key: "mount-rs-napi/unused-state".to_owned(),
+            };
+            let blocks = match options.durable {
+                Some(durable) => {
+                    R2BlockStore::new(config.build_store().map_err(to_js_error)?, prefix, durable)
+                }
+                None => R2BlockStore::from_config(&config, prefix),
+            }
+            .map_err(to_js_error)?;
+            Ok(Arc::new(blocks))
+        }
+        other => Err(config_error(format!("unknown block backend: {other}"))),
+    }
+}
+
+static NEXT_CHUNKED_OWNER: AtomicU64 = AtomicU64::new(1);
+
+fn chunked_owner(owner: Option<String>) -> Result<String, Error> {
+    if let Some(owner) = owner {
+        if owner.trim().is_empty() {
+            return Err(config_error("owner must not be empty"));
+        }
+        return Ok(owner);
+    }
+    let sequence = NEXT_CHUNKED_OWNER.fetch_add(1, Ordering::Relaxed);
+    Ok(format!("mount-rs-napi-{}-{sequence}", std::process::id()))
+}
+
 #[napi(object)]
 pub struct JsReadResult {
     pub bytes_read: f64,
@@ -707,9 +1091,13 @@ impl FileHandle {
 }
 
 /// A Node.js-facing wrapper around any core driver.
+type ShutdownFuture = Pin<Box<dyn Future<Output = CoreResult<()>> + Send>>;
+type ShutdownCallback = dyn Fn() -> ShutdownFuture + Send + Sync;
+
 #[napi]
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
+    shutdown: Option<Arc<ShutdownCallback>>,
 }
 
 #[napi]
@@ -718,6 +1106,7 @@ impl Filesystem {
     pub fn memory() -> Self {
         Self {
             driver: Arc::new(MemoryFs::empty()),
+            shutdown: None,
         }
     }
 
@@ -727,6 +1116,7 @@ impl Filesystem {
             .await
             .map(|filesystem| Self {
                 driver: Arc::new(filesystem),
+                shutdown: None,
             })
             .map_err(to_js_error)
     }
@@ -737,6 +1127,7 @@ impl Filesystem {
             .await
             .map(|filesystem| Self {
                 driver: Arc::new(filesystem),
+                shutdown: None,
             })
             .map_err(to_js_error)
     }
@@ -756,6 +1147,7 @@ impl Filesystem {
             .await
             .map(|filesystem| Self {
                 driver: Arc::new(filesystem),
+                shutdown: None,
             })
             .map_err(to_js_error)
     }
@@ -774,6 +1166,16 @@ impl Filesystem {
     #[napi(js_name = "getCapabilities")]
     pub fn get_capabilities(&self) -> JsCapabilities {
         self.resolved_capabilities()
+    }
+
+    /// Release the chunked metadata writer lease immediately. Legacy
+    /// snapshot factories have no lease and therefore resolve successfully.
+    #[napi]
+    pub async fn shutdown(&self) -> napi::Result<()> {
+        if let Some(shutdown) = &self.shutdown {
+            shutdown().await.map_err(to_js_error)?;
+        }
+        Ok(())
     }
 
     #[napi]
@@ -1092,6 +1494,40 @@ impl Filesystem {
     }
 }
 
+/// Construct a filesystem over independently selected metadata and immutable
+/// block providers. The returned driver's `shutdown()` releases its writer
+/// lease; callers should invoke it when the driver is no longer in use.
+#[napi]
+pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
+    let metadata = DynMetadataStore(build_metadata_store(&options.metadata).await?);
+    let blocks = DynBlockStore(build_block_store(&options.blocks).await?);
+    let owner = chunked_owner(options.owner)?;
+    let chunk_size = validate_chunk_size(options.chunk_size)?;
+    let ttl = validate_ttl(options.ttl_ms)?;
+    let uid = optional_u32("uid", options.uid, 0)?;
+    let gid = optional_u32("gid", options.gid, 0)?;
+    let umask = optional_u32("umask", options.umask, 0)?;
+    let root_mode = optional_u32("rootMode", options.root_mode, 0o755)?;
+    let chunk_options = ChunkedOptions::fixed(owner, chunk_size)
+        .map_err(to_js_error)?
+        .with_lease_ttl(ttl)
+        .with_identity(uid, gid, umask)
+        .with_root_mode(root_mode);
+
+    let filesystem = ChunkedFs::open(metadata, blocks, chunk_options)
+        .await
+        .map_err(to_js_error)?;
+    let shutdown_filesystem = filesystem.clone();
+    let shutdown: Arc<ShutdownCallback> = Arc::new(move || {
+        let filesystem = shutdown_filesystem.clone();
+        Box::pin(async move { filesystem.shutdown().await })
+    });
+    Ok(Filesystem {
+        driver: Arc::new(filesystem),
+        shutdown: Some(shutdown),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1152,5 +1588,30 @@ mod tests {
         assert_eq!(timestamp_ms("time", 1.5).unwrap(), 1500);
         assert!(timestamp_ms("time", f64::INFINITY).is_err());
         assert!(validate_length(Some(MAX_SAFE_INTEGER + 1.0)).is_err());
+    }
+
+    #[test]
+    fn chunked_options_validate_fixed_size_and_lease_values() {
+        assert_eq!(validate_chunk_size(4096.0).unwrap(), 4096);
+        assert!(validate_chunk_size(0.0).is_err());
+        assert!(validate_chunk_size(1.5).is_err());
+        assert_eq!(validate_ttl(None).unwrap(), Duration::from_secs(30));
+        assert_eq!(
+            validate_ttl(Some(120.0)).unwrap(),
+            Duration::from_millis(120)
+        );
+        assert!(validate_ttl(Some(0.0)).is_err());
+    }
+
+    #[test]
+    fn chunked_owner_is_unique_by_default_and_rejects_empty_explicit_ids() {
+        let first = chunked_owner(None).unwrap();
+        let second = chunked_owner(None).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            chunked_owner(Some("caller-owner".to_owned())).unwrap(),
+            "caller-owner"
+        );
+        assert!(chunked_owner(Some("  ".to_owned())).is_err());
     }
 }
