@@ -122,7 +122,42 @@ fn native_webdav_client_probe() -> Result<NativeClient, String> {
     Err("the WebDAV native harness supports only macOS and Linux".to_owned())
 }
 
-fn mount_args(client: &NativeClient, url: &str, mountpoint: &Path) -> Vec<OsString> {
+struct DavfsConfiguration(Option<PathBuf>);
+
+impl DavfsConfiguration {
+    fn create(client: &NativeClient, mountpoint: &Path) -> Self {
+        if !matches!(client.kind, NativeClientKind::LinuxDavfs) {
+            return Self(None);
+        }
+        // Match the upstream harness without changing /etc/davfs2 or the
+        // developer's configuration. Anonymous tests must not prompt on stdin.
+        use std::io::Write;
+        let path = mountpoint.with_extension("davfs.conf");
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .expect("create isolated davfs configuration");
+        file.write_all(b"ask_auth 0\ndelay_upload 0\ndir_refresh 1\nfile_refresh 1\n")
+            .expect("write isolated davfs configuration");
+        Self(Some(path))
+    }
+}
+
+impl Drop for DavfsConfiguration {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
+fn mount_args(
+    client: &NativeClient,
+    url: &str,
+    mountpoint: &Path,
+    config: &DavfsConfiguration,
+) -> Vec<OsString> {
     match client.kind {
         NativeClientKind::LinuxDavfs => {
             let uid = command_text("id", "-u").expect("Linux probe validated id -u");
@@ -131,7 +166,14 @@ fn mount_args(client: &NativeClient, url: &str, mountpoint: &Path) -> Vec<OsStri
                 OsString::from(url),
                 mountpoint.as_os_str().to_owned(),
                 OsString::from("-o"),
-                OsString::from(format!("rw,uid={uid},gid={gid}")),
+                OsString::from(format!(
+                    "conf={},rw,uid={uid},gid={gid}",
+                    config
+                        .0
+                        .as_ref()
+                        .expect("Linux davfs configuration")
+                        .display()
+                )),
             ]
         }
         NativeClientKind::MacOsMountWebdav => vec![
@@ -317,6 +359,7 @@ async fn native_webdav_mount_probe_and_round_trip() {
     // macOS's temporary directory may use /var while mount(8) reports its
     // canonical /private/var path. Compare and unmount the same identity.
     let mountpoint = fs::canonicalize(mountpoint).expect("canonicalize empty mountpoint");
+    let config = DavfsConfiguration::create(&client, &mountpoint);
 
     let driver: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
     let loopback = Loopback::from_arc(Arc::clone(&driver));
@@ -329,7 +372,11 @@ async fn native_webdav_mount_probe_and_round_trip() {
     server.listen().await.expect("listen WebDAV server");
 
     let url = format!("{}/", server.url());
-    let mounted_result = run_command(&client.mount, &mount_args(&client, &url, &mountpoint)).await;
+    let mounted_result = run_command(
+        &client.mount,
+        &mount_args(&client, &url, &mountpoint, &config),
+    )
+    .await;
     let active = wait_until_mounted(&client, &mountpoint).await;
     let mut guard = NativeMountGuard {
         client,

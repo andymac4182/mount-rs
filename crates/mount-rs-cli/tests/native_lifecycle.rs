@@ -103,7 +103,7 @@ fn wait_for_mount(
     while std::time::Instant::now() < deadline {
         match receiver.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => {
-                let mounted = line.contains("mounted fuse");
+                let mounted = strip_ansi(&line).contains("mounted fuse");
                 output.push(line);
                 if mounted {
                     return true;
@@ -133,6 +133,26 @@ fn wait_for_exit(child: &mut std::process::Child) -> std::process::ExitStatus {
         );
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+fn strip_ansi(value: &str) -> String {
+    let mut plain = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\u{1b}' {
+            plain.push(character);
+            continue;
+        }
+        if chars.next() != Some('[') {
+            continue;
+        }
+        for final_byte in chars.by_ref() {
+            if final_byte.is_ascii_alphabetic() {
+                break;
+            }
+        }
+    }
+    plain
 }
 
 fn is_mounted_at(target: &std::path::Path) -> bool {

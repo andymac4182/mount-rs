@@ -283,6 +283,15 @@ pub const OP_TEST_STATEID: u32 = 55;
 pub const OP_RECLAIM_COMPLETE: u32 = 58;
 pub const OP_ILLEGAL: u32 = 10_044;
 
+// CREATE_SESSION4 csa_flags/csr_flags (RFC 8881 §18.36).  The server
+// currently grants none of these optional capabilities: it has no persistent
+// reply cache, callback channel, or RDMA transport.  A client may still ask
+// for them; the result must mask them out rather than reject the request.
+pub const CREATE_SESSION4_FLAG_PERSIST: u32 = 0x0000_0001;
+pub const CREATE_SESSION4_FLAG_CONN_BACK_CHAN: u32 = 0x0000_0002;
+pub const CREATE_SESSION4_FLAG_CONN_RDMA: u32 = 0x0000_0004;
+const SERVER_CREATE_SESSION_FLAGS: u32 = 0;
+
 pub const NF4REG: u32 = 1;
 pub const NF4DIR: u32 = 2;
 pub const NF4BLK: u32 = 3;
@@ -2068,9 +2077,11 @@ impl Nfs4Session {
         else {
             unreachable!("CREATE_SESSION operation variant")
         };
-        if *flags != 0 {
-            return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_NOTSUPP);
-        }
+        // csa_flags are requests, not a promise that the server must grant.
+        // The pinned TypeScript implementation accepts the optional request
+        // flags and returns csr_flags=0 because this server implements no
+        // persistent session cache, callback channel, or RDMA transport.
+        let response_flags = *flags & SERVER_CREATE_SESSION_FLAGS;
         let (sessionid, slots, max_operations, max_cached) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(client) = state.clients.get_mut(clientid) else {
@@ -2126,7 +2137,7 @@ impl Nfs4Session {
         let mut body = XdrWriter::with_capacity(128);
         body.fixed_opaque(&sessionid, NFS4_SESSIONID_SIZE);
         body.u32(1);
-        body.u32(0);
+        body.u32(response_flags);
         write_channel_attrs(&mut body, response_fore);
         write_channel_attrs(&mut body, response_back);
         V4OpResult::with_body(OP_CREATE_SESSION, NFS4_OK, body.into_bytes())

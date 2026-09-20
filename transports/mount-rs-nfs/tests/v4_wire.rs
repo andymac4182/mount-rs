@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use mount_rs_core::MemoryFs;
+use mount_rs_nfs::v4::CREATE_SESSION4_FLAG_CONN_BACK_CHAN;
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
     decode_reply, encode_call, frame_record,
@@ -209,7 +210,10 @@ fn create_session_args(clientid: u64) -> Vec<u8> {
     op(OP_CREATE_SESSION, |writer| {
         writer.u64(clientid);
         writer.u32(1);
-        writer.u32(0);
+        // Linux requests a callback channel during the normal v4.1 mount
+        // handshake. The server must decline it in csr_flags, not reject the
+        // otherwise valid CREATE_SESSION operation.
+        writer.u32(CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
         channel(writer);
         channel(writer);
         writer.u32(0);

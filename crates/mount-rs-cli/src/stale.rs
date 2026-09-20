@@ -118,26 +118,24 @@ fn octal_value(octal: &[u8]) -> Option<u8> {
 async fn stale_type(target: &Path) -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        return mount_rs_nfs::mount_entry_at(target, mount_rs_nfs::NfsPlatform::Macos)
+        mount_rs_nfs::mount_entry_at(target, mount_rs_nfs::NfsPlatform::Macos)
             .await
             .ok()
             .flatten()
-            .map(|entry| entry.fs_type);
+            .map(|entry| entry.fs_type)
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        #[cfg(target_os = "linux")]
-        {
-            return std::fs::read_to_string("/proc/self/mounts")
-                .ok()
-                .and_then(|table| mount_type_from_linux_table(&table, target));
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = target;
-            None
-        }
+        std::fs::read_to_string("/proc/self/mounts")
+            .ok()
+            .and_then(|table| mount_type_from_linux_table(&table, target))
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = target;
+        None
     }
 }
 
