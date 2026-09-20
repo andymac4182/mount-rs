@@ -7,14 +7,14 @@ edit and refreshed against the current source, tests, and the pinned oracle:
 - repository baseline when the deleted file was recovered:
   `ac2161d27f4a6805b87580fbee20c1302e9cd9df`
 - current shared `HEAD` observed during this packet:
-  `d6b80f4`
+  `7c36b38`
 - oracle checkout: `/tmp/mountx-source.uWiHfX`
 - oracle revision: `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`
 
-The worktree is shared and dirty. This packet is restricted to the N-API
-integration and this ledger. A component test is evidence for that component
-only; it does not close the whole transport, mount, native-host, or live-service
-parity item.
+The worktree is shared and dirty. This update is restricted to this ledger and
+the deterministic parity checker. A component test is evidence for that
+component only; it does not close the whole transport, mount, native-host, or
+live-service parity item.
 
 ## Status vocabulary
 
@@ -37,14 +37,14 @@ described as a complete session or native-mount implementation.
 | Boundary | Current implementation | Parity state |
 | --- | --- | --- |
 | Root filesystem, errors, path utilities, and driver factory | Native `Filesystem`/handle API, root utility aliases, and `createDriver` facade | **IMPLEMENTED (focused); PARTIAL** for oracle harness/type parity |
-| Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object; mount and server factories still require a native `Filesystem` reference | **PARTIAL** |
+| Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the native `mount` binding still requires a native `Filesystem` at runtime | **PARTIAL** |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces and a Rust-backed `InodeTable` are exported through `./fuse`; full request/reply body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
-| CLI | Parser/runtime and focused CLI tests exist; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
+| CLI | Rust CLI constructs drivers through `mount-rs-sdk`; Node CLI has a direct SDK self-test; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
 The oracle source used for comparison is local and immutable for this audit;
 the relevant upstream package map, types, harness, auto API, and transport
@@ -233,6 +233,39 @@ tests and says the latter require explicit prerequisites; see
 demo hints, native mount/unmount behavior, and live filesystem results remain
 unverified. Do not report skipped native tests as passing.
 
+## Next W01 closure queue after SDK-backed CLIs
+
+The Rust and Node CLI SDK paths now have focused, mount-free read/write
+evidence. They do not close the next core parity gates, which are ordered here
+from the smallest contract boundary to the larger environment boundary:
+
+1. **NFS held-handle semantics (P1):** the pinned upstream run still has 12
+   `needs handles` rows. Add one oracle-backed `open -> unlink -> read`
+   regression through the existing NFS conformance path, then implement stable
+   orphan identity before changing the NFS capability declaration. Core and 9P
+   handle tests do not qualify NFS.
+2. **Capability-limited Unstorage behavior (P1):** the skip inventory still
+   identifies hardlinks (6 rows), symlinks/link timestamps (16 + 2 rows),
+   `statfs` (2 rows), special-node creation (16 rows), and root-only
+   permission cases (18 rows). For each, either add an explicit unsupported
+   assertion or implement the missing adapter semantics; a passing MemoryFs or
+   ChunkedFs case cannot close an Unstorage row.
+3. **Durability and race boundaries (P1):** the 56-step core trace and the
+   six-scenario concurrency packet intentionally omit persistence/restart,
+   cross-process atomicity, cancellation/close races, and transport/native
+   concurrency. These need revision-matched failure/restart tests before W01.4
+   can claim the full lifecycle contract.
+4. **Structural-driver native mount (P0/P1 seam):** server factories accept
+   structural drivers, but the native `mount` path has only invalid-option or
+   mount-free coverage. A privileged, platform-specific test must mount a
+   structural driver and verify read/write/unmount before this boundary is
+   promoted.
+
+The first three items are behavior gaps or explicit capability decisions; the
+fourth is an environment-backed acceptance gap. Provider, transport-barrel,
+FSKit, and live remote-service work remains separate from this simple-first
+queue.
+
 ## Implemented at the current boundary (not broad completion)
 
 These surfaces have concrete current-tree implementation, while the primary
@@ -334,12 +367,30 @@ result is claimed by this verification run. The separate integrated fault
 test at `decb71f` is outside this document's evidence boundary unless it is
 shown to exercise and verify one of the APIs above.
 
+### W01 sidecar verification after SDK-backed CLI work (2026-09-21)
+
+- **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-parity-target node scripts/check-parity.mjs`:
+  the deterministic Rust/TypeScript trace matched at the pinned oracle
+  revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
+- **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-parity-target node tests/core_parity/check.mjs`:
+  56 steps, 35 successful results, 21 stable expected errors, and zero
+  mismatches.
+- **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-parity-target node tests/core_concurrency/check.mjs`:
+  six scenarios and zero mismatches; five unsupported scope classifications
+  remain explicit.
+- **PASS** — `git diff --check -- docs/public-api-parity.md scripts/check-parity.mjs`.
+
+The deterministic checker now rejects a configured but non-pinned
+`MOUNTX_SOURCE` and uses Cargo's locked mode. These checks still do not claim
+the closure items listed above.
+
 ## Working-tree provenance and freeze boundary
 
 - Preserve all unrelated dirty, staged, and untracked work in the shared
   checkout.
-- This refresh changes only `docs/public-api-parity.md`; it makes no source,
-  root `Cargo.toml`, root `Cargo.lock`, workflow, or tracker changes.
+- This update changes only `docs/public-api-parity.md` and
+  `scripts/check-parity.mjs`; it makes no implementation, root manifest,
+  workflow, or tracker changes.
 - No commit or push is part of this work.
 - The oracle SHA and current source links above are the evidence boundary for
   this refresh. Broad completion must not be inferred from a green component
