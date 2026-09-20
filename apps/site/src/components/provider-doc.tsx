@@ -264,12 +264,13 @@ SQL`,
         metadata/blocks, Rust/Node/CLI matrices, and all 40 PGlite-inclusive
         seeded trace lanes. The dedicated provider matrix passed Rust SDK 4/4,
         Node SDK 5/5, and CLI 7/7 gated cases; the Node CLI uses the same
-        versioned provider configuration and reopen flow as the Rust CLI. The
-        later consumer packet adds 8 process-level CLI passes and 2 explicit
-        PGlite/R2 skips plus 4 Rust SDK passes and 4 external-gate skips;
-        these are focused consumer checks, not live-provider or native-mount
-        acceptance. R2 rows remained explicit credential skips; hosted and
-        release acceptance remain separate.
+        versioned provider configuration and reopen flow as the Rust CLI. A
+        later Rust CLI consumer check passed configured PGlite split-store
+        write, shutdown, reopen, and readback. The live CLI matrix is now 10
+        passes and one explicit R2 skip; no config-validation row is counted
+        as live R2 evidence. These are focused consumer checks, not
+        live-provider or native-mount acceptance; hosted and release
+        acceptance remain separate.
       </>
     ),
     sources: [
@@ -355,11 +356,11 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
     ),
     evidence: (
       <>
-        The current tracker records authenticated R2 filesystem, differential,
-        Node, CLI, ranged-read, reopen, and owned-prefix cleanup checks. The
-        configuration-driven CLI exercised the R2 block path with both
-        supported metadata-provider compositions. Local object-store tests are
-        not substituted for those live results.
+        The current tracker records authenticated R2 filesystem checks,
+        five-seed differential traces, Node and CLI coverage, ranged reads,
+        reopen, owned-prefix cleanup, and both supported metadata-provider
+        compositions. Local object-store tests and RustFS results are not
+        substituted for those live Cloudflare results.
       </>
     ),
     sources: [

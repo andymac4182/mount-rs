@@ -27,7 +27,7 @@ export const transportSpecs = {
     name: 'FUSE',
     eyebrow: 'Transport / kernel-facing Unix mount',
     maturity: 'Preview',
-    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; structural-driver Linux CI is wired but its hosted result is pending, while Rust-backed Node codec/inode coverage is implemented and broader platform scope remains explicit.',
+    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; the latest recorded hosted Linux run passed the structural FUSE lifecycle at 37e9ba1 but predates newer codec packets, so current-tree requalification remains open while broader platform scope stays explicit.',
     summary: (
       <>
         FUSE is the kernel-facing route for a host that can provide the FUSE
@@ -78,22 +78,27 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     limitations: (
       <>
         The codec is not a complete native session. The public Node barrel now
-        covers <code>READDIR</code>/<code>READDIRPLUS</code> bodies, but full
-        request/reply, init negotiation, session, and native-mount surfaces
-        remain open; several typed operations still return <code>ENOSYS</code>.
-        FUSE evidence does not qualify NFS, 9P, or FSKit.
+        covers <code>GETATTR</code>, <code>SETATTR</code>, <code>READ</code>,
+        <code>WRITE</code>, <code>READDIR</code>, and
+        <code>READDIRPLUS</code> bodies, but full request/reply, init
+        negotiation, session, and native-mount surfaces remain open; several
+        typed operations still return <code>ENOSYS</code>. FUSE evidence does
+        not qualify NFS, 9P, or FSKit.
       </>
     ),
     evidence: (
       <>
         The Rust-backed <code>./fuse</code> barrel now exposes oracle-shaped
+        typed <code>GETATTR</code>/<code>SETATTR</code> and
+        <code>READ</code>/<code>WRITE</code> codecs alongside
         <code>packDirents</code>/<code>unpackDirents</code> and
         <code>packDirentsPlus</code>/<code>unpackDirentsPlus</code>. Pinned
-        differential tests cover UTF-8 names, 8-byte alignment, bounded
-        packing, integer coercion, malformed input, and inode parity. The
-        structural Linux job is prerequisite-gated and its hosted pass remains
-        pending; full request/reply, session, and native-mount surfaces remain
-        open.
+        differential tests cover protocol bytes, truncation, trailing data,
+        UTF-8 names, 8-byte alignment, bounded packing, integer coercion,
+        malformed input, and inode parity. Hosted CI run 35499717435 passed
+        Linux native FUSE/NFS/9P/WebDAV at 37e9ba1, but current-tree hosted
+        requalification remains open; full request/reply, session, and
+        native-mount surfaces remain open.
       </>
     ),
     sources: [
