@@ -264,10 +264,12 @@ SQL`,
         metadata/blocks, Rust/Node/CLI matrices, and all 40 PGlite-inclusive
         seeded trace lanes. The dedicated provider matrix passed Rust SDK 4/4,
         Node SDK 5/5, and CLI 7/7 gated cases; the Node CLI uses the same
-        versioned provider configuration and reopen flow as the Rust CLI. A
-        later Rust CLI consumer check passed configured PGlite split-store
-        write, shutdown, reopen, and readback. The live CLI matrix is now 10
-        passes and one explicit R2 skip; no config-validation row is counted
+        versioned provider configuration and reopen flow as the Rust CLI. The
+        latest focused matrix passed 5 Rust SDK, 4 Node SDK, and 9 CLI cases,
+        with PGlite and R2 remaining explicit prerequisite skips. A separate
+        configured Rust CLI consumer check passed PGlite split-store write,
+        shutdown, reopen, and readback; with PGlite enabled, the CLI matrix is
+        10 passes and one explicit R2 skip. No config-validation row is counted
         as live R2 evidence. These are focused consumer checks, not
         live-provider or native-mount acceptance; hosted and release
         acceptance remain separate.
@@ -359,8 +361,10 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         The current tracker records authenticated R2 filesystem checks,
         five-seed differential traces, Node and CLI coverage, ranged reads,
         reopen, owned-prefix cleanup, and both supported metadata-provider
-        compositions. Local object-store tests and RustFS results are not
-        substituted for those live Cloudflare results.
+        compositions. The portable provider matrix also adds seeded
+        positional writes, truncate, flush, and reopen checks, but its R2 row
+        remains an explicit credential gate. Local object-store tests and
+        RustFS results are not substituted for those live Cloudflare results.
       </>
     ),
     sources: [
@@ -374,7 +378,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
     name: 'RustFS',
     eyebrow: 'Provider / local S3-compatible service',
     maturity: 'Validated',
-    maturityNote: 'Pinned service contract, restart, CAS, range, and hosted RustFS checks passed; composition breadth remains open.',
+    maturityNote: 'Pinned service contract, restart, CAS, range, hosted RustFS checks, and real FoundationDB/TiDB composition checkpoints passed; replicated topology and broader consumer coverage remain open.',
     summary: (
       <>
         RustFS is the reproducible local/CI S3-compatible service used to
@@ -434,16 +438,21 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     limitations: (
       <>
         The all-in-one local deployment is not production authentication or
-        replicated-durability evidence. TiDB/FoundationDB mixed-provider
-        composition, broader CLI/Node coverage, and release qualification are
-        still tracked separately.
+        replicated-durability evidence. TiDB/FoundationDB composition passed
+        bounded single-node checkpoints, while replicated topology, provider
+        restart promotion, broader CLI/Node coverage, and release
+        qualification remain tracked separately.
       </>
     ),
     evidence: (
       <>
-        The pinned RustFS contract and hosted Linux job cover the service
-        boundary, including restart and owned-resource cleanup. The maturity
-        label is scoped to that service path, not every S3-compatible server.
+        The bounded current-tree harness passed immutable block writes/reopens,
+        SQLite and PGlite metadata compositions, N-API factories, remote CLI
+        HTTP reopen, SQLite VFS over RustFS blocks, fault recovery, service
+        restart/reopen, and the RustFS benchmark. FoundationDB and TiDB mixed
+        provider runs also passed, with TiDB limited to single-node v8.5.7.
+        The maturity label is scoped to these service paths, not every
+        S3-compatible server or a replicated production topology.
       </>
     ),
     sources: [
@@ -518,16 +527,17 @@ LIMIT 20;`,
     limitations: (
       <>
         A MySQL-compatible server is not TiDB acceptance. The durable 3PD/3TiKV
-        topology is capacity-gated in the current tracker, and Node, CLI,
-        native-mount, hosted restart, and full RustFS composition coverage are
-        still open.
+        topology and provider restart promotion remain capacity-gated, while
+        Node, CLI, native-mount, and hosted restart coverage remain open.
       </>
     ),
     evidence: (
       <>
-        The provider has schema, fencing, CAS, reconnect, and single-node
-        ARM64 checks. The maturity label stays Experimental until the actual
-        TiDB service topology and mixed-provider gates are complete.
+        The real single-node v8.5.7 service run passed TiDB metadata/block
+        composition with durable-scope checks, block-absence assertions,
+        metadata-row cleanup, and symlink-path rejection. The maturity label
+        stays Experimental until replicated/durable topology and broader
+        consumer gates are complete.
       </>
     ),
     sources: [
@@ -540,7 +550,7 @@ LIMIT 20;`,
     name: 'FoundationDB',
     eyebrow: 'Provider / transactional key-value store',
     maturity: 'Experimental',
-    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints; lease authority and broader integration remain open.',
+    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, including exact owned-prefix cleanup; lease authority and broader integration remain open.',
     summary: (
       <>
         FoundationDB stores the split filesystem in a volume-scoped keyspace.
@@ -610,8 +620,9 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     evidence: (
       <>
         The real pinned Linux ARM64 provider and RustFS composition checks cover
-        blocks, metadata, CAS, fencing, and reopen. This is not yet a general
-        production or release-readiness claim.
+        blocks, metadata, CAS, fencing, reopen, and the latest exact owned-
+        prefix cleanup with sibling/parent sentinel preservation. This is not
+        yet a general production or release-readiness claim.
       </>
     ),
     sources: [

@@ -79,7 +79,8 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       <>
         The codec is not a complete native session. The public Node barrel now
         covers <code>GETATTR</code>, <code>SETATTR</code>, <code>READ</code>,
-        <code>WRITE</code>, <code>READDIR</code>, and
+        <code>WRITE</code>, <code>OPEN</code>, <code>OPENDIR</code>,
+        <code>CREATE</code>, <code>LOOKUP</code>, <code>READDIR</code>, and
         <code>READDIRPLUS</code> bodies, but full request/reply, init
         negotiation, session, and native-mount surfaces remain open; several
         typed operations still return <code>ENOSYS</code>. FUSE evidence does
@@ -89,16 +90,19 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     evidence: (
       <>
         The Rust-backed <code>./fuse</code> barrel now exposes oracle-shaped
-        typed <code>GETATTR</code>/<code>SETATTR</code> and
-        <code>READ</code>/<code>WRITE</code> codecs alongside
+        typed <code>GETATTR</code>/<code>SETATTR</code>,
+        <code>READ</code>/<code>WRITE</code>,
+        <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>, and
+        <code>LOOKUP</code> codecs alongside
         <code>packDirents</code>/<code>unpackDirents</code> and
         <code>packDirentsPlus</code>/<code>unpackDirentsPlus</code>. Pinned
-        differential tests cover protocol bytes, truncation, trailing data,
-        UTF-8 names, 8-byte alignment, bounded packing, integer coercion,
-        malformed input, and inode parity. Hosted CI run 35499717435 passed
-        Linux native FUSE/NFS/9P/WebDAV at 37e9ba1, but current-tree hosted
-        requalification remains open; full request/reply, session, and
-        native-mount surfaces remain open.
+        7.8/7.39/7.41 differential tests cover protocol bytes, truncation,
+        trailing data, UTF-8 names, 8-byte alignment, bounded packing, integer
+        coercion, malformed input, and inode parity. Rust session tests also
+        cover focused <code>ACCESS</code> validation. Hosted CI run 35499717435
+        passed Linux native FUSE/NFS/9P/WebDAV at 37e9ba1, but newer current-
+        tree CI is queued; full request/reply, session, and native-mount
+        surfaces remain open.
       </>
     ),
     sources: [
