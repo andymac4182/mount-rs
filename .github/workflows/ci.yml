@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -79,3 +79,8 @@ jobs:
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
       - run: pnpm --dir tests/pglite install --frozen-lockfile
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.os }}
+          path: integrations/mount-rs-napi/*.node
+          if-no-files-found: error

@@ -5,6 +5,14 @@
   "license": "MIT",
   "main": "index.js",
   "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./package.json": "./package.json"
+  },
   "files": [
     "index.js",
     "index.d.ts",
@@ -15,10 +23,18 @@
   "scripts": {
     "build": "napi build --platform --release && node postbuild.mjs",
     "build:debug": "napi build --platform && node postbuild.mjs",
-    "test": "node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/differential.mjs"
+    "prepare:npm": "napi create-npm-dirs",
+    "test": "node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/differential.mjs && node test/distribution.mjs",
+    "prepublishOnly": "napi create-npm-dirs && napi pre-publish --root-publisher pnpm"
   },
   "napi": {
-    "binaryName": "mount-rs"
+    "binaryName": "mount-rs",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-unknown-linux-gnu"
+    ]
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.5.0"
