@@ -3,11 +3,13 @@
 //! Backend integrations live in separate workspace crates. This crate contains
 //! only the path/error/types contract, loopback harness, and reference memfs.
 
+pub mod chunking;
 pub mod driver;
 pub mod error;
 pub mod handle;
 pub mod memory;
 pub mod path;
+pub mod storage;
 pub mod types;
 
 pub use driver::{FileHandle, FsDriver, Loopback};
