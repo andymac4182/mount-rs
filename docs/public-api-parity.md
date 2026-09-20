@@ -7,7 +7,7 @@ edit and refreshed against the current source, tests, and the pinned oracle:
 - repository baseline when the deleted file was recovered:
   `ac2161d27f4a6805b87580fbee20c1302e9cd9df`
 - current local integration baseline observed during this packet:
-  `8e1f218`
+  `4dc90d5`
 - oracle checkout: `/tmp/mountx-source.uWiHfX`
 - oracle revision: `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`
 
@@ -40,7 +40,7 @@ described as a complete session or native-mount implementation.
 | Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the opt-in native mount lifecycle now accepts the plain structural object and passes macOS NFS read/write/unmount | **PARTIAL; UNVERIFIED** for hosted Linux/other platforms |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
-| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS` dispatch and pure Rust INIT negotiation are tested separately; remaining bodies, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
+| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining bodies, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
@@ -134,10 +134,18 @@ The Rust implementation has useful, tested FUSE pieces:
   compatibility layouts, and embedded-NUL rejection. These are still
   mount-free codec gates; they do not establish FUSE session or native mount
   parity;
+- the barrel also exposes typed `BATCH_FORGET` and `INTERRUPT` request codecs.
+  Pinned-oracle tests cover protocol-minor framing, count/payload validation,
+  truncation, trailing bytes and the required empty-reply classification;
+  these remain mount-free codec gates;
 - the Rust FUSE session dispatch now validates and handles `ACCESS` requests
   with the fixed 8-byte wire shape, root handling, owner/group/other mode
   checks and invalid-mask errors. Focused locked session tests pass, but this
   does not establish a kernel FUSE device or native mount lifecycle;
+- the Rust session now validates `BATCH_FORGET` count/payload lengths before
+  mutating inode state and accepts `INTERRUPT` only with its exact 8-byte body,
+  returning `EAGAIN` for unknown targets without guessing cancellation or
+  tearing down the session. Native kernel cancellation remains unverified;
 - the N-API `./fuse` barrel now exposes Rust-backed `RELEASE`/`RELEASEDIR`,
   `FLUSH`, and `FSYNC`/`FSYNCDIR` request/status codecs. Pinned protocol
   differentials cover empty status replies and malformed/truncated/trailing
@@ -287,9 +295,9 @@ from the smallest contract boundary to the larger environment boundary:
    live-R2 and native transport concurrency remain separate acceptance gates.
 4. **Remaining public transport/API surface (P1):** the FUSE directory,
    `READ`/`WRITE`, `GETATTR`/`SETATTR`, `OPEN`/`OPENDIR`, `LOOKUP`,
-   `READLINK`, and `STATFS` body codecs are now public and
-   oracle-differentially tested. Expose the remaining request/reply bodies,
-   session and native-mount surfaces, then run
+   `READLINK`, `STATFS`, `BATCH_FORGET`, and `INTERRUPT` body codecs are now
+   public and oracle-differentially tested. Expose the remaining request/reply
+   bodies, session and native-mount surfaces, then run
    oracle-backed subpath tests for every exported transport rather than
    treating codec or inode fixture tests as transport completion.
 
@@ -497,6 +505,23 @@ the closure items listed above.
   and `MOUNT_RS_NODE_CLI_NATIVE_INTEGRATION=1 node
   examples/node-cli/native-integration.mjs` all exited 0. PGlite/R2 and
   hosted/native platform gates remain explicit boundaries.
+- **PASS** — `7934062` Rust FUSE `BATCH_FORGET`/`INTERRUPT` packet: strict
+  count/payload validation, no-reply behavior, exact interrupt-body checking,
+  unknown-target `EAGAIN`, malformed/truncated coverage, 48 package tests and
+  strict scoped Clippy passed.
+- **PASS** — `4dc90d5` napi-rs FUSE `BATCH_FORGET`/`INTERRUPT` packet:
+  generated bindings/declarations and pinned-oracle protocol-minor,
+  malformed-count, truncation, trailing-byte and empty-reply tests passed;
+  full N-API suite passed with only explicit PGlite/R2/native skips.
+- **PASS** — `b13350f` Unstorage remaining-skip parity: 25 pinned-oracle
+  rows passed with 4 supported results, 21 explicit `ENOSYS` classifications,
+  0 `ENOTSUP` mismatches and 0 skips; exact error code, errno, syscall, path
+  and message assertions are retained.
+- **PASS** — second-rotation combined gate: workspace format, the full locked
+  offline Rust workspace, the full oracle-enabled N-API suite, the 25-row
+  Unstorage parity packet, and the prior macOS NFS Node CLI acceptance all
+  exited 0. Hosted Linux/Windows, FSKit, live R2/PGlite and native kernel
+  cancellation remain explicit boundaries.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
