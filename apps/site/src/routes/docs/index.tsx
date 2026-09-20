@@ -60,6 +60,18 @@ function DocsOverview() {
           <p>The current <code>createChunkedDriver</code> shape and lifecycle expectations.</p>
           <span className="card-arrow" aria-hidden="true">→</span>
         </Link>
+        <Link className="doc-card" to="/docs/providers">
+          <span className="eyebrow">03 / Providers</span>
+          <h3>Storage roles and maturity</h3>
+          <p>See where metadata lives, how bytes are laid out, and what the evidence actually covers.</p>
+          <span className="card-arrow" aria-hidden="true">→</span>
+        </Link>
+        <Link className="doc-card" to="/docs/transports">
+          <span className="eyebrow">04 / Transports</span>
+          <h3>Mount-free and native edges</h3>
+          <p>Choose FUSE, NFS, 9P, FSKit, HTTP, or WebDAV with platform limits in view.</p>
+          <span className="card-arrow" aria-hidden="true">→</span>
+        </Link>
       </div>
 
       <div className="source-note">

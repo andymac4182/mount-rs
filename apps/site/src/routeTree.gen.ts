@@ -13,7 +13,26 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as DocsIndexRouteImport } from './routes/docs/index'
 import { Route as DocsNodeRouteImport } from './routes/docs/node'
+import { Route as DocsProvidersRouteImport } from './routes/docs/providers'
 import { Route as DocsRustRouteImport } from './routes/docs/rust'
+import { Route as DocsTransportsRouteImport } from './routes/docs/transports'
+import { Route as DocsProvidersIndexRouteImport } from './routes/docs/providers/index'
+import { Route as DocsProvidersAwsS3RouteImport } from './routes/docs/providers/aws-s3'
+import { Route as DocsProvidersFoundationdbRouteImport } from './routes/docs/providers/foundationdb'
+import { Route as DocsProvidersMemoryRouteImport } from './routes/docs/providers/memory'
+import { Route as DocsProvidersOzoneRouteImport } from './routes/docs/providers/ozone'
+import { Route as DocsProvidersPgliteRouteImport } from './routes/docs/providers/pglite'
+import { Route as DocsProvidersR2RouteImport } from './routes/docs/providers/r2'
+import { Route as DocsProvidersRustfsRouteImport } from './routes/docs/providers/rustfs'
+import { Route as DocsProvidersSqliteRouteImport } from './routes/docs/providers/sqlite'
+import { Route as DocsProvidersTidbRouteImport } from './routes/docs/providers/tidb'
+import { Route as DocsTransportsIndexRouteImport } from './routes/docs/transports/index'
+import { Route as DocsTransports9pRouteImport } from './routes/docs/transports/9p'
+import { Route as DocsTransportsFskitRouteImport } from './routes/docs/transports/fskit'
+import { Route as DocsTransportsFuseRouteImport } from './routes/docs/transports/fuse'
+import { Route as DocsTransportsHttpRouteImport } from './routes/docs/transports/http'
+import { Route as DocsTransportsNfsRouteImport } from './routes/docs/transports/nfs'
+import { Route as DocsTransportsWebdavRouteImport } from './routes/docs/transports/webdav'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -35,39 +54,260 @@ const DocsNodeRoute = DocsNodeRouteImport.update({
   path: '/node',
   getParentRoute: () => DocsRoute,
 } as any)
+const DocsProvidersRoute = DocsProvidersRouteImport.update({
+  id: '/providers',
+  path: '/providers',
+  getParentRoute: () => DocsRoute,
+} as any)
 const DocsRustRoute = DocsRustRouteImport.update({
   id: '/rust',
   path: '/rust',
   getParentRoute: () => DocsRoute,
+} as any)
+const DocsTransportsRoute = DocsTransportsRouteImport.update({
+  id: '/transports',
+  path: '/transports',
+  getParentRoute: () => DocsRoute,
+} as any)
+const DocsProvidersIndexRoute = DocsProvidersIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersAwsS3Route = DocsProvidersAwsS3RouteImport.update({
+  id: '/aws-s3',
+  path: '/aws-s3',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersFoundationdbRoute =
+  DocsProvidersFoundationdbRouteImport.update({
+    id: '/foundationdb',
+    path: '/foundationdb',
+    getParentRoute: () => DocsProvidersRoute,
+  } as any)
+const DocsProvidersMemoryRoute = DocsProvidersMemoryRouteImport.update({
+  id: '/memory',
+  path: '/memory',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersOzoneRoute = DocsProvidersOzoneRouteImport.update({
+  id: '/ozone',
+  path: '/ozone',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersPgliteRoute = DocsProvidersPgliteRouteImport.update({
+  id: '/pglite',
+  path: '/pglite',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersR2Route = DocsProvidersR2RouteImport.update({
+  id: '/r2',
+  path: '/r2',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersRustfsRoute = DocsProvidersRustfsRouteImport.update({
+  id: '/rustfs',
+  path: '/rustfs',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersSqliteRoute = DocsProvidersSqliteRouteImport.update({
+  id: '/sqlite',
+  path: '/sqlite',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsProvidersTidbRoute = DocsProvidersTidbRouteImport.update({
+  id: '/tidb',
+  path: '/tidb',
+  getParentRoute: () => DocsProvidersRoute,
+} as any)
+const DocsTransportsIndexRoute = DocsTransportsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => DocsTransportsRoute,
+} as any)
+const DocsTransports9pRoute = DocsTransports9pRouteImport.update({
+  id: '/9p',
+  path: '/9p',
+  getParentRoute: () => DocsTransportsRoute,
+} as any)
+const DocsTransportsFskitRoute = DocsTransportsFskitRouteImport.update({
+  id: '/fskit',
+  path: '/fskit',
+  getParentRoute: () => DocsTransportsRoute,
+} as any)
+const DocsTransportsFuseRoute = DocsTransportsFuseRouteImport.update({
+  id: '/fuse',
+  path: '/fuse',
+  getParentRoute: () => DocsTransportsRoute,
+} as any)
+const DocsTransportsHttpRoute = DocsTransportsHttpRouteImport.update({
+  id: '/http',
+  path: '/http',
+  getParentRoute: () => DocsTransportsRoute,
+} as any)
+const DocsTransportsNfsRoute = DocsTransportsNfsRouteImport.update({
+  id: '/nfs',
+  path: '/nfs',
+  getParentRoute: () => DocsTransportsRoute,
+} as any)
+const DocsTransportsWebdavRoute = DocsTransportsWebdavRouteImport.update({
+  id: '/webdav',
+  path: '/webdav',
+  getParentRoute: () => DocsTransportsRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/docs': typeof DocsRouteWithChildren
   '/docs/node': typeof DocsNodeRoute
+  '/docs/providers': typeof DocsProvidersRouteWithChildren
   '/docs/rust': typeof DocsRustRoute
+  '/docs/transports': typeof DocsTransportsRouteWithChildren
   '/docs/': typeof DocsIndexRoute
+  '/docs/providers/aws-s3': typeof DocsProvidersAwsS3Route
+  '/docs/providers/foundationdb': typeof DocsProvidersFoundationdbRoute
+  '/docs/providers/memory': typeof DocsProvidersMemoryRoute
+  '/docs/providers/ozone': typeof DocsProvidersOzoneRoute
+  '/docs/providers/pglite': typeof DocsProvidersPgliteRoute
+  '/docs/providers/r2': typeof DocsProvidersR2Route
+  '/docs/providers/rustfs': typeof DocsProvidersRustfsRoute
+  '/docs/providers/sqlite': typeof DocsProvidersSqliteRoute
+  '/docs/providers/tidb': typeof DocsProvidersTidbRoute
+  '/docs/transports/9p': typeof DocsTransports9pRoute
+  '/docs/transports/fskit': typeof DocsTransportsFskitRoute
+  '/docs/transports/fuse': typeof DocsTransportsFuseRoute
+  '/docs/transports/http': typeof DocsTransportsHttpRoute
+  '/docs/transports/nfs': typeof DocsTransportsNfsRoute
+  '/docs/transports/webdav': typeof DocsTransportsWebdavRoute
+  '/docs/providers/': typeof DocsProvidersIndexRoute
+  '/docs/transports/': typeof DocsTransportsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/rust': typeof DocsRustRoute
   '/docs': typeof DocsIndexRoute
+  '/docs/providers/aws-s3': typeof DocsProvidersAwsS3Route
+  '/docs/providers/foundationdb': typeof DocsProvidersFoundationdbRoute
+  '/docs/providers/memory': typeof DocsProvidersMemoryRoute
+  '/docs/providers/ozone': typeof DocsProvidersOzoneRoute
+  '/docs/providers/pglite': typeof DocsProvidersPgliteRoute
+  '/docs/providers/r2': typeof DocsProvidersR2Route
+  '/docs/providers/rustfs': typeof DocsProvidersRustfsRoute
+  '/docs/providers/sqlite': typeof DocsProvidersSqliteRoute
+  '/docs/providers/tidb': typeof DocsProvidersTidbRoute
+  '/docs/transports/9p': typeof DocsTransports9pRoute
+  '/docs/transports/fskit': typeof DocsTransportsFskitRoute
+  '/docs/transports/fuse': typeof DocsTransportsFuseRoute
+  '/docs/transports/http': typeof DocsTransportsHttpRoute
+  '/docs/transports/nfs': typeof DocsTransportsNfsRoute
+  '/docs/transports/webdav': typeof DocsTransportsWebdavRoute
+  '/docs/providers': typeof DocsProvidersIndexRoute
+  '/docs/transports': typeof DocsTransportsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/docs': typeof DocsRouteWithChildren
   '/docs/node': typeof DocsNodeRoute
+  '/docs/providers': typeof DocsProvidersRouteWithChildren
   '/docs/rust': typeof DocsRustRoute
+  '/docs/transports': typeof DocsTransportsRouteWithChildren
   '/docs/': typeof DocsIndexRoute
+  '/docs/providers/aws-s3': typeof DocsProvidersAwsS3Route
+  '/docs/providers/foundationdb': typeof DocsProvidersFoundationdbRoute
+  '/docs/providers/memory': typeof DocsProvidersMemoryRoute
+  '/docs/providers/ozone': typeof DocsProvidersOzoneRoute
+  '/docs/providers/pglite': typeof DocsProvidersPgliteRoute
+  '/docs/providers/r2': typeof DocsProvidersR2Route
+  '/docs/providers/rustfs': typeof DocsProvidersRustfsRoute
+  '/docs/providers/sqlite': typeof DocsProvidersSqliteRoute
+  '/docs/providers/tidb': typeof DocsProvidersTidbRoute
+  '/docs/transports/9p': typeof DocsTransports9pRoute
+  '/docs/transports/fskit': typeof DocsTransportsFskitRoute
+  '/docs/transports/fuse': typeof DocsTransportsFuseRoute
+  '/docs/transports/http': typeof DocsTransportsHttpRoute
+  '/docs/transports/nfs': typeof DocsTransportsNfsRoute
+  '/docs/transports/webdav': typeof DocsTransportsWebdavRoute
+  '/docs/providers/': typeof DocsProvidersIndexRoute
+  '/docs/transports/': typeof DocsTransportsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/docs' | '/docs/node' | '/docs/rust' | '/docs/'
+  fullPaths:
+    | '/'
+    | '/docs'
+    | '/docs/node'
+    | '/docs/providers'
+    | '/docs/rust'
+    | '/docs/transports'
+    | '/docs/'
+    | '/docs/providers/aws-s3'
+    | '/docs/providers/foundationdb'
+    | '/docs/providers/memory'
+    | '/docs/providers/ozone'
+    | '/docs/providers/pglite'
+    | '/docs/providers/r2'
+    | '/docs/providers/rustfs'
+    | '/docs/providers/sqlite'
+    | '/docs/providers/tidb'
+    | '/docs/transports/9p'
+    | '/docs/transports/fskit'
+    | '/docs/transports/fuse'
+    | '/docs/transports/http'
+    | '/docs/transports/nfs'
+    | '/docs/transports/webdav'
+    | '/docs/providers/'
+    | '/docs/transports/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/docs/node' | '/docs/rust' | '/docs'
-  id: '__root__' | '/' | '/docs' | '/docs/node' | '/docs/rust' | '/docs/'
+  to:
+    | '/'
+    | '/docs/node'
+    | '/docs/rust'
+    | '/docs'
+    | '/docs/providers/aws-s3'
+    | '/docs/providers/foundationdb'
+    | '/docs/providers/memory'
+    | '/docs/providers/ozone'
+    | '/docs/providers/pglite'
+    | '/docs/providers/r2'
+    | '/docs/providers/rustfs'
+    | '/docs/providers/sqlite'
+    | '/docs/providers/tidb'
+    | '/docs/transports/9p'
+    | '/docs/transports/fskit'
+    | '/docs/transports/fuse'
+    | '/docs/transports/http'
+    | '/docs/transports/nfs'
+    | '/docs/transports/webdav'
+    | '/docs/providers'
+    | '/docs/transports'
+  id:
+    | '__root__'
+    | '/'
+    | '/docs'
+    | '/docs/node'
+    | '/docs/providers'
+    | '/docs/rust'
+    | '/docs/transports'
+    | '/docs/'
+    | '/docs/providers/aws-s3'
+    | '/docs/providers/foundationdb'
+    | '/docs/providers/memory'
+    | '/docs/providers/ozone'
+    | '/docs/providers/pglite'
+    | '/docs/providers/r2'
+    | '/docs/providers/rustfs'
+    | '/docs/providers/sqlite'
+    | '/docs/providers/tidb'
+    | '/docs/transports/9p'
+    | '/docs/transports/fskit'
+    | '/docs/transports/fuse'
+    | '/docs/transports/http'
+    | '/docs/transports/nfs'
+    | '/docs/transports/webdav'
+    | '/docs/providers/'
+    | '/docs/transports/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -105,6 +345,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DocsNodeRouteImport
       parentRoute: typeof DocsRoute
     }
+    '/docs/providers': {
+      id: '/docs/providers'
+      path: '/providers'
+      fullPath: '/docs/providers'
+      preLoaderRoute: typeof DocsProvidersRouteImport
+      parentRoute: typeof DocsRoute
+    }
     '/docs/rust': {
       id: '/docs/rust'
       path: '/rust'
@@ -112,18 +359,202 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof DocsRustRouteImport
       parentRoute: typeof DocsRoute
     }
+    '/docs/transports': {
+      id: '/docs/transports'
+      path: '/transports'
+      fullPath: '/docs/transports'
+      preLoaderRoute: typeof DocsTransportsRouteImport
+      parentRoute: typeof DocsRoute
+    }
+    '/docs/providers/': {
+      id: '/docs/providers/'
+      path: '/'
+      fullPath: '/docs/providers/'
+      preLoaderRoute: typeof DocsProvidersIndexRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/aws-s3': {
+      id: '/docs/providers/aws-s3'
+      path: '/aws-s3'
+      fullPath: '/docs/providers/aws-s3'
+      preLoaderRoute: typeof DocsProvidersAwsS3RouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/foundationdb': {
+      id: '/docs/providers/foundationdb'
+      path: '/foundationdb'
+      fullPath: '/docs/providers/foundationdb'
+      preLoaderRoute: typeof DocsProvidersFoundationdbRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/memory': {
+      id: '/docs/providers/memory'
+      path: '/memory'
+      fullPath: '/docs/providers/memory'
+      preLoaderRoute: typeof DocsProvidersMemoryRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/ozone': {
+      id: '/docs/providers/ozone'
+      path: '/ozone'
+      fullPath: '/docs/providers/ozone'
+      preLoaderRoute: typeof DocsProvidersOzoneRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/pglite': {
+      id: '/docs/providers/pglite'
+      path: '/pglite'
+      fullPath: '/docs/providers/pglite'
+      preLoaderRoute: typeof DocsProvidersPgliteRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/r2': {
+      id: '/docs/providers/r2'
+      path: '/r2'
+      fullPath: '/docs/providers/r2'
+      preLoaderRoute: typeof DocsProvidersR2RouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/rustfs': {
+      id: '/docs/providers/rustfs'
+      path: '/rustfs'
+      fullPath: '/docs/providers/rustfs'
+      preLoaderRoute: typeof DocsProvidersRustfsRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/sqlite': {
+      id: '/docs/providers/sqlite'
+      path: '/sqlite'
+      fullPath: '/docs/providers/sqlite'
+      preLoaderRoute: typeof DocsProvidersSqliteRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/providers/tidb': {
+      id: '/docs/providers/tidb'
+      path: '/tidb'
+      fullPath: '/docs/providers/tidb'
+      preLoaderRoute: typeof DocsProvidersTidbRouteImport
+      parentRoute: typeof DocsProvidersRoute
+    }
+    '/docs/transports/': {
+      id: '/docs/transports/'
+      path: '/'
+      fullPath: '/docs/transports/'
+      preLoaderRoute: typeof DocsTransportsIndexRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
+    '/docs/transports/9p': {
+      id: '/docs/transports/9p'
+      path: '/9p'
+      fullPath: '/docs/transports/9p'
+      preLoaderRoute: typeof DocsTransports9pRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
+    '/docs/transports/fskit': {
+      id: '/docs/transports/fskit'
+      path: '/fskit'
+      fullPath: '/docs/transports/fskit'
+      preLoaderRoute: typeof DocsTransportsFskitRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
+    '/docs/transports/fuse': {
+      id: '/docs/transports/fuse'
+      path: '/fuse'
+      fullPath: '/docs/transports/fuse'
+      preLoaderRoute: typeof DocsTransportsFuseRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
+    '/docs/transports/http': {
+      id: '/docs/transports/http'
+      path: '/http'
+      fullPath: '/docs/transports/http'
+      preLoaderRoute: typeof DocsTransportsHttpRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
+    '/docs/transports/nfs': {
+      id: '/docs/transports/nfs'
+      path: '/nfs'
+      fullPath: '/docs/transports/nfs'
+      preLoaderRoute: typeof DocsTransportsNfsRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
+    '/docs/transports/webdav': {
+      id: '/docs/transports/webdav'
+      path: '/webdav'
+      fullPath: '/docs/transports/webdav'
+      preLoaderRoute: typeof DocsTransportsWebdavRouteImport
+      parentRoute: typeof DocsTransportsRoute
+    }
   }
 }
 
+interface DocsProvidersRouteChildren {
+  DocsProvidersAwsS3Route: typeof DocsProvidersAwsS3Route
+  DocsProvidersFoundationdbRoute: typeof DocsProvidersFoundationdbRoute
+  DocsProvidersMemoryRoute: typeof DocsProvidersMemoryRoute
+  DocsProvidersOzoneRoute: typeof DocsProvidersOzoneRoute
+  DocsProvidersPgliteRoute: typeof DocsProvidersPgliteRoute
+  DocsProvidersR2Route: typeof DocsProvidersR2Route
+  DocsProvidersRustfsRoute: typeof DocsProvidersRustfsRoute
+  DocsProvidersSqliteRoute: typeof DocsProvidersSqliteRoute
+  DocsProvidersTidbRoute: typeof DocsProvidersTidbRoute
+  DocsProvidersIndexRoute: typeof DocsProvidersIndexRoute
+}
+
+const DocsProvidersRouteChildren: DocsProvidersRouteChildren = {
+  DocsProvidersAwsS3Route: DocsProvidersAwsS3Route,
+  DocsProvidersFoundationdbRoute: DocsProvidersFoundationdbRoute,
+  DocsProvidersMemoryRoute: DocsProvidersMemoryRoute,
+  DocsProvidersOzoneRoute: DocsProvidersOzoneRoute,
+  DocsProvidersPgliteRoute: DocsProvidersPgliteRoute,
+  DocsProvidersR2Route: DocsProvidersR2Route,
+  DocsProvidersRustfsRoute: DocsProvidersRustfsRoute,
+  DocsProvidersSqliteRoute: DocsProvidersSqliteRoute,
+  DocsProvidersTidbRoute: DocsProvidersTidbRoute,
+  DocsProvidersIndexRoute: DocsProvidersIndexRoute,
+}
+
+const DocsProvidersRouteWithChildren = DocsProvidersRoute._addFileChildren(
+  DocsProvidersRouteChildren,
+)
+
+interface DocsTransportsRouteChildren {
+  DocsTransports9pRoute: typeof DocsTransports9pRoute
+  DocsTransportsFskitRoute: typeof DocsTransportsFskitRoute
+  DocsTransportsFuseRoute: typeof DocsTransportsFuseRoute
+  DocsTransportsHttpRoute: typeof DocsTransportsHttpRoute
+  DocsTransportsNfsRoute: typeof DocsTransportsNfsRoute
+  DocsTransportsWebdavRoute: typeof DocsTransportsWebdavRoute
+  DocsTransportsIndexRoute: typeof DocsTransportsIndexRoute
+}
+
+const DocsTransportsRouteChildren: DocsTransportsRouteChildren = {
+  DocsTransports9pRoute: DocsTransports9pRoute,
+  DocsTransportsFskitRoute: DocsTransportsFskitRoute,
+  DocsTransportsFuseRoute: DocsTransportsFuseRoute,
+  DocsTransportsHttpRoute: DocsTransportsHttpRoute,
+  DocsTransportsNfsRoute: DocsTransportsNfsRoute,
+  DocsTransportsWebdavRoute: DocsTransportsWebdavRoute,
+  DocsTransportsIndexRoute: DocsTransportsIndexRoute,
+}
+
+const DocsTransportsRouteWithChildren = DocsTransportsRoute._addFileChildren(
+  DocsTransportsRouteChildren,
+)
+
 interface DocsRouteChildren {
   DocsNodeRoute: typeof DocsNodeRoute
+  DocsProvidersRoute: typeof DocsProvidersRouteWithChildren
   DocsRustRoute: typeof DocsRustRoute
+  DocsTransportsRoute: typeof DocsTransportsRouteWithChildren
   DocsIndexRoute: typeof DocsIndexRoute
 }
 
 const DocsRouteChildren: DocsRouteChildren = {
   DocsNodeRoute: DocsNodeRoute,
+  DocsProvidersRoute: DocsProvidersRouteWithChildren,
   DocsRustRoute: DocsRustRoute,
+  DocsTransportsRoute: DocsTransportsRouteWithChildren,
   DocsIndexRoute: DocsIndexRoute,
 }
 
