@@ -186,6 +186,14 @@ pub(super) fn open(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File>
             READONLY
         } else {
             0
+        }
+        // O_CREAT|O_EXCL must examine the directory entry itself. Without
+        // OPEN_REPARSE_POINT, CreateFileW follows a dangling symlink and
+        // reports ERROR_FILE_NOT_FOUND instead of the POSIX EEXIST result.
+        | if flags.create && flags.exclusive {
+            OPEN_REPARSE_POINT
+        } else {
+            0
         };
     open_raw(path, access, disposition, attributes).map_err(|error| {
         if error.raw_os_error() == Some(80) && flags.create && !flags.exclusive {
