@@ -192,9 +192,11 @@ async fn native_tools() -> NativeTools {
         }
     }
     NativeTools {
-        fusermount: fusermount.unwrap_or_else(|| {
-            panic!("fusermount3 or fusermount is required for bounded FUSE cleanup")
-        }),
+        fusermount: fusermount
+            .unwrap_or_else(|| {
+                panic!("fusermount3 or fusermount is required for bounded FUSE cleanup")
+            })
+            .to_owned(),
     }
 }
 
