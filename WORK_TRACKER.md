@@ -145,6 +145,7 @@ complete.
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
+| W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
 ## Decisions and external prerequisites
 
@@ -824,6 +825,32 @@ listing a source does not mean it has been reviewed or its code can be reused.
   context propagation, redaction, disabled mode, dropped connections, exporter
   failures and shutdown. Benchmark overhead and qualify macOS/Linux/Windows;
   document setup and dashboards/examples without claiming unverified coverage.
+
+## W31 — Per-drive mounts from one backing datastore (future)
+
+This is a future workstream for exposing multiple independently mounted
+drives, each with its own drive identity and namespace, while sharing one
+metadata/block backing datastore. It must not be implemented by treating a
+shared provider handle as an implicit global filesystem or by weakening
+cross-drive isolation.
+
+- [ ] W31.1 Define drive identity, namespace roots, ownership, quotas and
+  lifecycle when several drives share one metadata and/or block provider.
+- [ ] W31.2 Specify metadata schema/indexing and block reachability so each
+  drive can be opened, snapshotted, copied, retained and garbage-collected
+  independently without deleting another drive's live blocks.
+- [ ] W31.3 Define locking, leases, revision/CAS boundaries and crash/reopen
+  behavior for concurrent writers on the same drive and on different drives.
+- [ ] W31.4 Expose the drive registry through the CLI config, HTTP multi-drive
+  API, Node/mount-free APIs, FUSE/NFS/9P/FSKit transports and future native
+  mounts without silently collapsing all drives into one namespace.
+- [ ] W31.5 Test per-drive authorization, path isolation, shared-store
+  cleanup, quotas, provider failures, restart, versioned views and future
+  distributed-cache/copy-on-write interactions across memory, SQLite, PGlite,
+  R2/RustFS and the database metadata providers.
+- [ ] W31.6 Benchmark shared-store efficiency against separate backing stores;
+  document supported combinations, migration/format versioning and safe
+  deletion rules before enabling automatic cleanup.
 
 ## Recent landed chunks
 
