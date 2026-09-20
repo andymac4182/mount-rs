@@ -22,7 +22,7 @@ The current repository and pinned upstream support the following:
 | Existing transport selection | Implemented, no FSKit entry | Rust `Transport` and the N-API `transport` option currently contain only `fuse`, `9p`, and `nfs`; see [transports/mount-rs-auto/src/lib.rs](../transports/mount-rs-auto/src/lib.rs) and [integrations/mount-rs-napi/src/lib.rs](../integrations/mount-rs-napi/src/lib.rs). The pinned upstream has the same union in `/tmp/mountx-source.uWiHfX/src/auto.ts:70-71`, preference at `:293-304`, and dispatch at `:372-387`. |
 | FSKit source artifacts in this repository | Missing | A read-only search found no Swift sources, Xcode project/workspace, entitlements file, Swift package, or FSKit target. |
 | FSKit source artifacts upstream | Missing | A read-only search of `/tmp/mountx-source.uWiHfX` found no FSKit, `FSVolume`, `FSUnaryFileSystem`, or file-system-extension implementation. |
-| Local Apple toolchain | Verified only as installed | `uname -m` = `arm64`; `sw_vers` = macOS `26.5.1`, build `25F80`; `xcodebuild -version` = Xcode `26.6`, build `17F113`; SDK = macOS `26.5` at `/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk`. This is not evidence of a valid FSKit entitlement, provisioning profile, extension activation, or mounted I/O. |
+| Local Apple toolchain | Compile gate verified; runtime still unverified | `uname -m` = `arm64`; `sw_vers` = macOS `26.5.1`, build `25F80`; `xcodebuild -version` = Xcode `26.6`, build `17F113`; SDK = macOS `26.5` at `/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk`. The standalone unsigned target in `integrations/mount-rs-fskit/` type-checks and builds with both `arm64-apple-macos15.4` and `x86_64-apple-macos15.4` using `CODE_SIGNING_ALLOWED=NO`. This is not evidence of a valid FSKit entitlement, provisioning profile, extension activation, or mounted I/O. |
 | Real FSKit mount and SQLite-on-FSKit behavior | Unverified/missing | No FSKit extension has been installed or activated, and no native mounted-path test has run. |
 
 The pinned upstream's NFS implementation is useful for behavioral parity but
@@ -42,17 +42,16 @@ These links are the official Apple documentation consulted for this checkpoint:
 - [UnaryFileSystemExtension](https://developer.apple.com/documentation/fskit/unaryfilesystemextension)
   is the extension entry point for an `FSUnaryFileSystem` implementation.
 - [FSVolume](https://developer.apple.com/documentation/fskit/fsvolume?changes=__1)
-  is the per-volume object. The current API surface includes lifecycle and
-  operation handlers rather than requiring a second filesystem engine.
-- [FSVolume.Handler](https://developer.apple.com/documentation/fskit/fsvolume/handler)
-  describes the current handler-style volume contract, including mount,
-  unmount, lookup, namespace mutation, enumeration, attributes, synchronize,
-  capabilities, and statistics.
-- [FSVolume.ReadWriteHandler](https://developer.apple.com/documentation/fskit/fsvolume/readwritehandler)
-  describes the read/write handler needed for user-space I/O. The current
-  pages identify parts of this API as beta or preliminary, so the exact SDK
-  declarations and availability must be pinned and compiled before support is
-  advertised.
+  is the per-volume object. In the installed macOS 26.5 SDK, the corresponding
+  Objective-C headers expose `FSVolume.Operations` and
+  `FSVolume.ReadWriteOperations`, both under FSKit V1 availability. The
+  compile-only target does not implement a volume yet.
+- Apple's online [FSVolume.Handler](https://developer.apple.com/documentation/fskit/fsvolume/handler)
+  and [FSVolume.ReadWriteHandler](https://developer.apple.com/documentation/fskit/fsvolume/readwritehandler)
+  pages describe a newer handler naming/API direction and mark parts of that
+  surface beta or preliminary. Those names are not present in the installed
+  SDK's `FSVolume.h`; they must not be used until the selected Xcode SDK
+  actually exposes and compiles them.
 - [FSPathURLResource](https://developer.apple.com/documentation/fskit/fspathurlresource?changes=l_9)
   and [FSResource](https://developer.apple.com/documentation/fskit/fsresource)
   define resources passed to the module. A security-scoped URL/resource must
@@ -102,46 +101,43 @@ extension would couple the extension ABI and lifecycle to the filesystem core,
 make crash/restart ownership ambiguous, and make the Node package an accidental
 runtime dependency.
 
-### IPC decision and gate
+### IPC feasibility result and bounded next gate
 
-The proposed first protocol is a local, versioned, authenticated Unix-domain
-socket between the FSKit adapter and the per-mount Rust worker:
+The compile-only target intentionally does not select or implement an IPC
+protocol. The available Apple guidance narrows the options enough to choose the
+next experiment without designing a large wire protocol prematurely:
 
-- the launcher creates a private endpoint and a random mount/session nonce;
-- the worker proves the nonce during handshake and rejects a different mount
-  identity or protocol version;
-- every request has a monotonically unique request ID, an operation, an
-  optional open-handle ID, caller context, and bounded payload lengths;
-- every request receives exactly one success or typed error response; transport
-  closure cancels all outstanding work and never fabricates successful replies;
-- unmount first stops new requests, drains/cancels in-flight operations, calls
-  the core synchronization barrier, then closes the worker and endpoint;
-- logs contain mount/session IDs and operation IDs, not provider secrets or
-  file contents.
+- Apple's [App Extension Programming Guide](https://developer.apple.com/library/archive/documentation/General/Conceptual/ExtensibilityPG/ExtensionOverview.html)
+  says an extension and its containing app have no direct communication; shared
+  data requires a deliberately configured shared container.
+- Apple's [App Groups entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups?changes=_2)
+  explicitly permits UNIX-domain sockets between sandboxed group members only
+  when the socket is in the app-group container. A random `/tmp` endpoint is
+  therefore not a valid default for a sandboxed FSKit extension, and an app
+  group would require registered entitlement/account work that is not approved
+  here.
+- Apple's [ExtensionFoundation app-extension guidance](https://developer.apple.com/documentation/extensionfoundation/adding-support-for-app-extensions-to-your-app)
+  says XPC is the better choice for communication with an extension in a
+  hardened sandbox. Apple's [XPC model](https://developer.apple.com/documentation/xpc)
+  also provides launch-on-demand, process isolation, and crash/restart
+  behavior. An XPC service is nevertheless a containing-app bundle component,
+  so its ownership and packaging with an FSKit module still need a small
+  target-level proof.
 
-This socket choice preserves a small Rust/Swift boundary and keeps the
-provider/storage code in Rust. It is not yet an Apple sandbox claim. Before
-implementation is accepted, a minimal signed FSKit target must prove that the
-extension can reach the endpoint across its actual process/container boundary.
-If that experiment fails, the fallback design is an Apple XPC service/shim
-with the same wire schema and lifecycle semantics. XPC is not selected merely
-because it is Apple-specific: it adds service-target, code-signing, entitlement,
-and Rust-to-Objective-C boundary work that must be measured against the socket
-approach.
+Decision for this checkpoint: XPC is the preferred feasibility candidate; UDS
+is conditional on a verified app-group container. Neither is implemented yet.
+The next bounded experiment is a minimal extension-to-helper liveness test on
+the exact SDK/deployment target, with no filesystem operation protocol:
 
-The experiment must answer, on the target SDK and deployment target:
+1. Build a minimal XPC service/connection pair and prove the extension can
+   establish and close one authenticated session.
+2. Record who launches/owns the helper, what happens on extension/helper exit,
+   and which entitlements/signing inputs are required.
+3. Only if XPC cannot be hosted in the required FSKit package, repeat the same
+   liveness test with a socket in a registered app-group container.
 
-- who starts and owns the Rust worker;
-- whether the extension can connect to the worker without an unapproved
-  privilege or an unrestricted filesystem entitlement;
-- how the endpoint and nonce survive extension relaunch but not stale mounts;
-- how worker crash, extension crash, forced unmount, and host shutdown surface
-  to the other side; and
-- whether the signed distribution artifact can carry the required helper and
-  extension together.
-
-No endpoint, helper, XPC service, or entitlement is added in this design-only
-checkpoint.
+Until that result exists, do not add a Rust worker, endpoint, app-group
+entitlement, XPC service, or speculative request/response schema.
 
 ### Core delegation
 
@@ -189,7 +185,8 @@ commit.
 
 The FSKit deliverable is a signed macOS app-extension package plus its Rust
 worker/control artifact. It is not a `.node` file and must not be loaded by
-`integrations/mount-rs-napi/index.js` as if it were one.
+`integrations/mount-rs-napi/index.js` as if it were one. The current
+compile-only target is intentionally unsigned and has no containing app.
 
 ### Rust side
 
@@ -210,8 +207,16 @@ worker/control artifact. It is not a `.node` file and must not be loaded by
 
 - Create an Xcode FSKit app-extension target based on the current SDK's
   template and compile against the pinned `FSUnaryFileSystem`/
-  `FSVolume.Handler` API. Do not copy the deprecated `FSVolume.Operations`
-  shape without an availability check.
+  `FSUnaryFileSystemOperations` API. For the installed SDK, future volume work
+  must use the exact `FSVolume.Operations` and
+  `FSVolume.ReadWriteOperations` declarations; do not copy the online
+  `FSVolume.Handler` shape into an older SDK.
+- The local Xcode 26.6 template's FSKit target sets
+  `MACOSX_DEPLOYMENT_TARGET=15.4`. The local header defines FSKit V1 at
+  macOS 15.4, V2 at macOS 26.0, and V2.4 at macOS 26.4. The compile-only
+  target uses only V1 (`UnaryFileSystemExtension`, `FSUnaryFileSystem`, and
+  `FSUnaryFileSystemOperations`) and passed with target triple
+  `arm64-apple-macos15.4`.
 - Generate and review the extension's `Info.plist` module metadata from the
   target template. Exact keys, short name, resource handling, and CLI mount
   options are SDK-versioned inputs and must be captured in the build review.
@@ -243,9 +248,13 @@ Before advertising support, record a matrix with:
   assembled with `lipo`; and
 - the SDK/Xcode and signing/provisioning inputs used for the artifact.
 
-Until that matrix has a real mounted pass, FSKit support status is **unreleased
-and unsupported**, even on the current development Mac. Linux and non-macOS
-targets must continue to compile without the FSKit crate or Apple SDK.
+The current **compile** minimum is macOS 15.4 because that is the local FSKit
+V1 availability and template deployment target. The skeleton compiles for
+arm64 and x86_64 at that deployment target, but this is not a universal or
+runtime support claim. Until a signed artifact and real mounted pass exist, the
+**functional support** status is unreleased and unsupported, even on the current
+development Mac. Linux and non-macOS targets must continue to compile without
+the FSKit crate or Apple SDK.
 
 ## Public integration contract
 
@@ -300,14 +309,16 @@ real-macOS gate rather than marking this suite passed.
 
 ## Implementation order and acceptance gates
 
-1. **SDK/API gate.** Build a minimal current-SDK FSKit target read-only first;
-   record the exact handler declarations, availability, module metadata, and
-   signing requirements. Resolve the minimum OS and whether the target can
-   connect to the proposed worker. Obtain explicit approval before any install
-   or activation.
-2. **Protocol gate.** Specify the IPC schema and error/cancellation rules;
-   test request IDs, bounded frames, concurrent responses, disconnects,
-   expected close, and worker restart without a filesystem mount.
+1. **SDK/API gate.** Compile the standalone unsigned FSKit target with
+   `CODE_SIGNING_ALLOWED=NO`; record the exact unary and volume protocol
+   declarations, availability, module metadata, and compile minimum. Resolve
+   whether the target can establish the bounded XPC/UDS liveness test. Obtain
+   explicit approval before any install or activation.
+2. **IPC feasibility gate.** Build only the smallest XPC liveness pair first;
+   test connect, one request/reply, close, helper exit, and restart. If XPC is
+   not viable for the FSKit package, test UDS only inside a verified app-group
+   container. Do not specify the filesystem operation protocol until one
+   transport passes this gate.
 3. **Rust integration gate.** Add the separate macOS crate and worker. Wire
    existing `FsDriver`, file handles, providers, read-only policy, identity,
    version selection, and synchronization. Test provider compositions and
@@ -341,4 +352,3 @@ real-macOS gate rather than marking this suite passed.
   design.
 - Whether automatic selection should ever prefer FSKit over macOS NFS. Explicit
   selection and honest failure are required first.
-
