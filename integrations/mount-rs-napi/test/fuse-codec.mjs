@@ -6,6 +6,10 @@ import {
   encodeOpenIn as namedEncodeOpenIn,
   decodeOpenOut as namedDecodeOpenOut,
   encodeOpenOut as namedEncodeOpenOut,
+  decodeCreateIn as namedDecodeCreateIn,
+  encodeCreateIn as namedEncodeCreateIn,
+  decodeCreateOut as namedDecodeCreateOut,
+  encodeCreateOut as namedEncodeCreateOut,
   decodeReadIn as namedDecodeReadIn,
   encodeReadIn as namedEncodeReadIn,
   decodeReadOut as namedDecodeReadOut,
@@ -29,6 +33,10 @@ for (const [name, value] of [
   ["encodeOpenIn", namedEncodeOpenIn],
   ["decodeOpenOut", namedDecodeOpenOut],
   ["encodeOpenOut", namedEncodeOpenOut],
+  ["decodeCreateIn", namedDecodeCreateIn],
+  ["encodeCreateIn", namedEncodeCreateIn],
+  ["decodeCreateOut", namedDecodeCreateOut],
+  ["encodeCreateOut", namedEncodeCreateOut],
   ["decodeReadIn", namedDecodeReadIn],
   ["encodeReadIn", namedEncodeReadIn],
   ["decodeReadOut", namedDecodeReadOut],
@@ -264,6 +272,35 @@ assert.deepEqual(fuse.unpackDirentsPlus(wrappedPlusPacked.buffer, plusContext), 
   dirent: { ino: 2n ** 64n - 2n, off: 0n, type: 2 ** 32 - 1, name: "wrap" },
 }]);
 
+const createContext = { minor: 41, setxattrExt: false };
+const createInput = {
+  flags: 0o2 | 0o100,
+  mode: 0o100640,
+  umask: 0o22,
+  openFlags: 1,
+  name: "créated",
+};
+const createReplyValue = { entry: plusEntry, open: openReplyValue };
+for (const ctx of [createContext, { minor: 39, setxattrExt: false }, { minor: 12, setxattrExt: false }, { minor: 8, setxattrExt: false }]) {
+  const body = fuse.encodeCreateIn(createInput, ctx);
+  const head = ctx.minor >= 12 ? 16 : 8;
+  assert.equal(body.length, head + Buffer.byteLength(createInput.name) + 1);
+  assert.deepEqual(fuse.decodeCreateIn(body, ctx), {
+    ...createInput,
+    umask: ctx.minor >= 12 ? createInput.umask : 0,
+    openFlags: ctx.minor >= 12 ? createInput.openFlags : 0,
+  });
+  const reply = fuse.encodeCreateOut(createReplyValue, ctx);
+  assert.equal(reply.length, fuse.entryOutSize(ctx.minor) + 16);
+  assert.deepEqual(fuse.decodeCreateOut(reply, ctx), {
+    ...createReplyValue,
+    open: {
+      ...createReplyValue.open,
+      backingId: ctx.minor >= 40 ? createReplyValue.open.backingId : 0,
+    },
+  });
+}
+
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
@@ -357,6 +394,60 @@ if (source) {
         `${name} reply trailing-byte classification for minor ${ctx.minor}`,
       );
     }
+  }
+
+  for (const ctx of [createContext, { minor: 39, setxattrExt: false }, { minor: 12, setxattrExt: false }, { minor: 8, setxattrExt: false }]) {
+    const oracleRequest = oracle.encodeRequestBody(fuse.FUSE_CREATE, createInput, ctx);
+    const actualRequest = fuse.encodeCreateIn(createInput, ctx);
+    assert.deepEqual([...actualRequest], [...oracleRequest], `CREATE request bytes match oracle for minor ${ctx.minor}`);
+    assert.deepEqual(
+      fuse.decodeCreateIn(actualRequest, ctx),
+      oracle.decodeRequestBody(fuse.FUSE_CREATE, oracleRequest, ctx),
+      `CREATE request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualRequest.length; length++) {
+      const body = actualRequest.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeCreateIn(body, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_CREATE, body, ctx)),
+        `CREATE request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeCreateIn(requestTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_CREATE, requestTrailing, ctx)),
+      `CREATE request trailing-byte classification for minor ${ctx.minor}`,
+    );
+    const malformedInput = { ...createInput, name: "bad\0name" };
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.encodeCreateIn(malformedInput, ctx)),
+      classifyProtocolError(() => oracle.encodeRequestBody(fuse.FUSE_CREATE, malformedInput, ctx)),
+      `CREATE request malformed-name classification for minor ${ctx.minor}`,
+    );
+
+    const oracleReply = oracle.encodeReplyBody(fuse.FUSE_CREATE, createReplyValue, ctx);
+    const actualReply = fuse.encodeCreateOut(createReplyValue, ctx);
+    assert.deepEqual([...actualReply], [...oracleReply], `CREATE reply bytes match oracle for minor ${ctx.minor}`);
+    assert.deepEqual(
+      fuse.decodeCreateOut(actualReply, ctx),
+      oracle.decodeReplyBody(fuse.FUSE_CREATE, oracleReply, ctx),
+      `CREATE reply decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualReply.length; length++) {
+      const body = actualReply.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeCreateOut(body, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_CREATE, body, ctx)),
+        `CREATE reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const replyTrailing = Buffer.concat([actualReply, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeCreateOut(replyTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_CREATE, replyTrailing, ctx)),
+      `CREATE reply trailing-byte classification for minor ${ctx.minor}`,
+    );
   }
 
   const attrReply = {
@@ -540,6 +631,7 @@ if (source) {
   console.log("mount-rs N-API FUSE GETATTR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -548,6 +640,7 @@ if (source) {
   console.log("mount-rs N-API FUSE GETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
 console.log("mount-rs N-API FUSE codec subpath: PASS");
