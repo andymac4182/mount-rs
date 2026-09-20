@@ -358,10 +358,11 @@ the applicable oracle-backed cases are covered.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
-- [x] `0de1832` adds a mount-free core parity harness: 56 operations, 35
-  successful results, 21 stable expected errors and zero mismatches against the
-  pinned oracle. It intentionally does not claim concurrency, persistence,
-  providers, transports or native mounts.
+- [x] `0de1832` plus `6ba3d62` now provide a mount-free core parity harness:
+  101 operations, 79 successful results, 22 stable expected errors and zero
+  mismatches/skips against the pinned oracle. The added `lchown` symlink
+  lifecycle row closes a concrete core-ledger gap. This still does not claim
+  concurrency, persistence, providers, transports or native mounts.
 - [x] `ae2f12d` adds the complete 88-row upstream skip inventory and a
   revision-checked trace-evidence runner. Five pinned seeds passed on the
   memory/SQLite/object-store/chunked six-backend lane, and the dedicated
@@ -386,7 +387,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   SDK contract; native mount and live remote-provider acceptance remain separate.
 - [x] `71e826f` pins the parity checker to the oracle revision, requires locked
   Cargo execution, and records the next simple-first W01 closure queue. The
-  pinned 56-step core trace and six-scenario concurrency trace still pass with
+  pinned 101-step core trace and six-scenario concurrency trace still pass with
   zero mismatches; the listed lifecycle, capability and native gaps remain open.
 - [x] `7236e0a`, `4422cd0`, `57632c6`, `e213856`, `1af1986`, `8ac77f3`,
   `9215ba3` and `a1ec0c5` integrate parallel W01 capability, structural native,
@@ -430,6 +431,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   codec with protocol 7.41/7.8 differential and malformed-input coverage.
   The combined N-API suite passed; native FUSE session/device/mount and the
   remaining capability-limited rows remain open.
+- [x] The latest W01 rotation is also integrated: `6ba3d62` adds `lchown`
+  symlink lifecycle parity (101 steps, 79 successes, 22 expected errors,
+  zero mismatches/skips); `58144fd`/`7238c829` classify the remaining
+  Unstorage inventory (14 rows, 4 PASS, 10 ENOSYS, zero skips); and
+  `63d9585`/`5c16164` expose the Rust-backed FUSE `CREATE` request/reply
+  codecs across protocol 7.41/7.39/7.12/7.8. The full locked Rust and
+  oracle-enabled N-API gates passed; native FUSE session/mount and live
+  provider gates remain separate.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -1198,7 +1207,9 @@ cross-drive isolation.
 | `00e96ce` | Cloudflare R2 CLI object-count compatibility | Live bucket-scoped CLI, N-API factory, parity and smoke benchmark passed; cleanup readback passed |
 | `ae7c4cb` | Isolate inherited PGlite URL from the preflight trace lane | Focused stale-URL regression passed; pushed to `origin/main` |
 | `73c33e0` | Isolate PGlite lifecycle from all preflight suites | Full macOS acceptance with live PGlite/R2 exited 0; native/hosted gates remain open |
-| `0de1832` | W01 core in-memory parity harness | 56-step pinned-oracle trace passed; later/provider/concurrency behavior remains open |
+| `0de1832` + `6ba3d62` | W01 core in-memory parity harness | 101-step pinned-oracle trace passed with 79 successes, 22 expected errors and zero mismatches/skips; later/provider/concurrency behavior remains open |
+| `7238c829` | W01 remaining Unstorage skip inventory | 14 rows classified: 4 PASS, 10 ENOSYS, 0 ENOTSUP, 0 skipped; capability-limited operations remain explicit |
+| `5c16164` | Public napi-rs FUSE `CREATE` request/reply codecs | Protocol 7.41/7.39/7.12/7.8 differential, malformed/truncated/trailing checks, typecheck, Clippy and full N-API suite passed; native session/device/mount remains open |
 | `ae2f12d` | W01 skip inventory and deterministic trace evidence | 88 skips classified; five memory seeds passed; full matrix remains open |
 | `dd65770` | Rust-backed N-API FUSE codec subpath | Rebuilt-addon smoke, TypeScript declarations and codec test passed; native session remains open |
 | `0d7f1f4` | Rust CLI native end-to-end demo | Actual macOS NFS plus Rust/Node mounted-path I/O and cleanup passed |
