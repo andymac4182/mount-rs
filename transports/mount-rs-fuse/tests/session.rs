@@ -2,8 +2,8 @@ use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_fuse::{
     RequestHeader,
     constants::{
-        FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_INTERRUPT, FUSE_LSEEK,
-        FUSE_POLL, FUSE_RENAME2, FUSE_STATFS,
+        FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_INTERRUPT, FUSE_IOCTL,
+        FUSE_LSEEK, FUSE_POLL, FUSE_RENAME2, FUSE_STATFS,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::FuseSession,
@@ -327,6 +327,61 @@ fn release_body(handle: u64) -> Vec<u8> {
     let mut body = vec![0; 24];
     body[..8].copy_from_slice(&handle.to_le_bytes());
     body
+}
+
+fn ioctl_body(declared_input_size: u32, input: &[u8]) -> Vec<u8> {
+    let mut body = vec![0; 32];
+    body[..8].copy_from_slice(&u64::MAX.to_le_bytes());
+    body[12..16].copy_from_slice(&0x1234u32.to_le_bytes());
+    body[16..24].copy_from_slice(&0x5678u64.to_le_bytes());
+    body[24..28].copy_from_slice(&declared_input_size.to_le_bytes());
+    body[28..32].copy_from_slice(&8u32.to_le_bytes());
+    body.extend(input);
+    body
+}
+
+#[tokio::test]
+async fn ioctl_is_strictly_framed_and_explicitly_unsupported_without_mutation() {
+    let fs = Arc::new(MemoryFs::empty());
+    let file = fs.open("/stable", "w", 0o644).await.unwrap();
+    file.close().await.unwrap();
+    let before = fs.lstat("/stable").await.unwrap();
+    let mut session = FuseSession::new(fs.clone());
+    let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
+
+    let errno = |reply: &[u8]| i32::from_le_bytes(reply[4..8].try_into().unwrap());
+    for body in [vec![0; 31], ioctl_body(3, b"ab"), ioctl_body(0, b"\xA5")] {
+        let reply = session
+            .handle(&frame(FUSE_IOCTL, 0, &body))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&reply), -22);
+    }
+
+    for body in [ioctl_body(0, b""), ioctl_body(3, b"abc")] {
+        let reply = session
+            .handle(&frame(FUSE_IOCTL, 0, &body))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&reply), -38);
+    }
+
+    let after = fs.lstat("/stable").await.unwrap();
+    assert_eq!(after.mode, before.mode);
+    assert_eq!(after.size, before.size);
+    assert!(session.negotiated.is_some());
+    let lookup = session
+        .handle(&frame(1, 1, b"stable\0"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&lookup), 0);
 }
 
 #[tokio::test]
