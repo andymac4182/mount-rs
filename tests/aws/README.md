@@ -7,12 +7,13 @@ production `ChunkedFs` and durable local SQLite metadata.
 
 The gate covers:
 
-- create-only immutable block publication and duplicate conditional-write
-  rejection;
+- create-only immutable block publication, duplicate conditional-create
+  rejection, stale conditional reads/writes, and a successful ETag CAS probe;
 - an actual S3 byte range read and filesystem offset reads;
 - multi-chunk writes, partial overwrite, truncate/extend, and a sparse tail;
 - fresh metadata and fresh signed S3-client reopen;
-- a second Cargo test process reading a block left by the first process; and
+- a second Cargo test process reading a block and composed SQLite+S3
+  filesystem left by the first process; and
 - shell-owned cleanup verified to leave no current objects below the run
   prefix.
 
@@ -43,6 +44,57 @@ narrow role/user policy needs, at minimum, `sts:GetCallerIdentity`,
 `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` restricted to the same
 object ARN prefix. The bucket and prefix must be owned by the test account;
 the harness does not create or discover resources.
+
+For the recorded bucket, the identity policy can be scoped to the harness's
+dedicated test namespace (replace the bucket ARN if the test bucket changes;
+for stricter per-run isolation, replace `mount-rs-tests/aws-s3/*` with the
+concrete reserved run prefix in both statements):
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListOnlyMountRsTestPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::mount-rs-integration-106427005394-ap-southeast-2",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": "mount-rs-tests/aws-s3/*"
+        }
+      }
+    },
+    {
+      "Sid": "ObjectsOnlyMountRsTestPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "s3:DeleteObject",
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::mount-rs-integration-106427005394-ap-southeast-2/mount-rs-tests/aws-s3/*"
+    },
+    {
+      "Sid": "IdentifyTestPrincipal",
+      "Effect": "Allow",
+      "Action": "sts:GetCallerIdentity",
+      "Resource": "*"
+    }
+  ]
+}
+```
+
+The runner uses prefix-scoped `ListObjectsV2` for both the empty-prefix
+preflight and cleanup, so it does not require broad bucket listing or
+`HeadBucket`. Each run includes a random ownership nonce in its default
+prefix, claims `<prefix>/.mount-rs-run-owner` with an atomic create, and
+verifies that marker before cleanup. A concurrent run using the same explicit
+prefix therefore fails closed instead of deleting the other run's objects;
+only pass an explicit prefix that this test owns. AWS CLI endpoint and service
+profile overrides are refused. Use a short-lived SSO or assumed-role session
+where possible; the runner never creates access keys, prints credential
+values, or writes them to the repository.
 
 If the selected profile uses SSO, refresh its session or use another
 already-authorized profile before running the gate. Do not paste credentials
