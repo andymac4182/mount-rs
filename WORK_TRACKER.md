@@ -58,15 +58,22 @@ backends, and the N-API distribution checks. The full root gate exited 0 with
 1,194 upstream tests passed and 40/40 seeded trace lanes passed; native mounts,
 hosted Windows/Linux runs and live R2 remain separate acceptance gates.
 
+Fresh current-tree `scripts/test-pglite.sh` acceptance also exited 0: real
+PGlite provider parity/reconnect/fencing/cancellation, disk-server restart,
+split metadata/blocks, N-API, chunked, userspace FUSE, Rust/Node/CLI provider
+matrices, the 1,194-test upstream suite, and all 40 PGlite-inclusive seeded
+trace lanes passed. R2 rows were explicit skips because this shell still lacks
+the required scoped credentials.
+
 Focused current-head acceptance after the follow-up packets: `mount-rs-sdk`
-unit tests passed (2/2), the Rust provider matrix passed memfs, memory/memory
-and SQLite/SQLite (3/3, with PGlite/R2 explicit skips), the Node SDK CLI direct
-driver self-test passed, the complete N-API suite passed, chunked tests passed
-(12/12 plus 7/7 concurrency), SQLite VFS tests passed (4/4 unit, 16/16 engine
-and 16/16 bridge), and local HostFs tests passed (14/14 including the Windows
-oracle cases where runnable). These are focused local gates at `3042d09`; the
-current shell still lacks live R2/PGlite credentials and hosted Windows/macOS
-and privileged native-mount runs remain unqualified.
+unit tests passed (2/2), the Rust provider matrix passed memfs, memory/memory,
+SQLite/SQLite and PGlite/PGlite (4/4, with R2 explicit skips), the Node SDK CLI
+direct driver self-test passed, the complete N-API suite passed, chunked tests
+passed (12/12 plus 7/7 concurrency), SQLite VFS tests passed (4/4 unit, 16/16
+engine and 16/16 bridge), and local HostFs tests passed (14/14 including the
+Windows oracle cases where runnable). These are focused local gates at
+`3042d09`; the current shell still lacks live R2 credentials and hosted
+Windows/macOS and privileged native-mount runs remain unqualified.
 
 ## How to read and maintain this tracker
 
@@ -295,6 +302,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   cancellation, disk restart, mixed stores, Node factories and userspace FUSE.
   Upstream suite passed with skips; all eight trace lanes passed five seeds of
   621 operations each. This local run does not replace hosted/live-R2 evidence.
+- [x] Fresh current-tree rerun passed the same real-server lifecycle and then
+  reported Rust SDK 4/4, Node SDK 5/5, CLI 6/6, upstream 1,194 passed/88
+  skipped, and 40/40 PGlite-inclusive trace lanes. R2-only rows remained
+  explicit skips without credentials.
 - [x] The bounded test-server teardown race is covered by an exact PostgreSQL
   Terminate-frame cleanup path plus an I/O-turn barrier. The readiness slot test
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
