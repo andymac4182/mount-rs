@@ -1120,6 +1120,9 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `e64d161` | Public napi-rs FUSE `WRITE` request/reply body codecs | Rebuilt N-API package, malformed-input and pinned mountx differential tests passed; full oracle-enabled N-API suite and distribution checks passed. Existing unrelated strict-Clippy `js_driver.rs` type-complexity lint remains. |
+| `8d52d3c` (published as `6ec7b4d`) | Unstorage special-node capability classification | FIFO, socket, character-device and block-device operations are explicitly classified as unsupported; 13-row capability parity passed with 12 oracle-classified unsupported rows and zero skips. |
+| `6b9258e` (published as `5f1ec1a`) | Locked Cargo resolution for all N-API CI builds | YAML, shell, local locked release-build checks passed; hosted CI run `35528165152` was created but remains queued and is not acceptance evidence until it completes. |
 | `dcc3aa4` | Rust CLI live PGlite SDK consumer reopen check | Real socket-backed Rust CLI write/shutdown/reopen/readback passed; R2 remains credential-gated |
 | `10afea2` (published as `7ea3eb6`) | Fail-closed R2/S3 configuration validation | 8 provider tests plus signed HTTP reopen/CAS passed; no live Cloudflare credentials |
 | `6855b2d` (published as `fad208e`) | Mountx-compatible 40-hop symlink resolution limit | 17 core behavior tests, 11 core unit tests and 100-step oracle trace passed |
