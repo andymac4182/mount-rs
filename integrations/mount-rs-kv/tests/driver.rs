@@ -9,6 +9,7 @@ use mount_rs_kv::{KeyValueMetadata, KeyValueStore, UnstorageOptions, create_unst
 struct MemoryStore {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     metadata: Arc<Mutex<HashMap<String, KeyValueMetadata>>>,
+    fail_next_set: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,6 +34,12 @@ impl KeyValueStore for MemoryStore {
     }
 
     async fn set_item_raw(&self, key: &str, value: Vec<u8>) -> Result<(), Self::Error> {
+        let mut fail_next_set = self.fail_next_set.lock().expect("failure lock");
+        if *fail_next_set {
+            *fail_next_set = false;
+            return Err(StoreError);
+        }
+        drop(fail_next_set);
         self.values
             .lock()
             .expect("values lock")
@@ -91,6 +98,10 @@ impl MemoryStore {
             .lock()
             .expect("metadata lock")
             .insert(key.to_owned(), metadata);
+    }
+
+    fn fail_next_set(&self) {
+        *self.fail_next_set.lock().expect("failure lock") = true;
     }
 }
 
@@ -198,6 +209,44 @@ async fn handles_share_buffers_and_flush_on_sync_or_close() {
 }
 
 #[tokio::test]
+async fn stat_sees_unflushed_growth_and_zero_length_positioned_writes_extend() {
+    let (store, fs) = setup();
+    fs.write_file("/f", b"a").await.expect("write");
+    let handle = fs.open("/f", "r+", 0).await.expect("open");
+    handle.write(b"bc", Some(3)).await.expect("sparse write");
+    assert_eq!(fs.stat("/f").await.expect("stat").size, 5);
+    assert_eq!(store.bytes("f"), Some(b"a".to_vec()));
+    handle.close().await.expect("close");
+    assert_eq!(store.bytes("f"), Some(b"a\0\0bc".to_vec()));
+
+    let zero = fs.open("/f", "r+", 0).await.expect("reopen");
+    zero.write(b"", Some(7)).await.expect("zero-length write");
+    assert_eq!(fs.stat("/f").await.expect("stat extension").size, 7);
+    zero.close().await.expect("close extension");
+    assert_eq!(store.bytes("f"), Some(b"a\0\0bc\0\0".to_vec()));
+}
+
+#[tokio::test]
+async fn failed_close_keeps_dirty_buffer_for_retry_and_path_truncate() {
+    let (store, fs) = setup();
+    fs.write_file("/f", b"aaaa").await.expect("write");
+    let handle = fs.open("/f", "r+", 0).await.expect("open");
+    handle.write(b"bbbb", Some(0)).await.expect("write handle");
+    store.fail_next_set();
+    assert_eq!(
+        handle.close().await.expect_err("failed close").code,
+        ErrorCode::Eio
+    );
+    assert_eq!(store.bytes("f"), Some(b"aaaa".to_vec()));
+
+    fs.truncate("/f", 2).await.expect("truncate dirty buffer");
+    assert_eq!(store.bytes("f"), Some(b"bb".to_vec()));
+    let retry = fs.open("/f", "r", 0).await.expect("fresh open");
+    assert_eq!(read_handle(&retry, 4).await, b"bb");
+    retry.close().await.expect("close fresh");
+}
+
+#[tokio::test]
 async fn unlink_and_rename_preserve_open_handle_rules() {
     let (store, fs) = setup();
     fs.write_file("/doomed", b"still here")
@@ -218,6 +267,56 @@ async fn unlink_and_rename_preserve_open_handle_rules() {
     handle.close().await.expect("close renamed");
     assert_eq!(store.bytes("from"), None);
     assert_eq!(store.bytes("to"), Some(b"bbcc".to_vec()));
+
+    fs.write_file("/source", b"source")
+        .await
+        .expect("write source");
+    fs.write_file("/target", b"target")
+        .await
+        .expect("write target");
+    let replaced = fs.open("/target", "r+", 0).await.expect("open target");
+    fs.rename("/source", "/target")
+        .await
+        .expect("replace target");
+    replaced
+        .write(b"zzzzzz", Some(0))
+        .await
+        .expect("write replaced handle");
+    replaced.close().await.expect("close replaced handle");
+    assert_eq!(store.bytes("source"), None);
+    assert_eq!(read(&fs, "/target").await, b"source");
+}
+
+#[tokio::test]
+async fn directory_rename_moves_nested_keys_and_open_handles() {
+    let (store, fs) = setup();
+    fs.mkdir(
+        "/from/inner",
+        MkdirOptions {
+            recursive: true,
+            mode: None,
+        },
+    )
+    .await
+    .expect("mkdir");
+    fs.write_file("/from/inner/file", b"aaaa")
+        .await
+        .expect("write");
+    let handle = fs.open("/from/inner/file", "r+", 0).await.expect("open");
+    handle.write(b"bb", Some(0)).await.expect("write open file");
+    fs.rename("/from", "/to").await.expect("rename directory");
+    handle
+        .write(b"cc", Some(2))
+        .await
+        .expect("write renamed file");
+    handle.close().await.expect("close renamed file");
+    assert_eq!(store.bytes("from:inner:file"), None);
+    assert_eq!(store.bytes("to:inner:file"), Some(b"bbcc".to_vec()));
+    assert_eq!(read(&fs, "/to/inner/file").await, b"bbcc");
+    assert_eq!(
+        fs.stat("/from").await.expect_err("old directory").code,
+        ErrorCode::Enoent
+    );
 }
 
 async fn read_handle(handle: &Arc<dyn mount_rs_core::FileHandle>, length: usize) -> Vec<u8> {

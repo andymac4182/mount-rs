@@ -1082,6 +1082,7 @@ dependencies = [
  "async-trait",
  "libc",
  "mount-rs-core",
+ "serde_json",
  "tokio",
 ]
 

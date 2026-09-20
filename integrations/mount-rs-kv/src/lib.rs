@@ -224,7 +224,7 @@ fn key_of(path: &str, syscall: &str) -> Result<String> {
                 .with_syscall(syscall)
                 .with_path(normalized)
                 .with_message(format!(
-                    "EINVAL: name is not representable as a key-value store key: '{segment}'"
+                    "Name is not representable as an unstorage key: '{segment}'"
                 )));
         }
     }
@@ -638,11 +638,11 @@ where
                 .with_syscall("write")
                 .with_path(&path)
         })?;
+        if end > file.data.len() as u64 {
+            resize_bytes(&mut file.data, end, "write")?;
+        }
         if !buffer.is_empty() {
             let start = checked_position(from)?;
-            if end > file.data.len() as u64 {
-                resize_bytes(&mut file.data, end, "write")?;
-            }
             file.data[start..start + buffer.len()].copy_from_slice(buffer);
         }
         if self.flags.append || position.is_none() {
@@ -1452,7 +1452,11 @@ where
     async fn stat_of(&self, path: &str, syscall: &str, scope: &mut Scope) -> Result<Stats> {
         match self.lookup(path, syscall, scope).await? {
             Kind::Directory => self.directory_stats(path),
-            Kind::File => self.file_stats(path, syscall, None).await,
+            Kind::File => {
+                // An open buffer is the file's contents until its last close,
+                // including writes that have not reached the store yet.
+                self.file_stats(path, syscall, self.open_file(path)?).await
+            }
             Kind::Missing => Err(FsError::new(ErrorCode::Enoent)
                 .with_syscall(syscall)
                 .with_path(path)),

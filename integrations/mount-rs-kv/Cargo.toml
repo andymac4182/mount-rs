@@ -14,4 +14,9 @@ mount-rs-core = { path = "../.." }
 libc = "0.2"
 
 [dev-dependencies]
+serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
+
+[[example]]
+name = "kv_oracle"
+path = "../../examples/kv_oracle.rs"
