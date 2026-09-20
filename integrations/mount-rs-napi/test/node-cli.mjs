@@ -34,15 +34,15 @@ function output(result) {
 
 const help = await runCli(["--help"]);
 assert.equal(help.code, 0, output(help));
-assert.match(help.stdout, /@mount-rs\\/core/);
-assert.doesNotMatch(output(help), /^mounted\\s+/im);
+assert.match(help.stdout, /@mount-rs\/core/);
+assert.doesNotMatch(output(help), /^mounted\s+/im);
 
 const invalidTransport = await runCli([
   "--transport", "remote", "--mountpoint", join(temporaryRoot, "mount-rs-node-cli-invalid"),
 ]);
 assert.equal(invalidTransport.code, 2, output(invalidTransport));
 assert.match(invalidTransport.stderr, /auto, fuse, 9p, or nfs/);
-assert.doesNotMatch(output(invalidTransport), /^mounted\\s+/im);
+assert.doesNotMatch(output(invalidTransport), /^mounted\s+/im);
 
 const invalidRoot = await runCli([
   "--driver", "memory", "--root", join(temporaryRoot, "should-not-be-used"),
@@ -56,7 +56,7 @@ const sdkSelfTest = await runCli([
 ]);
 assert.equal(sdkSelfTest.code, 0, output(sdkSelfTest));
 assert.match(sdkSelfTest.stdout, /sdk self-test passed: Node SDK wrote and read/);
-assert.doesNotMatch(output(sdkSelfTest), /^mounted\\s+/im);
+assert.doesNotMatch(output(sdkSelfTest), /^mounted\s+/im);
 
 const checkMountpoint = await fs.mkdtemp(join(temporaryRoot, "mount-rs-node-cli-check-"));
 try {
@@ -69,7 +69,7 @@ try {
     assert.equal(check.code, 0, output(check));
     assert.match(check.stdout, new RegExp(`driver=${driver}`));
     assert.match(check.stdout, /no SDK loaded; no mount attempted/);
-    assert.doesNotMatch(output(check), /^mounted\\s+/im);
+    assert.doesNotMatch(output(check), /^mounted\s+/im);
   }
 } finally {
   await fs.rm(checkMountpoint, { recursive: true, force: true });
