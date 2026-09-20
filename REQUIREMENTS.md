@@ -204,6 +204,13 @@ dependencies out of core crates.
 
 ## RustFS integration-test service
 
+Compression evaluation is tracked in [the compression review](docs/compression-design.md).
+Review independent per-chunk compression versus pre-chunk streaming, zstd and
+alternative codecs, logical/physical identities, dictionary retention, provider
+limits and random-I/O costs. Select defaults from reproducible macOS/Linux
+benchmarks and preserve SQLite durability, version readability and separate
+metadata/block-store composition. The review is not implementation acceptance.
+
 Set up actual [RustFS](https://rustfs.com/) for reproducible local and CI
 integration tests. Pin the service release and container digest or binary
 checksum; document macOS/Linux setup, readiness, isolated test credentials,
