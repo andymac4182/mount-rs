@@ -605,6 +605,60 @@ fn open_out(value: NativeFuseOpenOut) -> protocol::FuseOpenOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseReadIn {
+    pub fh: BigInt,
+    pub offset: BigInt,
+    pub size: u32,
+    #[napi(js_name = "readFlags")]
+    pub read_flags: u32,
+    #[napi(js_name = "lockOwner")]
+    pub lock_owner: BigInt,
+    pub flags: u32,
+}
+
+impl From<protocol::FuseReadIn> for NativeFuseReadIn {
+    fn from(value: protocol::FuseReadIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            offset: bigint(value.offset),
+            size: value.size,
+            read_flags: value.read_flags,
+            lock_owner: bigint(value.lock_owner),
+            flags: value.flags,
+        }
+    }
+}
+
+fn read_in(value: NativeFuseReadIn) -> protocol::FuseReadIn {
+    protocol::FuseReadIn {
+        fh: u64_from_bigint(&value.fh),
+        offset: u64_from_bigint(&value.offset),
+        size: value.size,
+        read_flags: value.read_flags,
+        lock_owner: u64_from_bigint(&value.lock_owner),
+        flags: value.flags,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseRawData {
+    #[napi(ts_type = "Uint8Array")]
+    pub data: Buffer,
+}
+
+impl From<Vec<u8>> for NativeFuseRawData {
+    fn from(value: Vec<u8>) -> Self {
+        Self {
+            data: Buffer::from(value),
+        }
+    }
+}
+
+fn raw_data(value: NativeFuseRawData) -> Vec<u8> {
+    value.data.as_ref().to_vec()
+}
+
+#[napi(object)]
 pub struct NativeFuseWriteIn {
     pub fh: BigInt,
     pub offset: BigInt,
@@ -863,6 +917,64 @@ pub fn fuse_encode_open_out(
         &open_out(value),
         protocol_context(context),
     ))
+}
+
+#[napi(js_name = "fuseDecodeReadIn")]
+pub fn fuse_decode_read_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseReadIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_READ,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Read(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_READ did not decode as a read request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeReadIn")]
+pub fn fuse_encode_read_in(
+    value: NativeFuseReadIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_READ,
+        &protocol::FuseRequestBody::Read(read_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeReadOut")]
+pub fn fuse_decode_read_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseRawData> {
+    match protocol::decode_reply_body(mount_rs_fuse::FUSE_READ, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Raw(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_READ did not decode as a raw reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeReadOut")]
+pub fn fuse_encode_read_out(value: NativeFuseRawData) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_READ,
+        &protocol::FuseReplyBody::Raw(raw_data(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeWriteIn")]
