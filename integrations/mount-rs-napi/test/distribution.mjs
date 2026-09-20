@@ -62,7 +62,7 @@ const { stdout } = await execFileAsync(
 );
 const report = JSON.parse(stdout.trim());
 const files = new Set(report.files.map(({ path }) => path));
-for (const required of ["LICENSE", "THIRD_PARTY_NOTICES.md", "index.js", "index.d.ts", "package.json", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "types/memory.d.ts"]) {
+for (const required of ["LICENSE", "THIRD_PARTY_NOTICES.md", "index.js", "index.d.ts", "package.json", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "postlude-harness.cjs", "types/harness.d.ts", "types/memory.d.ts"]) {
   assert.equal(files.has(required), true, `package is missing ${required}`);
 }
 for (const required of ["nfs.cjs", "p9.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "types/nfs-codec.d.ts", "types/p9-codec.d.ts"]) {

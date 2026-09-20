@@ -1208,3 +1208,6 @@ export { ERRNO_CODES, joinPath } from "./types/root.js"
 
 import type { FsDriver } from "./types/driver.js"
 export type { FsDriver, FileHandleLike, DirentLike } from "./types/driver.js"
+
+export { createLoopback, resolveCapabilities } from "./types/harness.js"
+export type { Loopback, ResolvedCapabilities } from "./types/harness.js"

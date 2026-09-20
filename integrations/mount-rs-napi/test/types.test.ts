@@ -357,6 +357,25 @@ function checkServerAndKvSubpaths(): void {
 }
 
 void checkFilesystemAndHandles
+// Public harness types and functions are available from the package root.
+import { createLoopback, resolveCapabilities, type Loopback, type ResolvedCapabilities } from "@mount-rs/core"
+function checkHarness(driver: FsDriver, native: Filesystem) {
+  const loop: Loopback = createLoopback(driver)
+  const nativeLoop: Loopback<Filesystem> = createLoopback(native)
+  const resolved: ResolvedCapabilities = resolveCapabilities(driver)
+  const readOnly: boolean = resolved.readOnly
+  const extensions: readonly string[] = resolved.extensions
+  // @ts-expect-error mknod is an extension, not a resolved harness capability
+  resolved.mknod
+  const original: FsDriver = loop.driver
+  const read: Promise<Uint8Array> = loop.readFile("/file")
+  const write: Promise<void> = loop.writeFile("/file", "data")
+  const optionalNowRequired: Promise<void> = loop.unlink("/file")
+  // @ts-expect-error paths are strings
+  loop.stat(1)
+  void [nativeLoop, readOnly, extensions, original, read, write, optionalNowRequired]
+}
+void checkHarness
 void checkFactories
 void checkMemorySubpath
 void checkUtilities

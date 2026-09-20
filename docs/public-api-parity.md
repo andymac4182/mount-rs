@@ -65,9 +65,11 @@ That adapter is not yet the oracle contract boundary:
   `createWebdavServer` now accept native or structural drivers through the
   JavaScript facade, with owned-adapter cleanup. Real server tests pass;
   successful native mounting with a structural driver remains unverified.
-- The root facade exports `FsDriver` types but does not expose `createLoopback` or
-  `resolveCapabilities` surface. The oracle definitions are in its
-  `src/types.ts` and `src/harness.ts`.
+- The root facade now exports `FsDriver`, `Loopback`, `ResolvedCapabilities`,
+  `createLoopback`, and `resolveCapabilities`. Main passed the pinned-oracle
+  harness comparison for declarations/inference, method binding and identity,
+  path arguments, optional-method errors, partial I/O, and close-error precedence.
+  JavaScript wrapper identity is preserved; native path/error helpers are reused.
 - `js-driver.mjs` now includes `structural-factories.mjs`: plain drivers pass
   through all server factories, with capability/missing-method comparisons,
   cleanup and eight WebDAV DELETE oracle cases. Main reran these successfully.

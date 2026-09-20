@@ -48,6 +48,11 @@ for (const postlude of ["postlude-utilities.cjs", "postlude-servers.cjs"]) {
     changed = true
   }
 }
+const harnessMarker = "const publicHarness = require('./postlude-harness.cjs')(module.exports)"
+if (!source.includes(harnessMarker)) {
+  source += `\n${harnessMarker}\nmodule.exports.createLoopback = publicHarness.createLoopback\nmodule.exports.resolveCapabilities = publicHarness.resolveCapabilities\n`
+  changed = true
+}
 if (changed) await writeFile(loader, source)
 
 // Native lock scheduling is retained; the utility postlude preserves generic
@@ -99,4 +104,8 @@ if (!types.includes(driverTypes)) {
 types = types.replace(/(function (?:mount|createNfsServer|createP9Server|createWebdavServer)\(driver: )Filesystem(?=,)/g, "$1Filesystem | FsDriver")
 types = types.replace(/(function createS3Server\(source: )Filesystem \| \{ buckets: Record<string, Filesystem> \}/g, "$1Filesystem | FsDriver | { buckets: Record<string, Filesystem | FsDriver> }")
 types = types.replace(/function createDriver\(driver: object\)/g, "function createDriver(driver: FsDriver)")
+const harnessTypes = 'export { createLoopback, resolveCapabilities } from "./types/harness.js"'
+if (!types.includes(harnessTypes)) {
+  types += `\n${harnessTypes}\nexport type { Loopback, ResolvedCapabilities } from "./types/harness.js"\n`
+}
 await writeFile(declarations, types)

@@ -872,3 +872,7 @@ module.exports.joinPath = (...parts) => nativeBinding.joinPathParts(parts)
 require('./postlude-utilities.cjs')(module.exports)
 
 require('./postlude-servers.cjs')(module.exports)
+
+const publicHarness = require('./postlude-harness.cjs')(module.exports)
+module.exports.createLoopback = publicHarness.createLoopback
+module.exports.resolveCapabilities = publicHarness.resolveCapabilities

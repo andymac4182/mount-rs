@@ -44,23 +44,23 @@ concurrency tests passed; Windows runtime confirmation remains required.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Verifying | Main / Linnaeus (ledger) |
+| W01 | Core and mountx parity | Verifying | Main |
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Live local tests passed; acceptance incomplete | Main |
 | W06 | RustFS integration service | Landed; extending | Main |
-| W07 | FoundationDB | Implementing | Ptolemy |
+| W07 | FoundationDB | Real composition passed; correctness review | Maxwell / Main |
 | W08 | TiDB | Implementing | Main |
 | W09 | Node / napi-rs and public API | Verifying | Main / Lagrange |
-| W10 | FUSE, NFS, 9P, WebDAV, S3 | Landed; verifying | Main |
-| W11 | Config-driven CLI | Landed; extending | Main |
+| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel / Main |
+| W11 | Config-driven CLI | HTTP landed; real remote tests implementing | Epicurus / Main |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
-| W13 | macOS FSKit | Implementing | Lovelace |
+| W13 | macOS FSKit | Unsigned draft awaiting integration | Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
-| W15 | Mount-free SQLite VFS | Implementing | Peirce |
+| W15 | Mount-free SQLite VFS | Rollback/lifetime landed; WAL design starting | Peirce / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
-| W17 | Multi-drive HTTP server | Implementing | Epicurus |
+| W17 | Multi-drive HTTP server | Server/CLI landed; remote acceptance pending | Epicurus / Main |
 | W18 | Benchmarks and dependency budget | Partial implementation | Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
@@ -70,7 +70,7 @@ concurrency tests passed; Windows runtime confirmation remains required.
 | W24 | Domain and marketing site | Site draft ready; deployment pending | Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
-| W27 | Native Windows support and CI | CI added; qualification pending | Lagrange / Main |
+| W27 | Native Windows support and CI | Runtime qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
@@ -239,6 +239,10 @@ concurrency tests passed; Windows runtime confirmation remains required.
 
 ## W09 — napi-rs, Node API and packaging
 
+- [x] Add public `createLoopback`/`resolveCapabilities` and associated types.
+  Main passed pinned-oracle capability/binding/path/partial-I/O/error comparisons,
+  TypeScript checks and package-content validation. This wrapper preserves caller
+  driver/handle identity and does not own the caller's shutdown lifecycle.
 - [x] Accept structural JavaScript drivers in mount/server factories and mixed
   S3 bucket maps, with owned-adapter cleanup and TypeScript declarations.
   Main independently passed the pinned-oracle structural factory suite and
