@@ -32,7 +32,7 @@ serde_json = "1"
 
 [dev-dependencies]
 mount-rs-fuse = { path = "transports/mount-rs-fuse" }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "process", "rt-multi-thread"] }
 mount-rs-r2 = { path = "integrations/mount-rs-r2" }
 mount-rs-pglite = { path = "integrations/mount-rs-pglite" }
 mount-rs-persist = { path = "integrations/mount-rs-persist" }

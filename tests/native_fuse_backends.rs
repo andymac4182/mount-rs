@@ -141,3 +141,62 @@ async fn mounted_pglite_persists_through_connection_reopen() {
         [0, 255, 1, 127]
     );
 }
+
+async fn sqlite_engine_round_trip(driver: Arc<dyn FsDriver>) {
+    // Never recursively remove a path that might still be mounted on failure.
+    let directory = tempfile::tempdir().unwrap().keep();
+    let mounted = mount(
+        driver,
+        &directory,
+        MountOptions {
+            default_permissions: false,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("mount for actual SQLite process tests");
+    let mut command = tokio::process::Command::new("python3");
+    command
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/sqlite_hosting.py"
+        ))
+        .arg(&directory)
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), command.output()).await;
+    let unmounted =
+        tokio::time::timeout(std::time::Duration::from_secs(15), unmount(mounted)).await;
+    if unmounted.as_ref().is_ok_and(Result::is_ok) {
+        std::fs::remove_dir(&directory).expect("remove unmounted empty directory");
+    }
+    let output = output
+        .expect("SQLite process harness deadline")
+        .expect("start Python SQLite engine");
+    println!("{}", String::from_utf8_lossy(&output.stdout));
+    assert!(
+        output.status.success(),
+        "SQLite hosting failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        unmounted.as_ref().is_ok_and(Result::is_ok),
+        "SQLite mount cleanup failed: {unmounted:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Linux FUSE; tests SQLite process failure, not mount-service failure"]
+async fn mounted_sqlite_engine_locks_journals_and_process_recovery() {
+    assert_eq!(
+        std::env::var("MOUNT_RS_RUN_NATIVE_FUSE").as_deref(),
+        Ok("1")
+    );
+    sqlite_engine_round_trip(Arc::new(MemoryFs::empty())).await;
+    let directory = tempfile::tempdir().unwrap();
+    sqlite_engine_round_trip(Arc::new(
+        mount_rs_sqlite::open_sqlite(directory.path().join("backend.sqlite"))
+            .await
+            .unwrap(),
+    ))
+    .await;
+}

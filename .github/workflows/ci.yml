@@ -52,6 +52,10 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 180s cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_memory_sqlite_and_object_store_match_and_persist -- --ignored --nocapture
+      - name: Verify actual SQLite processes, locks, journals and process recovery
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 240s cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_sqlite_engine_locks_journals_and_process_recovery -- --ignored --nocapture
       - uses: actions/setup-node@v4
         with:
           node-version: 24
