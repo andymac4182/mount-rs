@@ -5,6 +5,7 @@ import type {
   NativeFuseAttr,
   NativeFuseAttrOut,
   NativeFuseEntryOut,
+  NativeFuseGetattrIn,
   NativeFuseGetxattrOut,
   NativeFuseInHeader,
   NativeFuseInitIn,
@@ -18,6 +19,7 @@ import type {
   NativeFuseProtocolContext,
   NativeFuseRawData,
   NativeFuseReadIn,
+  NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
@@ -28,6 +30,7 @@ export type {
   NativeFuseAttr,
   NativeFuseAttrOut,
   NativeFuseEntryOut,
+  NativeFuseGetattrIn,
   NativeFuseGetxattrOut,
   NativeFuseInHeader,
   NativeFuseInitIn,
@@ -41,6 +44,7 @@ export type {
   NativeFuseProtocolContext,
   NativeFuseRawData,
   NativeFuseReadIn,
+  NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
@@ -102,6 +106,13 @@ export declare const FUSE_NAME_MAX: number
 export declare const FUSE_KERNEL_VERSION: number
 export declare const FUSE_KERNEL_MINOR_VERSION: number
 export declare const FUSE_ROOT_ID: bigint
+export declare const FUSE_GETATTR: number
+export declare const FUSE_SETATTR: number
+export declare const FUSE_GETATTR_FH: number
+export declare const FATTR_MODE: number
+export declare const FATTR_SIZE: number
+export declare const FATTR_ATIME: number
+export declare const FATTR_MTIME: number
 export declare const FUSE_IN_HEADER_SIZE: number
 export declare const FUSE_OUT_HEADER_SIZE: number
 export declare const DEFAULT_MAX_WRITE: number
@@ -139,6 +150,14 @@ export declare function decodeEntryOut(body: Uint8Array, context?: NativeFusePro
 export declare function encodeEntryOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
 export declare function encodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeGetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetattrIn
+export declare function encodeGetattrIn(value: NativeFuseGetattrIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeGetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
+export declare function encodeGetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeSetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseSetattrIn
+export declare function encodeSetattrIn(value: NativeFuseSetattrIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeSetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
+export declare function encodeSetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseOpenOut
 export declare function encodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseReadIn
