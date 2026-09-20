@@ -221,6 +221,13 @@ second Rust process verified the JavaScript bytes, and the CLI unmounted cleanly
 with the bytes still present in the host-backed directory. This is a real
 single-host NFS mount demonstration, not FUSE/FSKit or a remote-provider result.
 
+The matching Node CLI native path also passed on macOS: `node
+examples/node-cli/index.mjs --driver host --root <temporary backing>
+--transport nfs --mountpoint <temporary mount> --self-test` exited 0, with the
+Node SDK mounting through native NFS, writing and reading its file, unmounting,
+and leaving the temporary backing directory clean. This is a separate Node CLI
+consumer check; it does not qualify Linux FUSE, FSKit or live providers.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
