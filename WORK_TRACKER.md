@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `ca57758`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `5d9e513`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -63,7 +63,7 @@ non-overlapping packet. The current bounded allocation is:
 
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
-| Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Implementing |
+| Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Checkpoint complete; Main integrating |
 | Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Checkpoint complete; Main integrating |
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Checkpoint complete; Main integrating |
 | Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task active |
@@ -73,7 +73,7 @@ Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
 design review), Raman (scoped napi-rs package distribution), Aristotle (the
 unsigned FSKit bridge checkpoint), Mill (the TiDB provider/harness checkpoint),
-and Ohm (storage-dispatch review). Main
+Peirce (the SQLite VFS/WAL checkpoint), and Ohm (storage-dispatch review). Main
 rotates those slots rather than assigning multiple workers to the same files.
 
 ### Narrow-band completion order
@@ -115,10 +115,10 @@ complete.
 | W09 | Node / napi-rs and public API | Verifying | Raman (complete slice) / Main |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
 | W11 | Config-driven CLI | HTTP landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
-| W12 | Safely hosting SQLite files | Partial evidence | Main |
+| W12 | Safely hosting SQLite files | Local journal/WAL matrix and fail-closed gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
 | W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
-| W15 | Mount-free SQLite VFS | Rollback/lifetime landed; WAL design starting | Peirce / Main |
+| W15 | Mount-free SQLite VFS | Rollback, process-local and host-local WAL gates landed; remote/Node/Windows acceptance pending | Peirce (checkpoint) / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
 | W17 | Multi-drive HTTP server | Server/CLI landed; local split-store demo passed; RustFS remote passed, Cloudflare acceptance pending | Main |
 | W18 | Benchmarks and dependency budget | Partial implementation | Ohm / Main |
@@ -381,14 +381,21 @@ complete.
 - [x] Record prior Linux FUSE DELETE/WAL and macOS NFS single-host DELETE
   evidence; those configurations alone do not establish universal safety.
 - [ ] W12.1 Define and test supported journal/locking modes per transport.
-  Required matrix: [SQLite reliability](docs/sqlite-reliability-matrix.md),
-  including DELETE/TRUNCATE/PERSIST/WAL/MEMORY/OFF and all sync levels.
-- [ ] W12.2 Prevent silent WAL fallback from being reported as WAL success.
+  The local VFS checkpoint covers the required rollback matrix for
+  DELETE/TRUNCATE/PERSIST × NORMAL/FULL/EXTRA and explicit HostLocal/ProcessLocal
+  WAL cases; MEMORY/OFF, all transports and hosted platform coverage remain open.
+- [x] W12.2 Prevent silent WAL fallback from being reported as WAL success.
+  `5d9e513` asserts effective WAL for supported HostLocal scope and rejects
+  unsupported WAL requests instead of silently falling back.
 - [ ] W12.3 Exercise multiple connections/processes, readers/writers, locks,
   sync barriers, rename/unlink, disk-full errors and crash/restart integrity.
+  The checkpoint covers process/child-process locking, reader/writer snapshots,
+  sync-fault recovery, checkpoint/reopen and integrity; rename/unlink,
+  disk-full and hosted crash coverage remain open.
 - [ ] W12.4 Run integrity checks and acknowledged-commit recovery across every
   supported metadata/block combination and operating system.
-- [ ] W12.5 Explicitly reject unsupported safety modes and document constraints.
+- [x] W12.5 Explicitly reject unsupported safety modes and document constraints
+  for WAL capability scope in `docs/sqlite-vfs-wal-plan.md` (`5d9e513`).
 - [ ] W12.6 Run the new Linux CLI SQLite-backed FUSE SIGKILL/reopen test in
   hosted CI. Implementation and bounded cleanup are added; main independently
   passed both shared macOS NFS lifecycle regressions, formatting and Clippy.
@@ -462,8 +469,8 @@ complete.
   provider pair (18 cells), with exact committed/rolled-back bytes and reopen.
   WAL is explicitly rejected and remains unimplemented; Windows qualification,
   remote recovery, Node exposure, and broader crash/fault coverage stay open.
-- [ ] W15.1 Complete separate draft crate and actual mount-rs storage bridge;
-  host-file reference implementation alone does not satisfy the requirement.
+- [x] W15.1 Complete the separate draft crate and actual mount-rs storage bridge
+  (`5d9e513`); host-file and StorageBackend implementations are both tested.
 - [x] W15.2 Fix registration lifetime escapes through connection extraction or
   mutable access; test duplicate names and independently opened connections.
   Explicit quiescent close releases provider resources, rejects active callbacks
@@ -471,12 +478,17 @@ complete.
   extracted-connection and closed-wrapper/name-reuse regressions and passed
   28 local tests. Reentrant backend destruction runs outside the registry lock.
   Two remote tests remain opt-in; these local results are not WAL acceptance.
-- [ ] W15.3 Replace noop-waker/busy polling with a valid executor/reactor contract
-  or explicit unsupported rejection; test genuinely asynchronous storage.
-- [ ] W15.4 Implement real cross-connection SQLite locking or explicit safe
-  serialization, with fencing. Local lock enums alone are insufficient.
+- [x] W15.3 Replace noop-waker/busy polling with a valid executor contract and
+  test a real wake path (`5d9e513`); no hidden busy/noop-waker success path is
+  used by the process-local bridge.
+- [x] W15.4 Implement cross-connection SQLite locking or explicit safe
+  serialization with fencing for the supported HostLocal/ProcessLocal scopes;
+  child-process contention and stale-reader promotion tests pass in `5d9e513`.
 - [ ] W15.5 Test stale-reader promotion, separate processes, lost updates,
-  short reads, sync failures, journal recovery and database integrity.
+  short reads, sync failures, journal recovery and database integrity. The
+  checkpoint covers stale-reader promotion, separate processes, sync failures,
+  journal recovery and integrity; lost-update/short-read and broader hosted
+  crash coverage remain open.
 - [ ] W15.6 Expose and integrate through Rust and Node across storage engines
   without requiring a native mount; document supported journal modes.
 
@@ -776,5 +788,6 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `5993984` | FSKit SDK compile target | Unsigned compilation, not activation |
 | `95aca9c` | FSKit Rust/Swift/XPC bridge checkpoint | Local tests and unsigned arm64 Xcode builds; signing/activation/mount pending |
 | `ca57758` | TiDB metadata/block providers and pinned harness | Real single-node v8.5.7 ARM64 qualification passed; durable topology and RustFS composition remain open |
+| `5d9e513` | SQLite VFS/WAL reliability checkpoint | 4 unit, 15 SQLite-engine and 15 storage-bridge tests plus strict Clippy; Windows/remote/Node acceptance remains open |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
