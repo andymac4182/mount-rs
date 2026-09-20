@@ -7,8 +7,9 @@ use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_s3::{
     CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, PresignRequest, S3BindError,
     S3Request, S3Response, S3Server, S3ServerOptions, S3Session, S3SessionOptions,
-    STREAMING_PAYLOAD, SignRequest, canonical_query, format_amz_date, presign_request, sha256_hex,
-    sign_chunk, sign_request,
+    STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest,
+    canonical_query, format_amz_date, presign_request, sha256_hex, sign_chunk, sign_request,
+    sign_trailer,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -74,6 +75,65 @@ fn signed_chunked_body(
     body
 }
 
+fn signed_chunked_body_with_trailer(
+    payload: &[u8],
+    credentials: &Credentials,
+    scope: &CredentialScope,
+    amz_date: &str,
+    seed: &str,
+    trailer_name: &str,
+    trailer_value: &str,
+) -> Vec<u8> {
+    let first = sign_chunk(
+        &credentials.secret_access_key,
+        scope,
+        amz_date,
+        seed,
+        &sha256_hex(payload),
+    );
+    let terminal = sign_chunk(
+        &credentials.secret_access_key,
+        scope,
+        amz_date,
+        &first,
+        &sha256_hex(b""),
+    );
+    let trailer_block = format!("{trailer_name}:{trailer_value}\n");
+    let trailer_signature = sign_trailer(
+        &credentials.secret_access_key,
+        scope,
+        amz_date,
+        &terminal,
+        &sha256_hex(&trailer_block),
+    );
+    let mut body = format!("{:x};chunk-signature={first}\r\n", payload.len()).into_bytes();
+    body.extend_from_slice(payload);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(
+        format!(
+            "0;chunk-signature={terminal}\r\n{trailer_name}:{trailer_value}\r\nx-amz-trailer-signature:{trailer_signature}\r\n\r\n"
+        )
+        .as_bytes(),
+    );
+    body
+}
+
+fn unsigned_chunked_body_with_trailer(
+    payload: &[u8],
+    trailer_name: &str,
+    trailer_value: &str,
+    final_crlf: bool,
+) -> Vec<u8> {
+    let mut body = format!("{:x}\r\n", payload.len()).into_bytes();
+    body.extend_from_slice(payload);
+    body.extend_from_slice(b"\r\n0\r\n");
+    body.extend_from_slice(format!("{trailer_name}:{trailer_value}\r\n").as_bytes());
+    if final_crlf {
+        body.extend_from_slice(b"\r\n");
+    }
+    body
+}
+
 fn authorization_signature(authorization: &str) -> &str {
     authorization
         .rsplit_once("Signature=")
@@ -118,6 +178,240 @@ async fn oracle_refusal_boundaries_keep_their_protocol_reasons() {
             "{method} {target}: {document}"
         );
     }
+}
+
+#[tokio::test]
+async fn unsigned_checksum_trailers_match_oracle_framing() {
+    let session = S3Session::new(MemoryFs::empty());
+    let payload = b"checksum trailer payload";
+    for (key, final_crlf) in [("with-final-crlf", true), ("without-final-crlf", false)] {
+        let body = unsigned_chunked_body_with_trailer(
+            payload,
+            "x-amz-checksum-crc32",
+            "1B2M2Y8=",
+            final_crlf,
+        );
+        let mut upload = S3Request::new("PUT", format!("/mountx/{key}"), body);
+        upload.head.headers.extend([
+            HeaderEntry::new("content-encoding", "aws-chunked"),
+            HeaderEntry::new("x-amz-content-sha256", STREAMING_UNSIGNED_PAYLOAD_TRAILER),
+            HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+            HeaderEntry::new("x-amz-decoded-content-length", payload.len().to_string()),
+        ]);
+        let response = session.handle(upload).await;
+        assert_eq!(response.status, 200, "{key}");
+
+        let read = session
+            .handle(request("GET", &format!("/mountx/{key}"), [], &[]))
+            .await;
+        assert_eq!(read.status, 200, "{key}");
+        assert_eq!(read.body, payload, "{key}");
+    }
+}
+
+#[tokio::test]
+async fn chunked_lengths_and_trailer_declarations_follow_oracle_refusals() {
+    let session = S3Session::new(MemoryFs::empty());
+    let payload = b"framed without a wire length";
+    let body =
+        unsigned_chunked_body_with_trailer(payload, "x-amz-checksum-crc32", "1B2M2Y8=", false);
+    let mut no_wire_length = S3Request::new("PUT", "/mountx/no-wire-length", body);
+    no_wire_length
+        .head
+        .headers
+        .retain(|header| !header.name.eq_ignore_ascii_case("content-length"));
+    no_wire_length.head.headers.extend([
+        HeaderEntry::new("content-encoding", "aws-chunked"),
+        HeaderEntry::new("x-amz-content-sha256", STREAMING_UNSIGNED_PAYLOAD_TRAILER),
+        HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+        HeaderEntry::new("x-amz-decoded-content-length", payload.len().to_string()),
+    ]);
+    assert_eq!(session.handle(no_wire_length).await.status, 200);
+
+    let undeclared =
+        unsigned_chunked_body_with_trailer(payload, "x-amz-checksum-sha256", "bogus", true);
+    let mut request = S3Request::new("PUT", "/mountx/undeclared", undeclared);
+    request.head.headers.extend([
+        HeaderEntry::new("content-encoding", "aws-chunked"),
+        HeaderEntry::new("x-amz-content-sha256", STREAMING_UNSIGNED_PAYLOAD_TRAILER),
+        HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+        HeaderEntry::new("x-amz-decoded-content-length", payload.len().to_string()),
+    ]);
+    let response = session.handle(request).await;
+    assert_eq!(response.status, 400);
+    assert!(String::from_utf8_lossy(&response.body).contains("<Code>InvalidRequest</Code>"));
+
+    let missing = format!(
+        "{:x}\r\n{}\r\n0\r\n",
+        payload.len(),
+        String::from_utf8_lossy(payload)
+    )
+    .into_bytes();
+    let mut request = S3Request::new("PUT", "/mountx/missing-trailer", missing);
+    request.head.headers.extend([
+        HeaderEntry::new("content-encoding", "aws-chunked"),
+        HeaderEntry::new("x-amz-content-sha256", STREAMING_UNSIGNED_PAYLOAD_TRAILER),
+        HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+        HeaderEntry::new("x-amz-decoded-content-length", payload.len().to_string()),
+    ]);
+    let response = session.handle(request).await;
+    assert_eq!(response.status, 400);
+    assert!(String::from_utf8_lossy(&response.body).contains("<Code>InvalidRequest</Code>"));
+}
+
+#[tokio::test]
+async fn signed_checksum_trailer_chain_is_verified() {
+    let credentials = Credentials::new("AKIAMOUNTX7TRAILER", "test-secret-key");
+    let session = S3Session::new_with_options(
+        MemoryFs::empty(),
+        S3SessionOptions {
+            credentials: Some(credentials.clone()),
+            region: Some("us-east-1".to_owned()),
+            ..S3SessionOptions::default()
+        },
+    );
+    let payload = b"signed checksum trailer payload";
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64;
+    let amz_date = format_amz_date(now);
+    let scope = CredentialScope {
+        date: amz_date[..8].to_owned(),
+        region: "us-east-1".to_owned(),
+        service: "s3".to_owned(),
+    };
+    let draft_headers = [
+        HeaderEntry::new("host", "localhost"),
+        HeaderEntry::new("x-amz-date", &amz_date),
+        HeaderEntry::new("x-amz-content-sha256", STREAMING_PAYLOAD_TRAILER),
+        HeaderEntry::new("content-encoding", "aws-chunked"),
+        HeaderEntry::new("x-amz-trailer", "x-amz-checksum-crc32"),
+        HeaderEntry::new("x-amz-decoded-content-length", payload.len().to_string()),
+        HeaderEntry::new("content-length", "0"),
+    ];
+    let signed_names = draft_headers
+        .iter()
+        .map(|header| header.name.clone())
+        .collect::<Vec<_>>();
+    let draft_body = signed_chunked_body_with_trailer(
+        payload,
+        &credentials,
+        &scope,
+        &amz_date,
+        &"0".repeat(64),
+        "x-amz-checksum-crc32",
+        "1B2M2Y8=",
+    );
+    let headers = draft_headers
+        .iter()
+        .map(|header| {
+            if header.name.eq_ignore_ascii_case("content-length") {
+                HeaderEntry::new("content-length", draft_body.len().to_string())
+            } else {
+                header.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let authorization = sign_request(SignRequest {
+        method: "PUT",
+        path: "/mountx/signed-checksum.txt",
+        query: &[],
+        headers: &headers,
+        signed_headers: &signed_names,
+        credentials: &credentials,
+        region: "us-east-1",
+        timestamp_ms: now,
+        payload_hash: STREAMING_PAYLOAD_TRAILER,
+    });
+    let body = signed_chunked_body_with_trailer(
+        payload,
+        &credentials,
+        &scope,
+        &amz_date,
+        authorization_signature(&authorization),
+        "x-amz-checksum-crc32",
+        "1B2M2Y8=",
+    );
+    assert_eq!(body.len(), draft_body.len());
+    let mut tampered_body = body.clone();
+    let checksum_offset = tampered_body
+        .windows(b"1B2M2Y8=".len())
+        .position(|window| window == b"1B2M2Y8=")
+        .expect("checksum trailer");
+    tampered_body[checksum_offset + 6] = b'9';
+    let mut upload = S3Request::new("PUT", "/mountx/signed-checksum.txt", body.clone());
+    upload.head.headers = headers.clone();
+    upload
+        .head
+        .headers
+        .push(HeaderEntry::new("authorization", authorization.clone()));
+    let stored = session.handle(upload).await;
+    assert_eq!(stored.status, 200);
+
+    let mut tampered = S3Request::new("PUT", "/mountx/signed-checksum.txt", tampered_body);
+    tampered.head.headers = headers.clone();
+    tampered
+        .head
+        .headers
+        .push(HeaderEntry::new("authorization", authorization.clone()));
+    let rejected = session.handle(tampered).await;
+    assert_eq!(rejected.status, 403);
+    assert!(String::from_utf8_lossy(&rejected.body).contains("<Code>SignatureDoesNotMatch</Code>"));
+
+    let mut bad_trailer_signature = body.clone();
+    let signature_marker = b"x-amz-trailer-signature:";
+    let signature_offset = bad_trailer_signature
+        .windows(signature_marker.len())
+        .position(|window| window == signature_marker)
+        .map(|offset| offset + signature_marker.len())
+        .expect("trailer signature");
+    bad_trailer_signature[signature_offset] = if bad_trailer_signature[signature_offset] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
+    let mut tampered_signature =
+        S3Request::new("PUT", "/mountx/signed-checksum.txt", bad_trailer_signature);
+    tampered_signature.head.headers = headers;
+    tampered_signature
+        .head
+        .headers
+        .push(HeaderEntry::new("authorization", authorization));
+    let rejected = session.handle(tampered_signature).await;
+    assert_eq!(rejected.status, 403);
+    assert!(String::from_utf8_lossy(&rejected.body).contains("<Code>SignatureDoesNotMatch</Code>"));
+
+    let mut get_headers = vec![
+        HeaderEntry::new("host", "localhost"),
+        HeaderEntry::new("x-amz-date", &amz_date),
+        HeaderEntry::new("x-amz-content-sha256", EMPTY_PAYLOAD_SHA256),
+    ];
+    let get_names = get_headers
+        .iter()
+        .map(|header| header.name.clone())
+        .collect::<Vec<_>>();
+    let get_authorization = sign_request(SignRequest {
+        method: "GET",
+        path: "/mountx/signed-checksum.txt",
+        query: &[],
+        headers: &get_headers,
+        signed_headers: &get_names,
+        credentials: &credentials,
+        region: "us-east-1",
+        timestamp_ms: now,
+        payload_hash: EMPTY_PAYLOAD_SHA256,
+    });
+    get_headers.push(HeaderEntry::new("authorization", get_authorization));
+    let read = session
+        .handle({
+            let mut request = S3Request::new("GET", "/mountx/signed-checksum.txt", Vec::new());
+            request.head.headers = get_headers;
+            request
+        })
+        .await;
+    assert_eq!(read.status, 200);
+    assert_eq!(read.body, payload);
 }
 
 #[tokio::test]

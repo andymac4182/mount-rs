@@ -26,10 +26,10 @@ use crate::protocol::{
     self, ByteRange, ListObjectsXml, ListPartsXml, ListedObject, ListedPart, MAX_PART_SIZE,
     MAX_XML_BYTES, MIN_PART_SIZE, MULTIPART_PREFIX, ObjectTarget, Operation, S3Failure, S3Response,
     S3Result, compare_utf8, conditional_match, content_encoding_chunked, decode_continuation_token,
-    delete_result_xml, encode_continuation_token, error_response, header_content_length,
-    header_md5, initiate_multipart_xml, is_staging_key, list_buckets_xml, list_objects_xml,
-    list_parts_xml, parse_complete_document, parse_delete_document, parse_meta_mtime,
-    parse_object_key, parse_request_target, s3_error, unquote_etag, xml_response,
+    delete_result_xml, encode_continuation_token, error_response, header_md5,
+    initiate_multipart_xml, is_staging_key, list_buckets_xml, list_objects_xml, list_parts_xml,
+    parse_complete_document, parse_delete_document, parse_meta_mtime, parse_object_key,
+    parse_request_target, s3_error, unquote_etag, xml_response,
 };
 use crate::sigv4::{self, Credentials, HeaderEntry, SigV4Failure, header_list, header_value};
 
@@ -457,7 +457,9 @@ impl S3Session {
         body: &[u8],
         verified: Option<&sigv4::VerifiedRequest>,
     ) -> S3Result<S3Response> {
-        validate_declared_length(&head.headers, body.len())?;
+        if !aws_chunked_body(&head.headers) {
+            validate_declared_length(&head.headers, body.len())?;
+        }
         let existing = driver.stat(&target.path).await.ok();
         check_put_conditionals(existing.as_ref(), &head.headers)?;
         let body = decode_request_body(
@@ -547,7 +549,9 @@ impl S3Session {
         body: &[u8],
         verified: Option<&sigv4::VerifiedRequest>,
     ) -> S3Result<S3Response> {
-        validate_declared_length(&head.headers, body.len())?;
+        if !aws_chunked_body(&head.headers) {
+            validate_declared_length(&head.headers, body.len())?;
+        }
         let body = decode_request_body(
             &head.headers,
             body,
@@ -815,7 +819,9 @@ impl S3Session {
         request: UploadBody<'_>,
     ) -> S3Result<S3Response> {
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
-        validate_declared_length(&request.head.headers, request.body.len())?;
+        if !aws_chunked_body(&request.head.headers) {
+            validate_declared_length(&request.head.headers, request.body.len())?;
+        }
         let body = decode_request_body(
             &request.head.headers,
             request.body,
@@ -853,7 +859,9 @@ impl S3Session {
         upload_id: &str,
         request: UploadBody<'_>,
     ) -> S3Result<S3Response> {
-        validate_declared_length(&request.head.headers, request.body.len())?;
+        if !aws_chunked_body(&request.head.headers) {
+            validate_declared_length(&request.head.headers, request.body.len())?;
+        }
         let body = decode_request_body(
             &request.head.headers,
             request.body,
@@ -1454,10 +1462,33 @@ fn check_copy_conditionals(stats: &Stats, etag: &str, headers: &[HeaderEntry]) -
     Ok(())
 }
 
+const MAX_SAFE_LENGTH: u64 = 9_007_199_254_740_991;
+
+fn aws_chunked_body(headers: &[HeaderEntry]) -> bool {
+    let streaming = header_value(headers, "x-amz-content-sha256").unwrap_or_default();
+    content_encoding_chunked(headers)
+        || matches!(
+            streaming.as_str(),
+            sigv4::STREAMING_PAYLOAD
+                | sigv4::STREAMING_PAYLOAD_TRAILER
+                | sigv4::STREAMING_UNSIGNED_PAYLOAD_TRAILER
+        )
+}
+
+fn parse_declared_length(value: &str) -> Option<u64> {
+    let value = value.trim();
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    let value = value.parse::<u64>().ok()?;
+    (value <= MAX_SAFE_LENGTH).then_some(value)
+}
+
 fn validate_declared_length(headers: &[HeaderEntry], actual: usize) -> S3Result<()> {
-    let Some(length) = header_content_length(headers) else {
+    let Some(raw) = header_value(headers, "content-length") else {
         return Err(S3Failure::s3("MissingContentLength"));
     };
+    let length = parse_declared_length(&raw).ok_or_else(|| S3Failure::s3("InvalidArgument"))?;
     if length != actual as u64 {
         return Err(S3Failure::s3("IncompleteBody"));
     }
@@ -1471,37 +1502,54 @@ fn decode_request_body(
     verified: Option<&sigv4::VerifiedRequest>,
     credentials: Option<&Credentials>,
 ) -> S3Result<Vec<u8>> {
-    let chunked = content_encoding_chunked(headers);
     let streaming = header_value(headers, "x-amz-content-sha256").unwrap_or_default();
+    let signed_streaming = matches!(
+        streaming.as_str(),
+        sigv4::STREAMING_PAYLOAD | sigv4::STREAMING_PAYLOAD_TRAILER
+    );
+    let streaming_sentinel = matches!(
+        streaming.as_str(),
+        sigv4::STREAMING_PAYLOAD
+            | sigv4::STREAMING_PAYLOAD_TRAILER
+            | sigv4::STREAMING_UNSIGNED_PAYLOAD_TRAILER
+    );
+    let chunked = aws_chunked_body(headers);
     let decoded_length = header_value(headers, "x-amz-decoded-content-length")
-        .map(|value| {
-            value
-                .parse::<u64>()
-                .map_err(|_| S3Failure::s3("InvalidArgument"))
-        })
+        .map(|value| parse_declared_length(&value).ok_or_else(|| S3Failure::s3("InvalidArgument")))
         .transpose()?;
     if !chunked {
-        if streaming == sigv4::STREAMING_PAYLOAD || streaming.contains("TRAILER") {
+        if streaming_sentinel {
             return Err(S3Failure::s3("InvalidRequest"));
         }
         return Ok(body.to_vec());
     }
-    if streaming.contains("TRAILER") {
-        return Err(S3Failure::s3("NotImplemented"));
-    }
-    let signing = if streaming == sigv4::STREAMING_PAYLOAD {
+    let trailers = header_value(headers, "x-amz-trailer")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(|name| name.to_ascii_lowercase())
+                .fold(Vec::new(), |mut names, name| {
+                    if !names.iter().any(|existing| existing == &name) {
+                        names.push(name);
+                    }
+                    names
+                })
+        })
+        .unwrap_or_default();
+    let signing = if signed_streaming {
         match (credentials, verified) {
             (Some(credentials), Some(verified)) if !verified.presigned => Some(ChunkSigning {
                 credentials,
                 verified,
             }),
-            (None, _) => None,
-            _ => return Err(S3Failure::s3("SignatureDoesNotMatch")),
+            _ => None,
         }
     } else {
         None
     };
-    decode_aws_chunked(body, max_body_bytes, decoded_length, signing)
+    decode_aws_chunked(body, max_body_bytes, decoded_length, signing, &trailers)
 }
 
 struct ChunkSigning<'a> {
@@ -1510,12 +1558,16 @@ struct ChunkSigning<'a> {
 }
 
 const MAX_SIGNED_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_CHUNK_HEADER_BYTES: usize = 256;
+const MAX_TRAILER_BYTES: usize = 16 * 1024;
+const TRAILER_SIGNATURE_HEADER: &str = "x-amz-trailer-signature";
 
 fn decode_aws_chunked(
     body: &[u8],
     max_body_bytes: usize,
     decoded_length: Option<u64>,
     signing: Option<ChunkSigning<'_>>,
+    declared_trailers: &[String],
 ) -> S3Result<Vec<u8>> {
     let mut cursor = 0;
     let mut output = Vec::new();
@@ -1527,12 +1579,15 @@ fn decode_aws_chunked(
             .get(cursor..)
             .and_then(|remaining| remaining.windows(2).position(|pair| pair == b"\r\n"))
         else {
-            return Err(S3Failure::s3("InvalidRequest"));
+            return Err(S3Failure::s3("IncompleteBody"));
         };
+        if line_offset > MAX_CHUNK_HEADER_BYTES {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
         let line_end = cursor + line_offset;
-        let size_text = std::str::from_utf8(&body[cursor..line_end])
+        let header = std::str::from_utf8(&body[cursor..line_end])
             .map_err(|_| S3Failure::s3("InvalidRequest"))?;
-        let mut extensions = size_text.split(';');
+        let mut extensions = header.split(';');
         let size_text = extensions.next().unwrap_or_default();
         if size_text.is_empty() || size_text.len() > 16 {
             return Err(S3Failure::s3("InvalidRequest"));
@@ -1540,37 +1595,47 @@ fn decode_aws_chunked(
         let size =
             u64::from_str_radix(size_text, 16).map_err(|_| S3Failure::s3("InvalidRequest"))?;
         let provided_signature = extensions.find_map(|extension| {
-            extension
-                .strip_prefix("chunk-signature=")
-                .map(ToOwned::to_owned)
+            let (name, value) = extension.split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("chunk-signature")
+                .then(|| value.trim().to_owned())
         });
-        if signing.is_some()
-            && provided_signature.as_deref().is_none_or(|signature| {
-                signature.len() != 64 || !signature.bytes().all(|byte| byte.is_ascii_hexdigit())
-            })
-        {
-            return Err(S3Failure::s3("SignatureDoesNotMatch"));
+        if signing.is_some() {
+            let Some(signature) = provided_signature.as_deref() else {
+                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+            };
+            if signature.len() != 64 || !signature.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
         }
         cursor = line_end + 2;
         if signing.is_some() && size > MAX_SIGNED_CHUNK_BYTES {
             return Err(S3Failure::s3("EntityTooLarge"));
         }
-        let size_usize = usize::try_from(size).map_err(|_| S3Failure::s3("EntityTooLarge"))?;
-        if output.len().saturating_add(size_usize) > max_body_bytes {
+        if signing.is_none() && size > MAX_SAFE_LENGTH {
             return Err(S3Failure::s3("EntityTooLarge"));
         }
-        let end = cursor
-            .checked_add(size_usize)
-            .ok_or_else(|| S3Failure::s3("EntityTooLarge"))?;
-        if end.checked_add(2).is_none_or(|end| end > body.len()) {
-            return Err(S3Failure::s3("IncompleteBody"));
-        }
-        let payload = &body[cursor..end];
-        if decoded_length
-            .is_some_and(|length| output.len().saturating_add(size_usize) as u64 > length)
-        {
-            return Err(S3Failure::s3("IncompleteBody"));
-        }
+        let size_usize = usize::try_from(size).map_err(|_| S3Failure::s3("EntityTooLarge"))?;
+        let payload = if size == 0 {
+            &[]
+        } else {
+            if output.len().saturating_add(size_usize) > max_body_bytes {
+                return Err(S3Failure::s3("EntityTooLarge"));
+            }
+            let end = cursor
+                .checked_add(size_usize)
+                .ok_or_else(|| S3Failure::s3("EntityTooLarge"))?;
+            if end.checked_add(2).is_none_or(|end| end > body.len()) {
+                return Err(S3Failure::s3("IncompleteBody"));
+            }
+            let payload = &body[cursor..end];
+            if decoded_length
+                .is_some_and(|length| output.len().saturating_add(size_usize) as u64 > length)
+            {
+                return Err(S3Failure::s3("IncompleteBody"));
+            }
+            payload
+        };
         if let Some(signing) = signing.as_ref() {
             let previous = previous_signature
                 .as_deref()
@@ -1583,24 +1648,154 @@ fn decode_aws_chunked(
             if expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() != 1 {
                 return Err(S3Failure::s3("SignatureDoesNotMatch"));
             }
-            previous_signature = Some(supplied);
+            previous_signature = Some(expected);
         }
-        output.extend_from_slice(payload);
-        cursor = end;
-        if &body[cursor..cursor + 2] != b"\r\n" {
-            return Err(S3Failure::s3("InvalidRequest"));
-        }
-        cursor += 2;
         if size == 0 {
             if decoded_length.is_some_and(|length| output.len() as u64 != length) {
                 return Err(S3Failure::s3("IncompleteBody"));
             }
-            if cursor != body.len() {
-                return Err(S3Failure::s3("NotImplemented"));
+            if declared_trailers.is_empty() {
+                if cursor == body.len() || (body.len() - cursor == 2 && &body[cursor..] == b"\r\n")
+                {
+                    return Ok(output);
+                }
+                return Err(S3Failure::s3("IncompleteBody"));
             }
+            return decode_trailers(
+                body,
+                cursor,
+                output,
+                declared_trailers,
+                signing.as_ref(),
+                previous_signature.as_deref(),
+            );
+        }
+        let end = cursor
+            .checked_add(size_usize)
+            .ok_or_else(|| S3Failure::s3("EntityTooLarge"))?;
+        output.extend_from_slice(payload);
+        cursor = end;
+        if body.get(cursor..cursor + 2) != Some(b"\r\n") {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        cursor += 2;
+    }
+}
+
+fn decode_trailers(
+    body: &[u8],
+    mut cursor: usize,
+    output: Vec<u8>,
+    declared_trailers: &[String],
+    signing: Option<&ChunkSigning<'_>>,
+    previous_signature: Option<&str>,
+) -> S3Result<Vec<u8>> {
+    let mut trailer_block = Vec::new();
+    let mut seen = Vec::new();
+    loop {
+        if cursor == body.len() {
+            if signing.is_some() {
+                return Err(S3Failure::s3("IncompleteBody"));
+            }
+            ensure_trailers_present(declared_trailers, &seen)?;
             return Ok(output);
         }
+        let Some(line_offset) = body
+            .get(cursor..)
+            .and_then(|remaining| remaining.windows(2).position(|pair| pair == b"\r\n"))
+        else {
+            if body.len().saturating_sub(cursor)
+                > MAX_TRAILER_BYTES.saturating_sub(trailer_block.len())
+            {
+                return Err(S3Failure::s3("EntityTooLarge"));
+            }
+            return Err(S3Failure::s3("IncompleteBody"));
+        };
+        let line_end = cursor + line_offset;
+        let raw_line = &body[cursor..line_end];
+        let remaining = MAX_TRAILER_BYTES.saturating_sub(trailer_block.len());
+        if !raw_line.is_empty() && raw_line.len().saturating_add(1) > remaining {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        let line = latin1(raw_line);
+        cursor = line_end + 2;
+        if line.is_empty() {
+            if signing.is_some() {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+            ensure_trailers_present(declared_trailers, &seen)?;
+            if cursor == body.len() || (body.len() - cursor == 2 && &body[cursor..] == b"\r\n") {
+                return Ok(output);
+            }
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| S3Failure::s3("InvalidRequest"))?;
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if name == TRAILER_SIGNATURE_HEADER {
+            let Some(signing) = signing else {
+                return Err(S3Failure::s3("InvalidRequest"));
+            };
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+            ensure_trailers_present(declared_trailers, &seen)?;
+            let previous =
+                previous_signature.ok_or_else(|| S3Failure::s3("SignatureDoesNotMatch"))?;
+            let expected = sigv4::sign_trailer(
+                &signing.credentials.secret_access_key,
+                &signing.verified.scope,
+                &sigv4::format_amz_date(signing.verified.timestamp_ms),
+                previous,
+                &sigv4::sha256_hex(&trailer_block),
+            );
+            if expected
+                .as_bytes()
+                .ct_eq(value.to_ascii_lowercase().as_bytes())
+                .unwrap_u8()
+                != 1
+            {
+                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+            }
+            if cursor == body.len() || (body.len() - cursor == 2 && &body[cursor..] == b"\r\n") {
+                return Ok(output);
+            }
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        if name.is_empty()
+            || !declared_trailers.iter().any(|declared| declared == &name)
+            || seen.iter().any(|existing| existing == &name)
+        {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        if trailer_block
+            .len()
+            .saturating_add(raw_line.len())
+            .saturating_add(1)
+            > MAX_TRAILER_BYTES
+        {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        trailer_block.extend_from_slice(raw_line);
+        trailer_block.push(b'\n');
+        seen.push(name);
     }
+}
+
+fn latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| char::from(*byte)).collect()
+}
+
+fn ensure_trailers_present(declared: &[String], seen: &[String]) -> S3Result<()> {
+    if declared
+        .iter()
+        .any(|name| !seen.iter().any(|seen| seen == name))
+    {
+        return Err(S3Failure::s3("InvalidRequest"));
+    }
+    Ok(())
 }
 
 fn chunk_signature(signing: &ChunkSigning<'_>, previous: &str, payload_hash: &str) -> String {

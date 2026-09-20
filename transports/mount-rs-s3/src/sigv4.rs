@@ -22,6 +22,8 @@ pub const EMPTY_PAYLOAD_SHA256: &str =
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
 pub const STREAMING_PAYLOAD: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD";
+pub const STREAMING_PAYLOAD_TRAILER: &str = "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER";
+pub const STREAMING_UNSIGNED_PAYLOAD_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Credentials {
@@ -304,6 +306,24 @@ pub fn sign_chunk(
         "AWS4-HMAC-SHA256-PAYLOAD\n{amz_date}\n{}\n{previous_signature}\n{}\n{payload_hash}",
         scope.as_string(),
         EMPTY_PAYLOAD_SHA256,
+    );
+    hex_lower(&hmac_bytes(
+        &signing_key(secret, scope),
+        string_to_sign.as_bytes(),
+    ))
+}
+
+/// Sign the trailing-header block in an `aws-chunked` SigV4 chain.
+pub fn sign_trailer(
+    secret: &str,
+    scope: &CredentialScope,
+    amz_date: &str,
+    previous_signature: &str,
+    trailer_hash: &str,
+) -> String {
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256-TRAILER\n{amz_date}\n{}\n{previous_signature}\n{trailer_hash}",
+        scope.as_string(),
     );
     hex_lower(&hmac_bytes(
         &signing_key(secret, scope),
@@ -596,7 +616,11 @@ pub fn verify_request(input: VerifyRequest<'_>) -> Result<VerifiedRequest, SigV4
         header_value(input.headers, "x-amz-content-sha256")
             .ok_or_else(|| SigV4Failure::Malformed("missing x-amz-content-sha256".to_owned()))?
     };
-    if payload_hash != UNSIGNED_PAYLOAD && payload_hash != STREAMING_PAYLOAD {
+    if payload_hash != UNSIGNED_PAYLOAD
+        && payload_hash != STREAMING_PAYLOAD
+        && payload_hash != STREAMING_PAYLOAD_TRAILER
+        && payload_hash != STREAMING_UNSIGNED_PAYLOAD_TRAILER
+    {
         let actual = sha256_hex(input.body);
         if payload_hash != actual {
             return Err(SigV4Failure::SignatureMismatch);

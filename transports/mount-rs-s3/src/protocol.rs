@@ -1142,10 +1142,6 @@ pub fn conditional_match(value: &str, etag: &str) -> bool {
         .any(|candidate| candidate == "*" || candidate == tag || candidate == etag)
 }
 
-pub fn header_content_length(headers: &[HeaderEntry]) -> Option<u64> {
-    header_value(headers, "content-length")?.trim().parse().ok()
-}
-
 pub fn header_md5(headers: &[HeaderEntry]) -> Option<String> {
     header_value(headers, "content-md5")
 }

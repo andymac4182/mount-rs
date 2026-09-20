@@ -20,8 +20,9 @@ for this crate's transport tests.
 
 Known parity boundaries are explicit: ListObjects V1, bucket create/delete,
 GET/HEAD `partNumber`, and non-`/` list delimiters remain unsupported. The
-`STREAMING-AWS4-HMAC-SHA256-PAYLOAD` form is verified, including its chunk
-signature chain; trailer-bearing streaming forms and checksum trailer
-verification currently return `NotImplemented`. The bundled Axum boundary
-buffers each request body up to the configured limit, so it is not yet the
-upstream's fully incremental streaming server.
+`STREAMING-AWS4-HMAC-SHA256-PAYLOAD` and trailer-bearing streaming forms are
+decoded; signed chunk and trailer chains are verified, while checksum trailer
+values are accepted as framing metadata because that is what the oracle does
+(it does not independently recompute CRC/SHA checksums). The bundled Axum
+boundary buffers each request body up to the configured limit, so it is not yet
+the upstream's fully incremental streaming server.
