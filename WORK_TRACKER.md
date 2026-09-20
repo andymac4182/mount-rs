@@ -14,6 +14,12 @@ the HostFs lexical-root and directory-open tests; macOS jobs remain queued.
 This evidence predates `3f52b44` and does not qualify that newer revision.
 Its separate fault-injection workflow also passed (run `35499717417`).
 
+Windows HostFs follow-up: directory handles now use backup semantics, raw
+Win32 error mappings are separate from platform libc errno values, and root
+tests cover drive/UNC paths. Main passed 14 macOS tests and strict Clippy;
+post-fix Windows runtime CI is still required. Directory behavior was checked
+against [libuv's Windows implementation](https://github.com/libuv/libuv/blob/v1.x/src/win/fs.c).
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.

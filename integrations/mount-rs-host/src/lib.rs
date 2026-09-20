@@ -293,44 +293,77 @@ fn fs_error_from_io_with_dest(
         .with_dest(dest)
 }
 
+#[cfg(unix)]
 fn raw_error_code(errno: i32) -> Option<ErrorCode> {
     Some(match errno {
-        1 => ErrorCode::Eperm,
-        2 => ErrorCode::Enoent,
-        4 => ErrorCode::Eintr,
-        5 => ErrorCode::Eio,
-        6 => ErrorCode::Enxio,
-        9 => ErrorCode::Ebadf,
-        11 | 35 => ErrorCode::Eagain,
-        12 => ErrorCode::Enomem,
-        13 => ErrorCode::Eacces,
-        16 => ErrorCode::Ebusy,
-        17 => ErrorCode::Eexist,
-        18 => ErrorCode::Exdev,
-        19 => ErrorCode::Enodev,
-        20 => ErrorCode::Enotdir,
-        21 => ErrorCode::Eisdir,
-        22 => ErrorCode::Einval,
-        23 => ErrorCode::Enfile,
-        24 => ErrorCode::Emfile,
-        27 => ErrorCode::Efbig,
-        28 => ErrorCode::Enospc,
-        29 => ErrorCode::Espipe,
-        30 => ErrorCode::Erofs,
-        31 => ErrorCode::Emlink,
-        34 => ErrorCode::Erange,
-        36 => ErrorCode::Enametoolong,
-        38 => ErrorCode::Enosys,
-        39 | 66 => ErrorCode::Enotempty,
-        40 | 62 => ErrorCode::Eloop,
-        45 | 95 => ErrorCode::Enotsup,
-        61 => ErrorCode::Enodata,
-        69 | 122 => ErrorCode::Edquot,
-        71 => ErrorCode::Eproto,
-        75 | 84 => ErrorCode::Eoverflow,
-        116 => ErrorCode::Estale,
+        libc::EPERM => ErrorCode::Eperm,
+        libc::ENOENT => ErrorCode::Enoent,
+        libc::EINTR => ErrorCode::Eintr,
+        libc::EIO => ErrorCode::Eio,
+        libc::ENXIO => ErrorCode::Enxio,
+        libc::EBADF => ErrorCode::Ebadf,
+        libc::EAGAIN => ErrorCode::Eagain,
+        libc::ENOMEM => ErrorCode::Enomem,
+        libc::EACCES => ErrorCode::Eacces,
+        libc::EBUSY => ErrorCode::Ebusy,
+        libc::EEXIST => ErrorCode::Eexist,
+        libc::EXDEV => ErrorCode::Exdev,
+        libc::ENODEV => ErrorCode::Enodev,
+        libc::ENOTDIR => ErrorCode::Enotdir,
+        libc::EISDIR => ErrorCode::Eisdir,
+        libc::EINVAL => ErrorCode::Einval,
+        libc::ENFILE => ErrorCode::Enfile,
+        libc::EMFILE => ErrorCode::Emfile,
+        libc::EFBIG => ErrorCode::Efbig,
+        libc::ENOSPC => ErrorCode::Enospc,
+        libc::ESPIPE => ErrorCode::Espipe,
+        libc::EROFS => ErrorCode::Erofs,
+        libc::EMLINK => ErrorCode::Emlink,
+        libc::ERANGE => ErrorCode::Erange,
+        libc::ENAMETOOLONG => ErrorCode::Enametoolong,
+        libc::ENOSYS => ErrorCode::Enosys,
+        libc::ENOTEMPTY => ErrorCode::Enotempty,
+        libc::ELOOP => ErrorCode::Eloop,
+        libc::ENOTSUP => ErrorCode::Enotsup,
+        libc::ENODATA => ErrorCode::Enodata,
+        libc::EDQUOT => ErrorCode::Edquot,
+        libc::EPROTO => ErrorCode::Eproto,
+        libc::EOVERFLOW => ErrorCode::Eoverflow,
+        libc::ESTALE => ErrorCode::Estale,
         _ => return None,
     })
+}
+
+// Win32 errors are not POSIX errno values. Match libuv's win/error.c for
+// filesystem errors, falling back to ErrorKind for codes not listed here.
+#[cfg(windows)]
+fn raw_error_code(code: i32) -> Option<ErrorCode> {
+    Some(match code {
+        1 => ErrorCode::Eisdir, // ERROR_INVALID_FUNCTION
+        2 | 3 | 15 | 123 | 161 | 203 | 267 | 4392 => ErrorCode::Enoent,
+        4 => ErrorCode::Emfile,
+        5 | 1314 => ErrorCode::Eperm, // ACCESS_DENIED / PRIVILEGE_NOT_HELD
+        6 | 1004 => ErrorCode::Ebadf, // INVALID_HANDLE / INVALID_FLAGS
+        8 | 14 => ErrorCode::Enomem,
+        13 | 87 | 122 => ErrorCode::Einval,
+        17 => ErrorCode::Exdev,
+        19 => ErrorCode::Erofs,
+        32 | 33 | 231 => ErrorCode::Ebusy,
+        39 | 82 | 112 => ErrorCode::Enospc,
+        50 => ErrorCode::Enotsup,
+        80 | 183 => ErrorCode::Eexist,
+        111 | 206 => ErrorCode::Enametoolong,
+        145 => ErrorCode::Enotempty,
+        232 => ErrorCode::Eagain,
+        740 | 1920 => ErrorCode::Eacces,
+        1921 => ErrorCode::Eloop,
+        _ => return None,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn raw_error_code(_code: i32) -> Option<ErrorCode> {
+    None
 }
 
 fn error_code(error: &io::Error) -> ErrorCode {
@@ -341,6 +374,9 @@ fn error_code(error: &io::Error) -> ErrorCode {
     }
     match error.kind() {
         ErrorKind::NotFound => ErrorCode::Enoent,
+        ErrorKind::IsADirectory => ErrorCode::Eisdir,
+        ErrorKind::NotADirectory => ErrorCode::Enotdir,
+        ErrorKind::DirectoryNotEmpty => ErrorCode::Enotempty,
         ErrorKind::PermissionDenied => ErrorCode::Eacces,
         ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => ErrorCode::Eio,
         ErrorKind::AlreadyExists => ErrorCode::Eexist,
@@ -539,7 +575,22 @@ fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
         .append(flags.append)
         .create_new(flags.create && flags.exclusive);
     let _ = mode;
-    options.open(path)
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // Like libuv, allow read-only directory handles; read() reports EISDIR.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    options.open(path).map_err(|error| {
+        #[cfg(windows)]
+        if error.raw_os_error() == Some(80) && flags.create && !flags.exclusive {
+            // libuv fs__open: FILE_EXISTS with non-exclusive creation means
+            // the target is a directory, not an ordinary existing file.
+            return io::Error::from(io::ErrorKind::IsADirectory);
+        }
+        error
+    })
 }
 
 #[cfg(unix)]
@@ -1230,10 +1281,35 @@ mod tests {
 
     #[test]
     fn lexical_root_clamps_parent_components() {
+        let cwd = std::env::current_dir().expect("current directory");
+        let root = cwd.ancestors().last().expect("host root");
+        assert_eq!(lexical_absolute(Path::new("/tmp/../var")), root.join("var"));
         assert_eq!(
-            lexical_absolute(Path::new("/tmp/../var")),
-            Path::new("/var")
+            lexical_absolute(&root.join("tmp/../../../var")),
+            root.join("var")
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn lexical_root_preserves_drive_and_unc_prefixes() {
+        for root in [Path::new(r"D:\"), Path::new(r"\\server\share\")] {
+            assert_eq!(
+                lexical_absolute(&root.join("tmp/../../../var")),
+                root.join("var")
+            );
+        }
+    }
+
+    #[test]
+    fn portable_directory_error_kinds_keep_their_codes() {
+        for (kind, expected) in [
+            (io::ErrorKind::IsADirectory, ErrorCode::Eisdir),
+            (io::ErrorKind::NotADirectory, ErrorCode::Enotdir),
+            (io::ErrorKind::DirectoryNotEmpty, ErrorCode::Enotempty),
+        ] {
+            assert_eq!(error_code(&io::Error::from(kind)), expected);
+        }
     }
 
     #[test]
@@ -1250,19 +1326,42 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn error_mapping_covers_common_host_codes() {
         assert_eq!(
-            error_code(&io::Error::from_raw_os_error(2)),
+            error_code(&io::Error::from_raw_os_error(libc::ENOENT)),
             ErrorCode::Enoent
         );
         assert_eq!(
-            error_code(&io::Error::from_raw_os_error(40)),
+            error_code(&io::Error::from_raw_os_error(libc::ELOOP)),
             ErrorCode::Eloop
         );
         assert_eq!(
-            error_code(&io::Error::from_raw_os_error(95)),
+            error_code(&io::Error::from_raw_os_error(libc::ENOTSUP)),
             ErrorCode::Enotsup
         );
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn error_mapping_covers_common_host_codes() {
+        for (raw, expected) in [
+            (1, ErrorCode::Eisdir),
+            (2, ErrorCode::Enoent),
+            (5, ErrorCode::Eperm),
+            (6, ErrorCode::Ebadf),
+            (32, ErrorCode::Ebusy),
+            (50, ErrorCode::Enotsup),
+            (80, ErrorCode::Eexist),
+            (145, ErrorCode::Enotempty),
+            (1921, ErrorCode::Eloop),
+        ] {
+            assert_eq!(
+                error_code(&io::Error::from_raw_os_error(raw)),
+                expected,
+                "Win32 {raw}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1307,6 +1406,13 @@ mod tests {
                 .read(&mut buffer, Some(0))
                 .await
                 .expect_err("directory handle read must fail");
+            assert_eq!(read_error.code, ErrorCode::Eisdir);
+            assert_eq!(read_error.syscall.as_deref(), Some("read"));
+            assert_eq!(read_error.path, None);
+            let read_error = directory
+                .read(&mut buffer, None)
+                .await
+                .expect_err("directory cursor read");
             assert_eq!(read_error.code, ErrorCode::Eisdir);
             assert_eq!(read_error.syscall.as_deref(), Some("read"));
             assert_eq!(read_error.path, None);
