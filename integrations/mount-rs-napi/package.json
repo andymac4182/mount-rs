@@ -16,12 +16,48 @@
       "require": "./index.js",
       "default": "./index.js"
     },
+    "./drivers/node-fs": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./drivers/unstorage": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./auto": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./nfs": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./9p": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./s3": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
+    "./webdav": {
+      "types": "./index.d.ts",
+      "require": "./index.js",
+      "default": "./index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
     "index.d.ts",
     "postlude.cjs",
+    "postlude-utilities.cjs",
     "types",
     "*.node",
     "npm/*"
@@ -32,7 +68,7 @@
     "prepare:npm": "napi create-npm-dirs",
     "aggregate:artifacts": "node scripts/aggregate-artifacts.mjs",
     "test:distribution:aggregate": "node test/distribution-aggregate.mjs",
-    "test": "node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/memory-options.mjs && node test/chunked.mjs && node test/native.mjs && node test/differential.mjs && node test/distribution.mjs && node test/distribution-aggregate.mjs",
+    "test": "node test/typecheck.mjs && node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/memory-options.mjs && node test/utilities.mjs && node test/servers.mjs && node test/unstorage.mjs && node test/chunked.mjs && node test/native.mjs && node test/differential.mjs && node test/distribution.mjs && node test/distribution-aggregate.mjs",
     "prepublishOnly": "napi create-npm-dirs && napi pre-publish --root-publisher pnpm"
   },
   "napi": {
@@ -45,6 +81,7 @@
     ]
   },
   "devDependencies": {
-    "@napi-rs/cli": "^3.5.0"
+    "@napi-rs/cli": "^3.5.0",
+    "typescript": "6.0.3"
   }
 }

@@ -137,6 +137,63 @@ export declare class Mounted {
   unmount(): Promise<void>
 }
 
+export declare class NfsServer {
+  get host(): string
+  get port(): number
+  listen(): Promise<void>
+  close(): Promise<void>
+}
+
+export declare class P9Connection {
+  get id(): number
+  get peer(): string | null
+  get isClosed(): boolean
+  close(): Promise<void>
+  waitClosed(): Promise<void>
+}
+
+export declare class P9Server {
+  get host(): string
+  get path(): string | null
+  get port(): number
+  get connections(): number
+  address(): string | null
+  clients(): Array<P9Connection>
+  listen(): Promise<void>
+  close(): Promise<void>
+}
+
+/**
+ * Native equivalent of mountx's PathLock.  N-API callbacks are intentionally
+ * limited to `() => Promise<void>`; arbitrary JS driver callbacks are not a
+ * supported boundary for this crate.
+ */
+export declare class PathLock {
+  constructor()
+  read<T>(callback: () => T | Promise<T>): Promise<T>
+  write<T>(callback: () => T | Promise<T>): Promise<T>
+}
+
+export declare class S3Server {
+  get host(): string
+  get port(): number
+  get url(): string
+  get buckets(): Array<string>
+  listen(): Promise<void>
+  close(): Promise<void>
+}
+
+export declare class WebdavServer {
+  get host(): string
+  get port(): number
+  get url(): string
+  get connections(): number
+  listen(): Promise<void>
+  close(): Promise<void>
+}
+
+export declare function basename(path: string): string
+
 export declare function createChunkedDriver(options: JsChunkedOptions): Promise<Filesystem>
 
 /**
@@ -146,6 +203,8 @@ export declare function createChunkedDriver(options: JsChunkedOptions): Promise<
  */
 export declare function createMemoryDriver(options?: JsMemoryOptions | undefined | null): Filesystem
 
+export declare function createNfsServer(driver: Filesystem, options?: NfsServerOptions | undefined | null): NfsServer
+
 /**
  * Create the rooted host-filesystem driver used by the upstream
  * `createNodeFsDriver` API. Construction is synchronous; host I/O remains
@@ -153,10 +212,56 @@ export declare function createMemoryDriver(options?: JsMemoryOptions | undefined
  */
 export declare function createNodeFsDriver(root: string, options?: JsNodeFsOptions | undefined | null): Filesystem
 
+export declare function createP9Server(driver: Filesystem, options?: P9ServerOptions | undefined | null): P9Server
+
+export declare function createS3Server(driver: Filesystem, options?: S3ServerOptions | undefined | null): S3Server
+
+/**
+ * Create a filesystem over an unstorage-compatible JavaScript store.
+ *
+ * The callback names and arguments match the unstorage `Storage` surface;
+ * each callback may return its value directly or a Promise.  The Rust KV
+ * driver remains responsible for path mapping, directory discovery, handle
+ * buffering, metadata overlays, read-only checks, and flush/close behavior.
+ */
+export declare function createUnstorageDriver(store: object, options?: JsUnstorageOptions | undefined | null): Filesystem
+
+export declare function createWebdavServer(driver: Filesystem, options?: WebdavServerOptions | undefined | null): WebdavServer
+
+export declare function dirname(path: string): string
+
+export declare function errnoCodes(): JsErrnoCodes
+
+export declare function errnoOf(error: unknown): number
+
+export declare function fileTypeMode(mode: number): number
+
+export declare function fsError(code: string, options?: FsErrorOptions | undefined): FsError
+
+export declare function isFsError(error: unknown, code?: string | undefined | null): error is FsError
+
+export declare function isNormalizedPath(path: string): boolean
+
+export declare function isPathInside(path: string, parent: string): boolean
+
+export declare function isSpecialMode(mode: number): boolean
+
+/**
+ * The public TypeScript API is variadic; the postlude turns this native
+ * array bridge into `joinPath(...parts)` without pretending N-API received a
+ * JavaScript callback or variadic argument list directly.
+ */
+export declare function joinPathParts(parts: Array<string>): string
+
 export interface JsAutoMountOptions {
   transport?: string
   readOnly?: boolean
   unmountTimeoutMs?: number
+  /**
+   * Apply hard mounts and same-host locking when the selected transport is
+   * NFS. This does not enable WAL or distributed SQLite locking.
+   */
+  nfsSqliteSingleHost?: boolean
 }
 
 export interface JsAutoProbe {
@@ -213,6 +318,43 @@ export interface JsChunkedStoreOptions {
   secretAccessKey?: string
 }
 
+export interface JsErrnoCodes {
+  EPERM: number
+  ENOENT: number
+  EINTR: number
+  EIO: number
+  ENXIO: number
+  EBADF: number
+  EAGAIN: number
+  ENOMEM: number
+  EACCES: number
+  EBUSY: number
+  EEXIST: number
+  EXDEV: number
+  ENODEV: number
+  ENOTDIR: number
+  EISDIR: number
+  EINVAL: number
+  ENFILE: number
+  EMFILE: number
+  EFBIG: number
+  ENOSPC: number
+  ESPIPE: number
+  EROFS: number
+  EMLINK: number
+  ERANGE: number
+  ENAMETOOLONG: number
+  ENOSYS: number
+  ENOTEMPTY: number
+  ELOOP: number
+  ENODATA: number
+  EPROTO: number
+  EOVERFLOW: number
+  ENOTSUP: number
+  ESTALE: number
+  EDQUOT: number
+}
+
 export interface JsMemoryOptions {
   uid?: number
   gid?: number
@@ -251,9 +393,22 @@ export interface JsReadResult {
   buffer: Uint8Array
 }
 
+export interface JsResolvedPath {
+  path: string
+  segments: Array<string>
+}
+
 export interface JsTransportProbe {
   usable: boolean
   reason?: string
+}
+
+export interface JsUnstorageOptions {
+  uid?: number
+  gid?: number
+  fileMode?: number
+  dirMode?: number
+  readOnly?: boolean
 }
 
 export interface JsWriteResult {
@@ -274,14 +429,109 @@ export declare function liveMounts(): Promise<Array<Mounted>>
  */
 export declare function mount(driver: Filesystem, mountpoint: string, options?: JsAutoMountOptions | undefined | null): Promise<Mounted>
 
+export interface NfsServerOptions {
+  port?: number
+  host?: string
+  allowRemote?: boolean
+  maxRecord?: number
+  maxInFlight?: number
+  useDriverIno?: boolean
+  verifier?: Uint8Array
+  rtmax?: number
+  wtmax?: number
+  dtpref?: number
+  snapshotCache?: number
+  claimOwnership?: boolean
+}
+
+export declare function normalizePath(path: string): string
+
+export interface P9ServerOptions {
+  port?: number
+  host?: string
+  path?: string
+  allowRemote?: boolean
+  socketMode?: number
+  allowSharedDirectory?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+  msize?: number
+  useDriverIno?: boolean
+  readOnly?: boolean
+  claimOwnership?: boolean
+}
+
 /**
  * Probe host facts without attempting a mount. This is safe and rootless on
  * macOS and Linux; it reports the exact automatic preference and reasons.
  */
 export declare function probeTransports(): Promise<JsAutoProbe>
 
+export declare function rangeError(name: string, expected: string, value: number): RangeError
+
+export declare function resolvePath(path: string): JsResolvedPath
+
+export declare const S_IFBLK: number
+
+export declare const S_IFCHR: number
+
+export declare const S_IFDIR: number
+
+export declare const S_IFIFO: number
+
+export declare const S_IFLNK: number
+
+export declare const S_IFMT: number
+
+export declare const S_IFREG: number
+
+export declare const S_IFSOCK: number
+
+export declare const S_ISGID: number
+
+export declare const S_IXGRP: number
+
+export interface S3Credentials {
+  accessKeyId: string
+  secretAccessKey: string
+}
+
+export interface S3ServerOptions {
+  bucket?: string
+  host?: string
+  port?: number
+  credentials?: S3Credentials
+  region?: string
+  maxBodyBytes?: number
+  maxXmlBytes?: number
+  readChunkBytes?: number
+}
+
+export declare function splitPath(path: string): Array<string>
+
 /**
  * Tear down every mount visible to the automatic facade and return failures
  * individually instead of rejecting the cleanup operation.
  */
 export declare function unmountAll(): Promise<Array<JsMountFailure>>
+
+export interface WebdavCredentials {
+  username: string
+  password: string
+}
+
+export interface WebdavServerOptions {
+  host?: string
+  port?: number
+  credentials?: WebdavCredentials
+  realm?: string
+  readChunkBytes?: number
+  maxXmlBytes?: number
+  maxBodyBytes?: number
+  drainTimeout?: number
+  debug?: boolean
+}
+
+import type { FsError, FsErrorOptions } from "./types/root.js"
+export type { ErrnoCode, FsError, FsErrorOptions } from "./types/root.js"
+export { ERRNO_CODES, joinPath } from "./types/root.js"

@@ -1099,14 +1099,19 @@ dependencies = [
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
+ "mount-rs-9p",
  "mount-rs-auto",
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-host",
+ "mount-rs-kv",
  "mount-rs-memory",
+ "mount-rs-nfs",
  "mount-rs-pglite",
  "mount-rs-r2",
+ "mount-rs-s3",
  "mount-rs-sqlite",
+ "mount-rs-webdav",
  "napi",
  "napi-build",
  "napi-derive",

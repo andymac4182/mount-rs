@@ -1,4 +1,7 @@
+pub mod kv_binding;
 pub mod memory_factory;
+pub mod servers;
+pub mod utilities;
 
 use std::future::Future;
 use std::pin::Pin;
@@ -618,6 +621,9 @@ pub struct JsAutoMountOptions {
     pub transport: Option<String>,
     pub read_only: Option<bool>,
     pub unmount_timeout_ms: Option<f64>,
+    /// Apply hard mounts and same-host locking when the selected transport is
+    /// NFS. This does not enable WAL or distributed SQLite locking.
+    pub nfs_sqlite_single_host: Option<bool>,
 }
 
 #[napi(object)]
@@ -1447,6 +1453,7 @@ fn auto_options(options: Option<JsAutoMountOptions>) -> Result<AutoMountOptions,
         transport: None,
         read_only: None,
         unmount_timeout_ms: None,
+        nfs_sqlite_single_host: None,
     });
     Ok(AutoMountOptions {
         transport: parse_auto_transport(options.transport)?,
@@ -1454,7 +1461,10 @@ fn auto_options(options: Option<JsAutoMountOptions>) -> Result<AutoMountOptions,
         unmount_timeout: validate_unmount_timeout(options.unmount_timeout_ms)?,
         fuse: None,
         p9: None,
-        nfs: None,
+        nfs: options
+            .nfs_sqlite_single_host
+            .unwrap_or(false)
+            .then(mount_rs_nfs::NfsMountOptions::sqlite_single_host),
     })
 }
 
@@ -2279,5 +2289,24 @@ mod tests {
             Some(Duration::ZERO)
         );
         assert!(validate_unmount_timeout(Some(1.5)).is_err());
+    }
+
+    #[test]
+    fn auto_facade_exposes_opt_in_nfs_sqlite_profile() {
+        assert!(auto_options(None).unwrap().nfs.is_none());
+        let options = auto_options(Some(JsAutoMountOptions {
+            transport: Some("nfs".into()),
+            read_only: None,
+            unmount_timeout_ms: None,
+            nfs_sqlite_single_host: Some(true),
+        }))
+        .unwrap();
+        let nfs = options.nfs.unwrap();
+        assert!(nfs.hard);
+        let native =
+            mount_rs_nfs::native::nfs_mount_options(2049, &nfs, mount_rs_nfs::NfsPlatform::Macos)
+                .unwrap();
+        assert!(native.split(',').any(|value| value == "locallocks"));
+        assert!(native.split(',').any(|value| value == "hard"));
     }
 }

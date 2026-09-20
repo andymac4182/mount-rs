@@ -10,6 +10,11 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
+mount-rs-9p = { path = "../../transports/mount-rs-9p" }
+mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
+mount-rs-s3 = { path = "../../transports/mount-rs-s3" }
+mount-rs-webdav = { path = "../../transports/mount-rs-webdav" }
+mount-rs-kv = { path = "../mount-rs-kv" }
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-chunked = { path = "../mount-rs-chunked" }
 mount-rs-core = { path = "../.." }

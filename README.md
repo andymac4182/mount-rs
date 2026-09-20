@@ -25,12 +25,9 @@ driver, and persisted drivers that use the same filesystem model.
   official socket server makes it usable from Rust without embedding a JS
   runtime.
 
-The storage layer is deliberately correctness-first while the port is being
-validated. The public API is small and backend-neutral so transport layers can
-be added after the driver behavior is locked down by differential tests.
-
-The current milestone is the driver, persistence, backend, and N-API layer.
-The full upstream transport surface is tracked explicitly in
+The workspace includes separate FUSE, 9P, NFS, WebDAV, S3, native auto-mount,
+and CLI crates. Behavioral and native-platform acceptance remain in progress.
+The full upstream surface is tracked explicitly in
 [`PORTING_STATUS.md`](PORTING_STATUS.md) and remains part of the active porting
 goal.
 
@@ -40,6 +37,9 @@ have passed actual DELETE/WAL transactions, competing processes, killed SQLite
 writers, reopen, mount-service crashes and injected backend failures on split
 SQLite stores; other platform/backend combinations remain acceptance work. See the revision-specific
 evidence in `PORTING_STATUS.md`, not a blanket production-safety claim.
+Native macOS NFS tests also cover single-host DELETE-journal SQLite transactions
+and reopen. SQLite selects DELETE when WAL is requested on that mount: this is
+reported as unsupported WAL, not a passing WAL test or distributed-locking proof.
 Copy-on-write and additional chunking algorithms are future work. The older
 `SqliteFs`, `R2Fs` and `PgliteFs` factories retain transitional snapshot storage.
 
@@ -66,6 +66,26 @@ PGlite providers require `uri` and a volume `key`; durability defaults to false
 unless the caller explicitly asserts a persistent server configuration. R2
 blocks require an isolated prefix `key`, `endpoint`, `bucket`, `accessKeyId`,
 and `secretAccessKey`. Keep credentials outside source control.
+
+The Node package additionally exposes memory/host/Unstorage driver factories,
+native mounting and probes, and NFS/9P/S3/WebDAV server factories. The Unstorage
+adapter forwards JavaScript storage callbacks to the Rust KV driver; it is not
+a JavaScript filesystem reimplementation. Always await `shutdown()` when done:
+it releases provider connections, writer leases, or retained JavaScript callback
+references as appropriate. A retained Unstorage driver intentionally keeps its
+callbacks alive until shutdown, so omitting shutdown can keep Node running.
+Close server instances before shutting down the filesystem they serve.
+
+For single-host SQLite over NFS, opt in with
+`mount(fs, path, { transport: "nfs", nfsSqliteSingleHost: true })`.
+This selects hard mounts and local-only locks; general mount defaults remain
+unchanged. The profile is NFSv3-only and does not promise WAL, cross-host
+locking, or power-loss durability. Native macOS acceptance currently covers
+DELETE journaling; unsupported modes remain acceptance gaps.
+
+Architectural inspiration and benchmark references are listed in
+[`REFERENCES.md`](REFERENCES.md). ComputeSDK-aligned benchmark implementation
+and acceptance are tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
 
 The CLI can be run with `cargo run -p mount-rs-cli -- --help` or `-- probe`.
 

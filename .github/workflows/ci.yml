@@ -211,6 +211,8 @@ jobs:
         with:
           version: 11
       - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - name: Install pinned oracle dependencies without lifecycle scripts
+        run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - run: pnpm --dir integrations/mount-rs-napi build
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
       - name: Install native Node mount prerequisites on Linux

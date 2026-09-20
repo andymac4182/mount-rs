@@ -785,12 +785,54 @@ module.exports.JsMountx = nativeBinding.JsMountx
 module.exports.JsStats = nativeBinding.JsStats
 module.exports.JsStatsFs = nativeBinding.JsStatsFs
 module.exports.Mounted = nativeBinding.Mounted
+module.exports.NfsServer = nativeBinding.NfsServer
+module.exports.P9Connection = nativeBinding.P9Connection
+module.exports.P9Server = nativeBinding.P9Server
+module.exports.PathLock = nativeBinding.PathLock
+module.exports.S3Server = nativeBinding.S3Server
+module.exports.WebdavServer = nativeBinding.WebdavServer
+module.exports.basename = nativeBinding.basename
 module.exports.createChunkedDriver = nativeBinding.createChunkedDriver
 module.exports.createMemoryDriver = nativeBinding.createMemoryDriver
+module.exports.createNfsServer = nativeBinding.createNfsServer
 module.exports.createNodeFsDriver = nativeBinding.createNodeFsDriver
+module.exports.createP9Server = nativeBinding.createP9Server
+module.exports.createS3Server = nativeBinding.createS3Server
+module.exports.createUnstorageDriver = nativeBinding.createUnstorageDriver
+module.exports.createWebdavServer = nativeBinding.createWebdavServer
+module.exports.dirname = nativeBinding.dirname
+module.exports.errnoCodes = nativeBinding.errnoCodes
+module.exports.errnoOf = nativeBinding.errnoOf
+module.exports.fileTypeMode = nativeBinding.fileTypeMode
+module.exports.fsError = nativeBinding.fsError
+module.exports.isFsError = nativeBinding.isFsError
+module.exports.isNormalizedPath = nativeBinding.isNormalizedPath
+module.exports.isPathInside = nativeBinding.isPathInside
+module.exports.isSpecialMode = nativeBinding.isSpecialMode
+module.exports.joinPathParts = nativeBinding.joinPathParts
 module.exports.liveMounts = nativeBinding.liveMounts
 module.exports.mount = nativeBinding.mount
+module.exports.normalizePath = nativeBinding.normalizePath
 module.exports.probeTransports = nativeBinding.probeTransports
+module.exports.rangeError = nativeBinding.rangeError
+module.exports.resolvePath = nativeBinding.resolvePath
+module.exports.S_IFBLK = nativeBinding.S_IFBLK
+module.exports.S_IFCHR = nativeBinding.S_IFCHR
+module.exports.S_IFDIR = nativeBinding.S_IFDIR
+module.exports.S_IFIFO = nativeBinding.S_IFIFO
+module.exports.S_IFLNK = nativeBinding.S_IFLNK
+module.exports.S_IFMT = nativeBinding.S_IFMT
+module.exports.S_IFREG = nativeBinding.S_IFREG
+module.exports.S_IFSOCK = nativeBinding.S_IFSOCK
+module.exports.S_ISGID = nativeBinding.S_ISGID
+module.exports.S_IXGRP = nativeBinding.S_IXGRP
+module.exports.splitPath = nativeBinding.splitPath
 module.exports.unmountAll = nativeBinding.unmountAll
 
 require('./postlude.cjs')(module.exports)
+
+module.exports.ERRNO_CODES = Object.freeze(nativeBinding.errnoCodes())
+
+module.exports.joinPath = (...parts) => nativeBinding.joinPathParts(parts)
+
+require('./postlude-utilities.cjs')(module.exports)

@@ -23,6 +23,9 @@ assert.deepEqual(packageJson.exports, {
     default: "./index.js",
   },
   "./package.json": "./package.json",
+  ...Object.fromEntries(["./drivers/node-fs", "./drivers/unstorage", "./auto", "./nfs", "./9p", "./s3", "./webdav"].map((path) => [path, {
+    types: "./index.d.ts", require: "./index.js", default: "./index.js",
+  }])),
 });
 assert.deepEqual(packageJson.napi.targets, [
   "aarch64-apple-darwin",
@@ -59,5 +62,20 @@ assert.equal(typeof direct.Filesystem, "function");
 assert.equal(self.Filesystem, direct.Filesystem);
 assert.equal(selfCommonJs.Filesystem, direct.Filesystem);
 assert.equal(require("@andymac4182/mount-rs/package.json").name, packageJson.name);
+for (const [path, exported] of [
+  ["drivers/memory", "createMemoryDriver"],
+  ["drivers/node-fs", "createNodeFsDriver"],
+  ["drivers/unstorage", "createUnstorageDriver"],
+  ["auto", "mount"],
+  ["nfs", "createNfsServer"],
+  ["9p", "createP9Server"],
+  ["s3", "createS3Server"],
+  ["webdav", "createWebdavServer"],
+]) {
+  const esm = await import(`@andymac4182/mount-rs/${path}`);
+  const cjs = require(`@andymac4182/mount-rs/${path}`);
+  assert.equal(typeof esm[exported], "function", `${path} ESM export`);
+  assert.equal(esm[exported], cjs[exported], `${path} CJS/ESM identity`);
+}
 
 console.log("mount-rs N-API distribution/export coverage: PASS");

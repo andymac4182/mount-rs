@@ -29,6 +29,7 @@ pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
 pnpm --dir integrations/mount-rs-napi build
 MOUNTX_SOURCE="$mountx_source" pnpm --dir integrations/mount-rs-napi test
 pnpm --dir tests/upstream install --frozen-lockfile
+pnpm --dir "$mountx_source" install --frozen-lockfile --ignore-scripts
 MOUNTX_SOURCE="$mountx_source" pnpm --dir tests/upstream test
 MOUNTX_SOURCE="$mountx_source" node scripts/check-kv-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-http-parity.mjs
