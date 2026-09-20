@@ -7,9 +7,11 @@
 //! like the upstream `mountx` CLI).
 
 pub mod color;
+pub mod config;
 pub mod parser;
 pub mod runtime;
 mod stale;
+pub(crate) mod storage;
 pub mod watch;
 
 pub use parser::{CliOptions, Command, DriverChoice, ParseError, TransportChoice, parse_args};

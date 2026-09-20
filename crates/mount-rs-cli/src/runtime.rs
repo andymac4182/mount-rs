@@ -13,11 +13,16 @@ use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteFs, SqliteMetadataStore, open_sqlite};
 
 use crate::color::Color;
+use crate::config::{
+    ConfigError, redact_diagnostic, resolve_cli_options, unique_default_owner,
+    validate_config_file, validate_owner,
+};
 use crate::parser::{
     CliOptions, Command, DriverChoice, ParseError, TransportChoice, help_text, parse_args,
     version_text,
 };
 use crate::stale::{stale_command_line, unmount_stale};
+use crate::storage::{ErasedBlockStore, ErasedMetadataStore, StorageResources, open_storage};
 use crate::watch::{WatchOptions, watch_driver};
 
 #[derive(Debug, Clone)]
@@ -30,14 +35,14 @@ impl CliError {
     pub fn usage(message: impl Into<String>) -> Self {
         Self {
             code: 2,
-            message: message.into(),
+            message: redact_diagnostic(&message.into()),
         }
     }
 
     pub fn runtime(message: impl Into<String>) -> Self {
         Self {
             code: 1,
-            message: message.into(),
+            message: redact_diagnostic(&message.into()),
         }
     }
 
@@ -60,6 +65,12 @@ impl From<ParseError> for CliError {
     }
 }
 
+impl From<ConfigError> for CliError {
+    fn from(error: ConfigError) -> Self {
+        Self::usage(format!("{}\ntry --help", error.message()))
+    }
+}
+
 impl From<FsError> for CliError {
     fn from(error: FsError) -> Self {
         Self::runtime(error.to_string())
@@ -73,6 +84,10 @@ enum DriverRuntime {
     Sqlite(SqliteFs),
     SplitMemory(ChunkedFs<MemoryMetadataStore, MemoryBlockStore>),
     SplitSqlite(ChunkedFs<SqliteMetadataStore, SqliteBlockStore>),
+    SplitDynamic(
+        ChunkedFs<ErasedMetadataStore, ErasedBlockStore>,
+        StorageResources,
+    ),
 }
 
 impl DriverRuntime {
@@ -104,6 +119,26 @@ impl DriverRuntime {
                 Ok(Self::Sqlite(open_sqlite(expand_path(database)).await?))
             }
             DriverChoice::SplitStore => {
+                if let Some(storage) = &options.storage {
+                    if let Some(owner) = &storage.owner {
+                        validate_owner(owner)?;
+                    }
+                    let owner = storage.owner.clone().unwrap_or_else(unique_default_owner);
+                    let chunk_options = ChunkedOptions::fixed(owner, storage.chunk_size_bytes)
+                        .map_err(CliError::from)?
+                        .with_identity(uid, gid, 0);
+                    let opened = open_storage(storage).await.map_err(CliError::from)?;
+                    let resources = opened.resources.clone();
+                    return match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options)
+                        .await
+                    {
+                        Ok(driver) => Ok(Self::SplitDynamic(driver, resources)),
+                        Err(error) => {
+                            let _ = resources.close().await;
+                            Err(CliError::from(error))
+                        }
+                    };
+                }
                 let chunk_options = ChunkedOptions::default().with_identity(uid, gid, 0);
                 match (&options.database, &options.blocks) {
                     (None, None) => Ok(Self::SplitMemory(
@@ -137,6 +172,7 @@ impl DriverRuntime {
             Self::Sqlite(driver) => Arc::new(driver.clone()),
             Self::SplitMemory(driver) => Arc::new(driver.clone()),
             Self::SplitSqlite(driver) => Arc::new(driver.clone()),
+            Self::SplitDynamic(driver, _) => Arc::new(driver.clone()),
         }
     }
 
@@ -144,6 +180,11 @@ impl DriverRuntime {
         match self {
             Self::SplitMemory(driver) => driver.shutdown().await,
             Self::SplitSqlite(driver) => driver.shutdown().await,
+            Self::SplitDynamic(driver, resources) => {
+                let driver_result = driver.shutdown().await;
+                let resources_result = resources.close().await;
+                driver_result.and(resources_result)
+            }
             Self::Memory(_) | Self::Host(_) | Self::Sqlite(_) => Ok(()),
         }
     }
@@ -176,7 +217,15 @@ where
             );
             Ok(())
         }
-        Command::Mount(options) => mount_command(options).await,
+        Command::ValidateConfig(path) => {
+            validate_config_file(&path)?;
+            println!("valid config: {}", path.display());
+            Ok(())
+        }
+        Command::Mount(options) => {
+            let options = resolve_cli_options(options)?;
+            mount_command(options).await
+        }
     }
 }
 
@@ -520,6 +569,7 @@ impl From<TransportChoice> for AutoTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{SplitStorageConfig, StorageProvider};
     use crate::parser::parse_args;
 
     #[test]
@@ -607,5 +657,59 @@ mod tests {
         handle.close().await.unwrap();
         assert_eq!(split_driver.stat("/data").await.unwrap().size, 5);
         split.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn structured_memory_storage_is_a_live_provider_composition() {
+        let options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Memory,
+                blocks: StorageProvider::Memory,
+                chunk_size_bytes: 4096,
+                owner: Some("runtime-test-owner".to_owned()),
+            })),
+            ..CliOptions::default()
+        };
+        let runtime = DriverRuntime::open(&options, 1000, 1000).await.unwrap();
+        let driver = runtime.driver();
+        let handle = driver.open("/config", "w", 0o644).await.unwrap();
+        assert_eq!(handle.write(b"config", Some(0)).await.unwrap(), 6);
+        handle.close().await.unwrap();
+        let handle = driver.open("/config", "r", 0).await.unwrap();
+        let mut bytes = [0_u8; 6];
+        assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), 6);
+        assert_eq!(&bytes, b"config");
+        handle.close().await.unwrap();
+        runtime.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn structured_sqlite_storage_is_a_live_provider_composition() {
+        let stem = format!("mount-rs-cli-storage-{}", unique_default_owner());
+        let metadata_path = std::env::temp_dir().join(format!("{stem}-metadata.db"));
+        let blocks_path = std::env::temp_dir().join(format!("{stem}-blocks.db"));
+        let options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Sqlite {
+                    path: metadata_path.clone(),
+                },
+                blocks: StorageProvider::Sqlite {
+                    path: blocks_path.clone(),
+                },
+                chunk_size_bytes: 4096,
+                owner: None,
+            })),
+            ..CliOptions::default()
+        };
+        let runtime = DriverRuntime::open(&options, 1000, 1000).await.unwrap();
+        let driver = runtime.driver();
+        let handle = driver.open("/sqlite", "w", 0o644).await.unwrap();
+        assert_eq!(handle.write(b"sqlite", Some(0)).await.unwrap(), 6);
+        handle.close().await.unwrap();
+        runtime.shutdown().await.unwrap();
+        let _ = std::fs::remove_file(metadata_path);
+        let _ = std::fs::remove_file(blocks_path);
     }
 }

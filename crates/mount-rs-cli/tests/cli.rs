@@ -1,6 +1,7 @@
 use mount_rs_cli::color::Color;
 use mount_rs_cli::parse_args;
 use mount_rs_cli::parser::{CliOptions, Command, DriverChoice, TransportChoice, help_text};
+use std::process::Command as ProcessCommand;
 
 #[test]
 fn help_and_version_paths_are_pure() {
@@ -96,4 +97,27 @@ fn sqlite_single_host_rejects_non_nfs_transports() {
             "unexpected error for {transport}: {error}"
         );
     }
+}
+
+#[test]
+fn actual_binary_validates_provider_config_without_credentials_or_network() {
+    let config = format!(
+        "{}/examples/config-pglite-r2.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["validate-config", "--config", &config])
+        .env_remove("MOUNT_RS_PGLITE_URL")
+        .env_remove("R2_ACCESS_KEY_ID")
+        .env_remove("R2_SECRET_ACCESS_KEY")
+        .output()
+        .expect("run actual mount-rs config validator");
+    assert!(
+        output.status.success(),
+        "validator failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("valid config:"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("missing environment variable"));
 }

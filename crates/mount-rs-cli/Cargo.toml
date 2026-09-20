@@ -18,7 +18,10 @@ mount-rs-core = { path = "../.." }
 mount-rs-host = { path = "../../integrations/mount-rs-host" }
 mount-rs-memory = { path = "../../integrations/mount-rs-memory" }
 mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
+mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
+mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
 mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+serde_json = "1"
 tokio = { version = "1", default-features = false, features = ["macros", "process", "rt-multi-thread", "signal", "time"] }
 
 [target.'cfg(unix)'.dependencies]

@@ -32,7 +32,7 @@ impl TransportChoice {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, ParseError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, ParseError> {
         match value {
             "auto" => Ok(Self::Auto),
             "fuse" => Ok(Self::Fuse),
@@ -64,7 +64,7 @@ impl DriverChoice {
         }
     }
 
-    fn parse(value: &str) -> Result<Self, ParseError> {
+    pub(crate) fn parse(value: &str) -> Result<Self, ParseError> {
         match value {
             "memory" => Ok(Self::Memory),
             "host" => Ok(Self::Host),
@@ -78,7 +78,7 @@ impl DriverChoice {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CliOptions {
     pub mountpoint: Option<PathBuf>,
     pub transport: TransportChoice,
@@ -92,7 +92,54 @@ pub struct CliOptions {
     pub root: Option<PathBuf>,
     pub database: Option<PathBuf>,
     pub blocks: Option<PathBuf>,
+    /// Optional versioned JSON configuration. Runtime resolves this before a
+    /// mount; the parser itself remains filesystem-free.
+    pub config: Option<PathBuf>,
+    /// Explicit storage composition supplied by a config file.
+    pub storage: Option<Box<crate::config::SplitStorageConfig>>,
+    /// Flags that were actually present on the command line. Defaults must
+    /// never silently override values from a config file.
+    pub overrides: CliOverrides,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CliOverrides {
+    pub mountpoint: bool,
+    pub transport: bool,
+    pub quiet: bool,
+    pub verbose: bool,
+    pub read_only: bool,
+    pub empty: bool,
+    pub allow_other: bool,
+    pub sqlite_single_host: bool,
+    pub driver: bool,
+    pub root: bool,
+    pub database: bool,
+    pub blocks: bool,
+}
+
+// Provenance is an implementation detail used during config merging. Parsed
+// options with the same effective values remain semantically equal.
+impl PartialEq for CliOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.mountpoint == other.mountpoint
+            && self.transport == other.transport
+            && self.quiet == other.quiet
+            && self.verbose == other.verbose
+            && self.read_only == other.read_only
+            && self.empty == other.empty
+            && self.allow_other == other.allow_other
+            && self.sqlite_single_host == other.sqlite_single_host
+            && self.driver == other.driver
+            && self.root == other.root
+            && self.database == other.database
+            && self.blocks == other.blocks
+            && self.config == other.config
+            && self.storage == other.storage
+    }
+}
+
+impl Eq for CliOptions {}
 
 impl Default for CliOptions {
     fn default() -> Self {
@@ -109,6 +156,9 @@ impl Default for CliOptions {
             root: None,
             database: None,
             blocks: None,
+            config: None,
+            storage: None,
+            overrides: CliOverrides::default(),
         }
     }
 }
@@ -117,6 +167,7 @@ impl Default for CliOptions {
 pub enum Command {
     Mount(CliOptions),
     Probe,
+    ValidateConfig(PathBuf),
     Help,
     Version,
 }
@@ -176,6 +227,38 @@ where
             }
             return Ok(Command::Probe);
         }
+        if first_argument && raw == "validate-config" {
+            let mut config_path = None;
+            while let Some(raw) = args.next() {
+                let raw = raw.to_string_lossy().into_owned();
+                if raw == "--help" || raw == "-h" {
+                    return Ok(Command::Help);
+                }
+                let Some(name) = raw.strip_prefix("--") else {
+                    return Err(ParseError::new(
+                        "validate-config accepts only --config <path>",
+                    ));
+                };
+                let (name, inline_value) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_owned())),
+                    None => (name, None),
+                };
+                if name != "config" {
+                    return Err(ParseError::new(
+                        "validate-config accepts only --config <path>",
+                    ));
+                }
+                if config_path.is_some() {
+                    return Err(ParseError::new(
+                        "validate-config accepts only one --config <path>",
+                    ));
+                }
+                config_path = Some(PathBuf::from(value("config", inline_value, &mut args)?));
+            }
+            return config_path
+                .map(Command::ValidateConfig)
+                .ok_or_else(|| ParseError::new("validate-config requires --config <path>"));
+        }
         if first_argument && raw == "mount" {
             first_argument = false;
             continue;
@@ -202,28 +285,67 @@ where
                 None => (name, None),
             };
             match name {
-                "quiet" => values.quiet = true,
-                "verbose" => values.verbose = true,
-                "read-only" => values.read_only = true,
-                "empty" => values.empty = true,
-                "allow-other" => values.allow_other = true,
-                "sqlite-single-host" => values.sqlite_single_host = true,
+                "quiet" => {
+                    values.quiet = true;
+                    values.overrides.quiet = true;
+                }
+                "verbose" => {
+                    values.verbose = true;
+                    values.overrides.verbose = true;
+                }
+                "read-only" => {
+                    values.read_only = true;
+                    values.overrides.read_only = true;
+                }
+                "empty" => {
+                    values.empty = true;
+                    values.overrides.empty = true;
+                }
+                "allow-other" => {
+                    values.allow_other = true;
+                    values.overrides.allow_other = true;
+                }
+                "sqlite-single-host" => {
+                    values.sqlite_single_host = true;
+                    values.overrides.sqlite_single_host = true;
+                }
                 "mountpoint" => {
-                    values.mountpoint = Some(PathBuf::from(value(name, inline_value, &mut args)?))
+                    if values.overrides.mountpoint {
+                        return Err(ParseError::new(
+                            "option '--mountpoint' was supplied more than once",
+                        ));
+                    }
+                    values.mountpoint = Some(PathBuf::from(value(name, inline_value, &mut args)?));
+                    values.overrides.mountpoint = true;
+                }
+                "config" => {
+                    if values.config.is_some() {
+                        return Err(ParseError::new(
+                            "option '--config' was supplied more than once",
+                        ));
+                    }
+                    values.config = Some(PathBuf::from(value(name, inline_value, &mut args)?));
                 }
                 "transport" => {
                     values.transport =
-                        TransportChoice::parse(&value(name, inline_value, &mut args)?)?
+                        TransportChoice::parse(&value(name, inline_value, &mut args)?)?;
+                    values.overrides.transport = true;
                 }
                 "driver" => {
-                    values.driver = DriverChoice::parse(&value(name, inline_value, &mut args)?)?
+                    values.driver = DriverChoice::parse(&value(name, inline_value, &mut args)?)?;
+                    values.overrides.driver = true;
                 }
-                "root" => values.root = Some(PathBuf::from(value(name, inline_value, &mut args)?)),
+                "root" => {
+                    values.root = Some(PathBuf::from(value(name, inline_value, &mut args)?));
+                    values.overrides.root = true;
+                }
                 "database" | "db" => {
-                    values.database = Some(PathBuf::from(value(name, inline_value, &mut args)?))
+                    values.database = Some(PathBuf::from(value(name, inline_value, &mut args)?));
+                    values.overrides.database = true;
                 }
                 "blocks" => {
-                    values.blocks = Some(PathBuf::from(value(name, inline_value, &mut args)?))
+                    values.blocks = Some(PathBuf::from(value(name, inline_value, &mut args)?));
+                    values.overrides.blocks = true;
                 }
                 other => return Err(ParseError::new(format!("unknown option '--{other}'"))),
             }
@@ -253,8 +375,11 @@ where
             ));
         }
         values.mountpoint = Some(PathBuf::from(mountpoint));
+        values.overrides.mountpoint = true;
     }
-    validate_driver_options(&values)?;
+    if values.config.is_none() {
+        validate_driver_options(&values)?;
+    }
     validate_transport_options(&values)?;
     Ok(Command::Mount(values))
 }
@@ -270,9 +395,18 @@ where
 {
     for (index, character) in shorts.char_indices() {
         match character {
-            'q' => values.quiet = true,
-            'v' => values.verbose = true,
-            'r' => values.read_only = true,
+            'q' => {
+                values.quiet = true;
+                values.overrides.quiet = true;
+            }
+            'v' => {
+                values.verbose = true;
+                values.overrides.verbose = true;
+            }
+            'r' => {
+                values.read_only = true;
+                values.overrides.read_only = true;
+            }
             'h' => return Err(ParseError::new("--help must be used as '-h'")),
             'V' => return Err(ParseError::new("--version must be used as '-V'")),
             'm' | 't' => {
@@ -291,8 +425,10 @@ where
                 })?;
                 if character == 'm' {
                     values.mountpoint = Some(PathBuf::from(value));
+                    values.overrides.mountpoint = true;
                 } else {
                     values.transport = TransportChoice::parse(&value)?;
+                    values.overrides.transport = true;
                 }
                 break;
             }
@@ -374,7 +510,7 @@ fn validate_transport_options(values: &CliOptions) -> Result<(), ParseError> {
 pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
-    format!(
+    let output = format!(
         "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
@@ -393,6 +529,15 @@ pub fn help_text(color: Color) -> String {
         d("<path>"),
         d("Ctrl-C unmounts and exits."),
         d("Use 'mount-rs probe' for the same probe command form."),
+    );
+    let config_help = format!(
+        "      --config {}      read a versioned JSON config file; explicit flags override it\n      validate-config --config {}  validate JSON/schema without opening providers\n",
+        d("<path>"),
+        d("<path>"),
+    );
+    output.replace(
+        "      --sqlite-single-host",
+        &format!("{config_help}      --sqlite-single-host"),
     )
 }
 

@@ -10,6 +10,7 @@ The command accepts one positional mountpoint:
     mount-rs [mountpoint] [options]
     mount-rs mount [mountpoint] [options]
     mount-rs probe
+    mount-rs validate-config --config PATH
 
 --help, --version, and probe do not create a driver or a mount. The probe
 output describes the current host's FUSE, 9P, and NFS prerequisites and the
@@ -28,6 +29,38 @@ The built-in driver choices are:
 - --driver splitstore: independent metadata and immutable block stores. With
   no paths it is volatile memory; with both --database METADATA and --blocks
   BLOCKS it uses two durable SQLite databases.
+
+## Versioned JSON configuration
+
+Use --config PATH to select the same transport, lifecycle flags, and driver
+settings from a versioned JSON file:
+
+    mount-rs validate-config --config crates/mount-rs-cli/examples/config-memory.json
+    mount-rs mount --config crates/mount-rs-cli/examples/config-splitstore.json
+
+validate-config performs only JSON/schema and static option validation. It
+does not open SQLite or PGlite, resolve credential values, construct an R2
+client, or make a network request. Provider construction starts only after
+the mount command has resolved the config.
+
+The top-level version is currently 1. The driver object is discriminated and
+strict: memory accepts only kind; host accepts kind and root; sqlite accepts
+kind and database; and splitstore accepts either the legacy database plus
+blocks pair or one structured storage object. Structured splitstore.storage
+must not be combined with root, database, or blocks.
+
+Structured storage has independent metadata and blocks providers. Each
+provider is strict and supports memory, sqlite, and pglite; r2 is supported
+for blocks only because the current integration exposes no R2 metadata store.
+PGlite and R2 credentials are environment references such as
+{"env":"R2_SECRET_ACCESS_KEY"}, never plaintext values. See
+examples/config-pglite-r2.json for the block-only R2 shape.
+
+Explicit command-line flags override only the config fields they name.
+Unspecified flags retain config values. Relative config paths are resolved
+relative to the config file. An omitted splitstore owner gets a
+process-and-instance-specific writer-fence owner; explicit owners are
+validated before provider construction.
 
 For a SQLite database hosted through this process's loopback NFS server, add
 `--sqlite-single-host` with `--transport nfs` or `--transport auto`. The flag

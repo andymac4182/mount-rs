@@ -83,6 +83,106 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
     fs::remove_dir(&mountpoint).expect("remove disposable native mountpoint");
 }
 
+#[test]
+#[ignore = "requires an opt-in Linux FUSE setup; see the test command in the CLI README"]
+fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
+    if std::env::var("MOUNT_RS_CLI_NATIVE_FUSE").ok().as_deref() != Some("1") {
+        eprintln!("set MOUNT_RS_CLI_NATIVE_FUSE=1 to opt into native FUSE acceptance");
+        return;
+    }
+
+    let mountpoint = unique_mountpoint();
+    let config_path = mountpoint.with_extension("json");
+    fs::create_dir(&mountpoint).expect("create disposable native mountpoint");
+    fs::write(
+        &config_path,
+        format!(
+            r#"{{
+  "version": 1,
+  "mountpoint": "{}",
+  "transport": "fuse",
+  "empty": true,
+  "driver": {{
+    "kind": "memory"
+  }}
+}}"#,
+            mountpoint.display()
+        ),
+    )
+    .expect("write native config file");
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["mount", "--config"])
+        .arg(&config_path)
+        .args(["--quiet"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn config-backed mount-rs FUSE subprocess");
+
+    let (line_sender, line_receiver) = mpsc::channel::<String>();
+    let stdout = child.stdout.take().expect("capture CLI stdout");
+    let stdout_thread = thread::spawn(move || {
+        for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            let _ = line_sender.send(line);
+        }
+    });
+    let stderr = child.stderr.take().expect("capture CLI stderr");
+    let stderr_thread = thread::spawn(move || {
+        BufReader::new(stderr)
+            .lines()
+            .map_while(Result::ok)
+            .collect::<Vec<_>>()
+    });
+
+    let mut output = Vec::new();
+    let ready = wait_for_mount(&mut child, &line_receiver, &mut output);
+    assert!(
+        ready,
+        "config-backed subprocess did not mount; output: {output:?}"
+    );
+    assert!(
+        is_mounted_at(&mountpoint),
+        "kernel did not report config mount"
+    );
+
+    let io_result = (|| -> std::io::Result<()> {
+        let path = mountpoint.join("config-round-trip");
+        fs::write(&path, b"config-native")?;
+        let bytes = fs::read(&path)?;
+        if bytes != b"config-native" {
+            return Err(std::io::Error::other("config-backed native read mismatch"));
+        }
+        fs::remove_file(path)
+    })();
+
+    // The config was consumed by the actual binary; now exercise the same
+    // native SIGINT/unmount path as the baseline lifecycle test.
+    // SAFETY: the child is the live subprocess just spawned above.
+    let signal_result = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGINT) };
+    assert_eq!(signal_result, 0, "send SIGINT to config-backed mount-rs");
+    let status = wait_for_exit(&mut child);
+    assert!(
+        status.success(),
+        "config-backed CLI did not exit cleanly: {status}"
+    );
+
+    stdout_thread.join().expect("join CLI stdout reader");
+    let stderr_lines = stderr_thread.join().expect("join CLI stderr reader");
+    output.extend(line_receiver.try_iter());
+    assert!(io_result.is_ok(), "native config I/O failed: {io_result:?}");
+    assert!(
+        output.iter().any(|line| line.contains("unmounted")),
+        "config-backed CLI did not report unmount: {output:?}"
+    );
+    assert!(
+        !is_mounted_at(&mountpoint),
+        "config-backed mount remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
+    );
+    fs::remove_dir(&mountpoint).expect("remove disposable native mountpoint");
+    fs::remove_file(&config_path).expect("remove disposable native config");
+}
+
 fn unique_mountpoint() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
