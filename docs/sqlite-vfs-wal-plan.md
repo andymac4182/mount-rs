@@ -170,6 +170,19 @@ unsupported for distributed WAL. Durable object uploads alone are not shared
 memory, and a process-local wal-index would permit corruption if another
 process or host opened the same database.
 
+## Supported journal policy
+
+The reliability-qualified rollback baseline accepts `DELETE`, `TRUNCATE`, and
+`PERSIST`. The VFS rejects `MEMORY` and `OFF` through the SQLite pragma
+control path because those modes remove the rollback-journal durability
+boundary. A rollback-only registration also rejects `WAL`; WAL is accepted
+only when the requested `WalScope` is provided by the backend and its
+durability policy permits the requested synchronization level.
+
+This policy is tested against both the native `HostDirectory` backend and the
+mount-free `StorageBackend` bridge. It does not make reduced synchronization,
+remote WAL, Windows execution, or Node exposure acceptance claims.
+
 ## Verification gates
 
 The implementation is accepted only when all of these hold:

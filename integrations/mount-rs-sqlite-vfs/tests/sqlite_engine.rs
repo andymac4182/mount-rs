@@ -446,6 +446,34 @@ fn wal_request_is_rejected_instead_of_falling_back() {
 }
 
 #[test]
+fn unsafe_journal_modes_are_rejected_instead_of_falling_back() {
+    let root = temp_root("unsafe-journal");
+    let vfs = host_vfs(&root, "unsafe_journal");
+    let connection = vfs.open("unsafe.db", flags()).expect("open database");
+    connection
+        .execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE t(value INTEGER);")
+        .expect("initial rollback schema");
+
+    for mode in ["MEMORY", "OFF"] {
+        let pragma = format!("PRAGMA journal_mode={mode}");
+        let error = connection
+            .query_row(&pragma, [], |row| row.get::<_, String>(0))
+            .expect_err("unsafe journal mode must be rejected");
+        assert!(!error.to_string().is_empty(), "{mode}: missing error");
+        let effective: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("query effective journal mode");
+        assert_eq!(effective.to_ascii_uppercase(), "DELETE", "{mode}");
+    }
+
+    drop(connection);
+    assert!(!root.join("unsafe.db-wal").exists());
+    assert!(!root.join("unsafe.db-shm").exists());
+    vfs.close().expect("close VFS");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
 fn host_wal_round_trip_reader_writer_checkpoint_and_reopen() {
     let root = temp_root("wal-host");
     let vfs = host_wal_vfs(&root, "wal_host");

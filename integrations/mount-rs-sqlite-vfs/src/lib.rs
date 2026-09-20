@@ -1354,6 +1354,16 @@ unsafe extern "C" fn x_file_control(
                 {
                     return ffi::SQLITE_ERROR;
                 }
+                if pragma.eq_ignore_ascii_case(b"journal_mode")
+                    && (value.eq_ignore_ascii_case(b"memory") || value.eq_ignore_ascii_case(b"off"))
+                {
+                    // MEMORY and OFF remove the rollback-journal durability
+                    // boundary.  The VFS only claims rollback modes whose
+                    // journal bytes pass through xSync, so do not let SQLite
+                    // silently select an unsafe mode for a reliability-
+                    // qualified database.
+                    return ffi::SQLITE_ERROR;
+                }
                 if file.require_full_sync
                     && pragma.eq_ignore_ascii_case(b"synchronous")
                     && (value.eq_ignore_ascii_case(b"off")

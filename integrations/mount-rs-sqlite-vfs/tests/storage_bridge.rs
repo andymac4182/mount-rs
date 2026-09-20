@@ -1030,6 +1030,31 @@ fn storage_backend_rejects_host_local_wal_without_a_host_mapping() {
 }
 
 #[test]
+fn storage_bridge_rejects_unsafe_journal_modes_without_fallback() {
+    let backend = Arc::new(memory_backend("unsafe-journal"));
+    let vfs = storage_matrix_vfs(backend, "unsafe_journal");
+    let connection = vfs.open("unsafe.db", flags()).expect("open database");
+    connection
+        .execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE t(value INTEGER);")
+        .expect("initial rollback schema");
+
+    for mode in ["MEMORY", "OFF"] {
+        let pragma = format!("PRAGMA journal_mode={mode}");
+        let error = connection
+            .query_row(&pragma, [], |row| row.get::<_, String>(0))
+            .expect_err("unsafe journal mode must be rejected");
+        assert!(!error.to_string().is_empty(), "{mode}: missing error");
+        let effective: String = connection
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("query effective journal mode");
+        assert_eq!(effective.to_ascii_uppercase(), "DELETE", "{mode}");
+    }
+
+    drop(connection);
+    vfs.close().expect("close VFS");
+}
+
+#[test]
 fn failed_block_barrier_is_not_acknowledged_and_restart_reopens_old_integrity() {
     let clock = Arc::new(ManualClock::new(1_000));
     let metadata = MemoryMetadataStore::with_clock(clock.clone());
