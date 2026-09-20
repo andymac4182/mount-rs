@@ -10,6 +10,7 @@ license = "Apache-2.0"
 default = []
 tokio-executor = ["dep:tokio"]
 remote-harness = ["tokio-executor", "dep:mount-rs-pglite", "dep:mount-rs-r2"]
+pglite-harness = ["tokio-executor", "dep:mount-rs-pglite"]
 
 [dependencies]
 libc = "0.2"
