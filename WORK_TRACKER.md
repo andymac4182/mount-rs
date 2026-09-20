@@ -74,6 +74,30 @@ Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 design review), and Raman (scoped napi-rs package distribution). Main rotates
 those slots rather than assigning multiple workers to the same files.
 
+### Narrow-band completion order
+
+To reduce half-finished breadth, new worker packets are not opened outside the
+current vertical slice until its acceptance gate is green:
+
+1. **P0 runtime path:** core mountx parity, independent metadata/block stores,
+   fixed-size chunking, and the shared contract through memfs, SQLite, PGlite
+   and authenticated Cloudflare R2.
+2. **P0 consumer path:** the same configured drives through napi-rs, the
+   config-file CLI and the multi-drive HTTP API, with reopen, range, partial
+   write, truncate, concurrency, fault-injection and cleanup evidence.
+3. **P0 reliability/platform path:** SQLite hosting/VFS/WAL matrix and
+   macOS/Linux qualification, while Windows CI remains a required parallel
+   signal and is never treated as passed from Unix evidence.
+4. **P1 integration path:** TiDB and FoundationDB metadata with RustFS blocks,
+   then FSKit and remaining native acceptance. Existing bounded workers may
+   finish their current packets, but they must not grow scope.
+5. **P2 evidence/product path:** versioning, benchmarks/compression, AWS/Ozone,
+   reference reviews, site/domain and publication hardening.
+
+Distributed cache (W22), physical copy-on-write (W23), lifecycle hooks (W29)
+and OTel (W30) remain deferred discussions/features until the P0/P1 gates are
+complete.
+
 ## Workstream dashboard
 
 | ID | Stream | Status | Current owner |
