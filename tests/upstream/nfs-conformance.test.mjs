@@ -21,10 +21,17 @@ const fixture = build.trim().split('\n').map((line) => JSON.parse(line))
   .find((item) => item.reason === 'compiler-artifact' && item.target.name === 'nfs_oracle' && item.executable)
   ?.executable;
 if (!fixture) throw new Error('Cargo did not return the NFS fixture executable');
-// These are the upstream protocol column claims, including its real losses:
-// stateless/unlinked handles and mknod types not carried by the NFS enums.
-const capabilities = {
+// Keep the TypeScript controls honest: the pinned reference server remains
+// stateless for v3 and path-keyed for v4, while the Rust sessions retain
+// backend file handles and pass the held-handle rows below. mknod type
+// coverage remains the only intentional loss for the Rust fixture.
+const controlCapabilities = {
   handles: false, atomicRename: true, hardlinks: true, symlinks: true,
+  permissions: true, times: true, truncate: true, caseSensitive: true,
+  statfs: true, readOnly: false, durableWrites: false, extensions: ['mknod'],
+};
+const rustCapabilities = {
+  handles: true, atomicRename: true, hardlinks: true, symlinks: true,
   permissions: true, times: true, truncate: true, caseSensitive: true,
   statfs: true, readOnly: false, durableWrites: false, extensions: ['mknod'],
 };
@@ -74,7 +81,7 @@ async function serve(version) {
 for (const version of [3, 4]) {
   conformance({
     name: `TypeScript NFSv${version === 3 ? '3' : '4.1'} control`,
-    capabilities, carries: [], errors: version === 4 ? 'host' : 'linux',
+    capabilities: controlCapabilities, carries: [], errors: version === 4 ? 'host' : 'linux',
     setup: async () => {
       const server = createNfsServer(createMemoryDriver());
       await server.listen();
@@ -96,7 +103,7 @@ for (const version of [3, 4]) {
   });
   conformance({
     name: `Rust NFSv${version === 3 ? '3' : '4.1'} through upstream TCP client`,
-    capabilities, carries: [],
+    capabilities: rustCapabilities, carries: [],
     errors: version === 4 ? 'host' : 'linux',
     setup: () => serve(version),
   });
