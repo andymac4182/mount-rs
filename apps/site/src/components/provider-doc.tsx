@@ -264,9 +264,12 @@ SQL`,
         metadata/blocks, Rust/Node/CLI matrices, and all 40 PGlite-inclusive
         seeded trace lanes. The dedicated provider matrix passed Rust SDK 4/4,
         Node SDK 5/5, and CLI 7/7 gated cases; the Node CLI uses the same
-        versioned provider configuration and reopen flow as the Rust CLI. R2
-        rows remained explicit credential skips; hosted and release acceptance
-        remain separate.
+        versioned provider configuration and reopen flow as the Rust CLI. The
+        later consumer packet adds 8 process-level CLI passes and 2 explicit
+        PGlite/R2 skips plus 4 Rust SDK passes and 4 external-gate skips;
+        these are focused consumer checks, not live-provider or native-mount
+        acceptance. R2 rows remained explicit credential skips; hosted and
+        release acceptance remain separate.
       </>
     ),
     sources: [
@@ -314,9 +317,11 @@ SQL`,
     consistency: (
       <>
         The adapter reports durability only when the caller declares it. A
-        configured R2 endpoint normally uses the durable path, and the live
-        tests verify confirmed writes, ranges, reopen, conditional behavior,
-        and owned-prefix cleanup. Those results do not turn every object-store
+        configured R2 endpoint normally uses the durable path. Endpoint,
+        bucket, credential, and state-key shapes are validated before client
+        construction, so malformed configuration fails closed. The live tests
+        verify confirmed writes, ranges, reopen, conditional behavior, and
+        owned-prefix cleanup. Those results do not turn every object-store
         deployment into a universal power-loss claim.
       </>
     ),

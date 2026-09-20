@@ -62,13 +62,13 @@ const routes = [
     path: '/docs/providers/pglite',
     status: 200,
     contentType: 'text/html',
-    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL', '40 PGlite-inclusive', 'Rust SDK 4/4', 'CLI 7/7'],
+    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL', '40 PGlite-inclusive', 'Rust SDK 4/4', 'CLI 7/7', '8 process-level CLI passes'],
   },
   {
     path: '/docs/providers/r2',
     status: 200,
     contentType: 'text/html',
-    expected: ['Cloudflare R2 / S3-compatible blocks', 'vol-a/blocks/', 'b0123456789abcdef0123456789abcdef', 'aws s3api', 'block-only', 'both metadata-provider composition gates'],
+    expected: ['Cloudflare R2 / S3-compatible blocks', 'vol-a/blocks/', 'b0123456789abcdef0123456789abcdef', 'aws s3api', 'block-only', 'both metadata-provider composition gates', 'fails closed'],
   },
   {
     path: '/docs/providers/rustfs',
@@ -111,7 +111,7 @@ const routes = [
     path: '/docs/transports/fuse',
     status: 200,
     contentType: 'text/html',
-    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse'],
+    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'READDIRPLUS', 'packDirentsPlus', 'hosted pass remains pending'],
   },
   {
     path: '/docs/transports/nfs',

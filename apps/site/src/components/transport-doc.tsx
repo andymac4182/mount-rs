@@ -27,7 +27,7 @@ export const transportSpecs = {
     name: 'FUSE',
     eyebrow: 'Transport / kernel-facing Unix mount',
     maturity: 'Preview',
-    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; focused Rust-backed Node codec/inode coverage is implemented, while codec and platform scope remain explicit.',
+    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; structural-driver Linux CI is wired but its hosted result is pending, while Rust-backed Node codec/inode coverage is implemented and broader platform scope remains explicit.',
     summary: (
       <>
         FUSE is the kernel-facing route for a host that can provide the FUSE
@@ -77,22 +77,28 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     ),
     limitations: (
       <>
-        The codec is not a complete native session. Several typed operations
-        still return <code>ENOSYS</code>, and cross-platform/native N-API parity
-        remains open. FUSE evidence does not qualify NFS, 9P, or FSKit.
+        The codec is not a complete native session. The public Node barrel now
+        covers <code>READDIR</code>/<code>READDIRPLUS</code> bodies, but full
+        request/reply, init negotiation, session, and native-mount surfaces
+        remain open; several typed operations still return <code>ENOSYS</code>.
+        FUSE evidence does not qualify NFS, 9P, or FSKit.
       </>
     ),
     evidence: (
       <>
-        Revision-matched Linux native checks and local protocol tests are
-        recorded, including selected SQLite hosting and fault paths. The Node
-        package now exposes a Rust-backed <code>./fuse</code> codec/inode
-        subpath; focused inode parity is tested, while request/reply body,
-        session, and native-mount surfaces remain open.
+        The Rust-backed <code>./fuse</code> barrel now exposes oracle-shaped
+        <code>packDirents</code>/<code>unpackDirents</code> and
+        <code>packDirentsPlus</code>/<code>unpackDirentsPlus</code>. Pinned
+        differential tests cover UTF-8 names, 8-byte alignment, bounded
+        packing, integer coercion, malformed input, and inode parity. The
+        structural Linux job is prerequisite-gated and its hosted pass remains
+        pending; full request/reply, session, and native-mount surfaces remain
+        open.
       </>
     ),
     sources: [
       { label: 'FUSE transport boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-fuse/README.md' },
+      { label: 'FUSE body codec tests', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-napi/test/fuse-codec.mjs' },
       { label: 'N-API FUSE parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#native-prerequisites' },
     ],
