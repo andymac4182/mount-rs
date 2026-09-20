@@ -1,0 +1,41 @@
+# The real-cluster harness runs three TiKV processes alongside three PD
+# processes and TiDB. Keep each test TiKV bounded on developer Docker
+# allocations while retaining the actual Raft-backed storage engine.
+
+[log]
+level = "warn"
+
+[readpool.unified]
+max-thread-count = 1
+
+[readpool.storage]
+high-concurrency = 1
+normal-concurrency = 1
+low-concurrency = 1
+
+[readpool.coprocessor]
+high-concurrency = 1
+normal-concurrency = 1
+low-concurrency = 1
+
+[server]
+grpc-concurrency = 2
+grpc-concurrent-stream = 128
+
+[storage]
+memory-quota = "64MiB"
+reserve-space = "128MiB"
+scheduler-concurrency = 64
+scheduler-worker-pool-size = 1
+txn-status-cache-capacity = 1024
+
+[storage.block-cache]
+capacity = "64MiB"
+num-shard-bits = 2
+strict-capacity-limit = true
+
+[raftstore]
+apply-pool-size = 1
+store-pool-size = 1
+store-io-pool-size = 1
+snap-generator-pool-size = 1

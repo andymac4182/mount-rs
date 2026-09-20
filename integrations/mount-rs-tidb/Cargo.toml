@@ -1,0 +1,24 @@
+[package]
+name = "mount-rs-tidb"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "TiDB metadata and immutable block stores for mount-rs"
+license = "Apache-2.0"
+
+[features]
+# Plain MySQL-protocol URLs are the smallest local/CI build. Enable `rustls`
+# for TiDB Cloud or another TLS-required endpoint.
+rustls = ["mysql_async/rustls-tls", "mysql_async/tls12", "mysql_async/ring"]
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust"] }
+serde_json = "1"
+sha2 = "0.10"
+
+[dev-dependencies]
+mount-rs-chunked = { path = "../mount-rs-chunked" }
+mount-rs-r2 = { path = "../mount-rs-r2" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
