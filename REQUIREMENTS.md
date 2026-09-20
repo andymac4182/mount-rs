@@ -8,6 +8,13 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 
 ## Current completion gates
 
+- Add Windows as a supported platform and a dedicated workstream: native GitHub
+  CI must build/test Rust and napi-rs, qualify storage and oracle parity, and
+  explicitly track Windows-specific filesystem/mount behavior. Linux/macOS
+  passes are not Windows evidence; do not silence failures with allowed-failure jobs.
+- Build the marketing/docs site with TanStack Start on the user's Vercel Hobby
+  plan. The user initiated AWS registration of mount-rs.com; verify registration,
+  DNS and HTTPS, do not repurchase it or upgrade the hosting plan.
 - License first-party mount-rs code and package metadata as Apache-2.0, retaining
   the root LICENSE and all required third-party attribution notices.
 - Complete the Rust port of the pinned `pithings/mountx` source with behavioral

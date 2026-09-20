@@ -52,6 +52,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W24 | Domain and marketing site | Planned; approval needed | User / Main |
 | W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
 | W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
+| W27 | Native Windows support and CI | CI added; qualification pending | Main |
 
 ## Decisions and external prerequisites
 
@@ -400,8 +401,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W24 — Domain and marketing site
 
-- [ ] W24.1 After D05, buy `mount-rs.com` through AWS with agreed renewal settings.
-- [ ] W24.2 Build and deploy Vercel marketing site using verified capability claims.
+- [ ] W24.1 User initiated AWS registration of `mount-rs.com`; verify completion
+  and DNS. Do not purchase a duplicate domain.
+- [ ] W24.2 Build combined marketing/docs site with TanStack Start and deploy to
+  the user's Vercel Hobby plan, explicitly authorized 2026-09-20. No paid plan
+  upgrade or paid resources. Use verified capability claims and visible status.
 - [ ] W24.3 Verify public DNS, HTTPS and actual deployment, and record ownership/
   operational handoff. This backlog entry does not authorize spending now.
 
@@ -430,6 +434,21 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W26.4 Cover Node factories and CLI configuration; add required CI gates
   and document verified versions, limitations and platform evidence. Ozone is
   requested support, not yet a verified supported backend.
+
+## W27 — Native Windows support and CI
+
+- [ ] W27.1 Run native `windows-latest` Rust formatting, all-feature Clippy and
+  workspace tests; repair platform compilation and behavior failures rather
+  than adding continue-on-error. Windows CI is added, not yet verified green.
+- [ ] W27.2 Build the Windows napi-rs addon and run native Node factories,
+  chunked storage, just-bash/Mastra consumers and TypeScript checks in CI.
+- [ ] W27.3 Expand to pinned mountx differential parity, real SQLite/PGlite,
+  authenticated R2 and other required backend/service tests on Windows.
+- [ ] W27.4 Qualify path/drive-letter handling, open-handle deletion, locks,
+  process/service lifecycle, restart recovery and artifact installation.
+- [ ] W27.5 Define and implement Windows mount support separately from Unix
+  FUSE/NFS and macOS FSKit. Explicit unsupported operations are not proof of
+  Windows mounting acceptance; retain capability and evidence matrices.
 
 ## Recent landed chunks
 
