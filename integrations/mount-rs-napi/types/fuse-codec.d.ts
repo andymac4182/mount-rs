@@ -6,6 +6,7 @@ import type {
   NativeFuseAttrOut,
   NativeFuseCreateIn,
   NativeFuseCreateOut,
+  NativeFuseEmpty,
   NativeFuseEntryOut,
   NativeFuseFlushIn,
   NativeFuseFsyncIn,
@@ -25,6 +26,7 @@ import type {
   NativeFuseProtocolContext,
   NativeFuseRawData,
   NativeFuseReadIn,
+  NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
@@ -38,6 +40,7 @@ export type {
   NativeFuseAttrOut,
   NativeFuseCreateIn,
   NativeFuseCreateOut,
+  NativeFuseEmpty,
   NativeFuseEntryOut,
   NativeFuseFlushIn,
   NativeFuseFsyncIn,
@@ -57,6 +60,7 @@ export type {
   NativeFuseProtocolContext,
   NativeFuseRawData,
   NativeFuseReadIn,
+  NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
@@ -131,6 +135,8 @@ export declare const FUSE_FSYNC_FDATASYNC: number
 export declare const FUSE_GETATTR: number
 export declare const FUSE_SETATTR: number
 export declare const FUSE_GETATTR_FH: number
+export declare const FUSE_READLINK: number
+export declare const FUSE_STATFS: number
 export declare const FATTR_MODE: number
 export declare const FATTR_SIZE: number
 export declare const FATTR_ATIME: number
@@ -192,6 +198,10 @@ export declare function decodeCreateIn(body: Uint8Array, context?: NativeFusePro
 export declare function encodeCreateIn(value: NativeFuseCreateIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeCreateOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseCreateOut
 export declare function encodeCreateOut(value: NativeFuseCreateOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeReadlinkIn(body: Uint8Array): NativeFuseEmpty
+export declare function encodeReadlinkIn(value: NativeFuseEmpty): Buffer
+export declare function decodeReadlinkOut(body: Uint8Array): NativeFuseReadlinkOut
+export declare function encodeReadlinkOut(value: NativeFuseReadlinkOut): Buffer
 export declare function decodeReleaseIn(body: Uint8Array): NativeFuseReleaseIn
 export declare function encodeReleaseIn(value: NativeFuseReleaseIn): Buffer
 export declare function decodeFlushIn(body: Uint8Array): NativeFuseFlushIn
@@ -210,6 +220,8 @@ export declare function decodeInitIn(body: Uint8Array): NativeFuseInitIn
 export declare function encodeInitIn(value: NativeFuseInitIn): Buffer
 export declare function decodeInitOut(body: Uint8Array): NativeFuseInitOut
 export declare function encodeInitOut(value: NativeFuseInitOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeStatfsIn(body: Uint8Array): NativeFuseEmpty
+export declare function encodeStatfsIn(value: NativeFuseEmpty): Buffer
 export declare function decodeStatfsOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseKstatfs
 export declare function encodeStatfsOut(value: NativeFuseKstatfs, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetxattrOut(body: Uint8Array): NativeFuseGetxattrOut
