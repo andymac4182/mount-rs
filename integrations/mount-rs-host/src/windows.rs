@@ -122,9 +122,12 @@ unsafe extern "system" {
     fn RtlNtStatusToDosError(status: i32) -> u32;
 }
 
-fn wide_host_path(path: &Path) -> io::Result<Vec<u16>> {
-    // Normalize separators before using extended-length paths (which disable
-    // Win32 slash normalization). Preserve non-Unicode filenames as UTF-16.
+fn wide_path(path: &Path, extended: bool) -> io::Result<Vec<u16>> {
+    // Normalize separators before calling Win32. Preserve non-Unicode
+    // filenames as UTF-16. CreateFileW uses the extended-length namespace so
+    // ordinary host operations do not regress at MAX_PATH; CreateSymbolicLinkW
+    // follows Node/libuv's normal Win32 path form and only falls back to the
+    // extended namespace when a link name is actually too long.
     let absolute = std::path::absolute(path)?;
     let mut wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
     if wide.contains(&0) {
@@ -135,16 +138,38 @@ fn wide_host_path(path: &Path) -> io::Result<Vec<u16>> {
             *unit = u16::from(b'\\');
         }
     }
-    if !wide.starts_with(&[92, 92, 63, 92]) {
-        let (prefix, rest) = if wide.starts_with(&[92, 92]) {
-            (r"\\?\UNC\", &wide[2..])
+    if extended {
+        if !wide.starts_with(&[92, 92, 63, 92]) {
+            let (prefix, rest) = if wide.starts_with(&[92, 92]) {
+                (r"\\?\UNC\", &wide[2..])
+            } else {
+                (r"\\?\", wide.as_slice())
+            };
+            wide = prefix.encode_utf16().chain(rest.iter().copied()).collect();
+        }
+    } else if wide.starts_with(&[92, 92, 63, 92]) {
+        // CreateSymbolicLinkW is used with the same ordinary Win32 namespace
+        // as Node/libuv. Convert an already extended absolute path back to
+        // that namespace when it is safe to do so.
+        if wide.starts_with(&[92, 92, 63, 92, 85, 78, 67, 92]) {
+            wide = [92, 92]
+                .into_iter()
+                .chain(wide[8..].iter().copied())
+                .collect();
         } else {
-            (r"\\?\", wide.as_slice())
-        };
-        wide = prefix.encode_utf16().chain(rest.iter().copied()).collect();
+            wide = wide[4..].to_vec();
+        }
     }
     wide.push(0);
     Ok(wide)
+}
+
+fn wide_host_path(path: &Path) -> io::Result<Vec<u16>> {
+    wide_path(path, true)
+}
+
+fn wide_symbolic_link_path(path: &Path) -> io::Result<Vec<u16>> {
+    wide_path(path, false)
 }
 
 fn wide_link_target(target: &str) -> io::Result<Vec<u16>> {
@@ -165,7 +190,8 @@ fn wide_link_target(target: &str) -> io::Result<Vec<u16>> {
 }
 
 pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<()> {
-    let link = wide_host_path(path)?;
+    let link = wide_symbolic_link_path(path)?;
+    let extended_link = wide_host_path(path)?;
     let target = wide_link_target(target)?;
     let type_flag = if directory {
         SYMBOLIC_LINK_FLAG_DIRECTORY
@@ -173,6 +199,7 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
         0
     };
     let mut flags = type_flag | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    let mut link_path = &link;
     // Windows 10 Developer Mode supports this flag without elevation. Older
     // Windows versions reject the flag itself; libuv retries without it so
     // the ordinary elevated symlink behavior remains available.
@@ -187,6 +214,16 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             && error.raw_os_error() == Some(87)
         {
             flags &= !SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+            continue;
+        }
+        if std::ptr::eq(link_path, &link)
+            && error.raw_os_error() == Some(206)
+            && extended_link != link
+        {
+            // ERROR_FILENAME_EXCED_RANGE: retain the normal namespace for
+            // short paths, but still support long link names when the host
+            // process and filesystem have opted into long paths.
+            link_path = &extended_link;
             continue;
         }
         return Err(error);
