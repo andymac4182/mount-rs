@@ -236,7 +236,13 @@ complete.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
   Main executed actual R2 differential traces with seeds 4182, 1, 42, 65535,
   and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
-  oracle, with per-run snapshot cleanup. CLI/native and benchmarks remain open.
+  oracle, with per-run snapshot cleanup. On 2026-09-20, the live N-API R2
+  factory passed exact-key DELETE/HEAD cleanup, the configuration-driven HTTP
+  CLI passed both split-store drives and owned-prefix cleanup, and the
+  ComputeSDK-aligned smoke benchmark passed a 1 MiB fixed-64 KiB chunked
+  PGlite/R2 run (write 2,902.11 ms, read 1,657.28 ms, 5.06 MiB/s, delete
+  8.51 ms; one iteration, zero timeouts/failures). Native/hosted lanes and the
+  full benchmark matrix remain open.
 - [ ] W05.4 Record service identity and revision without recording credentials.
 - [x] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
   R2 endpoint with scoped S3 credentials. On 2026-09-20, the live gate passed
@@ -548,8 +554,9 @@ complete.
   and SQLite metadata each use actual RustFS chunks. Main's full harness run
   exited 0 with binary multi-chunk writes, full/range reads, per-drive auth,
   graceful shutdown and fresh-process durable reopen with distinct default
-  owners. Existing VFS/RustFS/PGlite restart checks also passed. Windows remote
-  execution, Cloudflare R2 CLI and abrupt CLI crash recovery remain open.
+  owners. Existing VFS/RustFS/PGlite restart checks also passed. The live
+  Cloudflare R2 CLI gate now passes; Windows remote execution and abrupt CLI
+  crash recovery remain open.
 - [ ] W17.2 Define discovery, routing, filesystem operations, streaming/ranges,
   stable errors and lifecycle; share the actual native/API drive namespace.
 - [ ] W17.3 Add per-drive authorization/isolation, limits and deployment/TLS guidance.
@@ -579,6 +586,10 @@ complete.
   additions and keep integrations out of the core dependency surface.
 - [ ] W18.6 Review the untracked duplicate dispatch draft against the canonical
   benchmark before any cleanup; preserve unrelated working-tree files.
+- [x] Live Cloudflare R2 smoke benchmark passed on 2026-09-20 through the public
+  N-API split-store path with PGlite metadata, R2 blocks, fixed 64 KiB chunks,
+  verified full-byte readback, delete and remote-prefix cleanup. This is one
+  macOS smoke measurement, not completion of the full matrix.
 
 ## W19 — Compression evaluation
 
@@ -823,5 +834,5 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `d526c18` | CLI HTTP edge cases and Windows pinned-oracle CI | Local CLI/HTTP tests and Clippy passed; hosted Windows/oracle execution remains pending |
 | `afc55cb` / `c9088aa` / `8cf0c5d` | TanStack Start site and Vercel output hardening | Production deployment and custom-domain DNS/HTTPS verified; broader project release readiness remains open |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
-| `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
-| working tree | Cloudflare R2 CLI object-count compatibility | Live bucket-scoped gate passed after counting R2 `Contents`; cleanup readback passed |
+| `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; object-count compatibility was fixed in `00e96ce` |
+| `00e96ce` | Cloudflare R2 CLI object-count compatibility | Live bucket-scoped CLI, N-API factory, parity and smoke benchmark passed; cleanup readback passed |
