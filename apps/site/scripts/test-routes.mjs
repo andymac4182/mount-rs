@@ -1,4 +1,5 @@
 import { createServer } from 'node:net'
+import { createHash } from 'node:crypto'
 import { readFile } from 'node:fs/promises'
 import { spawn } from 'node:child_process'
 
@@ -15,7 +16,7 @@ const routes = [
     path: '/docs',
     status: 200,
     contentType: 'text/html',
-    expected: ['The boundary is the product.', 'createChunkedDriver'],
+    expected: ['The boundary is the product.', 'createChunkedDriver', 'Built CLI artifact', 'Download built CLI'],
   },
   { path: '/docs/', status: 307, redirectTo: '/docs' },
   {
@@ -43,55 +44,55 @@ const routes = [
     path: '/docs/providers/memory',
     status: 200,
     contentType: 'text/html',
-    expected: ['Memory / memfs', 'durable()', 'Validated'],
+    expected: ['Memory / memfs', 'durable()', 'metadata.versions', 'Validated'],
   },
   {
     path: '/docs/providers/sqlite',
     status: 200,
     contentType: 'text/html',
-    expected: ['SQLite', 'mount_rs_metadata', 'sqlite3'],
+    expected: ['SQLite', 'mount_rs_metadata', 'mount_rs_versions', 'Legacy snapshot schema', 'sqlite3'],
   },
   {
     path: '/docs/providers/pglite',
     status: 200,
     contentType: 'text/html',
-    expected: ['PGlite', 'mount_rs_blocks', 'PGLITE_DATABASE_URL'],
+    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL'],
   },
   {
     path: '/docs/providers/r2',
     status: 200,
     contentType: 'text/html',
-    expected: ['Cloudflare R2 / S3-compatible blocks', 'aws s3api', 'block-only'],
+    expected: ['Cloudflare R2 / S3-compatible blocks', 'vol-a/blocks/', 'b0123456789abcdef0123456789abcdef', 'aws s3api', 'block-only'],
   },
   {
     path: '/docs/providers/rustfs',
     status: 200,
     contentType: 'text/html',
-    expected: ['RustFS', 'S3-compatible', 'Validated'],
+    expected: ['RustFS', 'owned-run/', 'raw block bytes', 'S3-compatible', 'Validated'],
   },
   {
     path: '/docs/providers/tidb',
     status: 200,
     contentType: 'text/html',
-    expected: ['TiDB', 'mount_rs_tidb_metadata', 'Experimental'],
+    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', 'Experimental'],
   },
   {
     path: '/docs/providers/foundationdb',
     status: 200,
     contentType: 'text/html',
-    expected: ['FoundationDB', 'fdbcli', 'meta/manifest'],
+    expected: ['FoundationDB', 'meta/manifest', 'meta/lease-oracle', 'block/sha256:', 'fdbcli'],
   },
   {
     path: '/docs/providers/aws-s3',
     status: 200,
     contentType: 'text/html',
-    expected: ['AWS S3', 'Planned', 'AWS_REGION'],
+    expected: ['AWS S3', 'mount-rs-tests/owned-run/', 'planned block key', 'Planned', 'AWS_REGION'],
   },
   {
     path: '/docs/providers/ozone',
     status: 200,
     contentType: 'text/html',
-    expected: ['Apache Ozone', 'OZONE_ENDPOINT', 'Experimental'],
+    expected: ['Apache Ozone', 'logical S3 prefix', 'mount-rs-tests/owned-run/', 'OZONE_ENDPOINT', 'Experimental'],
   },
   {
     path: '/docs/transports',
@@ -135,6 +136,18 @@ const routes = [
     status: 200,
     contentType: 'text/html',
     expected: ['WebDAV', 'mount.davfs', 'Preview'],
+  },
+  {
+    path: '/downloads/SHA256SUMS',
+    status: 200,
+    contentType: 'text/plain',
+    expected: ['3c8b127b2360e535ba982900ba72597141def5c2887672efbdca73724539897c', '041c6455b67119d21f754dab00ad2ff2e03750b17c0ba349bda3d8b6bb6d1f82'],
+  },
+  {
+    path: '/downloads/mount-rs-0.1.0-aarch64-apple-darwin.tar.gz',
+    status: 200,
+    contentType: 'application/x-tar',
+    binarySha256: '3c8b127b2360e535ba982900ba72597141def5c2887672efbdca73724539897c',
   },
   {
     path: '/missing',
@@ -294,7 +307,8 @@ for (const route of routes) {
   } catch (error) {
     fail(`route test failed: ${route.path}: ${error}`)
   }
-  const body = await response.text()
+  const rawBody = Buffer.from(await response.arrayBuffer())
+  const body = route.binarySha256 ? '' : rawBody.toString('utf8')
   if (response.status !== route.status) {
     fail(`route test failed: ${route.path}: HTTP ${response.status}, expected ${route.status}`)
   }
@@ -310,6 +324,12 @@ for (const route of routes) {
   const actualContentType = response.headers.get('content-type') ?? ''
   if (!actualContentType.startsWith(route.contentType)) {
     fail(`route test failed: ${route.path}: content type ${actualContentType}, expected ${route.contentType}`)
+  }
+  if (route.binarySha256) {
+    const actualSha256 = createHash('sha256').update(rawBody).digest('hex')
+    if (actualSha256 !== route.binarySha256) {
+      fail(`route test failed: ${route.path}: SHA-256 ${actualSha256}, expected ${route.binarySha256}`)
+    }
   }
   if (route.contentType === 'text/html' && !body.includes('<html')) {
     fail(`route test failed: ${route.path}: response was not HTML`)

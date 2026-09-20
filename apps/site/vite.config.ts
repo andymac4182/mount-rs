@@ -31,6 +31,13 @@ export default defineConfig({
     viteReact(),
     nitro({
       routeRules: {
+        '/downloads/**': {
+          headers: {
+            ...securityHeaders,
+            'Content-Disposition': 'attachment',
+            'Content-Encoding': 'identity',
+          },
+        },
         '/assets/**': { headers: securityHeaders },
         '/**': { headers: securityHeaders },
       },

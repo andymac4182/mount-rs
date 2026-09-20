@@ -1,4 +1,4 @@
-import { access, readFile } from 'node:fs/promises'
+import { access, readdir, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
 const siteRoot = fileURLToPath(new URL('..', import.meta.url))
@@ -41,6 +41,10 @@ if (!config.routes.some((route) => route.dest === '/__server')) {
 const assetRoute = config.routes.find((route) => route.src === '/assets/(.*)')
 if (assetRoute?.headers?.['cache-control'] !== 'public, max-age=31536000, immutable') {
   throw new Error('Vercel artifact test failed: hashed asset cache policy is missing')
+}
+const downloadRoute = config.routes.find((route) => route.src === '/downloads/(.*)')
+if (downloadRoute?.headers?.['content-encoding'] !== 'identity' || downloadRoute?.headers?.['content-disposition'] !== 'attachment') {
+  throw new Error('Vercel artifact test failed: download route must preserve binary bytes')
 }
 const requiredSecurityHeaders = [
   'Content-Security-Policy',
@@ -92,9 +96,19 @@ for (const path of [
   'static/docs/transports/http/index.html',
   'static/docs/transports/nfs/index.html',
   'static/docs/transports/webdav/index.html',
+  'static/downloads/SHA256SUMS',
+  'static/downloads/mount-rs-0.1.0-aarch64-apple-darwin.tar.gz',
   'static/favicon.svg',
 ]) {
   await requireFile(path)
+}
+
+for (const file of await readdir(`${siteRoot}/public/downloads`)) {
+  const source = await readFile(`${siteRoot}/public/downloads/${file}`)
+  const generated = await readFile(`${outputRoot}/static/downloads/${file}`)
+  if (!source.equals(generated)) {
+    throw new Error(`Vercel artifact test failed: generated download bytes differ from public/downloads/${file}`)
+  }
 }
 
 console.log('Vercel artifact check passed: Nitro preset, Node 24 function, prerendered routes, security headers, and asset policies are present')

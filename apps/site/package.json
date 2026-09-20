@@ -11,8 +11,8 @@
   },
   "scripts": {
     "dev": "vite dev",
-    "build": "vite build && tsc --noEmit",
-    "build:vercel": "NITRO_PRESET=vercel vite build && node scripts/configure-vercel-output.mjs && tsc --noEmit",
+    "build": "vite build && node scripts/restore-binary-assets.mjs && tsc --noEmit",
+    "build:vercel": "NITRO_PRESET=vercel vite build && node scripts/restore-binary-assets.mjs && node scripts/configure-vercel-output.mjs && tsc --noEmit",
     "start": "node .output/server/index.mjs",
     "typecheck": "tsc --noEmit",
     "test:routes": "node scripts/test-routes.mjs",

@@ -74,6 +74,29 @@ function DocsOverview() {
         </Link>
       </div>
 
+      <section className="cli-artifact-card" aria-labelledby="cli-artifact-heading">
+        <div className="cli-artifact-copy">
+          <p className="eyebrow">Built CLI artifact</p>
+          <h2 id="cli-artifact-heading">mount-rs 0.1.0</h2>
+          <p>
+            A release-mode <code>mount-rs</code> executable built from the
+            repository's only CLI target. This artifact is platform-specific
+            and does not imply a complete release matrix or native-mount
+            qualification.
+          </p>
+        </div>
+        <div className="cli-artifact-meta">
+          <div><span>Target</span><code>aarch64-apple-darwin</code></div>
+          <div><span>Artifact</span><code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code></div>
+          <a className="button button-warm" href="/downloads/mount-rs-0.1.0-aarch64-apple-darwin.tar.gz" download>
+            Download built CLI
+          </a>
+          <a className="cli-artifact-checksums" href="/downloads/SHA256SUMS">
+            SHA-256 checksums <span aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </section>
+
       <div className="source-note">
         <span className="source-note-mark" aria-hidden="true">↗</span>
         <p>

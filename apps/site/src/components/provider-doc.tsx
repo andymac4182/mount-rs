@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react'
 import { Link } from '@tanstack/react-router'
 import { CodeBlock } from './code-block'
+import { StorageAnatomy, providerStorageModels } from './storage-anatomy'
 
 export type ProviderMaturity = 'Validated' | 'Preview' | 'Experimental' | 'Planned'
 
@@ -784,7 +785,8 @@ export function ProviderIndex() {
       <p className="doc-lede">
         Providers are deliberately split into metadata and immutable blocks.
         These pages describe what the repository currently implements, how to
-        inspect the backing data, and exactly where the evidence stops.
+        inspect the backing data, how each schema/keyspace/prefix is laid out,
+        and exactly where the evidence stops.
       </p>
 
       <div className="callout callout-blue">
@@ -846,6 +848,8 @@ export function ProviderPage({ provider }: { provider: ProviderSpec }) {
           <p>{provider.blocks}</p>
         </div>
       </div>
+
+      <StorageAnatomy model={providerStorageModels[provider.slug]} />
 
       <div className="callout callout-blue">
         <strong>{provider.maturity} — scoped evidence</strong>
