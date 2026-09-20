@@ -84,6 +84,7 @@ Linux/macOS/Windows Node flag namespaces, and the rebuilt addon passed the
 opt-in macOS NFS structural mount lifecycle with mounted write/readback,
 callback reachability, unmount and cleanup. Linux, non-NFS transports, hosted
 Windows execution and full FUSE/FSKit acceptance remain separate gates.
+The full locked offline workspace gate also exited 0 after this patch.
 
 Focused current-head acceptance after the follow-up packets: `mount-rs-sdk`
 unit tests passed (2/2), the Rust provider matrix passed memfs, memory/memory,
