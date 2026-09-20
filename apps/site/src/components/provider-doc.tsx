@@ -262,13 +262,17 @@ SQL`,
         Fresh current-tree PGlite lifecycle acceptance covers provider
         parity/reconnect/fencing/cancellation, disk-server restart, split
         metadata/blocks, Rust/Node/CLI matrices, and all 40 PGlite-inclusive
-        seeded trace lanes. R2 rows were explicit skips without credentials;
-        hosted and release acceptance remain separate.
+        seeded trace lanes. The dedicated provider matrix passed Rust SDK 4/4,
+        Node SDK 5/5, and CLI 7/7 gated cases; the Node CLI uses the same
+        versioned provider configuration and reopen flow as the Rust CLI. R2
+        rows remained explicit credential skips; hosted and release acceptance
+        remain separate.
       </>
     ),
     sources: [
       { label: 'PGlite provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-pglite/src/storage.rs' },
       { label: 'Node split-store example', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
+      { label: 'Provider matrix and Node CLI', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/cli.mjs' },
     ],
   },
   r2: {
@@ -276,7 +280,7 @@ SQL`,
     name: 'Cloudflare R2 / S3-compatible blocks',
     eyebrow: 'Provider / object storage',
     maturity: 'Validated',
-    maturityNote: 'Authenticated live R2 block and CLI gates passed; metadata and broader release gates remain separate.',
+    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, and both metadata-provider composition gates passed; broader benchmark and release gates remain separate.',
     summary: (
       <>
         R2 is the remote block plane in the current split-store design. It is
@@ -347,13 +351,16 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
     evidence: (
       <>
         The current tracker records authenticated R2 filesystem, differential,
-        Node, CLI, ranged-read, reopen, and owned-prefix cleanup checks. Local
-        object-store tests are not substituted for those live results.
+        Node, CLI, ranged-read, reopen, and owned-prefix cleanup checks. The
+        configuration-driven CLI exercised the R2 block path with both
+        supported metadata-provider compositions. Local object-store tests are
+        not substituted for those live results.
       </>
     ),
     sources: [
       { label: 'R2 block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
       { label: 'Live R2 evidence in the tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w05--cloudflare-r2' },
+      { label: 'Configuration-driven provider matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/config-pglite-r2.json' },
     ],
   },
   rustfs: {

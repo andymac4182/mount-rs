@@ -102,7 +102,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     name: 'NFS',
     eyebrow: 'Transport / network filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Native macOS NFSv3 and Linux checkpoints exist; NFSv4.1 parity and distributed locking remain limited.',
+    maturityNote: 'Native macOS NFSv3 and Linux checkpoints exist; held-handle retention across unlink/rename is tested, while NFSv4.1 parity and distributed locking remain limited.',
     summary: (
       <>
         NFS is the current native macOS path and a Linux option when the host
@@ -129,7 +129,8 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     surface: (
       <>
         The common filesystem/session path includes handles, namespace I/O,
-        stateids, and selected byte-range locks. The server does not start
+        stateids, and selected byte-range locks. Held backend handles retain
+        object identity across unlink/rename. The server does not start
         <code>rpcbind</code>; it uses an explicitly selected loopback TCP port.
       </>
     ),
@@ -160,13 +161,15 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
     ),
     evidence: (
       <>
-        Native macOS NFSv3 and revision-specific Linux NFS checkpoints are
-        recorded, along with rootless wire coverage. Those results do not
-        establish every platform or storage-provider combination.
+        Current-tree Rust NFS tests retain backend handles across NFSv3 unlink
+        and NFSv4 rename. Focused coverage passed 30 unit, 8 integration, and
+        266 oracle cases with 18 capability-gated skips; the TypeScript control
+        and privileged Linux/macOS native qualification remain separate.
       </>
     ),
     sources: [
       { label: 'NFS transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-nfs/README.md' },
+      { label: 'Public API parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'SQLite-over-NFS boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
     ],
   },

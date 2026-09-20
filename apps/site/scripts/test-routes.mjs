@@ -62,13 +62,13 @@ const routes = [
     path: '/docs/providers/pglite',
     status: 200,
     contentType: 'text/html',
-    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL', '40 PGlite-inclusive'],
+    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL', '40 PGlite-inclusive', 'Rust SDK 4/4', 'CLI 7/7'],
   },
   {
     path: '/docs/providers/r2',
     status: 200,
     contentType: 'text/html',
-    expected: ['Cloudflare R2 / S3-compatible blocks', 'vol-a/blocks/', 'b0123456789abcdef0123456789abcdef', 'aws s3api', 'block-only'],
+    expected: ['Cloudflare R2 / S3-compatible blocks', 'vol-a/blocks/', 'b0123456789abcdef0123456789abcdef', 'aws s3api', 'block-only', 'both metadata-provider composition gates'],
   },
   {
     path: '/docs/providers/rustfs',
@@ -117,7 +117,7 @@ const routes = [
     path: '/docs/transports/nfs',
     status: 200,
     contentType: 'text/html',
-    expected: ['NFS', 'mount_nfs', 'Preview'],
+    expected: ['NFS', 'mount_nfs', 'Preview', 'unlink/rename', '266 oracle', 'capability-gated'],
   },
   {
     path: '/docs/transports/9p',
