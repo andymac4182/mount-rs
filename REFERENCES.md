@@ -60,14 +60,9 @@
   and comparable measurements under
   [Artifact FS comparison acceptance](REQUIREMENTS.md#artifact-fs-inspiration-and-benchmark-comparison).
 - [RustFS](https://rustfs.com/): required real S3-compatible integration-test
-  service and candidate shared backend for the ZeroFS comparison. Pin the
+  service and backend for storage benchmarks. Pin the
   tested release/image and verify required semantics rather than inferring
   compatibility from the product description.
-- [Barre/ZeroFS](https://github.com/Barre/ZeroFS): user-selected feature and
-  benchmark comparison target for object-backed mounted filesystems. Review
-  its configuration, NFS/9P access, durability and recovery tests, caching,
-  and storage behavior. Track comparisons under
-  [ZeroFS comparison acceptance](REQUIREMENTS.md#zerofs-feature-and-benchmark-comparison).
 - [ComputeSDK storage benchmarks](https://github.com/computesdk/benchmarks/tree/master/benchmarks/storage):
   workload and reporting reference for the required storage benchmark suite.
   See [benchmark acceptance](REQUIREMENTS.md#storage-benchmark-acceptance).

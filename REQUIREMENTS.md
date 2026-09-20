@@ -218,37 +218,10 @@ available. Wire the required service tests into CI; a mock or a skipped test
 does not satisfy this requirement. RustFS does not replace live Cloudflare R2
 verification: retain both service-specific acceptance gates.
 
-Use the pinned RustFS service as a common backend for mount-rs versus ZeroFS
-benchmarks where supported, with isolated namespaces and equivalent resource,
+Use the pinned RustFS service for mount-rs storage benchmarks where supported,
+with isolated namespaces and recorded resource,
 cache, transport, and durability settings. Record setup failures and unsupported
 combinations instead of fabricating benchmark results.
-
-## ZeroFS feature and benchmark comparison
-
-Include [Barre/ZeroFS](https://github.com/Barre/ZeroFS) as an additional
-feature-set reference and measured benchmark competitor, not a replacement
-for the pinned mountx behavioral oracle.
-
-- Produce a revision-pinned, source-backed feature matrix: mount protocols,
-  config-driven CLI, object storage, metadata/data placement, caching,
-  compression/encryption, durability barriers, locking, recovery, and platform
-  support. Label each mount-rs item implemented, verified, missing, or future;
-  reference features are comparison candidates, not implied parity claims.
-- Run shared mounted-filesystem workloads against both implementations where
-  supported: ComputeSDK-aligned file sizes, small-file/metadata operations,
-  sequential and random I/O, concurrency, and SQLite transactions/recovery.
-  Report unsupported combinations and unavailable external services explicitly.
-- Pin ZeroFS revision/build and capture hardware, OS, transport/mount options,
-  backend/region, cache state, compression/encryption, concurrency, dataset,
-  synchronization/durability policy, raw samples, latency percentiles and
-  throughput. Separate cold and warm cache runs; do not compare unlike
-  durability policies or direct-driver timings with mounted timings as equal.
-- Review its filesystem conformance and fault-injection approaches for relevant
-  additions to our acceptance suite. Independently verify mount-rs results;
-  upstream claims and benchmark availability do not establish our correctness.
-- Preserve minimal dependencies and inspect licensing before any code reuse.
-  Additional systems such as NBD or HA require an explicit scope decision;
-  copy-on-write remains the future requirement below.
 
 ## Artifact FS inspiration and benchmark comparison
 
@@ -261,7 +234,7 @@ target; mountx remains the behavioral oracle.
   generation publication, restart recovery, and macOS/Linux mount support.
   Record applicable lessons and explicitly distinguish verified features from
   proposed mount-rs work; adding a reference does not require a Git backend.
-- Produce a source-backed feature matrix alongside the ZeroFS comparison.
+- Produce a source-backed feature matrix comparing Artifact FS and mount-rs.
   Mark unsupported or non-equivalent workloads rather than implying parity
   between a Git-backed filesystem and arbitrary storage engines.
 - Benchmark time to usable tree, first-file read, cold/warm reads, selective
@@ -271,7 +244,7 @@ target; mountx remains the behavioral oracle.
   cache/prefetch settings, downloaded bytes, memory, raw samples, latency and
   throughput. Separate preparation, mount readiness, and hydration costs;
   include end-to-end startup totals so deferred work is not hidden.
-- Preserve the ComputeSDK and ZeroFS benchmark requirements. Record actual
+- Preserve the ComputeSDK benchmark requirements. Record actual
   results or explicit prerequisites/unsupported cases, never inferred wins.
   Inspect licensing before code reuse and retain minimal dependencies.
 
