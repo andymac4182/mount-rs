@@ -58,6 +58,7 @@
     "index.d.ts",
     "postlude.cjs",
     "postlude-utilities.cjs",
+    "postlude-servers.cjs",
     "types",
     "*.node",
     "npm/*"

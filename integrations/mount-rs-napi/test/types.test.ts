@@ -270,31 +270,44 @@ function checkServerAndKvSubpaths(): void {
   const nfsServer: NfsServer = createNfsServer(filesystem, nfsOptions)
   const p9Server: P9Server = createP9Server(filesystem, p9Options)
   const s3Server: S3Server = createS3Server(filesystem, s3Options)
+  const multiBucket: S3Server = createS3Server({ buckets: { files: filesystem } }, s3Options)
+  // @ts-expect-error Every bucket must be a filesystem, not a path or an arbitrary value.
+  createS3Server({ buckets: { files: "/tmp/files" } }, s3Options)
+  void multiBucket
   const webdavServer: WebdavServer = createWebdavServer(filesystem, webdavOptions)
   const kvFilesystem: Filesystem = createUnstorageDriver({}, kvOptions)
 
   const nfsHost: string = nfsServer.host
   const nfsPort: number = nfsServer.port
-  const nfsListen: Promise<void> = nfsServer.listen()
+  const nfsListen: Promise<NfsServer> = nfsServer.listen()
   const nfsClose: Promise<void> = nfsServer.close()
   const p9Address: string | null = p9Server.address()
   const p9Connections: Array<P9Connection> = p9Server.clients()
   const p9Path: string | null = p9Server.path
-  const p9Listen: Promise<void> = p9Server.listen()
+  const p9Listen: Promise<P9Server> = p9Server.listen()
   const p9Close: Promise<void> = p9Server.close()
   const s3Url: string = s3Server.url
   const s3Buckets: Array<string> = s3Server.buckets
-  const s3Listen: Promise<void> = s3Server.listen()
+  const s3Listen: Promise<S3Server> = s3Server.listen()
   const s3Close: Promise<void> = s3Server.close()
   const webdavUrl: string = webdavServer.url
   const webdavConnections: number = webdavServer.connections
-  const webdavListen: Promise<void> = webdavServer.listen()
+  const webdavListen: Promise<WebdavServer> = webdavServer.listen()
   const webdavClose: Promise<void> = webdavServer.close()
 
   const p9Connection: P9Connection = p9Connections[0]
   const connectionId: number = p9Connection.id
   const connectionPeer: string | null = p9Connection.peer
   const connectionClosed: boolean = p9Connection.isClosed
+  const connectionCompletion: Promise<void> = p9Connection.closed
+  const disposal: Promise<void>[] = [
+    nfsServer[Symbol.asyncDispose](),
+    p9Server[Symbol.asyncDispose](),
+    s3Server[Symbol.asyncDispose](),
+    webdavServer[Symbol.asyncDispose](),
+  ]
+  void connectionCompletion
+  void disposal
   const connectionClose: Promise<void> = p9Connection.close()
   const connectionWaitClosed: Promise<void> = p9Connection.waitClosed()
 

@@ -40,19 +40,43 @@ for (const exportMarker of facadeExportMarkers) {
     changed = true
   }
 }
-if (changed) await writeFile(loader, source)
-const utilitiesMarker = "require('./postlude-utilities.cjs')(module.exports)"
-if (!source.includes(utilitiesMarker)) {
-  await writeFile(loader, `${source}\n${utilitiesMarker}\n`)
+for (const postlude of ["postlude-utilities.cjs", "postlude-servers.cjs"]) {
+  const installMarker = `require('./${postlude}')(module.exports)`
+  if (!source.includes(installMarker)) {
+    source += `\n${installMarker}\n`
+    changed = true
+  }
 }
+if (changed) await writeFile(loader, source)
 
 // Native lock scheduling is retained; the utility postlude preserves generic
 // callback values and error identity across its Promise<void> boundary.
 const declarations = new URL("./index.d.ts", import.meta.url)
 let types = await readFile(declarations, "utf8")
+const disposableLib = '/// <reference lib="esnext.disposable" />'
+if (!types.includes(disposableLib)) types = `${disposableLib}\n${types}`
 types = types.replace(
   /\b(read|write)\(callback: \(\) => Promise<undefined>\): Promise<undefined>/g,
   "$1<T>(callback: () => T | Promise<T>): Promise<T>",
+)
+// These signatures describe the public lifecycle postlude, not the narrower
+// native Promise<void> ABI. Keep generation repeatable after every napi build.
+types = types.replace(
+  /export declare class (NfsServer|P9Server|S3Server|WebdavServer) \{([\s\S]*?)\n\}/g,
+  (declaration, name, body) => {
+    body = body.replace(/listen\(\): Promise<[^>]+>/, `listen(): Promise<${name}>`)
+    if (!body.includes("[Symbol.asyncDispose]")) {
+      body += "\n  [Symbol.asyncDispose](): Promise<void>"
+    }
+    return `export declare class ${name} {${body}\n}`
+  },
+)
+types = types.replace(
+  /export declare class P9Connection \{([\s\S]*?)\n\}/g,
+  (declaration, body) => {
+    if (!/\bclosed\s*:/.test(body)) body += "\n  readonly closed: Promise<void>"
+    return `export declare class P9Connection {${body}\n}`
+  },
 )
 const utilityTypes = 'import type { FsError, FsErrorOptions } from "./types/root.js"'
 if (!types.includes(utilityTypes)) {

@@ -788,6 +788,7 @@ module.exports.Mounted = nativeBinding.Mounted
 module.exports.NfsServer = nativeBinding.NfsServer
 module.exports.P9Connection = nativeBinding.P9Connection
 module.exports.P9Server = nativeBinding.P9Server
+module.exports.P9Session = nativeBinding.P9Session
 module.exports.PathLock = nativeBinding.PathLock
 module.exports.S3Server = nativeBinding.S3Server
 module.exports.WebdavServer = nativeBinding.WebdavServer
@@ -836,3 +837,5 @@ module.exports.ERRNO_CODES = Object.freeze(nativeBinding.errnoCodes())
 module.exports.joinPath = (...parts) => nativeBinding.joinPathParts(parts)
 
 require('./postlude-utilities.cjs')(module.exports)
+
+require('./postlude-servers.cjs')(module.exports)

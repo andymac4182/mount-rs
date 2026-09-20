@@ -5,6 +5,7 @@
 //! Filesystem driver alive while exposing the small lifecycle surface that
 //! Node callers need.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -24,7 +25,7 @@ use mount_rs_s3::{
 use mount_rs_webdav::{
     WebdavServer as TransportWebdavServer, WebdavServerOptions as TransportWebdavServerOptions,
 };
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::{Buffer, Either, JsObjectValue, Object, Reference};
 use napi::{Error, Status};
 use napi_derive::napi;
 
@@ -328,12 +329,84 @@ struct P9State {
 }
 
 #[napi]
+pub struct P9Session {
+    inner: mount_rs_9p::P9Session,
+}
+
+#[napi(object)]
+pub struct P9SessionStats {
+    pub requests: f64,
+    pub replies: f64,
+    pub errors: f64,
+    pub dropped: f64,
+    pub flushed: f64,
+    pub messages: HashMap<String, f64>,
+}
+
+impl From<mount_rs_9p::P9SessionStats> for P9SessionStats {
+    fn from(stats: mount_rs_9p::P9SessionStats) -> Self {
+        Self {
+            requests: stats.requests as f64,
+            replies: stats.replies as f64,
+            errors: stats.errors as f64,
+            dropped: stats.dropped as f64,
+            flushed: stats.flushed as f64,
+            messages: stats
+                .messages
+                .into_iter()
+                .map(|(name, count)| (name, count as f64))
+                .collect(),
+        }
+    }
+}
+
+#[napi]
+impl P9Session {
+    #[napi(getter)]
+    pub fn msize(&self) -> Option<u32> {
+        self.inner.msize()
+    }
+
+    #[napi(getter)]
+    pub fn version(&self) -> Option<String> {
+        self.inner.version().map(str::to_owned)
+    }
+
+    #[napi(getter)]
+    pub fn generation(&self) -> f64 {
+        self.inner.generation() as f64
+    }
+
+    #[napi(getter)]
+    pub fn destroyed(&self) -> bool {
+        self.inner.destroyed()
+    }
+
+    #[napi(getter)]
+    pub fn inflight(&self) -> f64 {
+        self.inner.inflight() as f64
+    }
+
+    #[napi(getter)]
+    pub fn stats(&self) -> P9SessionStats {
+        self.inner.stats().into()
+    }
+}
+
+#[napi]
 pub struct P9Connection {
     inner: mount_rs_9p::P9Connection,
 }
 
 #[napi]
 impl P9Connection {
+    #[napi(getter)]
+    pub fn session(&self) -> P9Session {
+        P9Session {
+            inner: self.inner.session.clone(),
+        }
+    }
+
     #[napi(getter)]
     pub fn id(&self) -> f64 {
         self.inner.id() as f64
@@ -566,7 +639,7 @@ fn s3_options(
     (
         String,
         u16,
-        String,
+        Option<String>,
         TransportS3ServerOptions,
         S3SessionOptions,
     ),
@@ -584,10 +657,6 @@ fn s3_options(
     });
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
-    let bucket = options.bucket.unwrap_or_else(|| "mountx".to_owned());
-    if !valid_s3_bucket_name(&bucket) {
-        return Err(config_error(format!("invalid S3 bucket name {bucket:?}")));
-    }
     let credentials = options.credentials.map(|credentials| {
         TransportS3Credentials::new(credentials.access_key_id, credentials.secret_access_key)
     });
@@ -614,13 +683,50 @@ fn s3_options(
     Ok((
         host,
         port,
-        bucket,
+        options.bucket,
         TransportS3ServerOptions {
             host: address,
             port,
         },
         session,
     ))
+}
+
+type S3BucketEntries = Vec<(String, Arc<dyn FsDriver>)>;
+
+fn s3_buckets(
+    source: Either<&Filesystem, Object<'_>>,
+    bucket: Option<String>,
+) -> Result<S3BucketEntries, Error> {
+    match source {
+        Either::A(driver) => {
+            let bucket = bucket.unwrap_or_else(|| "mountx".to_owned());
+            if !valid_s3_bucket_name(&bucket) {
+                return Err(config_error(format!("invalid S3 bucket name {bucket:?}")));
+            }
+            Ok(vec![(bucket, Arc::clone(&driver.driver))])
+        }
+        Either::B(source) => {
+            let buckets = source
+                .get_named_property::<Object<'_>>("buckets")
+                .map_err(|_| config_error("S3 source must contain a buckets object"))?;
+            let mut entries = Vec::new();
+            for name in Object::keys(&buckets)
+                .map_err(|error| config_error(format!("could not enumerate S3 buckets: {error}")))?
+            {
+                if !valid_s3_bucket_name(&name) {
+                    return Err(config_error(format!("invalid S3 bucket name {name:?}")));
+                }
+                let driver = buckets
+                    .get_named_property_unchecked::<Reference<Filesystem>>(&name)
+                    .map_err(|_| {
+                        config_error(format!("S3 bucket {name:?} must contain a Filesystem"))
+                    })?;
+                entries.push((name, Arc::clone(&driver.driver)));
+            }
+            Ok(entries)
+        }
+    }
 }
 
 #[napi]
@@ -727,20 +833,25 @@ impl S3Server {
 
 #[napi]
 pub fn create_s3_server(
-    driver: &Filesystem,
+    #[napi(ts_arg_type = "Filesystem | { buckets: Record<string, Filesystem> }")] source: Either<
+        &Filesystem,
+        Object<'_>,
+    >,
     options: Option<S3ServerOptions>,
 ) -> napi::Result<S3Server> {
     let (host, requested_port, bucket, server_options, session_options) = s3_options(options)?;
+    let buckets = s3_buckets(source, bucket)?;
     let session = Arc::new(S3Session::from_buckets_with_options(
-        [(bucket.clone(), Arc::clone(&driver.driver))],
+        buckets,
         session_options,
     ));
+    let buckets = session.bucket_names();
     Ok(S3Server {
         session,
         options: server_options,
         host,
         requested_port,
-        buckets: vec![bucket],
+        buckets,
         running: Mutex::new(None),
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),

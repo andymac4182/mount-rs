@@ -123,6 +123,25 @@ async function closeSocket(socket, label) {
   }
 }
 
+async function listenLifecycle(server, label) {
+  const listening = server.listen();
+  assert.strictEqual(listening, server.listen(), `${label} listen is cached`);
+  assert.strictEqual(await within(listening, `${label} listen`), server);
+  assert.strictEqual(server.listen(), listening, `${label} does not rebind`);
+  return { listening };
+}
+
+async function closeLifecycle(server, label, listening) {
+  const closing = server.close();
+  assert.strictEqual(closing, server.close(), `${label} close is cached`);
+  await within(closing, `${label} close`);
+  assert.strictEqual(server.listen(), listening, `${label} relisten is cached`);
+  assert.strictEqual(
+    await within(server[Symbol.asyncDispose](), `${label} async dispose`),
+    undefined,
+  );
+}
+
 function nfsNullCall(xid) {
   const call = Buffer.alloc(40);
   const words = [xid, 0, 2, 100_005, 3, 0, 0, 0, 0, 0];
@@ -141,10 +160,11 @@ async function exerciseNfs() {
   const server = createNfsServer(filesystem, { host: "127.0.0.1", port: 0 });
   let socket;
   let serverReader;
+  let listening;
   try {
     assert.equal(server.host, "127.0.0.1");
     assert.equal(server.port, 0);
-    await within(server.listen(), "NFS listen");
+    listening = (await listenLifecycle(server, "NFS")).listening;
     assert.ok(server.port > 0);
 
     ({ socket, reader: serverReader } = await connectLoopback(server.port));
@@ -162,7 +182,7 @@ async function exerciseNfs() {
     if (socket) {
       await closeSocket(socket, "NFS socket close");
     }
-    await within(server.close(), "NFS close");
+    await closeLifecycle(server, "NFS", listening);
   }
 }
 
@@ -207,8 +227,10 @@ async function exerciseP9() {
   const server = createP9Server(filesystem, { host: "127.0.0.1", port: 0 });
   let socket;
   let serverReader;
+  let connection;
+  let listening;
   try {
-    await within(server.listen(), "9P listen");
+    listening = (await listenLifecycle(server, "9P")).listening;
     assert.ok(server.port > 0);
     assert.match(server.address(), /^127\.0\.0\.1:\d+$/);
 
@@ -223,6 +245,15 @@ async function exerciseP9() {
     );
     assert.equal(versionBody.readUInt32LE(0), 65_536);
     assert.equal(versionBody.subarray(6).toString(), "9P2000.L");
+
+    [connection] = server.clients();
+    assert.ok(connection);
+    const session = connection.session;
+    assert.strictEqual(connection.session, session);
+    assert.equal(session.msize, 65_536);
+    assert.equal(session.version, "9P2000.L");
+    assert.equal(session.destroyed, false);
+    assert.ok(session.stats.requests >= 1);
 
     const attachBody = Buffer.alloc(12);
     attachBody.writeUInt32LE(1, 0);
@@ -281,7 +312,11 @@ async function exerciseP9() {
     if (socket) {
       await closeSocket(socket, "9P socket close");
     }
-    await within(server.close(), "9P close");
+    if (connection) {
+      await within(connection.closed, "9P connection closed");
+      assert.equal(connection.session.destroyed, true);
+    }
+    await closeLifecycle(server, "9P", listening);
   }
 }
 
@@ -295,44 +330,55 @@ async function fetchBody(url, init, label) {
 }
 
 async function exerciseS3() {
-  const filesystem = Filesystem.memory();
-  const server = createS3Server(filesystem, {
+  const photos = Filesystem.memory();
+  const notes = Filesystem.memory();
+  const server = createS3Server({ buckets: { photos, notes } }, {
     bucket: "mountx",
     host: "127.0.0.1",
     port: 0,
   });
+  let listening;
   try {
     assert.equal(server.port, 0);
-    await within(server.listen(), "S3 listen");
+    listening = (await listenLifecycle(server, "S3")).listening;
     assert.ok(server.port > 0);
     assert.equal(server.url.endsWith("/"), false);
-    assert.deepEqual(server.buckets, ["mountx"]);
+    assert.deepEqual(server.buckets, ["notes", "photos"]);
 
     const object = Buffer.from("S3 over the real loopback HTTP listener");
     const put = await fetchBody(
-      `${server.url}/mountx/servers-s3.txt`,
+      `${server.url}/photos/servers-s3.txt`,
       { method: "PUT", body: object },
       "S3 PUT",
     );
     assert.ok(put.response.status >= 200 && put.response.status < 300);
 
     const get = await fetchBody(
-      `${server.url}/mountx/servers-s3.txt`,
+      `${server.url}/photos/servers-s3.txt`,
       { method: "GET" },
       "S3 GET",
     );
     assert.equal(get.response.status, 200);
     assert.deepEqual(get.body, object);
+
+    const isolated = await fetchBody(
+      `${server.url}/notes/servers-s3.txt`,
+      { method: "GET" },
+      "S3 bucket isolation",
+    );
+    assert.equal(isolated.response.status, 404);
+    assert.deepEqual(await photos.readFile("/servers-s3.txt"), object);
   } finally {
-    await within(server.close(), "S3 close");
+    await closeLifecycle(server, "S3", listening);
   }
 }
 
 async function exerciseWebdav() {
   const filesystem = Filesystem.memory();
   const server = createWebdavServer(filesystem, { host: "127.0.0.1", port: 0 });
+  let listening;
   try {
-    await within(server.listen(), "WebDAV listen");
+    listening = (await listenLifecycle(server, "WebDAV")).listening;
     assert.ok(server.port > 0);
     assert.equal(server.url.endsWith("/"), false);
 
@@ -352,7 +398,7 @@ async function exerciseWebdav() {
     assert.equal(get.response.status, 200);
     assert.deepEqual(get.body, object);
   } finally {
-    await within(server.close(), "WebDAV close");
+    await closeLifecycle(server, "WebDAV", listening);
   }
 }
 
