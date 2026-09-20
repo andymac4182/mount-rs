@@ -699,6 +699,7 @@ function install(binding) {
     ["decodeGetattrOut", "fuseDecodeGetattrOut"], ["encodeGetattrOut", "fuseEncodeGetattrOut"],
     ["decodeSetattrIn", "fuseDecodeSetattrIn"], ["encodeSetattrIn", "fuseEncodeSetattrIn"],
     ["decodeSetattrOut", "fuseDecodeSetattrOut"], ["encodeSetattrOut", "fuseEncodeSetattrOut"],
+    ["decodeOpenIn", "fuseDecodeOpenIn"], ["encodeOpenIn", "fuseEncodeOpenIn"],
     ["decodeOpenOut", "fuseDecodeOpenOut"], ["encodeOpenOut", "fuseEncodeOpenOut"],
     ["decodeReadIn", "fuseDecodeReadIn"], ["encodeReadIn", "fuseEncodeReadIn"],
     ["decodeReadOut", "fuseDecodeReadOut"], ["encodeReadOut", "fuseEncodeReadOut"],
