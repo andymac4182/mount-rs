@@ -19,6 +19,11 @@ Win32 error mappings are separate from platform libc errno values, and root
 tests cover drive/UNC paths. Main passed 14 macOS tests and strict Clippy;
 post-fix Windows runtime CI is still required. Directory behavior was checked
 against [libuv's Windows implementation](https://github.com/libuv/libuv/blob/v1.x/src/win/fs.c).
+Run `35500474806` reached a different failure first: SQLite fencing setup
+exhausted a 75 ms lease before publication. The test now uses long-lived setup
+leases and explicitly expires the persisted lease before takeover, retaining
+busy-owner, stale-writer, and winner-persistence assertions. Five local chunked
+concurrency tests passed; Windows runtime confirmation remains required.
 
 ## How to read and maintain this tracker
 

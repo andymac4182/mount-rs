@@ -1054,6 +1054,7 @@ dependencies = [
  "mount-rs-sqlite",
  "mount-rs-webdav",
  "object_store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

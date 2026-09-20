@@ -14,7 +14,7 @@ use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use tempfile::tempdir;
 use tokio::sync::{Barrier, Notify};
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 const OP_TIMEOUT: Duration = Duration::from_secs(10);
 const RECORD_LEN: usize = 32;
@@ -280,7 +280,7 @@ async fn sqlite_writer_instances_fence_single_owner_across_connections() {
             SqliteBlockStore::open(&blocks_path).unwrap(),
             ChunkedOptions::fixed("first-owner", 16)
                 .unwrap()
-                .with_lease_ttl(Duration::from_millis(75)),
+                .with_lease_ttl(Duration::from_secs(60)),
         )
         .await
         .unwrap();
@@ -295,7 +295,7 @@ async fn sqlite_writer_instances_fence_single_owner_across_connections() {
             SqliteBlockStore::open(&blocks_path).unwrap(),
             ChunkedOptions::fixed("busy-owner", 16)
                 .unwrap()
-                .with_lease_ttl(Duration::from_millis(75)),
+                .with_lease_ttl(Duration::from_secs(60)),
         )
         .await;
         let busy_error = match busy {
@@ -304,14 +304,24 @@ async fn sqlite_writer_instances_fence_single_owner_across_connections() {
         };
         assert_eq!(busy_error.code, ErrorCode::Eagain);
 
-        sleep(Duration::from_millis(180)).await;
+        // Expire the persisted authority explicitly after the live-owner
+        // assertion. Slow filesystem setup must not consume the test lease;
+        // publication and replacement still use the real SQLite provider.
+        let fault_connection = rusqlite::Connection::open(&metadata_path).unwrap();
+        assert_eq!(
+            fault_connection
+                .execute("UPDATE mount_rs_metadata SET expires=0", [])
+                .unwrap(),
+            1
+        );
+        drop(fault_connection);
 
         let second = ChunkedFs::open(
             SqliteMetadataStore::open(&metadata_path).unwrap(),
             SqliteBlockStore::open(&blocks_path).unwrap(),
             ChunkedOptions::fixed("second-owner", 16)
                 .unwrap()
-                .with_lease_ttl(Duration::from_millis(75)),
+                .with_lease_ttl(Duration::from_secs(60)),
         )
         .await
         .unwrap();
