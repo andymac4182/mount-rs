@@ -67,6 +67,21 @@ endpoint uses the crate's optional `rustls` feature:
 cargo test -p mount-rs-tidb --features rustls --test tidb -- --ignored --nocapture
 ```
 
+The explicit ambiguous-commit lane uses a small plaintext MySQL-wire proxy to
+forward a real TiDB session, wait for TiDB to finish `COMMIT`, and drop the
+response connection. It verifies that the provider returns an unknown outcome
+and does not replay the publication. Run it only against an actual TiDB URL:
+
+```text
+MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' \
+  cargo test -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+```
+
+This failure-injection test requires an unencrypted `mysql://` endpoint because
+the proxy must inspect the MySQL command stream. It is evidence for commit
+outcome handling, not a claim that a lost response can reveal whether TiDB
+committed; callers must reconcile the row before deciding whether to retry.
+
 CI should start a pinned TiDB service (TiDB plus its required storage/PD
 components, not MySQL), wait for port and SQL readiness, create a least-
 privilege test database/user, set `MOUNT_RS_TIDB_URL` without printing it, and
