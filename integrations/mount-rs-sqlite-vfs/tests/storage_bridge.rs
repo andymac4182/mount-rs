@@ -13,9 +13,9 @@ use mount_rs_memory::{ManualClock, MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use mount_rs_sqlite_vfs::{
     Backend, FileKind, InlineExecutor, LockLevel, OpenOptions, SqliteVfs, StorageBackend,
-    StorageOptions, VfsError,
+    StorageOptions, VfsError, VfsOptions,
 };
-use rusqlite::OpenFlags;
+use rusqlite::{Connection, OpenFlags};
 
 #[derive(Clone)]
 struct FaultBlockStore {
@@ -224,6 +224,309 @@ fn vfs_name(label: &str) -> String {
     format!("mount_rs_storage_{label}_{}", std::process::id())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum JournalMode {
+    Delete,
+    Truncate,
+    Persist,
+}
+
+impl JournalMode {
+    fn pragma(self) -> &'static str {
+        match self {
+            Self::Delete => "DELETE",
+            Self::Truncate => "TRUNCATE",
+            Self::Persist => "PERSIST",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Delete => "delete",
+            Self::Truncate => "truncate",
+            Self::Persist => "persist",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SyncLevel {
+    Normal,
+    Full,
+    Extra,
+}
+
+impl SyncLevel {
+    fn pragma(self) -> &'static str {
+        match self {
+            Self::Normal => "NORMAL",
+            Self::Full => "FULL",
+            Self::Extra => "EXTRA",
+        }
+    }
+
+    fn value(self) -> i64 {
+        match self {
+            Self::Normal => 1,
+            Self::Full => 2,
+            Self::Extra => 3,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Full => "full",
+            Self::Extra => "extra",
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct LedgerRow {
+    id: i64,
+    body: Vec<u8>,
+}
+
+fn rollback_matrix_cells() -> [(JournalMode, SyncLevel); 9] {
+    [
+        (JournalMode::Delete, SyncLevel::Normal),
+        (JournalMode::Delete, SyncLevel::Full),
+        (JournalMode::Delete, SyncLevel::Extra),
+        (JournalMode::Truncate, SyncLevel::Normal),
+        (JournalMode::Truncate, SyncLevel::Full),
+        (JournalMode::Truncate, SyncLevel::Extra),
+        (JournalMode::Persist, SyncLevel::Normal),
+        (JournalMode::Persist, SyncLevel::Full),
+        (JournalMode::Persist, SyncLevel::Extra),
+    ]
+}
+
+fn storage_matrix_vfs(backend: Arc<dyn Backend>, label: &str) -> SqliteVfs {
+    SqliteVfs::with_options(
+        &vfs_name(label),
+        backend,
+        VfsOptions {
+            // This test intentionally exercises NORMAL as well as FULL and
+            // EXTRA. The StorageBackend still performs its declared sync;
+            // this policy only permits SQLite to request NORMAL.
+            require_full_sync: false,
+        },
+    )
+    .expect("register storage matrix VFS")
+}
+
+fn memory_matrix_backend(
+    metadata: MemoryMetadataStore,
+    blocks: MemoryBlockStore,
+    owner: &str,
+) -> StorageBackend<MemoryMetadataStore, MemoryBlockStore> {
+    StorageBackend::new(
+        metadata,
+        blocks,
+        StorageOptions::volatile_for_tests(owner, 4096).expect("memory matrix options"),
+    )
+    .expect("memory matrix storage bridge")
+}
+
+fn sqlite_matrix_backend(
+    root: &Path,
+    owner: &str,
+) -> StorageBackend<SqliteMetadataStore, SqliteBlockStore> {
+    fs::create_dir_all(root).expect("matrix storage root");
+    StorageBackend::new(
+        SqliteMetadataStore::open(root.join("metadata.sqlite")).expect("matrix metadata store"),
+        SqliteBlockStore::open(root.join("blocks.sqlite")).expect("matrix block store"),
+        StorageOptions::new(owner, 4096).expect("matrix durable options"),
+    )
+    .expect("durable matrix storage bridge")
+}
+
+fn assert_matrix_configuration(
+    connection: &Connection,
+    journal_mode: JournalMode,
+    sync_level: SyncLevel,
+    phase: &str,
+) {
+    let actual_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap_or_else(|error| panic!("{phase}: query effective journal mode: {error}"));
+    assert_eq!(
+        actual_mode.to_ascii_uppercase(),
+        journal_mode.pragma(),
+        "{phase}: SQLite changed the requested journal mode"
+    );
+
+    let actual_sync: i64 = connection
+        .query_row("PRAGMA synchronous", [], |row| row.get(0))
+        .unwrap_or_else(|error| panic!("{phase}: query effective synchronous level: {error}"));
+    assert_eq!(
+        actual_sync,
+        sync_level.value(),
+        "{phase}: SQLite changed the requested synchronous level"
+    );
+}
+
+fn configure_matrix_connection(
+    connection: &Connection,
+    journal_mode: JournalMode,
+    sync_level: SyncLevel,
+    phase: &str,
+) {
+    let journal_pragma = format!("PRAGMA journal_mode={};", journal_mode.pragma());
+    let actual_mode: String = connection
+        .query_row(&journal_pragma, [], |row| row.get(0))
+        .unwrap_or_else(|error| panic!("{phase}: set journal mode: {error}"));
+    assert_eq!(
+        actual_mode.to_ascii_uppercase(),
+        journal_mode.pragma(),
+        "{phase}: requested journal mode was not accepted"
+    );
+
+    connection
+        .execute_batch(&format!("PRAGMA synchronous={};", sync_level.pragma()))
+        .unwrap_or_else(|error| panic!("{phase}: set synchronous level: {error}"));
+    assert_matrix_configuration(connection, journal_mode, sync_level, phase);
+}
+
+fn assert_matrix_ledger(connection: &Connection, expected: &[LedgerRow], phase: &str) {
+    let mut statement = connection
+        .prepare("SELECT id, body FROM records ORDER BY id")
+        .unwrap_or_else(|error| panic!("{phase}: prepare ledger query: {error}"));
+    let actual = statement
+        .query_map([], |row| {
+            Ok(LedgerRow {
+                id: row.get(0)?,
+                body: row.get(1)?,
+            })
+        })
+        .unwrap_or_else(|error| panic!("{phase}: read ledger: {error}"))
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap_or_else(|error| panic!("{phase}: collect ledger: {error}"));
+    assert_eq!(actual, expected, "{phase}: independent row ledger mismatch");
+
+    let integrity: String = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .unwrap_or_else(|error| panic!("{phase}: integrity check: {error}"));
+    assert_eq!(integrity, "ok", "{phase}: integrity check failed");
+}
+
+fn write_storage_matrix_cell(
+    vfs: &SqliteVfs,
+    database: &str,
+    journal_mode: JournalMode,
+    sync_level: SyncLevel,
+    label: &str,
+) -> Vec<LedgerRow> {
+    let first = LedgerRow {
+        id: 1,
+        body: vec![0, 1, 2, 255],
+    };
+    let rolled_back = LedgerRow {
+        id: 2,
+        body: vec![9, 8, 7, 6],
+    };
+    let committed = LedgerRow {
+        id: 3,
+        body: vec![0, 255, 17, 34, 51],
+    };
+    let mut ledger = vec![first];
+    let connection = vfs
+        .open(database, flags())
+        .unwrap_or_else(|error| panic!("{label}: open initial connection: {error}"));
+
+    configure_matrix_connection(
+        &connection,
+        journal_mode,
+        sync_level,
+        &format!("{label}: initial configuration"),
+    );
+    connection
+        .execute_batch("CREATE TABLE records(id INTEGER PRIMARY KEY, body BLOB NOT NULL);")
+        .unwrap_or_else(|error| panic!("{label}: create schema: {error}"));
+    connection
+        .execute(
+            "INSERT INTO records(id, body) VALUES (?1, ?2)",
+            rusqlite::params![ledger[0].id, &ledger[0].body],
+        )
+        .unwrap_or_else(|error| panic!("{label}: insert initial row: {error}"));
+    assert_matrix_ledger(
+        &connection,
+        &ledger,
+        &format!("{label}: after initial commit"),
+    );
+
+    connection
+        .execute_batch("BEGIN IMMEDIATE;")
+        .unwrap_or_else(|error| panic!("{label}: begin rollback transaction: {error}"));
+    connection
+        .execute(
+            "INSERT INTO records(id, body) VALUES (?1, ?2)",
+            rusqlite::params![rolled_back.id, &rolled_back.body],
+        )
+        .unwrap_or_else(|error| panic!("{label}: insert rollback row: {error}"));
+    connection
+        .execute_batch("ROLLBACK;")
+        .unwrap_or_else(|error| panic!("{label}: rollback transaction: {error}"));
+    assert_matrix_ledger(&connection, &ledger, &format!("{label}: after rollback"));
+    assert_matrix_configuration(
+        &connection,
+        journal_mode,
+        sync_level,
+        &format!("{label}: after rollback"),
+    );
+
+    connection
+        .execute(
+            "INSERT INTO records(id, body) VALUES (?1, ?2)",
+            rusqlite::params![committed.id, &committed.body],
+        )
+        .unwrap_or_else(|error| panic!("{label}: insert committed row: {error}"));
+    ledger.push(committed);
+    assert_matrix_ledger(
+        &connection,
+        &ledger,
+        &format!("{label}: after committed row"),
+    );
+    assert_matrix_configuration(
+        &connection,
+        journal_mode,
+        sync_level,
+        &format!("{label}: after committed row"),
+    );
+    drop(connection);
+    ledger
+}
+
+fn assert_storage_matrix_reopen(
+    vfs: &SqliteVfs,
+    database: &str,
+    journal_mode: JournalMode,
+    sync_level: SyncLevel,
+    expected: &[LedgerRow],
+    label: &str,
+) {
+    let connection = vfs
+        .open(database, flags())
+        .unwrap_or_else(|error| panic!("{label}: reopen connection: {error}"));
+    let reopened_mode: String = connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .unwrap_or_else(|error| panic!("{label}: query reopened journal mode: {error}"));
+    assert_eq!(
+        reopened_mode.to_ascii_uppercase(),
+        JournalMode::Delete.pragma(),
+        "{label}: non-WAL rollback mode did not reopen at SQLite's DELETE default"
+    );
+    configure_matrix_connection(
+        &connection,
+        journal_mode,
+        sync_level,
+        &format!("{label}: reopened configuration"),
+    );
+    assert_matrix_ledger(&connection, expected, &format!("{label}: after reopen"));
+    drop(connection);
+}
+
 fn assert_invalid_options(options: StorageOptions, expected: &'static str) {
     let metadata_called = Arc::new(AtomicBool::new(false));
     let blocks_called = Arc::new(AtomicBool::new(false));
@@ -306,7 +609,10 @@ fn durable_sqlite_provider_pair_runs_real_sqlite_engine() {
                  INSERT INTO records(body) VALUES (x'00ff');",
             )
             .expect("durable transaction");
+        assert!(matches!(vfs.close(), Err(VfsError::Busy)));
     }
+    vfs.close()
+        .expect("close durable VFS before provider reopen");
     let backend = Arc::new(sqlite_backend(&root, "durable-reopen"));
     let vfs = SqliteVfs::new(&vfs_name("durable_reopen"), backend).expect("register reopen VFS");
     let connection = vfs.open("durable.db", flags()).expect("reopen database");
@@ -319,7 +625,114 @@ fn durable_sqlite_provider_pair_runs_real_sqlite_engine() {
         .expect("reopen integrity check");
     assert_eq!(integrity, "ok");
     drop(connection);
+    vfs.close().expect("close reopened durable VFS");
     fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn memory_storage_backend_runs_complete_rollback_matrix_as_volatile_evidence() {
+    for (cell, (journal_mode, sync_level)) in rollback_matrix_cells().into_iter().enumerate() {
+        let label = format!(
+            "memory-matrix-{}-{}",
+            journal_mode.label(),
+            sync_level.label()
+        );
+        let database = format!("{label}.db");
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+
+        // This is a volatile close/reopen check: both bridge instances use
+        // cloned in-memory providers, so it does not claim process-restart
+        // durability or persistence outside this test process.
+        let first_backend =
+            memory_matrix_backend(metadata.clone(), blocks.clone(), &format!("{label}-first"));
+        assert!(
+            !first_backend.provider_is_durable(),
+            "{label}: memory pair must remain volatile"
+        );
+        let first_vfs = storage_matrix_vfs(
+            Arc::new(first_backend),
+            &format!("memory_matrix_{cell}_first"),
+        );
+        let ledger =
+            write_storage_matrix_cell(&first_vfs, &database, journal_mode, sync_level, &label);
+        first_vfs
+            .close()
+            .unwrap_or_else(|error| panic!("{label}: close volatile VFS: {error}"));
+
+        let reopened_backend = memory_matrix_backend(metadata, blocks, &format!("{label}-reopen"));
+        assert!(
+            !reopened_backend.provider_is_durable(),
+            "{label}: reopened memory pair must remain volatile"
+        );
+        let reopened_vfs = storage_matrix_vfs(
+            Arc::new(reopened_backend),
+            &format!("memory_matrix_{cell}_reopen"),
+        );
+        assert_storage_matrix_reopen(
+            &reopened_vfs,
+            &database,
+            journal_mode,
+            sync_level,
+            &ledger,
+            &label,
+        );
+        reopened_vfs
+            .close()
+            .unwrap_or_else(|error| panic!("{label}: close reopened volatile VFS: {error}"));
+    }
+}
+
+#[test]
+fn durable_sqlite_storage_backend_runs_complete_rollback_matrix_and_reopens() {
+    for (cell, (journal_mode, sync_level)) in rollback_matrix_cells().into_iter().enumerate() {
+        let label = format!(
+            "durable-matrix-{}-{}",
+            journal_mode.label(),
+            sync_level.label()
+        );
+        let root = temp_root(&label);
+        let database = format!("{label}.db");
+
+        // Durable evidence uses fresh SQLite metadata/block provider objects
+        // on reopen over the same provider files, unlike the memory test.
+        let first_backend = sqlite_matrix_backend(&root, &format!("{label}-first"));
+        assert!(
+            first_backend.provider_is_durable(),
+            "{label}: SQLite provider pair must be durable"
+        );
+        let first_vfs = storage_matrix_vfs(
+            Arc::new(first_backend),
+            &format!("durable_matrix_{cell}_first"),
+        );
+        let ledger =
+            write_storage_matrix_cell(&first_vfs, &database, journal_mode, sync_level, &label);
+        first_vfs
+            .close()
+            .unwrap_or_else(|error| panic!("{label}: close durable VFS: {error}"));
+
+        let reopened_backend = sqlite_matrix_backend(&root, &format!("{label}-reopen"));
+        assert!(
+            reopened_backend.provider_is_durable(),
+            "{label}: reopened SQLite provider pair must be durable"
+        );
+        let reopened_vfs = storage_matrix_vfs(
+            Arc::new(reopened_backend),
+            &format!("durable_matrix_{cell}_reopen"),
+        );
+        assert_storage_matrix_reopen(
+            &reopened_vfs,
+            &database,
+            journal_mode,
+            sync_level,
+            &ledger,
+            &label,
+        );
+        reopened_vfs
+            .close()
+            .unwrap_or_else(|error| panic!("{label}: close reopened durable VFS: {error}"));
+        fs::remove_dir_all(&root).unwrap_or_else(|error| panic!("{label}: cleanup: {error}"));
+    }
 }
 
 #[test]
@@ -560,6 +973,7 @@ fn separate_process_cannot_promote_reader_to_writer_on_durable_bridge() {
         .execute_batch("ROLLBACK")
         .expect("release parent");
     drop(connection);
+    vfs.close().expect("close parent VFS");
     fs::remove_dir_all(root).expect("cleanup");
 }
 

@@ -104,16 +104,17 @@ returns errors from `xShmMap`/`xShmLock`. `require_full_sync` defaults to true
 and rejects weaker synchronous pragmas. The crate makes no atomic-sector,
 power-safe-overwrite, or power-loss recovery claim.
 
-Registrations are process-lifetime entries in a guarded registry: duplicate
-names are rejected, and the registered callback allocation is retained for
-name-based external opens. This retention is an intentional lifetime guard,
-not a cache with eviction. Callers must use a bounded set of stable names (one
-per logical backend) and must not generate a name per request; there is no
-unregister operation while SQLite may still hold a name-based VFS pointer.
-`VfsConnection` deliberately exposes only a borrowed immutable connection or a
-closure-scoped mutable borrow; it has no bare `Connection` escape that could
-outlive the VFS registration, while the process registry also protects
-name-based external opens.
+Registrations reject duplicate active names. Explicit `SqliteVfs::close()`
+returns `Busy` while a callback or file handle is active, then unregisters a
+quiescent VFS and detaches its backend/provider resources. Backend destruction
+runs outside the registry lock, allowing reentrant destructors. Closing is
+idempotent; the name can then be reused. A small backend-free callback
+allocation remains for the process lifetime so pointers obtained before
+unregistration never dangle. Use bounded stable registrations, not one per
+request: closing releases backend resources but does not reclaim tombstones.
+`VfsConnection` exposes a borrowed connection and closure-scoped mutable access.
+File leases also protect name-opened or extracted connections independently
+of the wrapper; wrapper ownership alone is not the lifetime safety boundary.
 
 The `InlineExecutor` parks the calling thread on a real future wake rather
 than busy-looping a noop waker. The optional `tokio-executor` feature exposes
@@ -194,8 +195,10 @@ binary data, WAL rejection, duplicate-registration and name-based lifecycle
 behavior, two-connection contention, child-process contention, and an injected
 sync failure.
 
-`tests/storage_bridge.rs` runs the same engine through both the volatile memory
-provider pair and durable SQLite metadata/block providers. It covers fixed
+`tests/storage_bridge.rs` runs the complete nine-cell rollback matrix through
+each of the volatile memory and durable SQLite metadata/block provider pairs
+(18 cells). Memory reopen reuses the same volatile stores; durable reopen uses
+fresh providers over persisted files. It covers fixed
 chunk publication, durable reopen/integrity, exact per-handle authorization,
 stale-reader promotion rejection, separate-process durable lease checking, and
 faults injected before block-barrier completion and metadata publication. The

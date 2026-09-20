@@ -374,13 +374,20 @@ concurrency tests passed; Windows runtime confirmation remains required.
   the remote PGlite/RustFS test remains ignored in this run. Host-backed engine
   tests cover DELETE/TRUNCATE/PERSIST x NORMAL/FULL/EXTRA with exact binary
   ledgers and reopen checks. Memory/SQLite storage bridges have separate engine,
-  fencing, failure and subprocess checks, not yet the full nine-cell matrix.
+  fencing, failure and subprocess checks. The follow-up now adds all nine
+  rollback journal/synchronous combinations to each memory and durable SQLite
+  provider pair (18 cells), with exact committed/rolled-back bytes and reopen.
   WAL is explicitly rejected and remains unimplemented; Windows qualification,
   remote recovery, Node exposure, and broader crash/fault coverage stay open.
 - [ ] W15.1 Complete separate draft crate and actual mount-rs storage bridge;
   host-file reference implementation alone does not satisfy the requirement.
-- [ ] W15.2 Fix registration lifetime escapes through connection extraction or
+- [x] W15.2 Fix registration lifetime escapes through connection extraction or
   mutable access; test duplicate names and independently opened connections.
+  Explicit quiescent close releases provider resources, rejects active callbacks
+  and file handles, and retains backend-free callback tombstones. Main added
+  extracted-connection and closed-wrapper/name-reuse regressions and passed
+  28 local tests. Reentrant backend destruction runs outside the registry lock.
+  Two remote tests remain opt-in; these local results are not WAL acceptance.
 - [ ] W15.3 Replace noop-waker/busy polling with a valid executor/reactor contract
   or explicit unsupported rejection; test genuinely asynchronous storage.
 - [ ] W15.4 Implement real cross-connection SQLite locking or explicit safe

@@ -285,11 +285,11 @@ impl fmt::Debug for SqliteVfs {
 impl SqliteVfs {
     /// Register a rollback-journal-only VFS under `name`.
     ///
-    /// SQLite's global registry retains each successful registration for the
-    /// process lifetime so name-based external opens cannot outlive callback
-    /// state. Names are therefore a bounded resource: use one stable name per
-    /// logical backend, do not generate one per request, and expect duplicate
-    /// names to be rejected. There is intentionally no unregister operation.
+    /// SQLite's global registry retains each successful registration until
+    /// [`Self::close`] is called. Closing permits the name to be reused, but a
+    /// small backend-free callback tombstone remains for the process lifetime;
+    /// use one stable name per logical backend rather than generating one per
+    /// request.
     pub fn new(name: &str, backend: Arc<dyn Backend>) -> Result<Self, VfsError> {
         Self::with_options(name, backend, VfsOptions::default())
     }
@@ -311,14 +311,17 @@ impl SqliteVfs {
         let mut registry = registry
             .lock()
             .map_err(|_| VfsError::Other("SQLite VFS registry lock poisoned".to_owned()))?;
-        if registry.contains_key(&name_string) {
+        if registry.active.contains_key(&name_string) {
             return Err(VfsError::Other(
                 "SQLite VFS name is already registered".to_owned(),
             ));
         }
 
         let mut registration = Box::new(RegisteredVfs {
-            app: Box::new(VfsApp { backend, options }),
+            app: Box::new(VfsApp {
+                lifecycle: LifecycleState::new(backend),
+                options,
+            }),
             name,
             vfs: unsafe { std::mem::zeroed() },
         });
@@ -337,7 +340,9 @@ impl SqliteVfs {
             )));
         }
 
-        registry.insert(name_string, Arc::clone(&registration));
+        registry
+            .active
+            .insert(name_string, Arc::clone(&registration));
 
         Ok(Self { registration })
     }
@@ -347,12 +352,80 @@ impl SqliteVfs {
         self.registration.name.to_str().expect("validated VFS name")
     }
 
+    /// Quiesce and unregister this VFS, releasing its backend and provider
+    /// resources while retaining a backend-free callback tombstone.
+    ///
+    /// The operation is deliberately non-blocking. It returns
+    /// [`VfsError::Busy`] while any VFS callback or SQLite file handle is
+    /// active; callers should close those connections and retry. A successful
+    /// close prevents new opens, unregisters the VFS from SQLite's global
+    /// list, and makes a subsequent call idempotently succeed.
+    pub fn close(&self) -> Result<(), VfsError> {
+        let name = self.name().to_owned();
+        let state = Arc::clone(&self.registration.app.lifecycle);
+        {
+            let mut lifecycle = state.lock()?;
+            match lifecycle.phase {
+                LifecyclePhase::Closed => return Ok(()),
+                LifecyclePhase::Closing => return Err(VfsError::Busy),
+                LifecyclePhase::Open => {}
+            }
+            if lifecycle.active_operations != 0 || lifecycle.active_files != 0 {
+                return Err(VfsError::Busy);
+            }
+            lifecycle.phase = LifecyclePhase::Closing;
+        }
+
+        let registry = registered_vfs_registry();
+        let mut registry = registry
+            .lock()
+            .map_err(|_| VfsError::Other("SQLite VFS registry lock poisoned".to_owned()))?;
+        let rc = unsafe {
+            ffi::sqlite3_vfs_unregister(
+                &self.registration.vfs as *const ffi::sqlite3_vfs as *mut ffi::sqlite3_vfs,
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            let mut lifecycle = state.lock()?;
+            lifecycle.phase = LifecyclePhase::Open;
+            return Err(VfsError::Other(format!(
+                "sqlite3_vfs_unregister failed: {rc}"
+            )));
+        }
+
+        let retired = registry
+            .active
+            .remove(&name)
+            .expect("active VFS registration disappeared before close");
+        assert!(Arc::ptr_eq(&retired, &self.registration));
+        registry.retired.push(retired);
+        drop(registry);
+
+        let backend = {
+            let mut lifecycle = state.lock()?;
+            debug_assert_eq!(lifecycle.phase, LifecyclePhase::Closing);
+            lifecycle.phase = LifecyclePhase::Closed;
+            lifecycle.backend.take()
+        };
+        drop(backend);
+        Ok(())
+    }
+
     /// Open a connection that keeps this VFS registered for its whole life.
     pub fn open<P: AsRef<Path>>(
         &self,
         path: P,
         flags: OpenFlags,
     ) -> rusqlite::Result<VfsConnection> {
+        // Hold this registration open while SQLite resolves its name. Without
+        // this guard a closed wrapper could resolve a replacement registration
+        // that happens to reuse the name and silently switch backing stores.
+        let _operation = self.registration.app.begin_operation().map_err(|error| {
+            rusqlite::Error::SqliteFailure(
+                ffi::Error::new(ffi::SQLITE_CANTOPEN),
+                Some(error.to_string()),
+            )
+        })?;
         let connection = Connection::open_with_flags_and_vfs(path, flags, self.name())?;
         Ok(VfsConnection {
             connection,
@@ -386,8 +459,133 @@ impl Deref for VfsConnection {
 }
 
 struct VfsApp {
-    backend: Arc<dyn Backend>,
+    lifecycle: Arc<LifecycleState>,
     options: VfsOptions,
+}
+
+impl VfsApp {
+    fn begin_operation(&self) -> Result<OperationGuard, VfsError> {
+        self.lifecycle.begin_operation()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LifecyclePhase {
+    Open,
+    Closing,
+    Closed,
+}
+
+struct LifecycleInner {
+    phase: LifecyclePhase,
+    active_operations: usize,
+    active_files: usize,
+    backend: Option<Arc<dyn Backend>>,
+}
+
+struct LifecycleState {
+    inner: Mutex<LifecycleInner>,
+}
+
+impl LifecycleState {
+    fn new(backend: Arc<dyn Backend>) -> Arc<Self> {
+        Arc::new(Self {
+            inner: Mutex::new(LifecycleInner {
+                phase: LifecyclePhase::Open,
+                active_operations: 0,
+                active_files: 0,
+                backend: Some(backend),
+            }),
+        })
+    }
+
+    fn lock(&self) -> Result<std::sync::MutexGuard<'_, LifecycleInner>, VfsError> {
+        self.inner
+            .lock()
+            .map_err(|_| VfsError::Other("SQLite VFS lifecycle lock poisoned".to_owned()))
+    }
+
+    fn begin_operation(self: &Arc<Self>) -> Result<OperationGuard, VfsError> {
+        let mut lifecycle = self.lock()?;
+        match lifecycle.phase {
+            LifecyclePhase::Open => {}
+            LifecyclePhase::Closing => return Err(VfsError::Busy),
+            LifecyclePhase::Closed => {
+                return Err(VfsError::Other("SQLite VFS is closed".to_owned()));
+            }
+        }
+        let backend = lifecycle
+            .backend
+            .clone()
+            .ok_or_else(|| VfsError::Other("SQLite VFS backend is detached".to_owned()))?;
+        lifecycle.active_operations += 1;
+        Ok(OperationGuard {
+            state: Arc::clone(self),
+            backend,
+        })
+    }
+
+    fn acquire_file(self: &Arc<Self>) -> Result<FileLease, VfsError> {
+        let mut lifecycle = self.lock()?;
+        if lifecycle.phase != LifecyclePhase::Open {
+            return Err(match lifecycle.phase {
+                LifecyclePhase::Closing => VfsError::Busy,
+                LifecyclePhase::Closed => VfsError::Other("SQLite VFS is closed".to_owned()),
+                LifecyclePhase::Open => unreachable!(),
+            });
+        }
+        lifecycle.active_files += 1;
+        Ok(FileLease {
+            state: Arc::clone(self),
+        })
+    }
+
+    fn release_operation(&self) {
+        let Ok(mut lifecycle) = self.inner.lock() else {
+            return;
+        };
+        debug_assert!(lifecycle.active_operations > 0);
+        lifecycle.active_operations = lifecycle.active_operations.saturating_sub(1);
+    }
+
+    fn release_file(&self) {
+        let Ok(mut lifecycle) = self.inner.lock() else {
+            return;
+        };
+        debug_assert!(lifecycle.active_files > 0);
+        lifecycle.active_files = lifecycle.active_files.saturating_sub(1);
+    }
+}
+
+struct OperationGuard {
+    state: Arc<LifecycleState>,
+    backend: Arc<dyn Backend>,
+}
+
+impl OperationGuard {
+    fn backend(&self) -> &dyn Backend {
+        self.backend.as_ref()
+    }
+
+    fn acquire_file(&self) -> Result<FileLease, VfsError> {
+        self.state.acquire_file()
+    }
+}
+
+impl Drop for OperationGuard {
+    fn drop(&mut self) {
+        self.state.release_operation();
+    }
+}
+
+struct FileLease {
+    state: Arc<LifecycleState>,
+}
+
+impl Drop for FileLease {
+    fn drop(&mut self) {
+        self.state.release_file();
+    }
 }
 
 struct RegisteredVfs {
@@ -402,9 +600,18 @@ struct RegisteredVfs {
 unsafe impl Send for RegisteredVfs {}
 unsafe impl Sync for RegisteredVfs {}
 
-fn registered_vfs_registry() -> &'static Mutex<HashMap<String, Arc<RegisteredVfs>>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, Arc<RegisteredVfs>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Default)]
+struct VfsRegistry {
+    active: HashMap<String, Arc<RegisteredVfs>>,
+    // SQLite may still call a raw callback pointer that it obtained just
+    // before unregistering the VFS. Keep the callback allocation alive, but
+    // release its backend through SqliteVfs::close.
+    retired: Vec<Arc<RegisteredVfs>>,
+}
+
+fn registered_vfs_registry() -> &'static Mutex<VfsRegistry> {
+    static REGISTRY: OnceLock<Mutex<VfsRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(VfsRegistry::default()))
 }
 
 #[repr(C)]
@@ -414,6 +621,17 @@ struct VfsFileHandle {
     level: LockLevel,
     reject_wal: bool,
     require_full_sync: bool,
+    file_lease: Option<FileLease>,
+}
+
+impl VfsFileHandle {
+    fn begin_operation(&self) -> Result<OperationGuard, VfsError> {
+        self.file_lease
+            .as_ref()
+            .ok_or_else(|| VfsError::Other("SQLite VFS file is closed".to_owned()))?
+            .state
+            .begin_operation()
+    }
 }
 
 fn make_vfs(name: &CStr, app: &VfsApp) -> ffi::sqlite3_vfs {
@@ -502,6 +720,10 @@ unsafe extern "C" fn x_open(
         let Some(app) = app_from_vfs(vfs) else {
             return ffi::SQLITE_MISUSE;
         };
+        let operation = match app.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_CANTOPEN),
+        };
         let options = OpenOptions::from_sqlite(flags);
         if options.raw_flags & ffi::SQLITE_OPEN_WAL != 0 {
             return ffi::SQLITE_CANTOPEN;
@@ -509,7 +731,7 @@ unsafe extern "C" fn x_open(
 
         let temporary_name;
         let name = if z_name.is_null() {
-            match app.backend.temporary_name() {
+            match operation.backend().temporary_name() {
                 Ok(value) => {
                     temporary_name = value;
                     temporary_name.as_slice()
@@ -520,8 +742,12 @@ unsafe extern "C" fn x_open(
             CStr::from_ptr(z_name).to_bytes()
         };
 
-        let file = match app.backend.open(name, options) {
+        let file = match operation.backend().open(name, options) {
             Ok(file) => file,
+            Err(error) => return map_error(error, ffi::SQLITE_CANTOPEN),
+        };
+        let file_lease = match operation.acquire_file() {
+            Ok(lease) => lease,
             Err(error) => return map_error(error, ffi::SQLITE_CANTOPEN),
         };
         let vfs_file = VfsFileHandle {
@@ -532,6 +758,7 @@ unsafe extern "C" fn x_open(
             level: LockLevel::None,
             reject_wal: true,
             require_full_sync: app.options.require_full_sync,
+            file_lease: Some(file_lease),
         };
         ptr::write(p_file as *mut VfsFileHandle, vfs_file);
         if !p_out_flags.is_null() {
@@ -553,8 +780,12 @@ unsafe extern "C" fn x_delete(
         if z_name.is_null() {
             return ffi::SQLITE_MISUSE;
         }
-        match app
-            .backend
+        let operation = match app.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_DELETE),
+        };
+        match operation
+            .backend()
             .delete(CStr::from_ptr(z_name).to_bytes(), sync_dir != 0)
         {
             Ok(()) => ffi::SQLITE_OK,
@@ -583,7 +814,14 @@ unsafe extern "C" fn x_access(
             ffi::SQLITE_ACCESS_READ => AccessMode::Read,
             _ => return ffi::SQLITE_MISUSE,
         };
-        match app.backend.access(CStr::from_ptr(z_name).to_bytes(), mode) {
+        let operation = match app.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_ACCESS),
+        };
+        match operation
+            .backend()
+            .access(CStr::from_ptr(z_name).to_bytes(), mode)
+        {
             Ok(value) => {
                 *p_res_out = i32::from(value);
                 ffi::SQLITE_OK
@@ -606,7 +844,14 @@ unsafe extern "C" fn x_full_pathname(
         if z_name.is_null() || z_out.is_null() || n_out <= 0 {
             return ffi::SQLITE_MISUSE;
         }
-        let path = match app.backend.full_pathname(CStr::from_ptr(z_name).to_bytes()) {
+        let operation = match app.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_CANTOPEN_FULLPATH),
+        };
+        let path = match operation
+            .backend()
+            .full_pathname(CStr::from_ptr(z_name).to_bytes())
+        {
             Ok(path) => path,
             Err(error) => return map_error(error, ffi::SQLITE_CANTOPEN_FULLPATH),
         };
@@ -639,15 +884,25 @@ unsafe extern "C" fn x_randomness(
         } else {
             std::slice::from_raw_parts_mut(z_out.cast::<u8>(), n_byte as usize)
         };
-        match app.backend.randomness(output) {
+        let operation = match app.begin_operation() {
+            Ok(operation) => operation,
+            Err(_) => return -1,
+        };
+        match operation.backend().randomness(output) {
             Ok(()) => n_byte,
             Err(_) => -1,
         }
     })
 }
 
-unsafe extern "C" fn x_sleep(_vfs: *mut ffi::sqlite3_vfs, microseconds: c_int) -> c_int {
-    catch_code(|| {
+unsafe extern "C" fn x_sleep(vfs: *mut ffi::sqlite3_vfs, microseconds: c_int) -> c_int {
+    catch_code(|| unsafe {
+        let Some(app) = app_from_vfs(vfs) else {
+            return 0;
+        };
+        let Ok(_operation) = app.begin_operation() else {
+            return 0;
+        };
         if microseconds > 0 {
             std::thread::sleep(Duration::from_micros(microseconds as u64));
         }
@@ -655,8 +910,14 @@ unsafe extern "C" fn x_sleep(_vfs: *mut ffi::sqlite3_vfs, microseconds: c_int) -
     })
 }
 
-unsafe extern "C" fn x_current_time(_vfs: *mut ffi::sqlite3_vfs, output: *mut f64) -> c_int {
+unsafe extern "C" fn x_current_time(vfs: *mut ffi::sqlite3_vfs, output: *mut f64) -> c_int {
     catch_code(|| unsafe {
+        let Some(app) = app_from_vfs(vfs) else {
+            return ffi::SQLITE_MISUSE;
+        };
+        let Ok(_operation) = app.begin_operation() else {
+            return ffi::SQLITE_MISUSE;
+        };
         if output.is_null() {
             return ffi::SQLITE_MISUSE;
         }
@@ -666,10 +927,16 @@ unsafe extern "C" fn x_current_time(_vfs: *mut ffi::sqlite3_vfs, output: *mut f6
 }
 
 unsafe extern "C" fn x_current_time_int64(
-    _vfs: *mut ffi::sqlite3_vfs,
+    vfs: *mut ffi::sqlite3_vfs,
     output: *mut ffi::sqlite3_int64,
 ) -> c_int {
     catch_code(|| unsafe {
+        let Some(app) = app_from_vfs(vfs) else {
+            return ffi::SQLITE_MISUSE;
+        };
+        let Ok(_operation) = app.begin_operation() else {
+            return ffi::SQLITE_MISUSE;
+        };
         if output.is_null() {
             return ffi::SQLITE_MISUSE;
         }
@@ -679,11 +946,17 @@ unsafe extern "C" fn x_current_time_int64(
 }
 
 unsafe extern "C" fn x_get_last_error(
-    _vfs: *mut ffi::sqlite3_vfs,
+    vfs: *mut ffi::sqlite3_vfs,
     n_byte: c_int,
     z_err_msg: *mut c_char,
 ) -> c_int {
     catch_code(|| unsafe {
+        let Some(app) = app_from_vfs(vfs) else {
+            return -1;
+        };
+        let Ok(_operation) = app.begin_operation() else {
+            return -1;
+        };
         if n_byte > 0 && !z_err_msg.is_null() {
             *z_err_msg = 0;
         }
@@ -706,7 +979,10 @@ unsafe extern "C" fn x_close(file: *mut ffi::sqlite3_file) -> c_int {
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
-        let _ = file.file.take();
+        let file_impl = file.file.take();
+        let file_lease = file.file_lease.take();
+        drop(file_impl);
+        drop(file_lease);
         file.base.pMethods = ptr::null();
         ffi::SQLITE_OK
     })
@@ -724,6 +1000,10 @@ unsafe extern "C" fn x_read(
         }
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_READ),
         };
         let Some(file_impl) = file.file.as_mut() else {
             return ffi::SQLITE_MISUSE;
@@ -758,6 +1038,10 @@ unsafe extern "C" fn x_write(
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_WRITE),
+        };
         let Some(file_impl) = file.file.as_mut() else {
             return ffi::SQLITE_MISUSE;
         };
@@ -781,6 +1065,10 @@ unsafe extern "C" fn x_truncate(file: *mut ffi::sqlite3_file, size: ffi::sqlite3
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_TRUNCATE),
+        };
         let Some(file_impl) = file.file.as_mut() else {
             return ffi::SQLITE_MISUSE;
         };
@@ -795,6 +1083,10 @@ unsafe extern "C" fn x_sync(file: *mut ffi::sqlite3_file, flags: c_int) -> c_int
     catch_code(|| unsafe {
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_FSYNC),
         };
         let Some(file_impl) = file.file.as_mut() else {
             return ffi::SQLITE_MISUSE;
@@ -817,6 +1109,10 @@ unsafe extern "C" fn x_file_size(
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_FSTAT),
+        };
         let Some(file_impl) = file.file.as_mut() else {
             return ffi::SQLITE_MISUSE;
         };
@@ -838,6 +1134,10 @@ unsafe extern "C" fn x_lock(file: *mut ffi::sqlite3_file, requested: c_int) -> c
         };
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_LOCK),
         };
         if level <= file.level {
             return ffi::SQLITE_OK;
@@ -862,6 +1162,10 @@ unsafe extern "C" fn x_unlock(file: *mut ffi::sqlite3_file, requested: c_int) ->
         };
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_UNLOCK),
         };
         if level >= file.level {
             return ffi::SQLITE_OK;
@@ -890,6 +1194,10 @@ unsafe extern "C" fn x_check_reserved_lock(
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
         };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR_CHECKRESERVEDLOCK),
+        };
         let Some(file_impl) = file.file.as_mut() else {
             return ffi::SQLITE_MISUSE;
         };
@@ -911,6 +1219,10 @@ unsafe extern "C" fn x_file_control(
     catch_code(|| unsafe {
         let Some(file) = file_from_base(file) else {
             return ffi::SQLITE_MISUSE;
+        };
+        let _operation = match file.begin_operation() {
+            Ok(operation) => operation,
+            Err(error) => return map_error(error, ffi::SQLITE_IOERR),
         };
         match operation {
             ffi::SQLITE_FCNTL_LOCKSTATE if !argument.is_null() => {
@@ -959,6 +1271,9 @@ unsafe extern "C" fn x_sector_size(file: *mut ffi::sqlite3_file) -> c_int {
         let Some(file) = file_from_base(file) else {
             return 4096;
         };
+        let Ok(_operation) = file.begin_operation() else {
+            return 4096;
+        };
         file.file.as_ref().map_or(4096, |file| file.sector_size())
     })
 }
@@ -966,6 +1281,9 @@ unsafe extern "C" fn x_sector_size(file: *mut ffi::sqlite3_file) -> c_int {
 unsafe extern "C" fn x_device_characteristics(file: *mut ffi::sqlite3_file) -> c_int {
     catch_code(|| unsafe {
         let Some(file) = file_from_base(file) else {
+            return 0;
+        };
+        let Ok(_operation) = file.begin_operation() else {
             return 0;
         };
         file.file

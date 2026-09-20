@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_sqlite_vfs::{
@@ -250,6 +250,7 @@ fn rollback_journal_round_trip_and_integrity_check() {
         assert_eq!(integrity, "ok");
     }
 
+    vfs.close().expect("close VFS");
     fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -406,6 +407,8 @@ fn rollback_journal_matrix_records_modes_sync_and_reopen_ledger() {
             journal_mode,
             &format!("{label}: after reopen close"),
         );
+        vfs.close()
+            .unwrap_or_else(|error| panic!("{label}: close VFS: {error}"));
         fs::remove_dir_all(root).unwrap_or_else(|error| panic!("{label}: cleanup: {error}"));
     }
 }
@@ -426,6 +429,7 @@ fn wal_request_is_rejected_instead_of_falling_back() {
     assert!(!root.join("wal.db-wal").exists());
     assert!(!root.join("wal.db-shm").exists());
     drop(connection);
+    vfs.close().expect("close VFS");
     fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -481,11 +485,14 @@ fn duplicate_registration_is_rejected_and_name_open_survives_wrapper_drop() {
     let connection = vfs
         .open("registration.db", flags())
         .expect("open through wrapper");
+    let owner = vfs.clone();
     drop(vfs);
 
     let external = Connection::open_with_flags_and_vfs("registration-external.db", flags(), &name)
         .expect("name-based open must retain the registration");
+    assert!(matches!(owner.close(), Err(VfsError::Busy)));
     drop(external);
+    assert!(matches!(owner.close(), Err(VfsError::Busy)));
 
     let duplicate = SqliteVfs::new(
         &name,
@@ -495,6 +502,43 @@ fn duplicate_registration_is_rejected_and_name_open_survives_wrapper_drop() {
     assert!(duplicate.to_string().contains("already registered"));
 
     drop(connection);
+    owner.close().expect("close VFS after name-open connection");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn borrowed_connection_lifetime_blocks_close_until_wrapper_drop() {
+    let root = temp_root("borrowed-close");
+    let vfs = host_vfs(&root, "borrowed_close");
+    let mut connection = vfs.open("borrowed.db", flags()).expect("open database");
+    connection.with_connection_mut(|connection| {
+        connection
+            .execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE t(value INTEGER);")
+            .expect("initial schema");
+        assert!(matches!(vfs.close(), Err(VfsError::Busy)));
+    });
+    assert!(matches!(vfs.close(), Err(VfsError::Busy)));
+    drop(connection);
+    vfs.close()
+        .expect("close VFS after borrowed connection drop");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[test]
+fn extracted_connection_keeps_file_lease_after_wrapper_drop() {
+    let root = temp_root("extracted-close");
+    let vfs = host_vfs(&root, "extracted_close");
+    let mut wrapper = vfs.open("extracted.db", flags()).expect("open database");
+    let extracted = wrapper.with_connection_mut(|connection| {
+        std::mem::replace(connection, Connection::open_in_memory().unwrap())
+    });
+    drop(wrapper);
+    assert!(matches!(vfs.close(), Err(VfsError::Busy)));
+    extracted
+        .execute_batch("CREATE TABLE t(value INTEGER)")
+        .unwrap();
+    drop(extracted);
+    vfs.close().expect("close after extracted connection");
     fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -531,6 +575,7 @@ fn two_connections_observe_reserved_lock_contention() {
         .expect("lock becomes available");
     drop(second);
     drop(first);
+    vfs.close().expect("close VFS");
     fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -565,6 +610,7 @@ fn child_process_observes_lock_contention() {
         .execute_batch("ROLLBACK")
         .expect("release parent lock");
     drop(first);
+    vfs.close().expect("close VFS");
     fs::remove_dir_all(root).expect("cleanup");
 }
 
@@ -587,6 +633,167 @@ fn child_process_lock_attempt() {
         message.contains("busy") || message.contains("locked"),
         "{message}"
     );
+}
+
+struct BlockingBackend {
+    inner: HostDirectory,
+    block_next_open: Arc<AtomicBool>,
+    started: Arc<Barrier>,
+    release: Arc<Barrier>,
+}
+
+impl Backend for BlockingBackend {
+    fn open(&self, name: &[u8], options: OpenOptions) -> Result<Box<dyn VfsFile>, VfsError> {
+        if self.block_next_open.swap(false, Ordering::SeqCst) {
+            self.started.wait();
+            self.release.wait();
+        }
+        self.inner.open(name, options)
+    }
+
+    fn delete(&self, name: &[u8], sync_dir: bool) -> Result<(), VfsError> {
+        self.inner.delete(name, sync_dir)
+    }
+
+    fn access(&self, name: &[u8], mode: AccessMode) -> Result<bool, VfsError> {
+        self.inner.access(name, mode)
+    }
+
+    fn full_pathname(&self, name: &[u8]) -> Result<Vec<u8>, VfsError> {
+        self.inner.full_pathname(name)
+    }
+
+    fn randomness(&self, output: &mut [u8]) -> Result<(), VfsError> {
+        self.inner.randomness(output)
+    }
+
+    fn temporary_name(&self) -> Result<Vec<u8>, VfsError> {
+        self.inner.temporary_name()
+    }
+}
+
+#[test]
+fn close_race_with_active_open_fails_closed_and_releases_backend() {
+    let root = temp_root("close-race");
+    let started = Arc::new(Barrier::new(2));
+    let release = Arc::new(Barrier::new(2));
+    let block_next_open = Arc::new(AtomicBool::new(true));
+    let name = format!("mount_rs_test_close_race_{}", std::process::id());
+    let vfs = SqliteVfs::new(
+        &name,
+        Arc::new(BlockingBackend {
+            inner: HostDirectory::new(&root).expect("host backend"),
+            block_next_open: Arc::clone(&block_next_open),
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        }),
+    )
+    .expect("register VFS");
+
+    let opener = vfs.clone();
+    let opening = std::thread::spawn(move || opener.open("race.db", flags()));
+    started.wait();
+    assert!(matches!(vfs.close(), Err(VfsError::Busy)));
+
+    release.wait();
+    let connection = opening.join().expect("open thread").expect("open database");
+    assert!(matches!(vfs.close(), Err(VfsError::Busy)));
+    drop(connection);
+
+    vfs.close().expect("close VFS after race quiesces");
+    assert!(Connection::open_with_flags_and_vfs("after-close.db", flags(), &name).is_err());
+
+    let replacement = SqliteVfs::new(
+        &name,
+        Arc::new(HostDirectory::new(&root).expect("replacement host backend")),
+    )
+    .expect("reuse closed VFS name");
+    assert!(vfs.open("wrong-backend.db", flags()).is_err());
+    assert!(!root.join("wrong-backend.db").exists());
+    vfs.close()
+        .expect("old close is idempotent after name reuse");
+    let replacement_connection = replacement
+        .open("replacement.db", flags())
+        .expect("open replacement database");
+    drop(replacement_connection);
+    replacement.close().expect("close replacement VFS");
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+type DropHook = Box<dyn FnOnce() + Send>;
+
+struct ReentrantDropBackend {
+    inner: HostDirectory,
+    hook: Arc<Mutex<Option<DropHook>>>,
+}
+
+impl Drop for ReentrantDropBackend {
+    fn drop(&mut self) {
+        let hook = self.hook.lock().expect("drop hook lock").take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+}
+
+impl Backend for ReentrantDropBackend {
+    fn open(&self, name: &[u8], options: OpenOptions) -> Result<Box<dyn VfsFile>, VfsError> {
+        self.inner.open(name, options)
+    }
+
+    fn delete(&self, name: &[u8], sync_dir: bool) -> Result<(), VfsError> {
+        self.inner.delete(name, sync_dir)
+    }
+
+    fn access(&self, name: &[u8], mode: AccessMode) -> Result<bool, VfsError> {
+        self.inner.access(name, mode)
+    }
+
+    fn full_pathname(&self, name: &[u8]) -> Result<Vec<u8>, VfsError> {
+        self.inner.full_pathname(name)
+    }
+
+    fn randomness(&self, output: &mut [u8]) -> Result<(), VfsError> {
+        self.inner.randomness(output)
+    }
+
+    fn temporary_name(&self) -> Result<Vec<u8>, VfsError> {
+        self.inner.temporary_name()
+    }
+}
+
+#[test]
+fn close_drops_backend_outside_registry_lock() {
+    let root = temp_root("reentrant-drop");
+    let child_root = temp_root("reentrant-drop-child");
+    let (done_sender, done_receiver) = std::sync::mpsc::channel();
+    let child_root_for_hook = child_root.clone();
+    let hook: Arc<Mutex<Option<DropHook>>> = Arc::new(Mutex::new(Some(Box::new(move || {
+        let name = format!("mount_rs_test_reentrant_child_{}", std::process::id());
+        let child = SqliteVfs::new(
+            &name,
+            Arc::new(HostDirectory::new(&child_root_for_hook).expect("child host backend")),
+        )
+        .expect("reentrant VFS registration");
+        child.close().expect("reentrant VFS close");
+        fs::remove_dir_all(&child_root_for_hook).expect("reentrant child cleanup");
+        done_sender.send(()).expect("reentrant drop notification");
+    }))));
+    let name = format!("mount_rs_test_reentrant_{}", std::process::id());
+    let vfs = SqliteVfs::new(
+        &name,
+        Arc::new(ReentrantDropBackend {
+            inner: HostDirectory::new(&root).expect("host backend"),
+            hook,
+        }),
+    )
+    .expect("register VFS");
+
+    vfs.close().expect("close reentrant VFS");
+    done_receiver
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("backend drop must be able to reenter the registry");
+    fs::remove_dir_all(root).expect("cleanup");
 }
 
 struct FaultBackend {
@@ -708,5 +915,7 @@ fn sync_fault_is_reported_and_reopen_stays_integrity_checked() {
         .query_row("PRAGMA integrity_check", [], |row| row.get(0))
         .expect("integrity check");
     assert_eq!(integrity, "ok");
+    drop(connection);
+    vfs.close().expect("close VFS");
     fs::remove_dir_all(root).expect("cleanup");
 }
