@@ -5,6 +5,8 @@ transports/*/Cargo.lock
 .env
 .pglite/
 node_modules/
+# Generated benchmark reports are uploaded by CI, not source artifacts.
+/artifacts/storage-*.json
 integrations/mount-rs-napi/*.node
 integrations/.mount-rs-napi.napi-stage-*/
 integrations/.napi-rs-filesystem-reconciliation.*.swp

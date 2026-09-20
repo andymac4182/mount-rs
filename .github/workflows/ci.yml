@@ -257,6 +257,16 @@ jobs:
       - name: Verify PGlite integration and restart recovery
         timeout-minutes: 10
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh
+      - name: Benchmark real volatile PGlite providers
+        timeout-minutes: 5
+        run: MOUNT_RS_PGLITE_TEST_SCOPE=benchmark ./scripts/test-pglite.sh
+      - name: Preserve PGlite benchmark samples
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: storage-pglite-smoke-${{ matrix.os }}
+          path: artifacts/storage-pglite-smoke.json
+          if-no-files-found: warn
       - uses: actions/upload-artifact@v4
         with:
           name: native-${{ matrix.os }}

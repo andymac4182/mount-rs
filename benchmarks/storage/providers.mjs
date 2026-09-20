@@ -148,9 +148,9 @@ async function openNapiSqlite() {
   }
 }
 
-async function openNapiPglite(environment) {
+async function openNapiPglite(context) {
   const { Filesystem } = loadNapi()
-  const { uri } = readPgliteConfig(environment)
+  const { uri } = readPgliteConfig(context.environment)
   const filesystem = await Filesystem.pglite(uri)
   return {
     filesystem,

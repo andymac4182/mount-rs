@@ -38,6 +38,7 @@ From the repository root:
 
 ```sh
 node benchmarks/storage/test.mjs
+MOUNT_RS_PGLITE_TEST_SCOPE=benchmark ./scripts/test-pglite.sh
 node benchmarks/storage/runner.mjs --smoke --output artifacts/storage-smoke.json
 node benchmarks/storage/runner.mjs \
   --sizes 1,4,10,16 --iterations 2 --concurrency 1 \
@@ -69,6 +70,12 @@ fields needed to interpret failures.
 Useful options include `--providers`, `--timeout-ms`,
 `--cleanup-timeout-ms`, `--chunk-size-bytes`, `--payload-seed`, and
 `--network-context`. A sequential run is explicit with `--concurrency 1`.
+
+The PGlite script requires `pnpm --dir tests/pglite install --frozen-lockfile`
+and a built native addon. It starts an isolated real PGlite socket server,
+runs combined and split-provider smoke workloads, and stops the server. These
+results are explicitly volatile, not durable-disk benchmark evidence. CI runs
+this check on the Node platform matrix and uploads its JSON separately.
 
 ## Provider matrix and evidence boundaries
 

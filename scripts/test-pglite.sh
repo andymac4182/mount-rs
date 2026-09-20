@@ -26,6 +26,15 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
+if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "benchmark" ]; then
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+  MOUNT_RS_PGLITE_DURABLE=0 \
+    node "$repo_dir/benchmarks/storage/runner.mjs" --smoke \
+      --providers mount-rs-pglite,mount-rs-split-pglite \
+      --output "$repo_dir/artifacts/storage-pglite-smoke.json"
+  exit 0
+fi
+
 if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-fuse" ]; then
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
     cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_pglite_persists_through_connection_reopen -- --ignored --nocapture
