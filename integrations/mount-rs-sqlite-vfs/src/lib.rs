@@ -2141,7 +2141,12 @@ fn map_host_region(
     const PAGE_READONLY: u32 = 0x02;
     const PAGE_READWRITE: u32 = 0x04;
     const FILE_MAP_READ: u32 = 0x0004;
-    const FILE_MAP_ALL_ACCESS: u32 = 0x001f_ffff;
+    // Win32's FILE_MAP_ALL_ACCESS is SECTION_ALL_ACCESS without execute
+    // access.  The previous value (0x001f_ffff) is not the Win32 mapping-view
+    // access mask and makes MapViewOfFile fail on Windows.  Keep the value
+    // explicit because this crate intentionally has no windows-sys dependency;
+    // SQLite uses the equivalent read/write view.
+    const FILE_MAP_ALL_ACCESS: u32 = 0x000f_001f;
 
     let offset = offset as u64;
     let base = offset / WINDOWS_ALLOCATION_GRANULARITY * WINDOWS_ALLOCATION_GRANULARITY;
