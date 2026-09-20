@@ -31,6 +31,9 @@ struct Database {
 
 impl Database {
     fn open(path: Option<&Path>, schema: &str) -> Result<Self> {
+        if let Some(path) = path {
+            super::ensure_parent_directory(path)?;
+        }
         let connection = match path {
             Some(path) => Connection::open(path),
             None => Connection::open_in_memory(),

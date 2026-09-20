@@ -16,8 +16,13 @@
         "id": "sqlite",
         "token": {"env": "MOUNT_RS_SQLITE_TOKEN"},
         "driver": {
-          "kind": "sqlite",
-          "database": "./state/http.sqlite"
+          "kind": "splitstore",
+          "storage": {
+            "metadata": {"kind": "sqlite", "path": "./state/http-metadata.db"},
+            "blocks": {"kind": "sqlite", "path": "./state/http-blocks.db"},
+            "chunk_size_bytes": 4096,
+            "owner": "demo-http"
+          }
         }
       }
     ]

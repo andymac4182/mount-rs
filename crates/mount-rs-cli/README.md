@@ -123,6 +123,37 @@ configured providers.
 See `examples/config-http.json` for a memory drive and a durable SQLite drive
 with isolated tokens.
 
+### Quick local demo
+
+The checked-in example is runnable on macOS, Linux, and Windows terminals
+with `curl` (PowerShell users can use `Invoke-WebRequest` for the same routes):
+
+```sh
+MOUNT_RS_MEMORY_TOKEN=demo-memory \
+MOUNT_RS_SQLITE_TOKEN=demo-sqlite \
+  cargo run --locked -p mount-rs-cli -- serve-http \
+  --config crates/mount-rs-cli/examples/config-http.json
+```
+
+In a second terminal, use the address printed by the service:
+
+```sh
+curl -H 'Authorization: Bearer demo-memory' \
+  -X PUT --data-binary 'hello from mount-rs' \
+  http://127.0.0.1:PORT/v1/drives/memory/fs/hello.txt
+curl -H 'Authorization: Bearer demo-memory' \
+  http://127.0.0.1:PORT/v1/drives/memory/fs/hello.txt
+curl -H 'Authorization: Bearer demo-sqlite' \
+  -X PUT --data-binary 'durable split-store data' \
+  http://127.0.0.1:PORT/v1/drives/sqlite/fs/persisted.txt
+```
+
+The SQLite drive uses independent metadata and block databases under the
+example's `state/` directory. Stop and restart the service, then GET the same
+`persisted.txt` path to verify reopen persistence; the memory drive is expected
+to reset. The CLI creates missing SQLite parent directories, and generated
+demo state should be removed when finished.
+
 For a SQLite database hosted through this process's loopback NFS server, add
 `--sqlite-single-host` with `--transport nfs` or `--transport auto`. The flag
 selects the NFSv3 single-host profile: a hard mount and local-only locking

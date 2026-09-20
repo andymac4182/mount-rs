@@ -12,6 +12,21 @@ use mount_rs_core::{Result, backend_error};
 use mount_rs_persist::{LoadedSnapshot, PersistedFs, StateStore, snapshot_conflict};
 use rusqlite::{Connection, params};
 
+fn ensure_parent_directory(path: &Path) -> Result<()> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent).map_err(|error| {
+        backend_error(format!(
+            "create SQLite parent directory {}: {error}",
+            parent.display()
+        ))
+    })
+}
+
 #[derive(Clone)]
 pub struct SqliteStore {
     connection: Arc<Mutex<Connection>>,
@@ -19,6 +34,8 @@ pub struct SqliteStore {
 
 impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        let path = path.as_ref();
+        ensure_parent_directory(path)?;
         let connection = Connection::open(path).map_err(backend_error)?;
         Self::from_connection(connection)
     }
@@ -240,5 +257,18 @@ mod tests {
         let mut bytes = [0_u8; 4];
         assert_eq!(block_on(file.read(&mut bytes, Some(0))).unwrap(), 4);
         assert_eq!(bytes, [0, 1, 254, 255]);
+    }
+
+    #[test]
+    fn file_database_creates_missing_parent_directories() {
+        let root = unique_database_path();
+        let path = root.join("state").join("mount-rs.sqlite");
+        assert!(!root.exists());
+
+        let filesystem = block_on(open_sqlite(&path)).unwrap();
+        assert!(path.is_file());
+        drop(filesystem);
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
