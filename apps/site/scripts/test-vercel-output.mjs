@@ -42,6 +42,32 @@ const assetRoute = config.routes.find((route) => route.src === '/assets/(.*)')
 if (assetRoute?.headers?.['cache-control'] !== 'public, max-age=31536000, immutable') {
   throw new Error('Vercel artifact test failed: hashed asset cache policy is missing')
 }
+const requiredSecurityHeaders = [
+  'Content-Security-Policy',
+  'Permissions-Policy',
+  'Referrer-Policy',
+  'X-Content-Type-Options',
+  'X-Frame-Options',
+  'Cross-Origin-Opener-Policy',
+  'Cross-Origin-Resource-Policy',
+  'X-DNS-Prefetch-Control',
+  'X-Permitted-Cross-Domain-Policies',
+  'Strict-Transport-Security',
+]
+const globalHeaderRoute = config.routes.find(
+  (route) => route.src === '/(.*)' && route.headers?.['Content-Security-Policy'],
+)
+for (const header of requiredSecurityHeaders) {
+  if (!globalHeaderRoute?.headers?.[header]) {
+    throw new Error(`Vercel artifact test failed: missing ${header} from the generated header route`)
+  }
+}
+const missingAssetRoute = config.routes.find(
+  (route) => route.src === '/assets/(.*)' && route.status === 404,
+)
+if (missingAssetRoute?.headers?.['cache-control'] !== 'no-store') {
+  throw new Error('Vercel artifact test failed: missing asset route is not no-store')
+}
 
 for (const path of [
   'functions/__server.func/index.mjs',
@@ -54,4 +80,4 @@ for (const path of [
   await requireFile(path)
 }
 
-console.log('Vercel artifact check passed: Nitro preset, Node 24 function, prerendered routes, and hashed asset policy are present')
+console.log('Vercel artifact check passed: Nitro preset, Node 24 function, prerendered routes, security headers, and asset policies are present')
