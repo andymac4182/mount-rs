@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mount_rs_core::{FsDriver, Loopback};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
@@ -237,7 +237,7 @@ impl NfsServer {
                         let v4_session = v4_session.clone();
                         let hooks = hooks.clone();
                         let task = tokio::spawn(async move {
-                            serve_connection(NfsConnectionRuntime {
+                            serve_tcp_connection(NfsTcpConnectionRuntime {
                                 stream,
                                 peer,
                                 session,
@@ -299,7 +299,19 @@ impl Drop for NfsServer {
     }
 }
 
-struct NfsConnectionRuntime {
+struct NfsConnectionRuntime<R, W> {
+    reader: R,
+    writer: W,
+    peer: SocketAddr,
+    session: Nfs3Session,
+    v4_session: Nfs4Session,
+    record_limit: usize,
+    max_in_flight: usize,
+    hooks: NfsServerHooks,
+    reported: Arc<AtomicBool>,
+}
+
+struct NfsTcpConnectionRuntime {
     stream: TcpStream,
     peer: SocketAddr,
     session: Nfs3Session,
@@ -310,8 +322,8 @@ struct NfsConnectionRuntime {
     hooks: NfsServerHooks,
 }
 
-async fn serve_connection(runtime: NfsConnectionRuntime) {
-    let NfsConnectionRuntime {
+async fn serve_tcp_connection(runtime: NfsTcpConnectionRuntime) {
+    let NfsTcpConnectionRuntime {
         mut stream,
         peer,
         session,
@@ -345,7 +357,39 @@ async fn serve_connection(runtime: NfsConnectionRuntime) {
         let _ = stream.shutdown().await;
         return;
     }
-    let (mut reader, writer) = stream.into_split();
+    let (reader, writer) = stream.into_split();
+    serve_connection(NfsConnectionRuntime {
+        reader,
+        writer,
+        peer,
+        session,
+        v4_session,
+        record_limit,
+        max_in_flight,
+        hooks,
+        reported,
+    })
+    .await;
+}
+
+async fn serve_connection<R, W>(runtime: NfsConnectionRuntime<R, W>)
+where
+    R: AsyncRead + Send + Unpin + 'static,
+    W: AsyncWrite + Send + Unpin + 'static,
+{
+    let NfsConnectionRuntime {
+        reader,
+        writer,
+        peer,
+        session,
+        v4_session,
+        record_limit,
+        max_in_flight,
+        hooks,
+        reported,
+    } = runtime;
+    let peer_name = peer.ip().to_string();
+    let mut reader = reader;
     let writer = Arc::new(AsyncMutex::new(writer));
     let permits = Arc::new(Semaphore::new(max_in_flight.max(1)));
     let stop = Arc::new(Notify::new());
@@ -469,7 +513,11 @@ async fn serve_connection(runtime: NfsConnectionRuntime) {
                     }
                 };
                 let mut writer = writer.lock().await;
-                if let Err(error) = writer.write_all(&framed).await {
+                let result = match writer.write_all(&framed).await {
+                    Ok(()) => writer.flush().await,
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
                     if !is_expected_disconnect(&error) {
                         report_once(
                             &hooks,
@@ -518,10 +566,18 @@ fn is_loopback(address: IpAddr) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::pin::Pin;
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll};
+    use std::time::Duration;
+
     use super::*;
     use crate::constants::{MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_NULL};
     use crate::rpc::{RecordAssembler, decode_reply, encode_call};
     use mount_rs_core::MemoryFs;
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
+    use tokio::sync::Notify;
+    use tokio::time::timeout;
 
     #[tokio::test]
     async fn loopback_tcp_server_handles_rpc_without_native_mount() {
@@ -551,5 +607,264 @@ mod tests {
         assert_eq!(reply.accept_stat, Some(0));
         results.end("NULL reply").unwrap();
         server.close().await.unwrap();
+    }
+
+    #[derive(Clone)]
+    struct FaultEvents {
+        values: Arc<Mutex<Vec<NfsTransportError>>>,
+        notify: Arc<Notify>,
+    }
+
+    impl FaultEvents {
+        fn new() -> (Self, NfsServerHooks) {
+            let values = Arc::new(Mutex::new(Vec::new()));
+            let notify = Arc::new(Notify::new());
+            let callback_values = Arc::clone(&values);
+            let callback_notify = Arc::clone(&notify);
+            let hooks = NfsServerHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    callback_values
+                        .lock()
+                        .expect("NFS injected event lock")
+                        .push(error);
+                    callback_notify.notify_waiters();
+                })),
+            };
+            (Self { values, notify }, hooks)
+        }
+
+        fn snapshot(&self) -> Vec<NfsTransportError> {
+            self.values.lock().expect("NFS injected event lock").clone()
+        }
+
+        async fn wait_for(&self, count: usize) {
+            timeout(Duration::from_secs(2), async {
+                loop {
+                    if self.snapshot().len() >= count {
+                        return;
+                    }
+                    self.notify.notified().await;
+                }
+            })
+            .await
+            .expect("NFS injected transport hook callback");
+        }
+    }
+
+    struct FaultStream {
+        input: Vec<u8>,
+        offset: usize,
+        read_error: Option<io::ErrorKind>,
+        write_error: Option<io::ErrorKind>,
+        flush_error: Option<io::ErrorKind>,
+    }
+
+    impl FaultStream {
+        fn new(
+            input: Vec<u8>,
+            read_error: Option<io::ErrorKind>,
+            write_error: Option<io::ErrorKind>,
+            flush_error: Option<io::ErrorKind>,
+        ) -> Self {
+            Self {
+                input,
+                offset: 0,
+                read_error,
+                write_error,
+                flush_error,
+            }
+        }
+    }
+
+    impl AsyncRead for FaultStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let stream = self.get_mut();
+            if let Some(kind) = stream.read_error {
+                return Poll::Ready(Err(io::Error::new(kind, "injected read failure")));
+            }
+            if stream.offset == stream.input.len() {
+                return Poll::Pending;
+            }
+            let count = (stream.input.len() - stream.offset).min(buffer.remaining());
+            buffer.put_slice(&stream.input[stream.offset..stream.offset + count]);
+            stream.offset += count;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for FaultStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            let stream = self.get_mut();
+            if let Some(kind) = stream.write_error {
+                return Poll::Ready(Err(io::Error::new(kind, "injected write failure")));
+            }
+            Poll::Ready(Ok(buffer.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            let stream = self.get_mut();
+            if let Some(kind) = stream.flush_error {
+                return Poll::Ready(Err(io::Error::new(kind, "injected flush failure")));
+            }
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn null_call(xid: u32) -> Vec<u8> {
+        frame_record(&encode_call(
+            xid,
+            MOUNT_PROGRAM,
+            MOUNT_V3,
+            MOUNTPROC3_NULL,
+            None,
+            None,
+            &[],
+        ))
+        .expect("frame injected NULL call")
+    }
+
+    fn runtime(
+        stream: FaultStream,
+        hooks: NfsServerHooks,
+        max_in_flight: usize,
+    ) -> NfsConnectionRuntime<ReadHalf<FaultStream>, WriteHalf<FaultStream>> {
+        let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+        let (reader, writer) = tokio::io::split(stream);
+        NfsConnectionRuntime {
+            reader,
+            writer,
+            peer: SocketAddr::from(([127, 0, 0, 1], 12345)),
+            session: server.session.clone(),
+            v4_session: server.v4_session.clone(),
+            record_limit: DEFAULT_RECORD_LIMIT,
+            max_in_flight,
+            hooks,
+            reported: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    #[tokio::test]
+    async fn injected_read_error_reports_once() {
+        let (events, hooks) = FaultEvents::new();
+        timeout(
+            Duration::from_secs(2),
+            serve_connection(runtime(
+                FaultStream::new(Vec::new(), Some(io::ErrorKind::Other), None, None),
+                hooks,
+                1,
+            )),
+        )
+        .await
+        .expect("injected NFS read failure returns");
+        events.wait_for(1).await;
+        let observed = events.snapshot();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, NfsTransportErrorKind::Read);
+    }
+
+    #[tokio::test]
+    async fn injected_write_and_flush_errors_report_once() {
+        for (write_error, flush_error) in [
+            (Some(io::ErrorKind::Other), None),
+            (None, Some(io::ErrorKind::Other)),
+        ] {
+            let (events, hooks) = FaultEvents::new();
+            timeout(
+                Duration::from_secs(2),
+                serve_connection(runtime(
+                    FaultStream::new(null_call(1), None, write_error, flush_error),
+                    hooks,
+                    1,
+                )),
+            )
+            .await
+            .expect("injected NFS write failure returns");
+            events.wait_for(1).await;
+            let observed = events.snapshot();
+            assert_eq!(observed.len(), 1);
+            assert_eq!(observed[0].kind, NfsTransportErrorKind::Write);
+        }
+    }
+
+    #[tokio::test]
+    async fn expected_connection_reset_is_silent_on_read_write_and_flush() {
+        for (input, read_error, write_error, flush_error) in [
+            (Vec::new(), Some(io::ErrorKind::ConnectionReset), None, None),
+            (
+                null_call(1),
+                None,
+                Some(io::ErrorKind::ConnectionReset),
+                None,
+            ),
+            (
+                null_call(1),
+                None,
+                None,
+                Some(io::ErrorKind::ConnectionReset),
+            ),
+        ] {
+            let (events, hooks) = FaultEvents::new();
+            timeout(
+                Duration::from_secs(2),
+                serve_connection(runtime(
+                    FaultStream::new(input, read_error, write_error, flush_error),
+                    hooks,
+                    1,
+                )),
+            )
+            .await
+            .expect("expected NFS reset returns");
+            assert!(events.snapshot().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn broken_pipe_write_is_reported_per_upstream_semantics() {
+        let (events, hooks) = FaultEvents::new();
+        timeout(
+            Duration::from_secs(2),
+            serve_connection(runtime(
+                FaultStream::new(null_call(1), None, Some(io::ErrorKind::BrokenPipe), None),
+                hooks,
+                1,
+            )),
+        )
+        .await
+        .expect("NFS broken-pipe write returns");
+        events.wait_for(1).await;
+        let observed = events.snapshot();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, NfsTransportErrorKind::Write);
+    }
+
+    #[tokio::test]
+    async fn concurrent_response_failures_report_once() {
+        let (events, hooks) = FaultEvents::new();
+        let mut input = null_call(1);
+        input.extend_from_slice(&null_call(2));
+        timeout(
+            Duration::from_secs(2),
+            serve_connection(runtime(
+                FaultStream::new(input, None, Some(io::ErrorKind::Other), None),
+                hooks,
+                2,
+            )),
+        )
+        .await
+        .expect("concurrent NFS write failures return");
+        events.wait_for(1).await;
+        assert_eq!(events.snapshot().len(), 1);
     }
 }

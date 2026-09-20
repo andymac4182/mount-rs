@@ -115,3 +115,15 @@ async fn request_decode_failure_is_not_a_transport_error() {
     assert!(events.snapshot().is_empty());
     server.close().await.expect("close NFS test server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_server_close_does_not_report() {
+    let (server, events, address) = start_server(1024).await;
+    let _client = TcpStream::connect(address)
+        .await
+        .expect("connect before explicit NFS close");
+    sleep(Duration::from_millis(20)).await;
+    server.close().await.expect("explicitly close NFS server");
+    sleep(Duration::from_millis(20)).await;
+    assert!(events.snapshot().is_empty());
+}
