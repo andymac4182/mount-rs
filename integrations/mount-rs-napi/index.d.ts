@@ -526,6 +526,10 @@ export declare function fuseDecodeInitOut(body: Uint8Array): NativeFuseInitOut
 
 export declare function fuseDecodeInterruptIn(body: Uint8Array): NativeFuseInterruptIn
 
+export declare function fuseDecodeIoctlIn(body: Uint8Array): NativeFuseIoctlIn
+
+export declare function fuseDecodeIoctlOut(body: Uint8Array): NativeFuseIoctlOut
+
 export declare function fuseDecodeListxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseListxattrIn
 
 export declare function fuseDecodeLookupIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseNameIn
@@ -621,6 +625,10 @@ export declare function fuseEncodeInitIn(value: NativeFuseInitIn): Buffer
 export declare function fuseEncodeInitOut(value: NativeFuseInitOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeInterruptIn(value: NativeFuseInterruptIn): Buffer
+
+export declare function fuseEncodeIoctlIn(value: NativeFuseIoctlIn): Buffer
+
+export declare function fuseEncodeIoctlOut(value: NativeFuseIoctlOut): Buffer
 
 export declare function fuseEncodeListxattrIn(value: NativeFuseListxattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -1057,6 +1065,22 @@ export interface NativeFuseDirentPlus {
 
 export interface NativeFuseInterruptIn {
   unique: bigint
+}
+
+export interface NativeFuseIoctlIn {
+  fh: bigint
+  flags: number
+  cmd: number
+  arg: bigint
+  inSize: number
+  outSize: number
+}
+
+export interface NativeFuseIoctlOut {
+  result: number
+  flags: number
+  inIovs: number
+  outIovs: number
 }
 
 export interface NativeFuseKstatfs {
