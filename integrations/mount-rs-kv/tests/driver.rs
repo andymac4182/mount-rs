@@ -398,3 +398,27 @@ async fn metadata_overlay_and_read_only_capabilities() {
         ErrorCode::Erofs
     );
 }
+
+#[tokio::test]
+async fn keeps_special_node_mknod_explicitly_unsupported() {
+    let (store, fs) = setup();
+    assert!(!fs.capabilities.mknod);
+
+    let cases = [
+        ("fifo", 0o010644, 0),
+        ("socket", 0o140600, 0),
+        ("character", 0o020666, (1 << 8) | 3),
+        ("block", 0o060660, 7 << 8),
+    ];
+    for (name, mode, dev) in cases {
+        let path = format!("/{name}");
+        let error = fs
+            .mknod(&path, mode, dev)
+            .await
+            .expect_err("special node unexpectedly created");
+        assert_eq!(error.code, ErrorCode::Enosys);
+        assert_eq!(error.syscall.as_deref(), Some("mknod"));
+        assert_eq!(error.path, None);
+        assert_eq!(store.bytes(name), None);
+    }
+}
