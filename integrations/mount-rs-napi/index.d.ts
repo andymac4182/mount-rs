@@ -142,6 +142,22 @@ export declare class Mounted {
   unmount(): Promise<void>
 }
 
+export declare class NativeFuseInodeTable {
+  constructor(options?: NativeFuseInodeTableOptions | undefined | null)
+  get root(): NativeFuseInode
+  get(nodeid: bigint): NativeFuseInode | null
+  nodeids(): Array<bigint>
+  at(path: string): NativeFuseInode | null
+  require(nodeid: bigint): NativeFuseInode
+  pathOf(nodeid: bigint): string
+  requirePath(nodeid: bigint): string
+  bind(path: string, statsValue: NativeFuseInodeStats): NativeFuseInode
+  acquire(nodeid: bigint): NativeFuseInode
+  unbind(path: string): NativeFuseInode | null
+  forget(nodeid: bigint, count: bigint): boolean
+  remap(from: string, to: string): void
+}
+
 export declare class NativeFuseTranscriptRecorder {
   constructor(limit?: number | undefined | null)
   get frames(): Array<NativeFuseTranscriptFrame>
@@ -830,6 +846,22 @@ export interface NativeFuseInitOut {
   mapAlignment: number
   flags2: number
   maxStackDepth: number
+}
+
+export interface NativeFuseInode {
+  nodeid: bigint
+  key?: string
+  nlookup: bigint
+  paths: Array<string>
+}
+
+export interface NativeFuseInodeStats {
+  dev: number
+  ino: number
+}
+
+export interface NativeFuseInodeTableOptions {
+  useDriverIno?: boolean
 }
 
 export interface NativeFuseKstatfs {

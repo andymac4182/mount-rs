@@ -6,14 +6,15 @@ edit and refreshed against the current source, tests, and the pinned oracle:
 
 - repository baseline when the deleted file was recovered:
   `ac2161d27f4a6805b87580fbee20c1302e9cd9df`
-- current shared `HEAD` observed during the final refresh check:
-  `40b1f8b`
+- current shared `HEAD` observed during this packet:
+  `d6b80f4`
 - oracle checkout: `/tmp/mountx-source.uWiHfX`
 - oracle revision: `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`
 
-The worktree is shared and dirty. This file is the only file changed for this
-refresh. A component test is evidence for that component only; it does not
-close the whole transport, mount, native-host, or live-service parity item.
+The worktree is shared and dirty. This packet is restricted to the N-API
+integration and this ledger. A component test is evidence for that component
+only; it does not close the whole transport, mount, native-host, or live-service
+parity item.
 
 ## Status vocabulary
 
@@ -27,11 +28,11 @@ close the whole transport, mount, native-host, or live-service parity item.
 
 ## Package and barrel snapshot
 
-The N-API package currently exports the root, `auto`, `nfs`, `9p`, `s3`,
-`webdav`, and the three driver helpers. It has no `./fuse` export. The exact
-map is in [`package.json`](../integrations/mount-rs-napi/package.json#L11-L57).
-The oracle exports the same transport groups plus `./fuse` and exposes the
-transport barrels from its source package.
+The N-API package currently exports the root, `auto`, `nfs`, `9p`, `fuse`, `s3`,
+`webdav`, and the three driver helpers. The exact map is in
+[`package.json`](../integrations/mount-rs-napi/package.json#L11-L60). The
+`./fuse` entry is now a Rust-backed codec/inode barrel; it is deliberately not
+described as a complete session or native-mount implementation.
 
 | Boundary | Current implementation | Parity state |
 | --- | --- | --- |
@@ -39,7 +40,7 @@ transport barrels from its source package.
 | Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object; mount and server factories still require a native `Filesystem` reference | **PARTIAL** |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
-| FUSE Node subpath and full protocol barrel | Rust notify/record pieces exist; no N-API `./fuse`, and full FUSE protocol codec is absent | **PARTIAL** |
+| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces and a Rust-backed `InodeTable` are exported through `./fuse`; full request/reply body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
@@ -94,16 +95,19 @@ transport/session parity:
   [`9p-codec.mjs`](../integrations/mount-rs-napi/test/9p-codec.mjs#L132-L245)
   do not establish the complete upstream 9P server object or all protocol
   behavior.
-- The package has no `./fuse` export. The Rust FUSE barrel currently exports
-  notify and transcript record surfaces, but its core public module still only
-  contains the limited request-header/request parsing helpers; see
-  [`mount-rs-fuse/src/lib.rs`](../transports/mount-rs-fuse/src/lib.rs#L1-L129).
+- The package now has a `./fuse` export. Its codec barrel covers the currently
+  bound notify/record/protocol helpers, and its `InodeTable` facade delegates to
+  the Rust transport table. The complete request/reply body codec, session,
+  and mount objects are still not exposed at the N-API boundary; see
+  [`fuse.cjs`](../integrations/mount-rs-napi/fuse.cjs) and
+  [`fuse_inodes.rs`](../integrations/mount-rs-napi/src/fuse_inodes.rs).
 
-**Required closure evidence:** add the missing FUSE package/barrel and full
-protocol surface, then run oracle-backed subpath tests for every exported
-transport rather than treating codec fixture tests as transport completion.
+**Required closure evidence:** expose the remaining FUSE request/reply body,
+session, and native-mount surfaces, then run oracle-backed subpath tests for
+every exported transport rather than treating codec or inode fixture tests as
+transport completion.
 
-### P1 — FUSE public layer: PARTIAL
+### P1 — FUSE public layer: IMPLEMENTED (focused); PARTIAL
 
 The Rust implementation has useful, tested FUSE pieces:
 
@@ -113,12 +117,19 @@ The Rust implementation has useful, tested FUSE pieces:
   [`record.rs`](../transports/mount-rs-fuse/src/record.rs#L1-L245);
 - [`notify_record.rs`](../transports/mount-rs-fuse/tests/notify_record.rs#L30-L257)
   contains upstream fixtures, malformed-input checks, and replay reports.
+- the Rust-backed `InodeTable` is now exposed from the N-API `./fuse` barrel;
+  its facade preserves oracle-shaped `Inode` views and `Set` paths while the
+  state and mutation logic remain in Rust. The focused oracle test covers
+  driver-identity hardlinks, held orphaned nodes, `FORGET`, directory subtree
+  remapping, replacement targets, and `useDriverIno: false`; see
+  [`fuse_inodes.rs`](../integrations/mount-rs-napi/src/fuse_inodes.rs) and
+  [`fuse-inodes.mjs`](../integrations/mount-rs-napi/test/fuse-inodes.mjs).
 
 The oracle FUSE barrel also exports constants, init, inodes, mount, notify,
 protocol, record, and session, including a broad request/reply body codec.
-The current Rust `lib.rs` does not expose that full protocol module, and the
-N-API package has no `./fuse` facade. Therefore the existing FUSE tests prove
-only notify/record components.
+The N-API package still does not expose the complete request/reply body codec,
+init negotiation, session, or native mount objects. Therefore this packet
+proves the inode component only, not full FUSE transport parity.
 
 ### P1 — auto/mount option and lifecycle parity: PARTIAL; UNVERIFIED
 
@@ -244,6 +255,9 @@ ledger above records where oracle parity is still incomplete:
   and [`mount-rs-nfs/src/lib.rs`](../transports/mount-rs-nfs/src/lib.rs#L10-L38).
 - Rust S3 and WebDAV server/session/protocol pieces and FUSE notify/record
   pieces, subject to their respective partial ledgers above.
+- Rust-backed FUSE inode state through the `./fuse` `InodeTable` facade, with
+  the pinned-oracle comparison in
+  [`test/fuse-inodes.mjs`](../integrations/mount-rs-napi/test/fuse-inodes.mjs).
 
 ## Verification and evidence boundary
 
@@ -256,6 +270,8 @@ The relevant tests are intentionally separated by what they prove:
   paths when it is not.
 - `nfs-codec.mjs` and `9p-codec.mjs`: focused wire/codec comparisons, not full
   transport parity.
+- `fuse-codec.mjs` and `fuse-inodes.mjs`: focused FUSE codec and inode-table
+  comparisons; they do not prove FUSE init/session/mount parity.
 - `servers.mjs`: loopback NFS/P9/S3/WebDAV/server-lifecycle behavior where its
   individual cases run; it does not cover every oracle member.
 - Rust FUSE, 9P, NFS, S3, WebDAV, and CLI tests: component or parser evidence;

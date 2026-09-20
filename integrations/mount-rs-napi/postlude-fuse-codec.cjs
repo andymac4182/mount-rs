@@ -321,6 +321,150 @@ function install(binding) {
   }
   binding.TranscriptRecorder = TranscriptRecorder
 
+  // Keep the inode table native: the transport owns the identity, orphan,
+  // hardlink, and subtree-remap invariants.  This small facade only restores
+  // the oracle's object-shaped `Inode` view (`paths` is a Set) and accepts an
+  // Inode object where the native bridge uses its nodeid.
+  const NativeFuseInodeTable = binding.NativeFuseInodeTable
+  if (typeof NativeFuseInodeTable === "function") {
+    class InodeTable {
+      #inner
+      #options
+      #views = new Map()
+      #nodeids = new Set([1n])
+
+      constructor(options = {}) {
+        this.#options = options
+        this.#inner = new NativeFuseInodeTable(options)
+      }
+
+      #nodeid(value) {
+        return typeof value === "bigint" ? value : value.nodeid
+      }
+
+      #view(raw) {
+        if (raw == null) return undefined
+        const nodeid = raw.nodeid
+        let view = this.#views.get(nodeid)
+        if (view == null) {
+          view = { nodeid, key: undefined, nlookup: 0n, paths: new Set() }
+          this.#views.set(nodeid, view)
+        }
+        view.key = raw.key ?? undefined
+        view.nlookup = raw.nlookup
+        view.paths.clear()
+        for (const path of raw.paths) view.paths.add(path)
+        this.#nodeids.add(nodeid)
+        return view
+      }
+
+      #sync() {
+        const nativeNodeids = new Set(this.#inner.nodeids())
+        for (const nodeid of this.#nodeids) {
+          if (!nativeNodeids.has(nodeid)) {
+            const view = this.#views.get(nodeid)
+            if (view != null) {
+              view.nlookup = 0n
+              view.paths.clear()
+            }
+            this.#nodeids.delete(nodeid)
+          }
+        }
+        for (const nodeid of nativeNodeids) {
+          const raw = this.#inner.get(nodeid)
+          if (raw == null) {
+            const view = this.#views.get(nodeid)
+            if (view != null) {
+              view.nlookup = 0n
+              view.paths.clear()
+            }
+            this.#nodeids.delete(nodeid)
+          } else {
+            this.#view(raw)
+          }
+        }
+      }
+
+      get root() {
+        return this.#view(this.#inner.root)
+      }
+
+      get size() {
+        this.#sync()
+        return this.#nodeids.size
+      }
+
+      get pathCount() {
+        this.#sync()
+        let count = 0
+        for (const nodeid of this.#nodeids) count += this.#views.get(nodeid)?.paths.size ?? 0
+        return count
+      }
+
+      get(nodeid) {
+        return this.#view(this.#inner.get(nodeid))
+      }
+
+      at(path) {
+        return this.#view(this.#inner.at(path))
+      }
+
+      require(nodeid) {
+        return this.#view(this.#inner.require(nodeid))
+      }
+
+      pathOf(inode) {
+        return this.#inner.pathOf(this.#nodeid(inode))
+      }
+
+      requirePath(nodeid) {
+        return this.#inner.requirePath(nodeid)
+      }
+
+      bind(path, stats) {
+        const result = this.#view(this.#inner.bind(path, { dev: stats.dev, ino: stats.ino }))
+        this.#sync()
+        return result
+      }
+
+      acquire(inode) {
+        const result = this.#view(this.#inner.acquire(this.#nodeid(inode)))
+        this.#sync()
+        return result
+      }
+
+      forget(nodeid, count) {
+        const removed = this.#inner.forget(nodeid, count)
+        this.#sync()
+        return removed
+      }
+
+      unbind(path) {
+        const result = this.#view(this.#inner.unbind(path))
+        this.#sync()
+        return result
+      }
+
+      remap(from, to) {
+        this.#inner.remap(from, to)
+        this.#sync()
+      }
+
+      nodeids() {
+        this.#sync()
+        return this.#inner.nodeids()
+      }
+
+      clear() {
+        this.#inner = new NativeFuseInodeTable(this.#options)
+        this.#views.clear()
+        this.#nodeids = new Set([1n])
+      }
+    }
+    binding.InodeTable = InodeTable
+    binding.INODE_GENERATION = 0n
+  }
+
   binding.decodeInHeader = (bytes) => call("fuseDecodeInHeader", [copyBytes(bytes)])
   binding.encodeInHeader = (value) => call("fuseEncodeInHeader", [value])
   binding.decodeOutHeader = (bytes) => call("fuseDecodeOutHeader", [copyBytes(bytes)])

@@ -66,6 +66,7 @@ import {
   type WebdavServer,
   type WebdavServerOptions,
 } from "@mount-rs/core/webdav"
+import { InodeTable, type Inode } from "@mount-rs/core/fuse"
 
 // node:fs/promises and minimal structural drivers satisfy the public boundary.
 import * as nodeFs from "node:fs/promises"
@@ -356,6 +357,24 @@ function checkServerAndKvSubpaths(): void {
   void connectionWaitClosed
 }
 
+function checkFuseInodeSubpath(): void {
+  const table = new InodeTable({ useDriverIno: true })
+  const root: Inode = table.root
+  const inode: Inode = table.bind("/file", { dev: 1, ino: 2 })
+  const acquired: Inode = table.acquire(inode)
+  const path: string = table.pathOf(acquired)
+  const byPath: Inode | undefined = table.at(path)
+  const nodeids: bigint[] = table.nodeids()
+  const paths: Set<string> = root.paths
+  const forgotten: boolean = table.forget(inode.nodeid, 1n)
+
+  void root
+  void byPath
+  void nodeids
+  void paths
+  void forgotten
+}
+
 void checkFilesystemAndHandles
 // Public harness types and functions are available from the package root.
 import { createLoopback, resolveCapabilities, type Loopback, type ResolvedCapabilities } from "@mount-rs/core"
@@ -380,3 +399,4 @@ void checkFactories
 void checkMemorySubpath
 void checkUtilities
 void checkServerAndKvSubpaths
+void checkFuseInodeSubpath

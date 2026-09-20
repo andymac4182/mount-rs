@@ -103,6 +103,7 @@ for (const [path, exported] of [
   ["nfs", "createNfsServer"],
   ["9p", "createP9Server"],
   ["fuse", "decodeInHeader"],
+  ["fuse", "InodeTable"],
   ["s3", "createS3Server"],
   ["webdav", "createWebdavServer"],
 ]) {

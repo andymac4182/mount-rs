@@ -48,6 +48,39 @@ export declare class TranscriptError extends Error {}
 
 export declare function isProtocolError(error: unknown): error is ProtocolError
 
+export interface Inode {
+  readonly nodeid: bigint
+  key: string | undefined
+  nlookup: bigint
+  readonly paths: Set<string>
+}
+
+export interface InodeTableOptions {
+  useDriverIno?: boolean
+}
+
+export declare const INODE_GENERATION: bigint
+
+/** Rust-backed path/nodeid state used by the FUSE session. */
+export declare class InodeTable {
+  constructor(options?: InodeTableOptions)
+  readonly root: Inode
+  readonly size: number
+  readonly pathCount: number
+  get(nodeid: bigint): Inode | undefined
+  at(path: string): Inode | undefined
+  require(nodeid: bigint): Inode
+  pathOf(inode: Inode): string
+  requirePath(nodeid: bigint): string
+  bind(path: string, stats: { dev: number; ino: number }): Inode
+  acquire(inode: Inode): Inode
+  forget(nodeid: bigint, count: bigint): boolean
+  unbind(path: string): Inode | undefined
+  remap(from: string, to: string): void
+  nodeids(): bigint[]
+  clear(): void
+}
+
 export declare class TranscriptRecorder {
   constructor(options?: { limit?: number; now?: () => bigint })
   readonly frames: Array<NativeFuseTranscriptFrame>

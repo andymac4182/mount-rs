@@ -785,6 +785,7 @@ module.exports.JsMountx = nativeBinding.JsMountx
 module.exports.JsStats = nativeBinding.JsStats
 module.exports.JsStatsFs = nativeBinding.JsStatsFs
 module.exports.Mounted = nativeBinding.Mounted
+module.exports.NativeFuseInodeTable = nativeBinding.NativeFuseInodeTable
 module.exports.NativeFuseTranscriptRecorder = nativeBinding.NativeFuseTranscriptRecorder
 module.exports.NativeP9DirentPacker = nativeBinding.NativeP9DirentPacker
 module.exports.NativeP9FrameAssembler = nativeBinding.NativeP9FrameAssembler
