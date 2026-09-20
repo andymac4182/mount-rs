@@ -3,5 +3,5 @@
   "private": true,
   "type": "module",
   "scripts": { "test": "vitest run --config vitest.config.mjs" },
-  "devDependencies": { "vitest": "4.1.10" }
+  "devDependencies": { "vitest": "4.1.11" }
 }
