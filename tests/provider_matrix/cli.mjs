@@ -66,6 +66,62 @@ await commandCase(
   ["examples/node-cli/index.mjs", "--driver", "memory", "--sdk-self-test"],
 );
 
+// Run the actual Rust CLI binary through its public-SDK self-test command.
+// The command is mount-free, so this remains portable while proving that the
+// process-level CLI—not only private runtime tests—constructs a Rust SDK
+// filesystem and performs driver I/O.
+await commandCase(
+  "rust-cli-sdk-self-test",
+  "cargo",
+  [
+    "run",
+    "--quiet",
+    "--offline",
+    "--locked",
+    "-p",
+    "mount-rs-cli",
+    "--",
+    "sdk-self-test",
+  ],
+);
+
+const rustConfigDirectory = await mkdtemp(join(tmpdir(), "mount-rs-rust-cli-provider-"));
+const rustConfigPath = join(rustConfigDirectory, "splitstore.json");
+await writeFile(
+  rustConfigPath,
+  `${JSON.stringify({
+    version: 1,
+    driver: {
+      kind: "splitstore",
+      storage: {
+        metadata: { kind: "sqlite", path: "./metadata.sqlite" },
+        blocks: { kind: "sqlite", path: "./blocks.sqlite" },
+        chunk_size_bytes: 7,
+        owner: `provider-matrix-rust-cli-${providerRunId}`,
+      },
+    },
+  }, null, 2)}\n`,
+  { mode: 0o600 },
+);
+await commandCase(
+  "rust-cli-sdk-self-test-sqlite-reopen",
+  "cargo",
+  [
+    "run",
+    "--quiet",
+    "--offline",
+    "--locked",
+    "-p",
+    "mount-rs-cli",
+    "--",
+    "sdk-self-test",
+    "--config",
+    rustConfigPath,
+    "--reopen",
+  ],
+);
+await rm(rustConfigDirectory, { recursive: true, force: true });
+
 // Exercise the actual Node CLI's config-to-SDK path when the PGlite harness is
 // running. The config deliberately has no mountpoint: this is a portable,
 // mount-free consumer test that still opens the configured public SDK driver,
