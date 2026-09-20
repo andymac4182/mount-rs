@@ -513,6 +513,79 @@ function install(binding) {
   binding.direntPlusSize = (size, ctx) => call("fuseDirentPlusSize", [size, context(ctx)])
   binding.direntType = (mode) => call("fuseDirentType", [mode])
 
+  // `READDIR` bodies are variable-length records rather than one of the
+  // fixed-size structs owned by the Rust codec. Keep this small body codec in
+  // the public postlude so it follows the pinned oracle without adding a
+  // second native allocation layer. `READDIRPLUS` remains intentionally open;
+  // it also needs the negotiated `fuse_entry_out` layout and is a separate
+  // compatibility slice.
+  const direntName = (name) => {
+    if (name.includes("\0")) throw new ProtocolError("dirent name contains a NUL byte")
+    return Buffer.from(name)
+  }
+  const direntBody = (value, what) => {
+    const body = Buffer.from(value)
+    const read = (offset, size) => {
+      if (offset + size > body.length) {
+        throw new ProtocolError(
+          `truncated ${what}: need ${size} byte(s) at offset ${offset}, have ${body.length - offset}`,
+          { offset },
+        )
+      }
+    }
+    return { body, read }
+  }
+  binding.packDirents = (entries, maxSize) => {
+    const limit = Math.max(0, Math.trunc(maxSize))
+    const chunks = []
+    let used = 0
+    for (const dirent of entries) {
+      const name = direntName(dirent.name)
+      const total = binding.direntSize(name.length)
+      if (used + total > limit) break
+      const chunk = Buffer.alloc(total)
+      chunk.writeBigUInt64LE(BigInt.asUintN(64, dirent.ino), 0)
+      chunk.writeBigUInt64LE(BigInt.asUintN(64, dirent.off), 8)
+      chunk.writeUInt32LE(name.length >>> 0, 16)
+      chunk.writeUInt32LE(dirent.type >>> 0, 20)
+      name.copy(chunk, 24)
+      chunks.push(chunk)
+      used += total
+    }
+    return { buffer: Buffer.concat(chunks, used), packed: chunks.length }
+  }
+  binding.unpackDirents = (value) => {
+    const { body, read } = direntBody(value, "fuse_dirent")
+    const entries = []
+    let offset = 0
+    while (offset < body.length) {
+      const start = offset
+      read(offset, 24)
+      const ino = body.readBigUInt64LE(offset)
+      const off = body.readBigUInt64LE(offset + 8)
+      const namelen = body.readUInt32LE(offset + 16)
+      const type = body.readUInt32LE(offset + 20)
+      offset += 24
+      if (namelen > body.length - offset) {
+        throw new ProtocolError(
+          `fuse_dirent.namelen is ${namelen} but only ${body.length - offset} byte(s) remain`,
+          { offset },
+        )
+      }
+      const name = body.toString("utf8", offset, offset + namelen)
+      offset += namelen
+      const padded = start + binding.direntAlign(offset - start)
+      if (padded > body.length) {
+        throw new ProtocolError("fuse_dirent padding runs past the end of the buffer", {
+          offset,
+        })
+      }
+      offset = padded
+      entries.push({ ino, off, type, name })
+    }
+    return entries
+  }
+
   for (const [publicName, nativeName] of [
     ["decodeEntryOut", "fuseDecodeEntryOut"], ["encodeEntryOut", "fuseEncodeEntryOut"],
     ["decodeAttrOut", "fuseDecodeAttrOut"], ["encodeAttrOut", "fuseEncodeAttrOut"],
