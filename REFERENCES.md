@@ -8,6 +8,14 @@
 
 ## Inspiration and design references
 
+- [slatedb/slatedb](https://github.com/slatedb/slatedb): user-selected reference
+  for potential S3-backed storage design. Study object-storage LSM layout,
+  batched writes, explicit durable-write/flush boundaries, manifest publication,
+  compaction, recovery, and memory/disk caching. Evaluate metadata and byte-store
+  trade-offs independently, including request cost and latency. This is a
+  research reference, not a decision to depend on SlateDB or a claim that its
+  storage guarantees satisfy our SQLite-hosting contract. Any adopted design
+  must preserve fencing, atomic metadata publication, and honest fsync semantics.
 - [tursodatabase/agentfs](https://github.com/tursodatabase/agentfs): the
   user-selected filesystem design reference.
 - [Archil introduction](https://docs.archil.com/getting-started/introduction):
