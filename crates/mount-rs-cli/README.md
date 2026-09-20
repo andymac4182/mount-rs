@@ -29,6 +29,20 @@ The built-in driver choices are:
   no paths it is volatile memory; with both --database METADATA and --blocks
   BLOCKS it uses two durable SQLite databases.
 
+For a SQLite database hosted through this process's loopback NFS server, add
+`--sqlite-single-host` with `--transport nfs` or `--transport auto`. The flag
+selects the NFSv3 single-host profile: a hard mount and local-only locking
+(`locallocks` on macOS, `local_lock=all` on Linux). It is deliberately scoped
+to one host and one client; it is not distributed locking, cross-host
+coordination, or a power-loss durability guarantee. The profile is an NFS
+setting only: `--transport fuse` and `--transport 9p` reject it, and `auto`
+does not force NFS—if auto selects FUSE or 9P, no NFS profile is applied. Use
+`--transport nfs` when NFS is required.
+
+This option does not guarantee SQLite WAL support. Treat WAL as unsupported
+unless the target host and filesystem have been independently verified; use
+SQLite's DELETE journal mode for the portable single-host NFS path.
+
 The CLI never uses a native mount in its ordinary parser, help, version, probe,
 or watcher tests. Those tests verify the protocol-free portions only; they do
 not claim a native kernel mount on either platform.

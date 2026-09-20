@@ -13,6 +13,7 @@ fn help_and_version_paths_are_pure() {
         Ok(Command::Version)
     ));
     assert!(help_text(Color::disabled()).contains("--transport"));
+    assert!(help_text(Color::disabled()).contains("--sqlite-single-host"));
 }
 
 #[test]
@@ -64,4 +65,35 @@ fn invalid_arguments_are_reported_without_touching_the_filesystem() {
     assert!(error.to_string().contains("unknown transport"));
     let error = parse_args(["mount-rs", "one", "two"]).unwrap_err();
     assert!(error.to_string().contains("one mountpoint"));
+}
+
+#[test]
+fn sqlite_single_host_is_available_for_nfs_and_auto() {
+    for args in [
+        &["mount-rs", "--transport", "nfs", "--sqlite-single-host"][..],
+        &["mount-rs", "--transport", "auto", "--sqlite-single-host"][..],
+        &["mount-rs", "--sqlite-single-host"][..],
+    ] {
+        let Ok(Command::Mount(options)) = parse_args(args) else {
+            panic!("expected a mount command for {args:?}");
+        };
+        assert!(
+            options.sqlite_single_host,
+            "flag was not retained for {args:?}"
+        );
+    }
+}
+
+#[test]
+fn sqlite_single_host_rejects_non_nfs_transports() {
+    for transport in ["fuse", "9p"] {
+        let error =
+            parse_args(["mount-rs", "--transport", transport, "--sqlite-single-host"]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only valid with --transport nfs or auto"),
+            "unexpected error for {transport}: {error}"
+        );
+    }
 }

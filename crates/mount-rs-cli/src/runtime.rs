@@ -216,6 +216,7 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     let mount_options = AutoMountOptions {
         transport: options.transport.into(),
         read_only: Some(options.read_only),
+        nfs: sqlite_single_host_nfs_options(&options),
         fuse: Some(mount_rs_auto::MountOptions {
             allow_other: options.allow_other || uid == 0,
             ..mount_rs_auto::MountOptions::default()
@@ -274,6 +275,19 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         println!("  {}", color.dim(stats));
     }
     Ok(())
+}
+
+fn sqlite_single_host_nfs_options(options: &CliOptions) -> Option<mount_rs_nfs::NfsMountOptions> {
+    if !options.sqlite_single_host {
+        return None;
+    }
+
+    let mut nfs = mount_rs_nfs::NfsMountOptions::sqlite_single_host();
+    // A transport-specific override is complete, so carry the CLI's common
+    // read-only setting into the profile instead of relying on AutoMount's
+    // shared-field merge.
+    nfs.read_only = options.read_only;
+    Some(nfs)
 }
 
 fn session_stats(mounted: &AutoMount) -> Option<String> {
@@ -543,6 +557,29 @@ mod tests {
     fn driver_labels_are_explicit() {
         assert_eq!(DriverChoice::SplitStore.as_str(), "splitstore");
         assert_eq!(TransportChoice::P9.as_str(), "9p");
+    }
+
+    #[test]
+    fn sqlite_single_host_profile_is_an_nfs_only_override() {
+        let options = CliOptions {
+            read_only: true,
+            sqlite_single_host: true,
+            ..CliOptions::default()
+        };
+        let nfs = sqlite_single_host_nfs_options(&options).expect("profile override");
+        assert!(nfs.hard);
+        assert!(nfs.read_only);
+        assert_eq!(nfs.version, mount_rs_nfs::NfsVersion::V3);
+        let rendered =
+            mount_rs_nfs::nfs_mount_options(2049, &nfs, mount_rs_nfs::NfsPlatform::Linux)
+                .expect("profile renders");
+        assert!(rendered.contains("local_lock=all"));
+        assert!(rendered.contains("hard"));
+    }
+
+    #[test]
+    fn sqlite_single_host_profile_is_omitted_by_default() {
+        assert!(sqlite_single_host_nfs_options(&CliOptions::default()).is_none());
     }
 
     #[tokio::test]

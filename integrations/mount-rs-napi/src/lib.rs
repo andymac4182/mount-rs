@@ -1461,10 +1461,14 @@ fn auto_options(options: Option<JsAutoMountOptions>) -> Result<AutoMountOptions,
         unmount_timeout: validate_unmount_timeout(options.unmount_timeout_ms)?,
         fuse: None,
         p9: None,
-        nfs: options
-            .nfs_sqlite_single_host
-            .unwrap_or(false)
-            .then(mount_rs_nfs::NfsMountOptions::sqlite_single_host),
+        nfs: options.nfs_sqlite_single_host.unwrap_or(false).then(|| {
+            let mut nfs = mount_rs_nfs::NfsMountOptions::sqlite_single_host();
+            nfs.read_only = options.read_only.unwrap_or(false);
+            if let Some(timeout) = options.unmount_timeout_ms {
+                nfs.unmount_timeout = Some(Duration::from_millis(timeout as u64));
+            }
+            nfs
+        }),
     })
 }
 
@@ -2296,13 +2300,15 @@ mod tests {
         assert!(auto_options(None).unwrap().nfs.is_none());
         let options = auto_options(Some(JsAutoMountOptions {
             transport: Some("nfs".into()),
-            read_only: None,
-            unmount_timeout_ms: None,
+            read_only: Some(true),
+            unmount_timeout_ms: Some(1234.0),
             nfs_sqlite_single_host: Some(true),
         }))
         .unwrap();
         let nfs = options.nfs.unwrap();
         assert!(nfs.hard);
+        assert!(nfs.read_only);
+        assert_eq!(nfs.unmount_timeout, Some(Duration::from_millis(1234)));
         let native =
             mount_rs_nfs::native::nfs_mount_options(2049, &nfs, mount_rs_nfs::NfsPlatform::Macos)
                 .unwrap();

@@ -87,6 +87,7 @@ pub struct CliOptions {
     pub read_only: bool,
     pub empty: bool,
     pub allow_other: bool,
+    pub sqlite_single_host: bool,
     pub driver: DriverChoice,
     pub root: Option<PathBuf>,
     pub database: Option<PathBuf>,
@@ -103,6 +104,7 @@ impl Default for CliOptions {
             read_only: false,
             empty: false,
             allow_other: false,
+            sqlite_single_host: false,
             driver: DriverChoice::Memory,
             root: None,
             database: None,
@@ -205,6 +207,7 @@ where
                 "read-only" => values.read_only = true,
                 "empty" => values.empty = true,
                 "allow-other" => values.allow_other = true,
+                "sqlite-single-host" => values.sqlite_single_host = true,
                 "mountpoint" => {
                     values.mountpoint = Some(PathBuf::from(value(name, inline_value, &mut args)?))
                 }
@@ -252,6 +255,7 @@ where
         values.mountpoint = Some(PathBuf::from(mountpoint));
     }
     validate_driver_options(&values)?;
+    validate_transport_options(&values)?;
     Ok(Command::Mount(values))
 }
 
@@ -353,11 +357,25 @@ fn validate_driver_options(values: &CliOptions) -> Result<(), ParseError> {
     }
 }
 
+fn validate_transport_options(values: &CliOptions) -> Result<(), ParseError> {
+    if values.sqlite_single_host
+        && matches!(
+            values.transport,
+            TransportChoice::Fuse | TransportChoice::P9
+        )
+    {
+        return Err(ParseError::new(
+            "--sqlite-single-host is only valid with --transport nfs or auto",
+        ));
+    }
+    Ok(())
+}
+
 pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),
