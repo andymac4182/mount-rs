@@ -514,6 +514,10 @@ export declare function fuseDecodeOpenOut(body: Uint8Array, context?: NativeFuse
 
 export declare function fuseDecodeOutHeader(bytes: Uint8Array): NativeFuseOutHeader
 
+export declare function fuseDecodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseReadIn
+
+export declare function fuseDecodeReadOut(body: Uint8Array): NativeFuseRawData
+
 export declare function fuseDecodeStatfsOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseKstatfs
 
 export declare function fuseDecodeTranscript(bytes: Uint8Array): Array<NativeFuseTranscriptFrame>
@@ -555,6 +559,10 @@ export declare function fuseEncodeNotifyInvalInode(value: NativeFuseNotifyInvalI
 export declare function fuseEncodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeOutHeader(value: NativeFuseOutHeader): Buffer
+
+export declare function fuseEncodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeReadOut(value: NativeFuseRawData): Buffer
 
 export declare function fuseEncodeReply(unique: bigint, body?: Uint8Array): Buffer
 
@@ -935,6 +943,19 @@ export interface NativeFuseOutHeader {
 export interface NativeFuseProtocolContext {
   minor: number
   setxattrExt: boolean
+}
+
+export interface NativeFuseRawData {
+  data: Uint8Array
+}
+
+export interface NativeFuseReadIn {
+  fh: bigint
+  offset: bigint
+  size: number
+  readFlags: number
+  lockOwner: bigint
+  flags: number
 }
 
 export interface NativeFuseSplitInitFlags {
