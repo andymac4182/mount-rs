@@ -4,8 +4,8 @@ use crate::{
     Request,
     constants::{
         FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET, FUSE_INTERRUPT,
-        FUSE_KERNEL_MINOR_VERSION, FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK,
-        FUSE_RENAME2, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION, FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL,
+        FUSE_READLINK, FUSE_RENAME2, FUSE_SETXATTR_EXT, FUSE_STATFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -19,6 +19,7 @@ use mount_rs_core::{ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Resu
 use std::{collections::HashMap, sync::Arc};
 
 type DirectorySnapshot = Option<Vec<(String, u32)>>;
+const FUSE_IOCTL_IN_SIZE: usize = 32;
 
 async fn stat_of(driver: &dyn FsDriver, path: &str) -> Result<Stats> {
     match driver.lstat(path).await {
@@ -76,6 +77,16 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
     };
     if exact.is_some_and(|size| body.len() != size) {
         return Err(FsError::new(ErrorCode::Einval));
+    }
+    if opcode == FUSE_IOCTL {
+        let input_size =
+            usize::try_from(u32_at(body, 24)?).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let expected = FUSE_IOCTL_IN_SIZE
+            .checked_add(input_size)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        if body.len() != expected {
+            return Err(FsError::new(ErrorCode::Einval));
+        }
     }
     if opcode == FUSE_BATCH_FORGET {
         if body.len() < 8 {
@@ -682,6 +693,7 @@ impl FuseSession {
                 // default poll result and will not keep sending POLL calls.
                 Err(FsError::enosys("poll"))
             }
+            FUSE_IOCTL => Err(FsError::enosys(crate::constants::opcode_name(FUSE_IOCTL))),
             FUSE_FALLOCATE | FUSE_RENAME2 | FUSE_LSEEK | FUSE_COPY_FILE_RANGE => {
                 // These operations have no corresponding FsDriver capability
                 // yet. Their wire bodies were validated before dispatch, so a
