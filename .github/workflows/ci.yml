@@ -19,6 +19,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: tests/ozone -> target
+      - name: Validate the Ozone provider config without credentials or mounts
+        run: |
+          cargo test --locked -p mount-rs-cli --test cli \
+            actual_binary_validates_the_loopback_ozone_provider_config_without_credentials_or_network
+          node examples/node-cli/index.mjs \
+            --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
       - name: Verify real Apache Ozone block contract and restart recovery
         run: sh scripts/test-ozone.sh
 

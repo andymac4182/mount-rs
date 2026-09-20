@@ -126,6 +126,29 @@ fn actual_binary_validates_provider_config_without_credentials_or_network() {
 }
 
 #[test]
+fn actual_binary_validates_the_loopback_ozone_provider_config_without_credentials_or_network() {
+    let config = format!(
+        "{}/examples/config-pglite-ozone.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["validate-config", "--config", &config])
+        .env_remove("MOUNT_RS_PGLITE_URL")
+        .env_remove("R2_ACCESS_KEY_ID")
+        .env_remove("R2_SECRET_ACCESS_KEY")
+        .output()
+        .expect("run actual mount-rs Ozone config validator");
+    assert!(
+        output.status.success(),
+        "Ozone config validator failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("valid config:"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("missing environment variable"));
+}
+
+#[test]
 fn actual_binary_uses_the_public_rust_sdk_for_mount_free_self_tests() {
     let memory = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
         .args(["sdk-self-test"])

@@ -51,6 +51,32 @@ const invalidRoot = await runCli([
 assert.equal(invalidRoot.code, 2, output(invalidRoot));
 assert.match(invalidRoot.stderr, /--root is only valid/);
 
+const ozoneConfig = resolve(
+  repositoryRoot,
+  "crates/mount-rs-cli/examples/config-pglite-ozone.json",
+);
+const ozoneFixture = JSON.parse(await fs.readFile(ozoneConfig, "utf8"));
+assert.equal(ozoneFixture.version, 1);
+assert.equal(ozoneFixture.driver?.kind, "splitstore");
+assert.equal(ozoneFixture.driver?.storage?.metadata?.kind, "pglite");
+assert.equal(ozoneFixture.driver?.storage?.blocks?.kind, "r2");
+assert.equal(ozoneFixture.driver?.storage?.blocks?.endpoint, "http://127.0.0.1:9878");
+assert.equal(ozoneFixture.driver?.storage?.blocks?.bucket, "mount-rs-ozone-test");
+assert.deepEqual(ozoneFixture.driver?.storage?.blocks?.access_key_id, {
+  env: "R2_ACCESS_KEY_ID",
+});
+assert.deepEqual(ozoneFixture.driver?.storage?.blocks?.secret_access_key, {
+  env: "R2_SECRET_ACCESS_KEY",
+});
+const ozoneCheck = await runCli(
+  ["--config", ozoneConfig, "--check"],
+  { MOUNT_RS_NAPI_PACKAGE: "@mount-rs/this-package-must-not-be-loaded-for-check" },
+);
+assert.equal(ozoneCheck.code, 0, output(ozoneCheck));
+assert.match(ozoneCheck.stdout, /driver=splitstore/);
+assert.match(ozoneCheck.stdout, /no SDK loaded; no mount attempted/);
+assert.doesNotMatch(output(ozoneCheck), /^mounted\s+/im);
+
 const sdkSelfTest = await runCli([
   "--driver", "memory", "--sdk-self-test",
 ]);

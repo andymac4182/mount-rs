@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one RustFS combo command in a bounded, isolated process group."""
+"""Run one provider-composition command in a bounded process group."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import time
 
 TIMEOUT_EXIT = 124
 GROUP_CLEANUP_EXIT = 125
-GROUP_STOP_SECONDS = 5.0
+DEFAULT_GROUP_STOP_SECONDS = 5.0
 
 
 def group_exists(pgid: int) -> bool:
@@ -57,21 +57,21 @@ def wait_group_gone(pgid: int, seconds: float) -> bool:
     return True
 
 
-def stop_group(process: subprocess.Popen[object]) -> bool:
+def stop_group(process: subprocess.Popen[object], group_stop_seconds: float) -> bool:
     pgid = process.pid
     signal_group(pgid, signal.SIGTERM)
     try:
-        process.wait(timeout=GROUP_STOP_SECONDS)
+        process.wait(timeout=group_stop_seconds)
     except subprocess.TimeoutExpired:
         pass
-    group_gone = wait_group_gone(pgid, GROUP_STOP_SECONDS)
+    group_gone = wait_group_gone(pgid, group_stop_seconds)
     if not group_gone:
         signal_group(pgid, signal.SIGKILL)
         try:
-            process.wait(timeout=GROUP_STOP_SECONDS)
+            process.wait(timeout=group_stop_seconds)
         except subprocess.TimeoutExpired:
             pass
-        group_gone = wait_group_gone(pgid, GROUP_STOP_SECONDS)
+        group_gone = wait_group_gone(pgid, group_stop_seconds)
     if process.poll() is None:
         return False
     return group_gone
@@ -102,11 +102,24 @@ def main(argv: list[str]) -> int:
     pid_file = Path(argv[3])
     name = argv[4]
     command = argv[5]
+    try:
+        group_stop_seconds = float(
+            os.environ.get(
+                "RUSTFS_COMBO_GROUP_STOP_SECONDS",
+                str(DEFAULT_GROUP_STOP_SECONDS),
+            )
+        )
+    except ValueError:
+        print("RUSTFS_COMBO_GROUP_STOP_SECONDS must be a positive number", file=sys.stderr)
+        return 2
+    if group_stop_seconds <= 0:
+        print("RUSTFS_COMBO_GROUP_STOP_SECONDS must be a positive number", file=sys.stderr)
+        return 2
     process: subprocess.Popen[object] | None = None
 
     def interrupted(signum: int, _frame: object) -> None:
         if process is not None:
-            stopped = stop_group(process)
+            stopped = stop_group(process, group_stop_seconds)
             if not stopped:
                 print(f"RUSTFS_COMBO_GROUP_CLEANUP_FAIL name={name}", file=sys.stderr)
                 raise SystemExit(GROUP_CLEANUP_EXIT)
@@ -126,15 +139,15 @@ def main(argv: list[str]) -> int:
         try:
             returncode = process.wait(timeout=timeout_seconds)
         except subprocess.TimeoutExpired:
-            stopped = stop_group(process)
+            stopped = stop_group(process, group_stop_seconds)
             if not stopped:
                 print(f"RUSTFS_COMBO_GROUP_CLEANUP_FAIL name={name}", file=sys.stderr)
                 return GROUP_CLEANUP_EXIT
             print(f"RUSTFS_COMBO_TIMEOUT name={name}", file=sys.stderr)
             return TIMEOUT_EXIT
 
-        if not wait_group_gone(process.pid, GROUP_STOP_SECONDS):
-            stopped = stop_group(process)
+        if not wait_group_gone(process.pid, group_stop_seconds):
+            stopped = stop_group(process, group_stop_seconds)
             if not stopped:
                 print(f"RUSTFS_COMBO_GROUP_CLEANUP_FAIL name={name}", file=sys.stderr)
                 return GROUP_CLEANUP_EXIT

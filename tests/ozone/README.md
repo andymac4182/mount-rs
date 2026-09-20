@@ -19,13 +19,19 @@ The all-in-one image starts the Ozone services and exposes the S3 Gateway on
 port `9878`. The harness publishes that port only on `127.0.0.1`, uses fixed
 throwaway credentials for the local non-secure gateway, and creates one
 test-owned bucket and prefix. It does not provision or contact a cloud
-service.
+service. The explicit FoundationDB composition mode is the only exception: it
+also publishes the port on the local Docker bridge so its disposable client
+container can reach the gateway. This is a single-container, single-cluster topology with anonymous
+Ozone data volumes; it does not claim multi-node replication, Kerberos/TLS
+authentication, power-loss durability, or production placement policy.
 
 ## Contract coverage
 
 The real gateway tests cover:
 
 - immutable block publication with full and range reads;
+- binary block bodies large enough to cross the configured ChunkedFs block
+  boundary when the composition lanes are enabled;
 - missing-block mapping to `ENOENT`;
 - create-only object publication and duplicate-create rejection;
 - stale conditional reads and stale conditional writes, with the original
@@ -47,7 +53,13 @@ container is needed for diagnosis. The timeout controls are
 `MOUNT_RS_OZONE_ACTION_TIMEOUT_SECONDS` (30 seconds),
 `MOUNT_RS_OZONE_CLIENT_TIMEOUT_SECONDS` (10 seconds),
 `MOUNT_RS_OZONE_STOP_TIMEOUT_SECONDS` (30 seconds), and
-`MOUNT_RS_OZONE_TEST_TIMEOUT_SECONDS` (600 seconds).
+`MOUNT_RS_OZONE_TEST_TIMEOUT_SECONDS` (600 seconds). Independent provider
+composition children are supervised by
+`MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS` (1200 seconds) with a separate
+`MOUNT_RS_OZONE_COMPOSITION_STOP_GRACE_SECONDS` (30 seconds) cleanup grace.
+The child harness owns its readiness, test, and resource cleanup lifecycle;
+the supervisor gives its cleanup trap time to finish before the Ozone harness
+removes the Ozone service.
 
 ## Run
 
@@ -93,7 +105,52 @@ tests are invoked with `--ignored` only by this wrapper; a normal
 coverage. If Docker, PGlite, or either provider is unavailable, the lane is a
 blocked/non-passing attempt rather than a fabricated pass.
 
-TiDB and FoundationDB are intentionally not added to this Ozone packet: their
-existing real composition harnesses are RustFS-specific and no Ozone-aware
-real-service composition was available here. Their separate gates remain the
-evidence for those providers.
+### TiDB and FoundationDB compositions
+
+The existing real-service TiDB and FoundationDB harnesses can now keep the
+Ozone gateway alive as the block store. These are separate explicit modes so
+the default Ozone contract does not silently start two additional distributed
+databases:
+
+```sh
+MOUNT_RS_OZONE_TIDB_COMPOSITION=1 ./scripts/test-ozone.sh
+MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION=1 ./scripts/test-ozone.sh
+```
+
+The TiDB mode delegates topology, restart, and cleanup to
+`scripts/test-tidb.sh` (the default is three PD nodes and three TiKV nodes)
+and runs the real `mount-rs-tidb` ChunkedFs composition twice: seed against
+Ozone, restart TiDB/TiKV, then reopen and clean the scoped metadata row and
+Ozone block objects. The FoundationDB mode delegates the native 7.4 client
+container, cluster, and cleanup to `scripts/test-foundationdb.sh`; its
+ChunkedFs composition uses Ozone through the Docker host gateway and deletes
+only its scoped object prefix. That explicit mode publishes the Ozone port on
+the local Docker bridge so the disposable client container can reach it; the
+default contract remains loopback-only. These distributed-provider modes are
+manual opt-ins; the base CI job does not claim their live acceptance. Both
+modes retain explicit CAS, stale-writer
+fencing, partial-write/truncation, binary multi-chunk, reopen, and cleanup
+assertions. TiDB replication and FoundationDB durability remain deployment
+properties; the tests do not turn a local development cluster into a
+production durability claim.
+
+### Node and Rust CLI configuration
+
+[`config-pglite-ozone.json`](../../crates/mount-rs-cli/examples/config-pglite-ozone.json)
+is the shared versioned configuration shape for a PGlite metadata provider and
+the Ozone S3-compatible block provider. It keeps credentials as environment
+references and uses the loopback gateway endpoint. The Rust and Node CLI
+configuration checks validate this file without opening providers, resolving
+credentials, loading native code, or claiming a live Ozone Node factory pass:
+
+```sh
+cargo test --locked -p mount-rs-cli --test cli \
+  actual_binary_validates_the_loopback_ozone_provider_config_without_credentials_or_network
+node examples/node-cli/index.mjs \
+  --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
+```
+
+The base Ubuntu CI Ozone job runs the real gateway contract plus these
+mount-free Rust/Node configuration checks. A live Node SDK Ozone run still
+requires the normal N-API build and PGlite service prerequisites, so it is
+not reported as covered by the static configuration gate.

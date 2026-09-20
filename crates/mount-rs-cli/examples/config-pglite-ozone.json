@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "pglite",
+        "connection": {
+          "env": "MOUNT_RS_PGLITE_URL"
+        },
+        "volume_key": "ozone-cli-example-volume",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "http://127.0.0.1:9878",
+        "bucket": "mount-rs-ozone-test",
+        "prefix": "mount-rs/ozone-cli-example",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 7,
+      "owner": "ozone-cli-example"
+    }
+  }
+}

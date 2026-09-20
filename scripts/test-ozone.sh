@@ -18,6 +18,16 @@ ozone_action_timeout=${MOUNT_RS_OZONE_ACTION_TIMEOUT_SECONDS:-30}
 ozone_client_timeout=${MOUNT_RS_OZONE_CLIENT_TIMEOUT_SECONDS:-10}
 ozone_stop_timeout=${MOUNT_RS_OZONE_STOP_TIMEOUT_SECONDS:-30}
 ozone_test_timeout=${MOUNT_RS_OZONE_TEST_TIMEOUT_SECONDS:-600}
+ozone_composition_timeout=${MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS:-1200}
+ozone_composition_stop_grace=${MOUNT_RS_OZONE_COMPOSITION_STOP_GRACE_SECONDS:-30}
+ozone_publish_host=127.0.0.1
+if [ "${MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION:-0}" = "1" ]; then
+  # The FoundationDB child runs in a Docker client container and reaches the
+  # host-published gateway through host.docker.internal. Keep the default
+  # contract loopback-only, but make this explicit opt-in composition
+  # reachable from the Docker bridge on Linux as well as Docker Desktop.
+  ozone_publish_host=0.0.0.0
+fi
 
 validate_positive_timeout() {
   timeout_value=$1
@@ -39,6 +49,8 @@ validate_positive_timeout "$ozone_action_timeout" MOUNT_RS_OZONE_ACTION_TIMEOUT_
 validate_positive_timeout "$ozone_client_timeout" MOUNT_RS_OZONE_CLIENT_TIMEOUT_SECONDS
 validate_positive_timeout "$ozone_stop_timeout" MOUNT_RS_OZONE_STOP_TIMEOUT_SECONDS
 validate_positive_timeout "$ozone_test_timeout" MOUNT_RS_OZONE_TEST_TIMEOUT_SECONDS
+validate_positive_timeout "$ozone_composition_timeout" MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS
+validate_positive_timeout "$ozone_composition_stop_grace" MOUNT_RS_OZONE_COMPOSITION_STOP_GRACE_SECONDS
 
 bounded_docker_command_for_timeout() {
   bounded_timeout=$1
@@ -299,7 +311,7 @@ if bounded_docker_startup_command "run-service" docker run --detach --platform "
   --name "$container_name" \
   --label "com.mount-rs.ozone-test=$ownership_label" \
   --label "com.mount-rs.ozone-test-run=$container_name" \
-  --publish 127.0.0.1::9878 \
+  --publish "$ozone_publish_host"::9878 \
   "$ozone_image" >/dev/null 2>&1; then
   :
 else
@@ -512,6 +524,29 @@ bounded_ignored_cargo_test() {
   return "$test_status"
 }
 
+bounded_composition_script() {
+  composition_name=$1
+  composition_command=$2
+  composition_pid_file="$run_dir/$composition_name.pid"
+  if RUSTFS_COMBO_GROUP_STOP_SECONDS="$ozone_composition_stop_grace" \
+    python3 "$repo_dir/scripts/rustfs-combo-runner.py" \
+      "$ozone_composition_timeout" \
+      "$repo_dir" \
+      "$composition_pid_file" \
+      "$composition_name" \
+      "$composition_command"; then
+    return 0
+  else
+    composition_status=$?
+  fi
+  if [ "$composition_status" -eq 124 ] || [ "$composition_status" -eq 125 ]; then
+    echo "Apache Ozone composition exceeded its bounded timeout or cleanup grace: $composition_name" >&2
+  else
+    echo "Apache Ozone composition failed with status $composition_status: $composition_name" >&2
+  fi
+  return "$composition_status"
+}
+
 refresh_endpoint
 export R2_BUCKET="$ozone_bucket"
 export R2_ACCESS_KEY_ID="$ozone_access_key"
@@ -559,6 +594,31 @@ if [ "${MOUNT_RS_OZONE_COMPOSITIONS:-0}" = "1" ]; then
   export MOUNT_RS_OZONE_CHUNKED_PGLITE=1
   bounded_ignored_cargo_test "chunked_composition::real_ozone_sqlite_chunked_composition"
   bounded_ignored_cargo_test "chunked_composition::real_ozone_pglite_chunked_composition"
+fi
+
+if [ "${MOUNT_RS_OZONE_TIDB_COMPOSITION:-0}" = "1" ]; then
+  # test-tidb.sh owns the actual TiDB/TiKV/PD topology and restart sequence.
+  # This process keeps the real Ozone gateway alive and supplies its scoped
+  # S3 endpoint, so the child test composes independent TiDB metadata with
+  # Ozone immutable blocks rather than silently switching to RustFS.
+  export MOUNT_RS_TIDB_CHUNKED_RUSTFS=1
+  export MOUNT_RS_TIDB_RUSTFS_PREFIX="$OZONE_TEST_PREFIX/tidb-blocks"
+  export MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY="$OZONE_TEST_PREFIX/tidb-metadata"
+  export MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE="$run_dir/tidb-chunked.fixture"
+  export MOUNT_RS_TIDB_CHUNKED_RUSTFS_REOPEN=0
+  export MOUNT_RS_TIDB_COMPOSITION_COMMAND="${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-cargo test --locked -p mount-rs-tidb --test chunked_rustfs -- --ignored --nocapture}"
+  bounded_composition_script "ozone-tidb-composition" "sh scripts/test-tidb.sh"
+fi
+
+if [ "${MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION:-0}" = "1" ]; then
+  # The FoundationDB harness builds its real client in an image that carries
+  # the matching native library. It rewrites this loopback endpoint to the
+  # Docker host gateway and owns its own cluster/network cleanup.
+  export RUSTFS_COMBO_PREFIX="$OZONE_TEST_PREFIX/foundationdb-blocks"
+  export MOUNT_RS_FOUNDATIONDB_TEST_PREFIX="$RUSTFS_COMBO_PREFIX"
+  # The composition supervisor gives the child cleanup trap a longer grace
+  # than the short Docker-action watchdog before it reaps a stuck process.
+  bounded_composition_script "ozone-foundationdb-composition" "sh scripts/test-foundationdb.sh"
 fi
 
 echo "OZONE_INTEGRATION_PASS endpoint=$ozone_endpoint bucket=$ozone_bucket prefix=$OZONE_TEST_PREFIX"

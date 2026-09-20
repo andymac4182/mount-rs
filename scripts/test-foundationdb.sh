@@ -216,7 +216,14 @@ if [ -n "$rustfs_endpoint" ]; then
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
      apt-get update -qq
-     apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
+     apt-get install -y -qq --no-install-recommends clang libclang-dev curl >/dev/null
+     endpoint_status=$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
+       -o /dev/null -w "%{http_code}" "$R2_ENDPOINT" || true)
+     if [ "$endpoint_status" = "000" ]; then
+       echo "FoundationDB client container could not reach the composed block endpoint" >&2
+       exit 1
+     fi
+     echo "FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=$endpoint_status"
      exec sh -c "$1"' \
     mount-rs-foundationdb-client "$test_command"
 else

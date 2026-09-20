@@ -523,6 +523,17 @@ begin_phase() {
 
 run_provider_test() {
   persistence_expectation=$1
+  if [ -n "${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-}" ]; then
+    # The caller owns the block service and supplies a complete, explicit
+    # command for a split-provider composition. Keep the TiDB URL and the
+    # restart expectation in the child environment without putting either
+    # credentials or URLs into the command string.
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+    MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
+    MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
+      sh -c "$MOUNT_RS_TIDB_COMPOSITION_COMMAND"
+    return $?
+  fi
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
