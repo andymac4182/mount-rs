@@ -12,6 +12,10 @@ use async_trait::async_trait;
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::versioning::{
+    PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo, VersionKind,
+    VersionPublication, VersionedMetadataStore, VolumeId,
+};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,12 +37,54 @@ const METADATA_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_metadata (
  namespace TEXT,
  owner TEXT,
  fence BIGINT NOT NULL CHECK(fence>=0),
- expires BIGINT NOT NULL);
+ expires BIGINT NOT NULL,
+ volume_id TEXT);
+ALTER TABLE mount_rs_metadata ADD COLUMN IF NOT EXISTS volume_id TEXT;
 ";
 
 const BLOCK_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS mount_rs_blocks (
  volume_key TEXT NOT NULL, id TEXT NOT NULL, bytes BYTEA NOT NULL,
  PRIMARY KEY (volume_key, id));";
+
+const NOW_SELECT: &str = "SELECT CAST(EXTRACT(EPOCH FROM clock_timestamp()) * 1000 AS BIGINT)";
+const VERSION_SCHEMA_NAME: &str = "mount-rs-versioning";
+const VERSION_SCHEMA_VERSION: i64 = 1;
+const VERSION_SCHEMA: &str = "
+CREATE TABLE IF NOT EXISTS mount_rs_schema_versions (
+ schema_name TEXT PRIMARY KEY NOT NULL,
+ schema_version BIGINT NOT NULL CHECK(schema_version>=0));
+CREATE TABLE IF NOT EXISTS mount_rs_version_state (
+ volume_key TEXT PRIMARY KEY NOT NULL,
+ volume_id TEXT NOT NULL,
+ head_id TEXT,
+ next_sequence BIGINT NOT NULL CHECK(next_sequence>0),
+ next_read_fence BIGINT NOT NULL CHECK(next_read_fence>=0));
+CREATE TABLE IF NOT EXISTS mount_rs_versions (
+ volume_key TEXT NOT NULL,
+ id TEXT NOT NULL,
+ volume_id TEXT NOT NULL,
+ sequence BIGINT NOT NULL CHECK(sequence>0),
+ parent_id TEXT,
+ restored_from TEXT,
+ forked_from TEXT,
+ namespace TEXT NOT NULL,
+ block_store_id TEXT NOT NULL,
+ kind TEXT NOT NULL,
+ created_at_ms BIGINT NOT NULL,
+ durable BOOLEAN NOT NULL,
+ operation_id TEXT NOT NULL,
+ PRIMARY KEY (volume_key, id),
+ UNIQUE (volume_key, operation_id));
+CREATE TABLE IF NOT EXISTS mount_rs_version_pins (
+ volume_key TEXT NOT NULL,
+ view_id TEXT NOT NULL,
+ volume_id TEXT NOT NULL,
+ version_id TEXT NOT NULL,
+ owner TEXT NOT NULL,
+ fence BIGINT NOT NULL CHECK(fence>0),
+ expires BIGINT NOT NULL CHECK(expires>=0),
+ PRIMARY KEY (volume_key, view_id));
+";
 
 /// Connection-scoped selection for one independent metadata/block volume.
 ///
@@ -162,9 +208,20 @@ impl Database {
             .ok_or_else(connection_closed)?
             .execute_typed(
                 "INSERT INTO mount_rs_metadata
-                    (volume_key, revision, namespace, owner, fence, expires)
-                 VALUES ($1, 0, NULL, NULL, 0, 0)
+                    (volume_key, revision, namespace, owner, fence, expires, volume_id)
+                 VALUES ($1, 0, NULL, NULL, 0, 0, 'pglite-' || md5($1))
                  ON CONFLICT (volume_key) DO NOTHING",
+                &[(&self.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?;
+        client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .execute_typed(
+                "UPDATE mount_rs_metadata
+                 SET volume_id = 'pglite-' || md5(volume_key)
+                 WHERE volume_key=$1 AND (volume_id IS NULL OR volume_id='')",
                 &[(&self.volume_key, Type::TEXT)],
             )
             .await
@@ -190,7 +247,7 @@ impl Database {
 /// Namespace JSON contains attributes and block references only; file bytes
 /// are stored by [`PgliteBlockStore`].
 #[derive(Clone)]
-pub struct PgliteMetadataStore(Database);
+pub struct PgliteMetadataStore(Database, VolumeId);
 
 impl PgliteMetadataStore {
     /// Connect to a PGlite PostgreSQL-wire endpoint and initialize the
@@ -213,7 +270,9 @@ impl PgliteMetadataStore {
     ) -> Result<Self> {
         let database = Database::connect(connection_string, METADATA_SCHEMA, options).await?;
         database.ensure_metadata_row().await?;
-        Ok(Self(database))
+        initialize_version_schema(&database).await?;
+        let volume_id = load_volume_id(&database).await?;
+        Ok(Self(database, volume_id))
     }
 
     /// Close the underlying PostgreSQL-wire client. This is idempotent and is
@@ -261,6 +320,198 @@ fn connection_closed() -> FsError {
     FsError::new(ErrorCode::Ebadf).with_syscall("PGlite connection")
 }
 
+fn incompatible_schema(message: impl Into<String>) -> FsError {
+    FsError::new(ErrorCode::Enotsup)
+        .with_syscall("PGlite versioning schema")
+        .with_message(message.into())
+}
+
+async fn load_volume_id(database: &Database) -> Result<VolumeId> {
+    let client = database.lock_client().await?;
+    let row = client
+        .as_ref()
+        .ok_or_else(connection_closed)?
+        .query_typed_opt(
+            "SELECT volume_id FROM mount_rs_metadata WHERE volume_key=$1",
+            &[(&database.volume_key, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?
+        .ok_or_else(|| incompatible_schema("PGlite metadata row is missing"))?;
+    let value = row
+        .get::<_, Option<String>>(0)
+        .ok_or_else(|| incompatible_schema("PGlite metadata volume_id is missing"))?;
+    VolumeId::new(value).map_err(|_| incompatible_schema("PGlite volume_id is invalid"))
+}
+
+async fn initialize_version_schema(database: &Database) -> Result<()> {
+    let mut client = database.lock_client().await?;
+    let tx = client
+        .as_mut()
+        .ok_or_else(connection_closed)?
+        .transaction()
+        .await
+        .map_err(postgres_error)?;
+    tx.batch_execute(VERSION_SCHEMA)
+        .await
+        .map_err(postgres_error)?;
+
+    let stored_version = tx
+        .query_typed_opt(
+            "SELECT schema_version FROM mount_rs_schema_versions WHERE schema_name=$1",
+            &[(&VERSION_SCHEMA_NAME, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?
+        .map(|row| row.get::<_, i64>(0));
+    if stored_version.is_some_and(|version| version > VERSION_SCHEMA_VERSION) {
+        return Err(incompatible_schema(
+            "PGlite versioning schema is newer than this mount-rs build",
+        ));
+    }
+
+    let volume_id = load_volume_id_from_transaction(&tx, database).await?;
+    let state = tx
+        .query_typed_opt(
+            "SELECT volume_id, next_sequence, next_read_fence
+             FROM mount_rs_version_state WHERE volume_key=$1 FOR UPDATE",
+            &[(&database.volume_key, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?;
+    match state {
+        Some(row) => {
+            let state_volume = row.get::<_, String>(0);
+            let next_sequence = row.get::<_, i64>(1);
+            let next_read_fence = row.get::<_, i64>(2);
+            if state_volume != volume_id.0 || next_sequence <= 0 || next_read_fence < 0 {
+                return Err(incompatible_schema(
+                    "PGlite version state is inconsistent with its metadata volume",
+                ));
+            }
+        }
+        None => {
+            tx.execute_typed(
+                "INSERT INTO mount_rs_version_state
+                 (volume_key, volume_id, head_id, next_sequence, next_read_fence)
+                 VALUES ($1, $2, NULL, 1, 0)",
+                &[
+                    (&database.volume_key, Type::TEXT),
+                    (&volume_id.0, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        }
+    }
+
+    let invalid_versions = tx
+        .query_typed_opt(
+            "SELECT EXISTS(
+                 SELECT 1 FROM mount_rs_versions
+                 WHERE volume_key=$1 AND (volume_id IS NULL OR volume_id<>$2)
+             )",
+            &[
+                (&database.volume_key, Type::TEXT),
+                (&volume_id.0, Type::TEXT),
+            ],
+        )
+        .await
+        .map_err(postgres_error)?
+        .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
+        .get::<_, bool>(0);
+    let invalid_pins = tx
+        .query_typed_opt(
+            "SELECT EXISTS(
+                 SELECT 1 FROM mount_rs_version_pins
+                 WHERE volume_key=$1 AND (volume_id IS NULL OR volume_id<>$2)
+             )",
+            &[
+                (&database.volume_key, Type::TEXT),
+                (&volume_id.0, Type::TEXT),
+            ],
+        )
+        .await
+        .map_err(postgres_error)?
+        .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
+        .get::<_, bool>(0);
+    if invalid_versions || invalid_pins {
+        return Err(incompatible_schema(
+            "PGlite version records or pins cross provider volumes",
+        ));
+    }
+
+    let head_id = tx
+        .query_typed_opt(
+            "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
+            &[(&database.volume_key, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?
+        .and_then(|row| row.get::<_, Option<String>>(0));
+    if let Some(head_id) = head_id {
+        let head = VersionId::decode(&head_id)
+            .map_err(|_| incompatible_schema("PGlite version head is malformed"))?;
+        if head.volume != volume_id {
+            return Err(incompatible_schema(
+                "PGlite version head belongs to another provider volume",
+            ));
+        }
+        let exists = tx
+            .query_typed_opt(
+                "SELECT EXISTS(
+                     SELECT 1 FROM mount_rs_versions
+                     WHERE volume_key=$1 AND id=$2 AND volume_id=$3
+                 )",
+                &[
+                    (&database.volume_key, Type::TEXT),
+                    (&head_id, Type::TEXT),
+                    (&volume_id.0, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite schema query returned no row"))?
+            .get::<_, bool>(0);
+        if !exists {
+            return Err(incompatible_schema(
+                "PGlite version head references a missing version",
+            ));
+        }
+    }
+
+    tx.execute_typed(
+        "INSERT INTO mount_rs_schema_versions(schema_name, schema_version)
+         VALUES ($1, $2)
+         ON CONFLICT(schema_name) DO UPDATE SET schema_version=excluded.schema_version",
+        &[
+            (&VERSION_SCHEMA_NAME, Type::TEXT),
+            (&VERSION_SCHEMA_VERSION, Type::INT8),
+        ],
+    )
+    .await
+    .map_err(postgres_error)?;
+    tx.commit().await.map_err(postgres_error)
+}
+
+async fn load_volume_id_from_transaction(
+    tx: &tokio_postgres::Transaction<'_>,
+    database: &Database,
+) -> Result<VolumeId> {
+    let row = tx
+        .query_typed_opt(
+            "SELECT volume_id FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE",
+            &[(&database.volume_key, Type::TEXT)],
+        )
+        .await
+        .map_err(postgres_error)?
+        .ok_or_else(|| incompatible_schema("PGlite metadata row is missing"))?;
+    let value = row
+        .get::<_, Option<String>>(0)
+        .ok_or_else(|| incompatible_schema("PGlite metadata volume_id is missing"))?;
+    VolumeId::new(value).map_err(|_| incompatible_schema("PGlite volume_id is invalid"))
+}
+
 fn ttl_ms(ttl: Duration) -> Result<i64> {
     let value = i64::try_from(ttl.as_millis()).map_err(|_| FsError::new(ErrorCode::Einval))?;
     if value == 0 {
@@ -283,6 +534,74 @@ fn stale() -> FsError {
 fn nonnegative(value: i64, field: &str) -> Result<u64> {
     u64::try_from(value).map_err(|_| backend_error(format!("invalid PGlite {field}")))
 }
+
+fn version_kind_name(kind: &VersionKind) -> &'static str {
+    match kind {
+        VersionKind::Initial => "initial",
+        VersionKind::Snapshot => "snapshot",
+        VersionKind::Restore => "restore",
+        VersionKind::Fork => "fork",
+    }
+}
+
+fn parse_version_kind(value: &str) -> Result<VersionKind> {
+    match value {
+        "initial" => Ok(VersionKind::Initial),
+        "snapshot" => Ok(VersionKind::Snapshot),
+        "restore" => Ok(VersionKind::Restore),
+        "fork" => Ok(VersionKind::Fork),
+        _ => Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("load version")
+            .with_message(format!("unknown PGlite version kind '{value}'"))),
+    }
+}
+
+fn decode_version_row(row: &tokio_postgres::Row) -> Result<VersionInfo> {
+    let id_text = row.get::<_, String>(0);
+    let volume_text = row.get::<_, String>(2);
+    let volume = VolumeId::new(volume_text)?;
+    let sequence = nonnegative(row.get::<_, i64>(3), "version sequence")?;
+    let id = VersionId::new(volume.clone(), sequence)?;
+    if id.encode() != id_text {
+        return Err(FsError::new(ErrorCode::Eio)
+            .with_syscall("load version")
+            .with_message("stored PGlite version id does not match its volume and sequence"));
+    }
+    let parent = row
+        .get::<_, Option<String>>(4)
+        .as_deref()
+        .map(VersionId::decode)
+        .transpose()?;
+    let restored_from = row
+        .get::<_, Option<String>>(5)
+        .as_deref()
+        .map(VersionId::decode)
+        .transpose()?;
+    let forked_from = row
+        .get::<_, Option<String>>(6)
+        .as_deref()
+        .map(VersionId::decode)
+        .transpose()?;
+    let namespace = serde_json::from_str(&row.get::<_, String>(7)).map_err(backend_error)?;
+    let block_store_id = mount_rs_core::versioning::BlockStoreId::new(row.get::<_, String>(8))?;
+    let info = VersionInfo {
+        id,
+        parent,
+        restored_from,
+        forked_from,
+        kind: parse_version_kind(&row.get::<_, String>(9))?,
+        namespace,
+        block_store_id,
+        created_at_ms: row.get::<_, i64>(10),
+        durable: row.get::<_, bool>(11),
+    };
+    info.validate()?;
+    Ok(info)
+}
+
+const VERSION_SELECT: &str = "SELECT id, volume_key, volume_id, sequence,
+ parent_id, restored_from, forked_from, namespace, block_store_id, kind,
+ created_at_ms, durable FROM mount_rs_versions";
 
 #[async_trait]
 impl MetadataStore for PgliteMetadataStore {
@@ -507,6 +826,661 @@ impl MetadataStore for PgliteMetadataStore {
 
     async fn flush(&self) -> Result<()> {
         self.0.flush().await
+    }
+}
+
+#[async_trait]
+impl VersionedMetadataStore for PgliteMetadataStore {
+    fn volume_id(&self) -> VolumeId {
+        self.1.clone()
+    }
+
+    async fn version_head(&self) -> Result<Option<VersionHead>> {
+        let client = self.0.lock_client().await?;
+        let metadata = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT revision FROM mount_rs_metadata WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        let revision = nonnegative(metadata.get::<_, i64>(0), "metadata revision")?;
+        let state = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
+        let Some(head_id) = state.get::<_, Option<String>>(0) else {
+            return Ok(None);
+        };
+        let version = VersionId::decode(&head_id).map_err(|_| {
+            FsError::new(ErrorCode::Eio)
+                .with_syscall("version head")
+                .with_message("stored PGlite version head is malformed")
+        })?;
+        if version.volume != self.1 {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("version head")
+                .with_message("stored PGlite version head belongs to another volume"));
+        }
+        let exists = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT EXISTS(
+                     SELECT 1 FROM mount_rs_versions
+                     WHERE volume_key=$1 AND id=$2 AND volume_id=$3
+                 )",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&head_id, Type::TEXT),
+                    (&self.1.0, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite version query returned no row"))?
+            .get::<_, bool>(0);
+        if !exists {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("version head")
+                .with_message("stored PGlite version head references a missing version"));
+        }
+        Ok(Some(VersionHead { version, revision }))
+    }
+
+    async fn load_version(&self, id: &VersionId) -> Result<VersionInfo> {
+        if id.volume != self.1 {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
+        }
+        let encoded = id.encode();
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND id=$2"),
+                &[(&self.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("load version"))?;
+        let info = decode_version_row(&row)?;
+        info.validate_for_volume(&self.1)?;
+        if info.id != *id {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("load version"));
+        }
+        Ok(info)
+    }
+
+    async fn list_versions(&self) -> Result<Vec<VersionInfo>> {
+        let client = self.0.lock_client().await?;
+        let rows = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed(
+                &format!("{VERSION_SELECT} WHERE volume_key=$1 ORDER BY sequence"),
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?;
+        rows.into_iter()
+            .map(|row| {
+                let version = decode_version_row(&row)?;
+                version.validate_for_volume(&self.1)?;
+                Ok(version)
+            })
+            .collect()
+    }
+
+    async fn find_publication(&self, operation_id: &PublicationId) -> Result<Option<VersionInfo>> {
+        let client = self.0.lock_client().await?;
+        let row = client
+            .as_ref()
+            .ok_or_else(connection_closed)?
+            .query_typed_opt(
+                "SELECT id FROM mount_rs_versions
+                 WHERE volume_key=$1 AND operation_id=$2",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&operation_id.0, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let encoded = row.get::<_, String>(0);
+        let id = VersionId::decode(&encoded).map_err(|_| {
+            FsError::new(ErrorCode::Eio)
+                .with_syscall("find publication")
+                .with_message("stored PGlite publication references a malformed version")
+        })?;
+        drop(client);
+        self.load_version(&id).await.map(Some)
+    }
+
+    async fn publish_version(
+        &self,
+        lease: &WriterLease,
+        publication: VersionPublication,
+    ) -> Result<VersionInfo> {
+        publication.validate(&self.1)?;
+        if publication.durable && !self.0.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("publish version")
+                .with_message("PGlite provider is not configured as durable"));
+        }
+        let expected_revision = i64::try_from(publication.expected_revision)
+            .map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let (fence, expires) = lease_numbers(lease)?;
+        let operation_id = publication.operation_id.0.clone();
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+
+        let existing = tx
+            .query_typed_opt(
+                &format!("{VERSION_SELECT} WHERE volume_key=$1 AND operation_id=$2"),
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&operation_id, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if let Some(row) = existing {
+            let committed = decode_version_row(&row)?;
+            committed.validate_for_volume(&self.1)?;
+            if !publication.matches_committed(&committed)? {
+                return Err(FsError::new(ErrorCode::Eexist)
+                    .with_syscall("publish version")
+                    .with_message("publication id was reused with a different payload"));
+            }
+            tx.commit().await.map_err(postgres_error)?;
+            return Ok(committed);
+        }
+
+        let state = tx
+            .query_typed_opt(
+                &format!(
+                    "SELECT
+                         (owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}) AS lease_valid,
+                         (revision=$5) AS revision_valid,
+                         (SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1)
+                     FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
+                ),
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&lease.owner, Type::TEXT),
+                    (&fence, Type::INT8),
+                    (&expires, Type::INT8),
+                    (&expected_revision, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?;
+        if !state.get::<_, bool>(0) {
+            return Err(stale());
+        }
+        if !state.get::<_, bool>(1) {
+            return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish version"));
+        }
+        let head_id = state.get::<_, Option<String>>(2);
+        let expected_parent = publication.expected_parent.as_ref().map(VersionId::encode);
+        if head_id != expected_parent {
+            return Err(FsError::new(ErrorCode::Eagain)
+                .with_syscall("publish version")
+                .with_message("version head changed concurrently"));
+        }
+        if let Some(head_id) = head_id.as_deref() {
+            let exists = tx
+                .query_typed_opt(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM mount_rs_versions
+                         WHERE volume_key=$1 AND id=$2 AND volume_id=$3
+                     )",
+                    &[
+                        (&self.0.volume_key, Type::TEXT),
+                        (&head_id, Type::TEXT),
+                        (&self.1.0, Type::TEXT),
+                    ],
+                )
+                .await
+                .map_err(postgres_error)?
+                .ok_or_else(|| incompatible_schema("PGlite version query returned no row"))?
+                .get::<_, bool>(0);
+            if !exists {
+                return Err(FsError::new(ErrorCode::Eio)
+                    .with_syscall("publish version")
+                    .with_message("stored PGlite version head references a missing version"));
+            }
+        }
+
+        let state_row = tx
+            .query_typed_opt(
+                "SELECT next_sequence FROM mount_rs_version_state
+                 WHERE volume_key=$1 FOR UPDATE",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
+        let sequence = nonnegative(state_row.get::<_, i64>(0), "version sequence")?;
+        let sequence_i64 =
+            i64::try_from(sequence).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let id = VersionId::new(self.1.clone(), sequence)?;
+        let id_text = id.encode();
+        let created_at_ms = tx
+            .query_typed_opt(NOW_SELECT, &[])
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
+            .get::<_, i64>(0);
+        let namespace = serde_json::to_string(&publication.namespace).map_err(backend_error)?;
+        let parent_id = publication.expected_parent.as_ref().map(VersionId::encode);
+        let restored_from = publication.restored_from.as_ref().map(VersionId::encode);
+        let forked_from = publication.forked_from.as_ref().map(VersionId::encode);
+        let kind = version_kind_name(&publication.kind);
+        let durable = publication.durable;
+        tx.execute_typed(
+            "INSERT INTO mount_rs_versions
+             (volume_key, id, volume_id, sequence, parent_id, restored_from,
+              forked_from, namespace, block_store_id, kind, created_at_ms,
+              durable, operation_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+            &[
+                (&self.0.volume_key, Type::TEXT),
+                (&id_text, Type::TEXT),
+                (&self.1.0, Type::TEXT),
+                (&sequence_i64, Type::INT8),
+                (&parent_id, Type::TEXT),
+                (&restored_from, Type::TEXT),
+                (&forked_from, Type::TEXT),
+                (&namespace, Type::TEXT),
+                (&publication.block_store_id.0, Type::TEXT),
+                (&kind, Type::TEXT),
+                (&created_at_ms, Type::INT8),
+                (&durable, Type::BOOL),
+                (&operation_id, Type::TEXT),
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let metadata_update_sql = format!(
+            "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
+                 WHERE volume_key=$1 AND revision=$4
+                   AND owner=$5 AND fence=$6 AND expires=$7 AND expires>{NOW}"
+        );
+        let changed = tx
+            .execute_typed(
+                &metadata_update_sql,
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&next_revision, Type::INT8),
+                    (&namespace, Type::TEXT),
+                    (&expected_revision, Type::INT8),
+                    (&lease.owner, Type::TEXT),
+                    (&fence, Type::INT8),
+                    (&expires, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if changed != 1 {
+            return Err(stale());
+        }
+        let next_sequence = sequence_i64
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        tx.execute_typed(
+            "UPDATE mount_rs_version_state SET head_id=$2, next_sequence=$3
+             WHERE volume_key=$1",
+            &[
+                (&self.0.volume_key, Type::TEXT),
+                (&id_text, Type::TEXT),
+                (&next_sequence, Type::INT8),
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
+        tx.commit().await.map_err(postgres_error)?;
+        if publication.durable {
+            self.0.flush().await?;
+        }
+
+        Ok(VersionInfo {
+            id,
+            parent: publication.expected_parent,
+            restored_from: publication.restored_from,
+            forked_from: publication.forked_from,
+            kind: publication.kind,
+            namespace: publication.namespace,
+            block_store_id: publication.block_store_id,
+            created_at_ms,
+            durable: publication.durable,
+        })
+    }
+
+    async fn open_view_pin(&self, id: &VersionId, request: ReadLeaseRequest) -> Result<ReadLease> {
+        let ttl_ms =
+            i64::try_from(request.validate()?).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        if id.volume != self.1 {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
+        }
+        let encoded = id.encode();
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let exists = tx
+            .query_typed_opt(
+                "SELECT EXISTS(
+                     SELECT 1 FROM mount_rs_versions
+                     WHERE volume_key=$1 AND id=$2 AND volume_id=$3
+                 )",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&encoded, Type::TEXT),
+                    (&self.1.0, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite version query returned no row"))?
+            .get::<_, bool>(0);
+        if !exists {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
+        }
+        let state = tx
+            .query_typed_opt(
+                "SELECT next_read_fence FROM mount_rs_version_state
+                 WHERE volume_key=$1 FOR UPDATE",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?;
+        let current_fence = state.get::<_, i64>(0);
+        let next_fence = current_fence
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let now_ms = tx
+            .query_typed_opt(NOW_SELECT, &[])
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
+            .get::<_, i64>(0);
+        let expires = now_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let view_id = format!("{}-view-{next_fence}", self.1);
+        tx.execute_typed(
+            "UPDATE mount_rs_version_state SET next_read_fence=$2 WHERE volume_key=$1",
+            &[(&self.0.volume_key, Type::TEXT), (&next_fence, Type::INT8)],
+        )
+        .await
+        .map_err(postgres_error)?;
+        tx.execute_typed(
+            "INSERT INTO mount_rs_version_pins
+             (volume_key, view_id, volume_id, version_id, owner, fence, expires)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            &[
+                (&self.0.volume_key, Type::TEXT),
+                (&view_id, Type::TEXT),
+                (&self.1.0, Type::TEXT),
+                (&encoded, Type::TEXT),
+                (&request.owner, Type::TEXT),
+                (&next_fence, Type::INT8),
+                (&expires, Type::INT8),
+            ],
+        )
+        .await
+        .map_err(postgres_error)?;
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(ReadLease {
+            volume: self.1.clone(),
+            version: id.clone(),
+            view_id,
+            owner: request.owner,
+            fence: u64::try_from(next_fence).map_err(|_| FsError::new(ErrorCode::Eio))?,
+            expires_at_ms: u64::try_from(expires).map_err(|_| FsError::new(ErrorCode::Eio))?,
+        })
+    }
+
+    async fn renew_view_pin(
+        &self,
+        lease: &ReadLease,
+        request: ReadLeaseRequest,
+    ) -> Result<ReadLease> {
+        let ttl_ms =
+            i64::try_from(request.validate()?).map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+        let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
+        let expires =
+            i64::try_from(lease.expires_at_ms).map_err(|_| FsError::new(ErrorCode::Estale))?;
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let current = tx
+            .query_typed_opt(
+                "SELECT volume_id, version_id, owner, fence, expires
+                 FROM mount_rs_version_pins
+                 WHERE volume_key=$1 AND view_id=$2 FOR UPDATE",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&lease.view_id, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        let Some(current) = current else {
+            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+        };
+        let current_volume = current.get::<_, String>(0);
+        let current_version = current.get::<_, String>(1);
+        let current_owner = current.get::<_, String>(2);
+        let current_fence = current.get::<_, i64>(3);
+        let current_expires = current.get::<_, i64>(4);
+        let now_ms = tx
+            .query_typed_opt(NOW_SELECT, &[])
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite clock query returned no row"))?
+            .get::<_, i64>(0);
+        if current_volume != self.1.0
+            || current_version != lease.version.encode()
+            || current_owner != request.owner
+            || current_owner != lease.owner
+            || current_fence != fence
+            || current_expires != expires
+            || current_expires <= now_ms
+        {
+            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+        }
+        let next_expires = now_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let changed = tx
+            .execute_typed(
+                "UPDATE mount_rs_version_pins SET expires=$3
+                 WHERE volume_key=$1 AND view_id=$2 AND fence=$4 AND expires=$5",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&lease.view_id, Type::TEXT),
+                    (&next_expires, Type::INT8),
+                    (&fence, Type::INT8),
+                    (&expires, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if changed != 1 {
+            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+        }
+        tx.commit().await.map_err(postgres_error)?;
+        Ok(ReadLease {
+            expires_at_ms: u64::try_from(next_expires).map_err(|_| FsError::new(ErrorCode::Eio))?,
+            ..lease.clone()
+        })
+    }
+
+    async fn close_view_pin(&self, lease: &ReadLease) -> Result<()> {
+        let fence = i64::try_from(lease.fence).map_err(|_| FsError::new(ErrorCode::Estale))?;
+        let expires =
+            i64::try_from(lease.expires_at_ms).map_err(|_| FsError::new(ErrorCode::Estale))?;
+        let encoded = lease.version.encode();
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let changed = tx
+            .execute_typed(
+                "DELETE FROM mount_rs_version_pins
+                 WHERE volume_key=$1 AND view_id=$2 AND volume_id=$3
+                   AND version_id=$4 AND owner=$5 AND fence=$6 AND expires=$7",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&lease.view_id, Type::TEXT),
+                    (&self.1.0, Type::TEXT),
+                    (&encoded, Type::TEXT),
+                    (&lease.owner, Type::TEXT),
+                    (&fence, Type::INT8),
+                    (&expires, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if changed == 1 {
+            tx.commit().await.map_err(postgres_error)?;
+            return Ok(());
+        }
+        let exists = tx
+            .query_typed_opt(
+                "SELECT EXISTS(
+                     SELECT 1 FROM mount_rs_version_pins
+                     WHERE volume_key=$1 AND view_id=$2
+                 )",
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&lease.view_id, Type::TEXT),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite pin query returned no row"))?
+            .get::<_, bool>(0);
+        tx.commit().await.map_err(postgres_error)?;
+        if exists {
+            Err(FsError::new(ErrorCode::Estale).with_syscall("close view"))
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn delete_version(&self, lease: &WriterLease, id: &VersionId) -> Result<()> {
+        if id.volume != self.1 {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
+        }
+        let (fence, expires) = lease_numbers(lease)?;
+        let encoded = id.encode();
+        let mut client = self.0.lock_client().await?;
+        let tx = client
+            .as_mut()
+            .ok_or_else(connection_closed)?
+            .transaction()
+            .await
+            .map_err(postgres_error)?;
+        let valid = tx
+            .query_typed_opt(
+                &format!(
+                    "SELECT owner=$2 AND fence=$3 AND expires=$4 AND expires>{NOW}
+                     FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
+                ),
+                &[
+                    (&self.0.volume_key, Type::TEXT),
+                    (&lease.owner, Type::TEXT),
+                    (&fence, Type::INT8),
+                    (&expires, Type::INT8),
+                ],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| backend_error("PGlite metadata row is missing"))?
+            .get::<_, bool>(0);
+        if !valid {
+            return Err(stale());
+        }
+        let head_id = tx
+            .query_typed_opt(
+                "SELECT head_id FROM mount_rs_version_state WHERE volume_key=$1",
+                &[(&self.0.volume_key, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite version state is missing"))?
+            .get::<_, Option<String>>(0);
+        if head_id.as_deref() == Some(&encoded) {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("delete version")
+                .with_message("current version cannot be deleted"));
+        }
+        let protected = tx
+            .query_typed_opt(
+                &format!(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM mount_rs_version_pins
+                         WHERE volume_key=$1 AND version_id=$2 AND expires>{NOW}
+                     )"
+                ),
+                &[(&self.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?
+            .ok_or_else(|| incompatible_schema("PGlite pin query returned no row"))?
+            .get::<_, bool>(0);
+        if protected {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("delete version")
+                .with_message("version has an active read lease"));
+        }
+        let changed = tx
+            .execute_typed(
+                "DELETE FROM mount_rs_versions WHERE volume_key=$1 AND id=$2",
+                &[(&self.0.volume_key, Type::TEXT), (&encoded, Type::TEXT)],
+            )
+            .await
+            .map_err(postgres_error)?;
+        if changed != 1 {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
+        }
+        tx.commit().await.map_err(postgres_error)
     }
 }
 
