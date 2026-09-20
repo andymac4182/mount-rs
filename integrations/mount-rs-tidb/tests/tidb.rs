@@ -349,6 +349,108 @@ async fn actual_tidb_split_store_contract() {
     blocks.close().await.expect("close blocks");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
+async fn actual_tidb_provider_clock_fencing_and_concurrent_publication() {
+    let url = tidb_url();
+    assert_actual_tidb(&url).await;
+
+    let volume_key = unique_volume_key();
+    let metadata = TidbMetadataStore::connect_with_options(
+        &url,
+        TidbStorageOptions::new(&volume_key)
+            .with_durable(true)
+            .with_max_namespace_bytes(4 * 1024 * 1024),
+    )
+    .await
+    .expect("connect TiDB metadata for provider-clock fencing");
+    let initial = metadata
+        .load()
+        .await
+        .expect("load initial provider-clock metadata");
+    assert_eq!(initial.revision, 0);
+    assert!(initial.namespace.is_none());
+
+    let stale_store = metadata.clone();
+    let replacement_store = metadata.clone();
+    let stale = stale_store
+        .acquire_writer("tidb-provider-clock-stale", Duration::from_millis(250))
+        .await
+        .expect("acquire short-lived TiDB lease");
+    // Expiry is evaluated with TiDB's CURRENT_TIMESTAMP(3), not this
+    // process's wall clock. The delay only gives the provider clock time to
+    // advance before the replacement acquisition.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let replacement = replacement_store
+        .acquire_writer("tidb-provider-clock-replacement", Duration::from_secs(30))
+        .await
+        .expect("replace expired TiDB lease");
+    assert!(replacement.fence > stale.fence);
+
+    let stale_renew = stale_store
+        .renew_writer(&stale, Duration::from_secs(30))
+        .await
+        .expect_err("stale TiDB lease renewal must be fenced");
+    assert!(stale_renew.is(ErrorCode::Estale));
+    let stale_release = stale_store
+        .release_writer(&stale)
+        .await
+        .expect_err("stale TiDB lease release must be fenced");
+    assert!(stale_release.is(ErrorCode::Estale));
+
+    let current = replacement_store
+        .renew_writer(&replacement, Duration::from_secs(30))
+        .await
+        .expect("replacement TiDB lease remains valid after stale operations");
+
+    let publish_a_store = replacement_store.clone();
+    let publish_b_store = replacement_store.clone();
+    let publish_a_lease = current.clone();
+    let publish_b_lease = current.clone();
+    let namespace_a = root_namespace().await;
+    let namespace_b = root_namespace().await;
+    let (left, right) = tokio::join!(
+        publish_a_store.publish(0, &publish_a_lease, namespace_a),
+        publish_b_store.publish(0, &publish_b_lease, namespace_b),
+    );
+    match (left, right) {
+        (Ok(revision), Err(error)) | (Err(error), Ok(revision)) => {
+            assert_eq!(revision, 1);
+            assert!(
+                error.is(ErrorCode::Eagain),
+                "same-revision TiDB publication conflict must be EAGAIN: {error}"
+            );
+        }
+        (Ok(left_revision), Ok(right_revision)) => {
+            panic!(
+                "concurrent same-revision TiDB publications both succeeded: {left_revision}, {right_revision}"
+            );
+        }
+        (Err(left_error), Err(right_error)) => {
+            panic!(
+                "concurrent same-revision TiDB publications both failed: {left_error}; {right_error}"
+            );
+        }
+    }
+    assert_eq!(
+        replacement_store
+            .load()
+            .await
+            .expect("load concurrently published TiDB metadata")
+            .revision,
+        1
+    );
+
+    replacement_store
+        .release_writer(&current)
+        .await
+        .expect("release current TiDB lease");
+    metadata
+        .close()
+        .await
+        .expect("close provider-clock TiDB metadata");
+}
+
 #[tokio::test]
 #[ignore = "requires an actual TiDB service and MOUNT_RS_TIDB_URL"]
 async fn volume_keys_preserve_exact_utf8_and_trailing_spaces() {
