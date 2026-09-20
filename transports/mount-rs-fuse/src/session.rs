@@ -305,11 +305,17 @@ impl FuseSession {
                 self.created_entry(&path, &r.header).await
             }
             25 => {
+                let handle = self
+                    .handles
+                    .get(&u64_at(r.body, 0)?)
+                    .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
                 if self.driver.capabilities().durable_writes {
-                    return Err(FsError::enosys("flush"));
-                }
-                if !self.handles.contains_key(&u64_at(r.body, 0)?) {
-                    return Err(FsError::new(ErrorCode::Ebadf));
+                    // FUSE_FLUSH is a per-open-handle close/flush point. It
+                    // is intentionally distinct from FSYNC: durable drivers
+                    // must make the handle's pending writes observable before
+                    // acknowledging it, while volatile drivers may complete
+                    // the protocol operation without backend work.
+                    handle.sync().await?;
                 }
                 Ok(vec![])
             }
@@ -317,6 +323,7 @@ impl FuseSession {
                 if !self.directories.contains_key(&u64_at(r.body, 0)?) {
                     return Err(FsError::new(ErrorCode::Ebadf));
                 }
+                self.driver.syncfs().await?;
                 Ok(vec![])
             }
             4 => {

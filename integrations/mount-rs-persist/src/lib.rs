@@ -284,6 +284,10 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
         capabilities
     }
 
+    async fn syncfs(&self) -> Result<()> {
+        self.persist().await
+    }
+
     async fn stat(&self, path: &str) -> Result<Stats> {
         self.core.stat(path).await
     }
@@ -388,7 +392,7 @@ mod tests {
     use super::*;
     use mount_rs_core::{FsDriver, MemoryFs, OpenFlags};
     use std::future::Future;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::thread;
     use std::time::Duration;
 
@@ -408,6 +412,7 @@ mod tests {
     struct TestStore {
         snapshot: Arc<Mutex<Option<Vec<u8>>>>,
         fail_next: Arc<AtomicBool>,
+        save_calls: Arc<AtomicUsize>,
         delay: Arc<(Mutex<DelayState>, std::sync::Condvar)>,
     }
 
@@ -422,6 +427,7 @@ mod tests {
             Self {
                 snapshot: Arc::new(Mutex::new(None)),
                 fail_next: Arc::new(AtomicBool::new(false)),
+                save_calls: Arc::new(AtomicUsize::new(0)),
                 delay: Arc::new((
                     Mutex::new(DelayState {
                         next: false,
@@ -435,6 +441,10 @@ mod tests {
 
         fn fail_next_save(&self) {
             self.fail_next.store(true, Ordering::SeqCst);
+        }
+
+        fn save_calls(&self) -> usize {
+            self.save_calls.load(Ordering::SeqCst)
         }
 
         fn delay_next_save(&self) {
@@ -472,6 +482,7 @@ mod tests {
         }
 
         async fn save(&self, snapshot: Vec<u8>) -> Result<()> {
+            self.save_calls.fetch_add(1, Ordering::SeqCst);
             let should_delay = {
                 let (state, condition) = &*self.delay;
                 let mut state = state.lock().unwrap();
@@ -527,6 +538,21 @@ mod tests {
         block_on(handle.sync()).unwrap();
         let after_retry = MemoryFs::from_snapshot(&store.snapshot()).unwrap();
         assert_eq!(read_file(&after_retry, "/file"), b"new");
+    }
+
+    #[test]
+    fn syncfs_is_a_durable_barrier_and_propagates_store_failure() {
+        let store = TestStore::new();
+        let fs = block_on(PersistedFs::open(store.clone())).unwrap();
+        let before = store.save_calls();
+
+        store.fail_next_save();
+        let error = block_on(fs.syncfs()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert_eq!(store.save_calls(), before + 1);
+
+        block_on(fs.syncfs()).unwrap();
+        assert_eq!(store.save_calls(), before + 2);
     }
 
     #[test]

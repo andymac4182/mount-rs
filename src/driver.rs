@@ -32,6 +32,21 @@ pub trait FileHandle: Send + Sync {
 pub trait FsDriver: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 
+    /// Establish a filesystem-wide persistence barrier.
+    ///
+    /// Volatile drivers have nothing to flush and therefore succeed by
+    /// default. A driver that advertises durable writes must override this
+    /// method with its backend-specific durability operation; otherwise the
+    /// caller receives the same explicit unsupported result used by the
+    /// transport contract instead of a false durability acknowledgement.
+    async fn syncfs(&self) -> Result<()> {
+        if self.capabilities().durable_writes {
+            Err(crate::error::FsError::enosys("syncfs"))
+        } else {
+            Ok(())
+        }
+    }
+
     async fn stat(&self, path: &str) -> Result<Stats>;
     async fn lstat(&self, _path: &str) -> Result<Stats> {
         Err(crate::error::FsError::enosys("lstat"))
@@ -157,6 +172,10 @@ impl Loopback {
 
     pub async fn statfs(&self, path: &str) -> Result<StatsFs> {
         self.driver.statfs(&normalize_path(path)).await
+    }
+
+    pub async fn syncfs(&self) -> Result<()> {
+        self.driver.syncfs().await
     }
 
     pub async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
