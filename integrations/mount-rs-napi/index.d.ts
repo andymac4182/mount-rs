@@ -514,6 +514,8 @@ export declare function fuseDecodeNotifyInvalEntry(body: Uint8Array): NativeFuse
 
 export declare function fuseDecodeNotifyInvalInode(body: Uint8Array): NativeFuseNotifyInvalInodeOut
 
+export declare function fuseDecodeOpenIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseOpenIn
+
 export declare function fuseDecodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseOpenOut
 
 export declare function fuseDecodeOutHeader(bytes: Uint8Array): NativeFuseOutHeader
@@ -567,6 +569,8 @@ export declare function fuseEncodeNotify(code: number, body: Uint8Array): Buffer
 export declare function fuseEncodeNotifyInvalEntry(value: NativeFuseNotifyInvalEntryOut): Buffer
 
 export declare function fuseEncodeNotifyInvalInode(value: NativeFuseNotifyInvalInodeOut): Buffer
+
+export declare function fuseEncodeOpenIn(value: NativeFuseOpenIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -947,6 +951,11 @@ export interface NativeFuseNotifyInvalInodeOut {
   ino: bigint
   off: bigint
   len: bigint
+}
+
+export interface NativeFuseOpenIn {
+  flags: number
+  openFlags: number
 }
 
 export interface NativeFuseOpenOut {
