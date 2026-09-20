@@ -551,7 +551,16 @@ the closure items listed above.
   explicit safe `ENOSYS` boundary; malformed, truncated, and trailing frames
   are rejected with `EINVAL`; and unsupported requests do not mutate state or
   kill the session. The focused locked FUSE suite and strict scoped Clippy
-  gate passed. Remote publication is queued for the next serialized packet.
+  gate passed; the packet was published through remote commit `7c6186f`.
+- **PASS** — `cf7a132` napi-rs FUSE xattr packet: `SETXATTR`, `GETXATTR`,
+  `LISTXATTR`, and `REMOVEXATTR` request/reply codecs match the pinned oracle
+  across protocol contexts; generated artifacts/declarations, malformed,
+  truncated, trailing and declared-size checks, build, typecheck and the full
+  focused suite passed. The packet was published through `4f484ad`.
+- **PASS** — `e0e8195` Unstorage capability-boundary packet: 14 pinned rows
+  passed with 5 supported results, 9 exact `ENOSYS` classifications, zero
+  `ENOTSUP` mismatches and zero skips; the packet was published through
+  `9b74c87`.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
