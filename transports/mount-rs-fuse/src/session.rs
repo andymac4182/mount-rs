@@ -1,6 +1,13 @@
 //! Driver-backed requests for modern FUSE (7.9+). Negotiation and mount
 //! lifecycle are separate and remain under implementation.
-use crate::{Request, error_reply, inodes::InodeTable, open_flags};
+use crate::{
+    Request,
+    constants::{FUSE_KERNEL_MINOR_VERSION, FUSE_READLINK, FUSE_SETXATTR_EXT, FUSE_STATFS},
+    error_reply,
+    inodes::InodeTable,
+    open_flags,
+    protocol::{FuseKstatfs, FuseReadlinkOut, FuseReplyBody, ProtocolContext},
+};
 use mount_rs_core::{ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Result, Stats};
 use std::{collections::HashMap, sync::Arc};
 
@@ -83,6 +90,15 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
+fn encode_wire_reply(
+    opcode: u32,
+    body: &FuseReplyBody,
+    context: ProtocolContext,
+) -> Result<Vec<u8>> {
+    crate::protocol::encode_reply_body(opcode, body, Some(context))
+        .map_err(|error| FsError::backend(format!("FUSE reply encoding failed: {error}")))
+}
+
 /// Apply the Linux `access(2)` permission check to driver metadata. FUSE
 /// supplies the calling uid/gid in the request header, while the driver
 /// supplies the file owner, group, and mode. Supplementary groups are not
@@ -151,6 +167,16 @@ fn attr(id: u64, s: &Stats) -> Vec<u8> {
     b
 }
 impl FuseSession {
+    fn protocol_context(&self) -> ProtocolContext {
+        let negotiated = self.negotiated.as_ref();
+        ProtocolContext {
+            minor: negotiated
+                .map(|reply| reply.minor)
+                .unwrap_or(FUSE_KERNEL_MINOR_VERSION),
+            setxattr_ext: negotiated.is_some_and(|reply| reply.flags & FUSE_SETXATTR_EXT != 0),
+        }
+    }
+
     async fn created_entry(
         &mut self,
         path: &str,
@@ -565,28 +591,32 @@ impl FuseSession {
                 }
                 Ok(body)
             }
-            17 => {
-                let path = self.inodes.require_path(r.header.nodeid).unwrap_or("/");
-                let stats = self.driver.statfs(path).await?;
-                let mut body = Vec::with_capacity(80);
-                for value in [
-                    stats.blocks,
-                    stats.blocks_free,
-                    stats.blocks_available,
-                    stats.files,
-                    stats.files_free,
-                ] {
-                    body.extend(value.to_le_bytes());
-                }
+            FUSE_STATFS => {
+                let path = self
+                    .inodes
+                    .require_path(r.header.nodeid)
+                    .unwrap_or("/")
+                    .to_owned();
+                let stats = self.driver.statfs(&path).await?;
                 let block = if stats.block_size == 0 {
                     4096
                 } else {
                     stats.block_size as u32
                 };
-                for value in [block, 255, block, 0, 0, 0, 0, 0, 0, 0] {
-                    body.extend(value.to_le_bytes());
-                }
-                Ok(body)
+                encode_wire_reply(
+                    FUSE_STATFS,
+                    &FuseReplyBody::Statfs(FuseKstatfs {
+                        blocks: stats.blocks,
+                        bfree: stats.blocks_free,
+                        bavail: stats.blocks_available,
+                        files: stats.files,
+                        ffree: stats.files_free,
+                        bsize: block,
+                        namelen: 255,
+                        frsize: block,
+                    }),
+                    self.protocol_context(),
+                )
             }
             34 => {
                 let path = self.inodes.require_path(r.header.nodeid)?;
@@ -638,11 +668,15 @@ impl FuseSession {
                 body.extend([0; 4]);
                 Ok(body)
             }
-            5 => Ok(self
-                .driver
-                .readlink(self.inodes.require_path(r.header.nodeid)?)
-                .await?
-                .into_bytes()),
+            FUSE_READLINK => {
+                let path = self.inodes.require_path(r.header.nodeid)?.to_owned();
+                let target = self.driver.readlink(&path).await?;
+                encode_wire_reply(
+                    FUSE_READLINK,
+                    &FuseReplyBody::Readlink(FuseReadlinkOut { target }),
+                    self.protocol_context(),
+                )
+            }
             6 => {
                 let (name, rest) = string(r.body)?;
                 let (target, _) = string(rest)?;
