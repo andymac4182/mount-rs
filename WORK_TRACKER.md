@@ -527,11 +527,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   suite, and macOS NFS Node CLI mount/read/write/unmount/persistence test all
   passed. Hosted Linux FUSE, hosted Windows, FSKit, live R2/PGlite and the
   remaining FUSE session/mount surfaces remain open.
-- [x] The three packets and this tracker update were published sequentially to
-  `origin/main`; the verified final remote ref is
-  `bcf465334273c8701161c0fb35be7bfc4ddfb538`. The local checkout remains
-  intentionally divergent because Contents-API publication creates one remote
-  commit per file; no force-push or destructive synchronization was used.
+- [x] The three implementation packets were published sequentially to
+  `origin/main`; their verified implementation ref before the tracker-only
+  publication was `bcf465334273c8701161c0fb35be7bfc4ddfb538`, followed by
+  tracker publication `b04f6ca4979cf632d74d31d9f6b55792f3f86f98`. The local
+  checkout remains intentionally divergent because Contents-API publication
+  creates one remote commit per file; no force-push or destructive
+  synchronization was used.
 
 ## W02 — Independent metadata, blocks and chunking
 
