@@ -808,6 +808,14 @@ cargo test \
 
 node "$repo_dir/tests/rustfs/napi-factories.mjs"
 
+echo "RUSTFS_SQLITE_VFS_START"
+cargo test \
+  --manifest-path "$repo_dir/Cargo.toml" \
+  --locked -p mount-rs-sqlite-vfs --features remote-harness \
+  --test remote_storage_bridge -- \
+  remote_pglite_rustfs_sqlite_vfs --exact --ignored --nocapture
+echo "RUSTFS_SQLITE_VFS_PASS"
+
 run_combo_command() {
   if [ -z "${RUSTFS_COMBO_COMMAND:-}" ]; then
     return 0

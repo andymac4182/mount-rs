@@ -325,6 +325,12 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W15 — Mount-free SQLite VFS
 
+- [x] Live PGlite metadata + RustFS blocks VFS test passed locally: real SQLite
+  transaction, exact binary bytes and integrity after reconnecting both clients.
+  Added it to the standard RustFS harness instead of leaving it opt-in only.
+  The surrounding RustFS suite also passed its service-restart check, but that
+  fixture is separate: VFS-specific service restart and PGlite restart remain
+  unverified. No remote power-loss durability claim is made.
 - [x] Root-integrate the separate rollback-journal VFS and metadata/block
   storage bridge. Main passed 22 local tests and strict all-feature Clippy;
   the remote PGlite/RustFS test remains ignored in this run. Host-backed engine

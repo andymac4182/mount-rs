@@ -171,8 +171,8 @@ fn remote_pglite_rustfs_sqlite_vfs() {
 
         // Reconnect both providers and reopen through a fresh VFS name. The
         // registration itself is intentionally retained by SQLite for the
-        // process lifetime, while the provider clients exercise a real
-        // remote restart boundary.
+        // process lifetime. This checks fresh remote clients, not a service
+        // restart: neither PGlite nor RustFS is restarted by this test.
         let reopened_metadata =
             PgliteMetadataStore::connect_with_options(&pglite_url, provider_options)
                 .await
