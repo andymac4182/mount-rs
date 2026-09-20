@@ -66,6 +66,12 @@ matrices, the 1,194-test upstream suite, and all 40 PGlite-inclusive seeded
 trace lanes passed. R2 rows were explicit skips because this shell still lacks
 the required scoped credentials.
 
+The follow-up PGlite CLI consumer check in `dcc3aa4` also exited 0: the Rust
+CLI now performs the same configured PGlite split-store write, shutdown,
+reopen and readback that the Node CLI already performed. The live CLI matrix
+is now 10 passes and one explicit R2 skip; no config-validation row is being
+counted as live R2 evidence.
+
 Latest SDK-consumer slice at local `21803fd` was published to `main` as the
 sequential API commits `9868e93`, `83153ef`, `b8a49a0`, `9163a39`, `b09965c`,
 `cc605c7` and `b43a4e9`. The Rust provider matrix now opens PGlite/R2 through
@@ -234,7 +240,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
-| W05 | Cloudflare R2 | Live provider and configuration-driven CLI gates passed; broader benchmark/release evidence remains | Main |
+| W05 | Cloudflare R2 | Verifying; local S3/R2 HTTP and configuration gates pass, but live provider acceptance is still credential-gated | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
@@ -1107,6 +1113,9 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `dcc3aa4` | Rust CLI live PGlite SDK consumer reopen check | Real socket-backed Rust CLI write/shutdown/reopen/readback passed; R2 remains credential-gated |
+| `10afea2` (published as `7ea3eb6`) | Fail-closed R2/S3 configuration validation | 8 provider tests plus signed HTTP reopen/CAS passed; no live Cloudflare credentials |
+| `6855b2d` (published as `fad208e`) | Mountx-compatible 40-hop symlink resolution limit | 17 core behavior tests, 11 core unit tests and 100-step oracle trace passed |
 | `2452463` | Server-test phase/cleanup diagnostics | Local repeats; timeout cause unresolved |
 | `2085b19` | HTTP/cache requirements and SQLite VFS reference | Requirements, not server implementation |
 | `cfce82a` | PGlite injected cleanup failure | Local regression passed |
