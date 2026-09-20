@@ -27,6 +27,10 @@ use crate::server::{NfsServer, NfsServerOptions, create_nfs_server};
 
 const MACOS_MOUNT_TABLE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_UNMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
+// This is carried through the existing public `mount_options` field so the
+// profile can be added without breaking downstream struct literals. It is
+// consumed by `nfs_mount_options` and is never passed to mount(8).
+const SQLITE_SINGLE_HOST_PROFILE: &str = "mount-rs-sqlite-single-host";
 const LINUX_HELPERS: &[&str] = &[
     "/sbin/mount.nfs",
     "/usr/sbin/mount.nfs",
@@ -218,6 +222,27 @@ impl Default for NfsMountOptions {
     }
 }
 
+impl NfsMountOptions {
+    /// Build a conservative profile for SQLite hosted through this process's
+    /// loopback NFS server and one host kernel client.
+    ///
+    /// The profile uses a hard mount and local-only locking: `locallocks` on
+    /// macOS and `local_lock=all` on Linux. It is intentionally scoped to a
+    /// single host/client and does not provide distributed locking, cross-host
+    /// coordination, or power-loss durability guarantees. General NFS callers
+    /// retain the historical default profile, including soft mounts.
+    pub fn sqlite_single_host() -> Self {
+        let mut options = Self {
+            hard: true,
+            ..Self::default()
+        };
+        options
+            .mount_options
+            .push(SQLITE_SINGLE_HOST_PROFILE.to_owned());
+        options
+    }
+}
+
 /// Refuse the one client/version combination for which the upstream contract
 /// has no interoperable server: macOS is treated as v4.0-only.
 pub fn version_refusal(platform: NfsPlatform, version: NfsVersion) -> Option<String> {
@@ -262,6 +287,31 @@ pub fn nfs_mount_options(
     options: &NfsMountOptions,
     platform: NfsPlatform,
 ) -> Result<String, NfsMountError> {
+    let sqlite_single_host = options
+        .mount_options
+        .iter()
+        .any(|option| option == SQLITE_SINGLE_HOST_PROFILE);
+    if sqlite_single_host {
+        if options.version != NfsVersion::V3 {
+            return Err(NfsMountError::InvalidOptions(
+                "sqlite_single_host profile supports NFSv3 only".into(),
+            ));
+        }
+        if !options.hard {
+            return Err(NfsMountError::InvalidOptions(
+                "sqlite_single_host profile requires hard=true".into(),
+            ));
+        }
+        if let Some(option) = options
+            .mount_options
+            .iter()
+            .find(|option| sqlite_profile_conflict(option))
+        {
+            return Err(NfsMountError::InvalidOptions(format!(
+                "sqlite_single_host profile conflicts with mount option {option:?}"
+            )));
+        }
+    }
     if let Some(message) = version_refusal(platform, options.version) {
         return Err(NfsMountError::UnsupportedVersion(message));
     }
@@ -271,7 +321,12 @@ pub fn nfs_mount_options(
             "proto=tcp".to_owned(),
             format!("port={port}"),
             format!("mountport={port}"),
-            if platform == NfsPlatform::Macos {
+            if sqlite_single_host {
+                match platform {
+                    NfsPlatform::Macos => "locallocks".to_owned(),
+                    NfsPlatform::Linux => "local_lock=all".to_owned(),
+                }
+            } else if platform == NfsPlatform::Macos {
                 "nolocks".to_owned()
             } else {
                 "nolock".to_owned()
@@ -284,7 +339,7 @@ pub fn nfs_mount_options(
         ],
     };
     if options.hard {
-        if platform == NfsPlatform::Linux {
+        if platform == NfsPlatform::Linux || sqlite_single_host {
             parts.push("hard".into());
         }
     } else {
@@ -298,8 +353,39 @@ pub fn nfs_mount_options(
     if options.read_only {
         parts.push("ro".into());
     }
-    parts.extend(options.mount_options.iter().cloned());
+    parts.extend(
+        options
+            .mount_options
+            .iter()
+            .filter(|option| *option != SQLITE_SINGLE_HOST_PROFILE)
+            .cloned(),
+    );
     Ok(parts.join(","))
+}
+
+fn sqlite_profile_conflict(option: &str) -> bool {
+    option.split(',').any(|token| {
+        let name = token
+            .trim()
+            .split_once('=')
+            .map_or(token.trim(), |(name, _)| name.trim());
+        [
+            "soft",
+            "softerr",
+            "softreval",
+            "hard",
+            "lock",
+            "nolock",
+            "nolocks",
+            "nolockd",
+            "nonlm",
+            "locallocks",
+            "nolocallocks",
+            "local_lock",
+        ]
+        .iter()
+        .any(|candidate| name.eq_ignore_ascii_case(candidate))
+    })
 }
 
 fn option_count(value: Option<f64>, fallback: u64, floor: u64) -> u64 {
@@ -425,6 +511,7 @@ pub enum NfsMountError {
     UnsupportedPlatform(String),
     ClientUnavailable(String),
     UnsupportedVersion(String),
+    InvalidOptions(String),
     InvalidMountpoint(String),
     InvalidExportPath(String),
     AlreadyMounted(String),
@@ -443,6 +530,7 @@ impl fmt::Display for NfsMountError {
             Self::UnsupportedPlatform(message)
             | Self::ClientUnavailable(message)
             | Self::UnsupportedVersion(message)
+            | Self::InvalidOptions(message)
             | Self::InvalidMountpoint(message)
             | Self::InvalidExportPath(message)
             | Self::AlreadyMounted(message)
@@ -901,6 +989,71 @@ mod tests {
             nfs_mount_options(2049, &options, NfsPlatform::Macos).expect("macOS options"),
             "vers=3,proto=tcp,port=2049,mountport=2049,nolocks,soft,timeo=50,retrans=2,nobrowse"
         );
+    }
+
+    #[test]
+    fn sqlite_single_host_profile_is_hard_and_local_only() {
+        let options = NfsMountOptions::sqlite_single_host();
+        assert_eq!(
+            nfs_mount_options(2049, &options, NfsPlatform::Linux).expect("linux options"),
+            "vers=3,proto=tcp,port=2049,mountport=2049,local_lock=all,hard,timeo=50,retrans=2"
+        );
+        assert_eq!(
+            nfs_mount_options(2049, &options, NfsPlatform::Macos).expect("macOS options"),
+            "vers=3,proto=tcp,port=2049,mountport=2049,locallocks,hard,timeo=50,retrans=2,nobrowse"
+        );
+    }
+
+    #[test]
+    fn sqlite_single_host_profile_rejects_conflicting_mount_options() {
+        let mut options = NfsMountOptions::sqlite_single_host();
+        options.mount_options.push("soft".into());
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Macos),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
+
+        let mut options = NfsMountOptions::sqlite_single_host();
+        options.mount_options.push("nolock".into());
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Linux),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
+
+        let mut options = NfsMountOptions::sqlite_single_host();
+        options.mount_options.push("timeo=50,soft".into());
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Macos),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
+
+        let mut options = NfsMountOptions::sqlite_single_host();
+        options.mount_options.push("rsize=4096,nolocks".into());
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Macos),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
+
+        let mut options = NfsMountOptions::sqlite_single_host();
+        options.hard = false;
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Macos),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
+    }
+
+    #[test]
+    fn sqlite_single_host_profile_rejects_nfs_v4() {
+        let mut options = NfsMountOptions::sqlite_single_host();
+        options.version = NfsVersion::V4_1;
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Linux),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
+        assert!(matches!(
+            nfs_mount_options(2049, &options, NfsPlatform::Macos),
+            Err(NfsMountError::InvalidOptions(_))
+        ));
     }
 
     #[test]

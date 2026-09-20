@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::Loopback;
 use mount_rs_nfs::{
-    NativeNfsMount, NfsMountOptions, NfsPlatform, NfsVersion, mount_entry_at, mount_nfs,
-    nfs_client_probe, nfs_platform,
+    NativeNfsMount, NfsMountOptions, NfsPlatform, mount_entry_at, mount_nfs, nfs_client_probe,
+    nfs_platform,
 };
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 
@@ -344,20 +344,8 @@ async fn run_sqlite_fixture(mountpoint: &Path) -> Result<SqliteFixtureOutcome, S
     Ok(SqliteFixtureOutcome { wal })
 }
 
-fn sqlite_mount_options(platform: NfsPlatform) -> NfsMountOptions {
-    NfsMountOptions {
-        version: NfsVersion::V3,
-        // macOS's default `nolocks` avoids NLM, but SQLite still needs the
-        // same-host kernel client to coordinate its own processes.
-        // `locallocks` is deliberately not a distributed locking claim;
-        // Linux retains the native default `nolock`.
-        mount_options: if platform == NfsPlatform::Macos {
-            vec!["locallocks".into()]
-        } else {
-            Vec::new()
-        },
-        ..NfsMountOptions::default()
-    }
+fn sqlite_mount_options() -> NfsMountOptions {
+    NfsMountOptions::sqlite_single_host()
 }
 
 async fn verify_fresh_native_sqlite(
@@ -371,11 +359,7 @@ async fn verify_fresh_native_sqlite(
     let mut cleanup = NativeNfsCleanup::new(mountpoint.clone(), platform);
     let mount_result = tokio::time::timeout(
         MOUNT_TIMEOUT,
-        mount_nfs(
-            filesystem.clone(),
-            &mountpoint,
-            sqlite_mount_options(platform),
-        ),
+        mount_nfs(filesystem.clone(), &mountpoint, sqlite_mount_options()),
     )
     .await;
     match mount_result {
@@ -488,11 +472,7 @@ async fn run_native_sqlite_acceptance() -> Result<(), String> {
 
     let mount_result = tokio::time::timeout(
         MOUNT_TIMEOUT,
-        mount_nfs(
-            filesystem.clone(),
-            &mountpoint,
-            sqlite_mount_options(platform),
-        ),
+        mount_nfs(filesystem.clone(), &mountpoint, sqlite_mount_options()),
     )
     .await;
     match mount_result {
