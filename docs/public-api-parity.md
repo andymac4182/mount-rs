@@ -6,8 +6,8 @@ edit and refreshed against the current source, tests, and the pinned oracle:
 
 - repository baseline when the deleted file was recovered:
   `ac2161d27f4a6805b87580fbee20c1302e9cd9df`
-- current shared `HEAD` observed during this packet:
-  `7c36b38`
+- current local integration baseline observed during this packet:
+  `ef7ae63`
 - oracle checkout: `/tmp/mountx-source.uWiHfX`
 - oracle revision: `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`
 
@@ -44,7 +44,7 @@ described as a complete session or native-mount implementation.
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
-| CLI | Rust CLI constructs drivers through `mount-rs-sdk`; Node CLI has a direct SDK self-test; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
+| CLI | Rust CLI constructs drivers through `mount-rs-sdk`; Node CLI has direct SDK and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
 The oracle source used for comparison is local and immutable for this audit;
 the relevant upstream package map, types, harness, auto API, and transport
@@ -239,32 +239,31 @@ The Rust and Node CLI SDK paths now have focused, mount-free read/write
 evidence. They do not close the next core parity gates, which are ordered here
 from the smallest contract boundary to the larger environment boundary:
 
-1. **NFS held-handle semantics (P1):** the pinned upstream run still has 12
-   `needs handles` rows. Add one oracle-backed `open -> unlink -> read`
-   regression through the existing NFS conformance path, then implement stable
-   orphan identity before changing the NFS capability declaration. Core and 9P
-   handle tests do not qualify NFS.
-2. **Capability-limited Unstorage behavior (P1):** the skip inventory still
-   identifies hardlinks (6 rows), symlinks/link timestamps (16 + 2 rows),
-   `statfs` (2 rows), special-node creation (16 rows), and root-only
-   permission cases (18 rows). For each, either add an explicit unsupported
-   assertion or implement the missing adapter semantics; a passing MemoryFs or
-   ChunkedFs case cannot close an Unstorage row.
-3. **Durability and race boundaries (P1):** the 56-step core trace and the
-   six-scenario concurrency packet intentionally omit persistence/restart,
-   cross-process atomicity, cancellation/close races, and transport/native
-   concurrency. These need revision-matched failure/restart tests before W01.4
-   can claim the full lifecycle contract.
-4. **Structural-driver native mount (P0/P1 seam):** server factories accept
+1. **Structural-driver native mount (P0/P1 seam):** server factories accept
    structural drivers, but the native `mount` path has only invalid-option or
    mount-free coverage. A privileged, platform-specific test must mount a
    structural driver and verify read/write/unmount before this boundary is
    promoted.
+2. **Capability-limited Unstorage behavior (P1):** focused oracle-backed
+   capability, unsupported-operation, metadata and ownership-overlay checks
+   now pass. The remaining inventory still identifies hardlinks (6 rows),
+   symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
+   creation (16 rows), and root-only permission cases (18 rows). Each remaining
+   row needs an explicit unsupported assertion or adapter implementation; a
+   passing MemoryFs or ChunkedFs case cannot close an Unstorage row.
+3. **Durability and race boundaries (P1):** local restart, provider fencing,
+   cancellation/close, fault-injection, SQLite and PGlite gates now cover the
+   main storage paths, including the SDK-backed CLI reopen flow. Hosted crash,
+   live-R2 and native transport concurrency remain separate acceptance gates.
+4. **Remaining public transport/API surface (P1):** expose the missing FUSE
+   request/reply body, session and native-mount surfaces, then run
+   oracle-backed subpath tests for every exported transport rather than treating
+   codec or inode fixture tests as transport completion.
 
-The first three items are behavior gaps or explicit capability decisions; the
-fourth is an environment-backed acceptance gap. Provider, transport-barrel,
-FSKit, and live remote-service work remains separate from this simple-first
-queue.
+The first two items are behavior or environment gaps in the current W01 slice;
+the third and fourth retain broader acceptance boundaries. Provider,
+transport-barrel, FSKit, and live remote-service work remains separate from
+this simple-first queue.
 
 ## Implemented at the current boundary (not broad completion)
 
