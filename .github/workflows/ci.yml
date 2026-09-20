@@ -147,6 +147,10 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 240s cargo test --locked -p mount-rs-core --test sqlite_service_crash -- --ignored --nocapture
+      - name: Verify real SQLite recovery from split backend failures
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 300s cargo test --locked -p mount-rs-core --test sqlite_backend_faults -- --ignored --nocapture
       - uses: actions/setup-node@v4
         with:
           node-version: 24
