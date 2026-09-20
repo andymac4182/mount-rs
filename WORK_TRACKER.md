@@ -228,6 +228,18 @@ Node SDK mounting through native NFS, writing and reading its file, unmounting,
 and leaving the temporary backing directory clean. This is a separate Node CLI
 consumer check; it does not qualify Linux FUSE, FSKit or live providers.
 
+The third W01 implementation rotation is locally integrated and verified. The
+Rust FUSE packet is `15026f2`, the napi-rs packet is `5b7f982`, and the CI
+packet is `d28f31a`. Rust now validates the fixed-width FUSE `POLL` request at
+the session boundary, rejects malformed/truncated/trailing frames with
+`EINVAL`, and keeps valid `POLL` at an explicit safe `ENOSYS` boundary until a
+driver supplies poll semantics. napi-rs exposes the matching request/reply
+codecs, generated declarations/artifacts, protocol-minor oracle coverage and
+malformed-frame tests. CI now runs the opt-in Node SDK CLI native mount gate on
+Linux and macOS when the required host prerequisites are present. The combined
+locked workspace gate, scoped FUSE tests/Clippy and oracle-enabled N-API suite
+passed; hosted Linux/macOS results and actual kernel POLL support remain open.
+
 The next three implementation packets were validated and published to
 `origin/main` on 2026-09-21. The HostFs packet is local `72d570f` and finished
 publishing at remote commit `1352fa9`; the N-API FUSE lifecycle packet is local
@@ -301,6 +313,9 @@ patch):
 | Nietzsche | W01 napi-rs FUSE BATCH_FORGET/INTERRUPT codecs | `integrations/mount-rs-napi/**` | Integrated as `4dc90d5`; generated bindings, pinned-oracle protocol-minor tests, typecheck, build and full N-API suite passed; scoped Clippy retains the known pre-existing lint exclusion |
 | Nash the 2nd | W01 Rust FUSE forget/interrupt validation | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `7934062`; strict BATCH_FORGET validation, fail-closed INTERRUPT semantics, 48 package tests and strict scoped Clippy passed; native kernel cancellation remains open |
 | Kant | W01 Unstorage remaining capability parity | `tests/unstorage/**` | Integrated as `b13350f`; 25 oracle rows passed with 4 supported, 21 explicit ENOSYS classifications, 0 ENOTSUP mismatches and 0 skips |
+| Aquinas the 2nd | W01 Rust FUSE POLL session validation | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `15026f2`; strict 24-byte framing, malformed/trailing rejection, explicit ENOSYS boundary, 50 package tests and strict scoped Clippy passed |
+| Euclid the 2nd | W01 napi-rs FUSE POLL request/reply codecs | `integrations/mount-rs-napi/**` | Integrated as `5b7f982`; generated artifacts/declarations, protocol-minor oracle differentials, malformed/truncated/trailing tests, build/typecheck and full N-API suite passed |
+| Dalton the 2nd | W01 Node SDK CLI native CI gate | `.github/workflows/ci.yml` | Integrated as `d28f31a`; opt-in Linux/macOS native gate with bounded timeouts and prerequisite probes; hosted results remain unverified |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -537,6 +552,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The full locked Rust workspace, oracle-enabled N-API suite, 25-row Unstorage
   packet and previous native Node CLI acceptance all passed. Hosted Linux and
   Windows, FSKit, live R2/PGlite, and kernel-level cancellation remain open.
+- [x] The third W01 rotation is integrated locally: `15026f2` validates FUSE
+  `POLL` frames at the Rust session boundary; `5b7f982` exposes the matching
+  napi-rs request/reply codecs and pinned-oracle tests; and `d28f31a` adds the
+  opt-in Linux/macOS Node SDK CLI native gate to CI. The locked all-feature
+  workspace, 50-test FUSE package gate, scoped Clippy, build/typecheck and full
+  oracle-enabled N-API suite passed. Hosted CI and kernel poll semantics remain
+  explicit acceptance boundaries.
 - [x] The second-rotation implementation and documentation files were published
   sequentially to `origin/main`; the verified remote ref after that packet was
   `9c5f910489741c169031f2f737c3eb51ed427c89`. The local checkout remains
