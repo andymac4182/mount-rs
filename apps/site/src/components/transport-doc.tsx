@@ -78,13 +78,17 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     limitations: (
       <>
         The codec is not a complete native session. The public Node barrel now
-        covers <code>GETATTR</code>, <code>SETATTR</code>, <code>READ</code>,
-        <code>WRITE</code>, <code>OPEN</code>, <code>OPENDIR</code>,
-        <code>CREATE</code>, <code>LOOKUP</code>, <code>READDIR</code>, and
-        <code>READDIRPLUS</code> bodies, but full request/reply, init
-        negotiation, session, and native-mount surfaces remain open; several
-        typed operations still return <code>ENOSYS</code>. FUSE evidence does
-        not qualify NFS, 9P, or FSKit.
+        covers typed <code>READ</code>/<code>WRITE</code>,
+        <code>GETATTR</code>/<code>SETATTR</code>,
+        <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>,
+        <code>LOOKUP</code>, <code>READLINK</code>, <code>STATFS</code>,
+        <code>BATCH_FORGET</code>, <code>INTERRUPT</code>,
+        <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>, and
+        <code>FSYNC</code>/<code>FSYNCDIR</code> bodies, plus
+        <code>READDIR</code>/<code>READDIRPLUS</code> directory codecs.
+        Full request/reply, init negotiation, session, and native-mount surfaces
+        remain open; several typed operations still return <code>ENOSYS</code>.
+        FUSE evidence does not qualify NFS, 9P, or FSKit.
       </>
     ),
     evidence: (
@@ -92,17 +96,23 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         The Rust-backed <code>./fuse</code> barrel now exposes oracle-shaped
         typed <code>GETATTR</code>/<code>SETATTR</code>,
         <code>READ</code>/<code>WRITE</code>,
-        <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>, and
-        <code>LOOKUP</code> codecs alongside
-        <code>packDirents</code>/<code>unpackDirents</code> and
+        <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>,
+        <code>LOOKUP</code>, <code>READLINK</code>, and <code>STATFS</code>
+        codecs alongside <code>BATCH_FORGET</code>/<code>INTERRUPT</code>,
+        <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>,
+        <code>FSYNC</code>/<code>FSYNCDIR</code>,
+        <code>packDirents</code>/<code>unpackDirents</code>, and
         <code>packDirentsPlus</code>/<code>unpackDirentsPlus</code>. Pinned
-        7.8/7.39/7.41 differential tests cover protocol bytes, truncation,
-        trailing data, UTF-8 names, 8-byte alignment, bounded packing, integer
-        coercion, malformed input, and inode parity. Rust session tests also
-        cover focused <code>ACCESS</code> validation. Hosted CI run 35499717435
-        passed Linux native FUSE/NFS/9P/WebDAV at 37e9ba1, but newer current-
-        tree CI is queued; full request/reply, session, and native-mount
-        surfaces remain open.
+        7.8/7.39/7.41 differential tests cover protocol bytes, legacy layouts,
+        truncation, trailing data, UTF-8 names, 8-byte alignment, bounded
+        packing, integer coercion, malformed input, embedded-NUL rejection, and
+        inode parity. Rust session tests cover focused <code>ACCESS</code>,
+        <code>BATCH_FORGET</code>, and fail-closed <code>INTERRUPT</code>
+        validation; six INIT tests cover negotiated <code>FUSE_INIT_EXT</code>
+        and <code>flags2</code> handling. Hosted CI run 35499717435 passed Linux
+        native FUSE/NFS/9P/WebDAV at 37e9ba1; newer current-tree CI is queued,
+        so full request/reply, session, and native-mount surfaces stay
+        open.
       </>
     ),
     sources: [
@@ -178,8 +188,11 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       <>
         Current-tree Rust NFS tests retain backend handles across NFSv3 unlink
         and NFSv4 rename. Focused coverage passed 30 unit, 8 integration, and
-        266 oracle cases with 18 capability-gated skips; the TypeScript control
-        and privileged Linux/macOS native qualification remain separate.
+        266 oracle cases with 18 capability-gated skips. The opt-in macOS Node
+        CLI path also mounted HostFs through native NFS, verified read/write,
+        unmount, persistence, and clean backing-directory teardown. The
+        TypeScript control, Linux FUSE, and privileged cross-platform
+        qualification remain separate.
       </>
     ),
     sources: [

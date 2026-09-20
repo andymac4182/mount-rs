@@ -111,13 +111,13 @@ const routes = [
     path: '/docs/transports/fuse',
     status: 200,
     contentType: 'text/html',
-    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'GETATTR', 'SETATTR', 'OPEN', 'OPENDIR', 'CREATE', 'LOOKUP', 'READDIRPLUS', 'ACCESS', 'packDirentsPlus', 'CI is queued'],
+    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'GETATTR', 'SETATTR', 'OPEN', 'OPENDIR', 'CREATE', 'LOOKUP', 'READLINK', 'STATFS', 'BATCH_FORGET', 'INTERRUPT', 'RELEASE', 'FSYNC', 'READDIRPLUS', 'ACCESS', 'FUSE_INIT_EXT', 'packDirentsPlus', 'CI is queued'],
   },
   {
     path: '/docs/transports/nfs',
     status: 200,
     contentType: 'text/html',
-    expected: ['NFS', 'mount_nfs', 'Preview', 'unlink/rename', '266 oracle', 'capability-gated'],
+    expected: ['NFS', 'mount_nfs', 'Preview', 'unlink/rename', '266 oracle', 'Node CLI', 'HostFs', 'capability-gated'],
   },
   {
     path: '/docs/transports/9p',
