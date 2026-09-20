@@ -720,12 +720,10 @@ function install(binding) {
     ["decodeStatfsIn", "fuseDecodeStatfsIn"], ["encodeStatfsIn", "fuseEncodeStatfsIn"],
     ["decodeStatfsOut", "fuseDecodeStatfsOut"], ["encodeStatfsOut", "fuseEncodeStatfsOut"],
     ["decodeInterruptIn", "fuseDecodeInterruptIn"], ["encodeInterruptIn", "fuseEncodeInterruptIn"],
+    ["decodeIoctlIn", "fuseDecodeIoctlIn"], ["encodeIoctlIn", "fuseEncodeIoctlIn"],
+    ["decodeIoctlOut", "fuseDecodeIoctlOut"], ["encodeIoctlOut", "fuseEncodeIoctlOut"],
     ["decodePollIn", "fuseDecodePollIn"], ["encodePollIn", "fuseEncodePollIn"],
     ["decodePollOut", "fuseDecodePollOut"], ["encodePollOut", "fuseEncodePollOut"],
-    ["decodeSetxattrIn", "fuseDecodeSetxattrIn"], ["encodeSetxattrIn", "fuseEncodeSetxattrIn"],
-    ["decodeGetxattrIn", "fuseDecodeGetxattrIn"], ["encodeGetxattrIn", "fuseEncodeGetxattrIn"],
-    ["decodeListxattrIn", "fuseDecodeListxattrIn"], ["encodeListxattrIn", "fuseEncodeListxattrIn"],
-    ["decodeRemovexattrIn", "fuseDecodeRemovexattrIn"], ["encodeRemovexattrIn", "fuseEncodeRemovexattrIn"],
     ["decodeGetxattrOut", "fuseDecodeGetxattrOut"], ["encodeGetxattrOut", "fuseEncodeGetxattrOut"],
     ["encodeXattrNames", "fuseEncodeXattrNames"], ["decodeXattrNames", "fuseDecodeXattrNames"],
   ]) {
@@ -736,9 +734,6 @@ function install(binding) {
       }
       if (publicName === "encodeReadOut" && args[0] !== undefined) {
         args[0] = { ...args[0], data: copyBytes(args[0].data) }
-      }
-      if (publicName === "encodeSetxattrIn" && args[0] !== undefined) {
-        args[0] = { ...args[0], value: copyBytes(args[0].value) }
       }
       if (args[0] && args[0].buffer !== undefined && typeof args[0] !== "object") args[0] = copyBytes(args[0])
       try {
