@@ -22,6 +22,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const PAYLOAD: &[u8] = b"graceful-pglite-restart-payload";
+const LIFECYCLE_ROUNDS: usize = 4;
 
 type PgliteFilesystem = ChunkedFs<PgliteMetadataStore, PgliteBlockStore>;
 
@@ -114,17 +115,20 @@ impl PgliteServer {
     }
 
     async fn stop(&mut self) -> Result<(), String> {
-        let Some(pid) = self.child.id() else {
-            return Ok(());
-        };
-        if self
+        if let Some(status) = self
             .child
             .try_wait()
-            .map_err(|error| format!("inspect PGlite server process {pid}: {error}"))?
-            .is_some()
+            .map_err(|error| format!("inspect PGlite server before SIGTERM: {error}"))?
         {
-            return Ok(());
-        }
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("PGlite server exited before SIGTERM with {status}"))
+            };
+        };
+        let Some(pid) = self.child.id() else {
+            return Err("PGlite server has no process id before SIGTERM".to_owned());
+        };
 
         let signal = tokio::time::timeout(
             SIGNAL_TIMEOUT,
@@ -287,36 +291,47 @@ async fn reopen_and_read(url: &str, key: &str) -> Result<(), String> {
 }
 
 async fn run_lifecycle() -> Result<(), String> {
-    let data_dir =
-        tempfile::tempdir().map_err(|error| format!("create PGlite data directory: {error}"))?;
-    let key = format!(
-        "pglite-restart/{}/{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|error| format!("system clock before Unix epoch: {error}"))?
-            .as_nanos()
-    );
+    // These are independent fresh-database rounds, deliberately bounded and
+    // not retries of a failed phase. Each round exercises both SIGTERM
+    // shutdowns and the disk-backed reopen contract.
+    for round in 0..LIFECYCLE_ROUNDS {
+        let data_dir = tempfile::tempdir()
+            .map_err(|error| format!("round {round}: create PGlite data directory: {error}"))?;
+        let key = format!(
+            "pglite-restart/{}/{}/{}",
+            std::process::id(),
+            round,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|error| format!("round {round}: system clock before Unix epoch: {error}"))?
+                .as_nanos()
+        );
 
-    let mut first = PgliteServer::start(data_dir.path()).await?;
-    let write_result = write_and_close(first.connection_string(), &key).await;
-    let stop_result = first.stop().await;
-    if let Err(error) = write_result {
-        return Err(format!(
-            "first server phase: {error}; shutdown={stop_result:?}"
-        ));
-    }
-    stop_result?;
+        let mut first = PgliteServer::start(data_dir.path())
+            .await
+            .map_err(|error| format!("round {round}: start first server: {error}"))?;
+        let write_result = write_and_close(first.connection_string(), &key).await;
+        let stop_result = first.stop().await;
+        if let Err(error) = write_result {
+            return Err(format!(
+                "round {round} first server phase: {error}; shutdown={stop_result:?}"
+            ));
+        }
+        stop_result.map_err(|error| format!("round {round} first server shutdown: {error}"))?;
 
-    let mut second = PgliteServer::start(data_dir.path()).await?;
-    let reopen_result = reopen_and_read(second.connection_string(), &key).await;
-    let second_stop = second.stop().await;
-    if let Err(error) = reopen_result {
-        return Err(format!(
-            "reopen server phase: {error}; shutdown={second_stop:?}"
-        ));
+        let mut second = PgliteServer::start(data_dir.path())
+            .await
+            .map_err(|error| format!("round {round}: start reopen server: {error}"))?;
+        let reopen_result = reopen_and_read(second.connection_string(), &key).await;
+        let second_stop = second.stop().await;
+        if let Err(error) = reopen_result {
+            return Err(format!(
+                "round {round} reopen server phase: {error}; shutdown={second_stop:?}"
+            ));
+        }
+        second_stop.map_err(|error| format!("round {round} reopen server shutdown: {error}"))?;
     }
-    second_stop
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
