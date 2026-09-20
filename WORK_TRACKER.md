@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `95aca9c`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `ca57758`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -59,12 +59,12 @@ acceptance evidence, tracker updates and commit/push; it does not mean that
 every implementation task is being done serially. Workers receive disjoint
 write scopes, return exact paths and test evidence, and are closed after their
 patch is integrated. A completed worker is then rotated into the next open,
-non-overlapping packet. The current five-packet allocation is:
+non-overlapping packet. The current bounded allocation is:
 
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
 | Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Implementing |
-| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Implementing |
+| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Checkpoint complete; Main integrating |
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Checkpoint complete; Main integrating |
 | Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task active |
 | Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Closed; no change recommended |
@@ -72,7 +72,8 @@ non-overlapping packet. The current five-packet allocation is:
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
 design review), Raman (scoped napi-rs package distribution), Aristotle (the
-unsigned FSKit bridge checkpoint), and Ohm (storage-dispatch review). Main
+unsigned FSKit bridge checkpoint), Mill (the TiDB provider/harness checkpoint),
+and Ohm (storage-dispatch review). Main
 rotates those slots rather than assigning multiple workers to the same files.
 
 ### Narrow-band completion order
@@ -110,7 +111,7 @@ complete.
 | W05 | Cloudflare R2 | Live provider tests passed; CLI gate added, credentialed execution pending | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
-| W08 | TiDB | Real harness repair and qualification | Mill / Main |
+| W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying | Raman (complete slice) / Main |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
 | W11 | Config-driven CLI | HTTP landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
@@ -290,17 +291,21 @@ complete.
 
 ## W08 — TiDB
 
-- [x] Local draft library tests passed three cases: limits, stable identifiers,
-  and URL redaction. Crate/workspace registration remains uncommitted.
-- [ ] W08.1 Review and land TiDB metadata/block implementation and dependencies.
-- [ ] W08.2 Complete real TiDB/PD/TiKV Docker harness and restart results;
-  MySQL compatibility alone does not constitute TiDB verification.
+- [x] W08.1 Review and land the separate TiDB metadata/block implementation and
+  dependencies (`ca57758`); four unit tests, format checks and test binaries
+  passed.
+- [ ] W08.2 Complete the durable real TiDB/PD/TiKV Docker harness and restart
+  results. The pinned v8.5.7 single-node ARM64 TiDB/TiKV run passed schema,
+  UTF-8/trailing-space, identity and provider checks; the durable 3PD/3TiKV
+  topology now fails fast because this Docker host has 8,232,747,008 bytes and
+  the harness requires 10,737,418,240. MySQL compatibility alone does not
+  constitute TiDB verification.
 - [ ] W08.3 Verify provider time/fencing, ambiguous commits, concurrency and
   deployment durability assumptions. Liveness queries are not fsync evidence.
 - [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
-- [ ] W08.5 **TiDB metadata + RustFS S3 chunks:** Arendt owns real-service
-  integration with the same mixed-provider acceptance as W07.6, using actual
-  TiDB/PD/TiKV and RustFS. Add runnable isolated orchestration and retain results.
+- [ ] W08.5 **TiDB metadata + RustFS S3 chunks:** the separate contract test and
+  runnable harness are landed, but the actual mixed-provider test still needs
+  explicit TiDB and RustFS services and has not been claimed as passed.
 
 ## W09 — napi-rs, Node API and packaging
 
@@ -770,5 +775,6 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `29ffb3b` | PGlite cleanup/slot ordering | Local regressions; hosted rerun pending |
 | `5993984` | FSKit SDK compile target | Unsigned compilation, not activation |
 | `95aca9c` | FSKit Rust/Swift/XPC bridge checkpoint | Local tests and unsigned arm64 Xcode builds; signing/activation/mount pending |
+| `ca57758` | TiDB metadata/block providers and pinned harness | Real single-node v8.5.7 ARM64 qualification passed; durable topology and RustFS composition remain open |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
