@@ -118,6 +118,82 @@ fn registration_name(label: &str) -> String {
 }
 
 #[test]
+#[ignore = "requires the prepare/reopen phases of scripts/test-rustfs.sh"]
+fn remote_vfs_survives_rustfs_restart() {
+    let phase = required_env("RUSTFS_VFS_RESTART_PHASE");
+    assert!(matches!(phase.as_str(), "prepare" | "reopen"));
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("restart test runtime");
+    runtime.block_on(async {
+        let (config, _) = remote_config();
+        // The harness retains this exact prefix across the service restart,
+        // while every test process and provider connection is fresh.
+        let prefix = format!("{}/sqlite-vfs-restart", required_env("RUSTFS_TEST_PREFIX"));
+        let metadata = PgliteMetadataStore::connect_with_options(
+            &required_env("PGLITE_DATABASE_URL"),
+            PgliteStorageOptions::new(format!("{prefix}/metadata")).with_durable(true),
+        )
+        .await
+        .expect("restart metadata provider");
+        let blocks = R2BlockStore::from_config(&config, format!("{prefix}/blocks"))
+            .expect("restart block provider");
+        let backend = StorageBackend::with_executor(
+            metadata.clone(),
+            blocks,
+            StorageOptions::new(format!("{prefix}/{phase}"), 4096).unwrap(),
+            TokioExecutor::current().unwrap(),
+        )
+        .expect("restart storage bridge");
+        let vfs = SqliteVfs::new(&registration_name("restart"), Arc::new(backend)).unwrap();
+        let connection = vfs.open("restart.db", flags()).unwrap();
+        let mode: String = connection
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "delete");
+        connection.execute_batch("PRAGMA synchronous=FULL").unwrap();
+        let synchronous: i64 = connection
+            .query_row("PRAGMA synchronous", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(synchronous, 2);
+        if phase == "prepare" {
+            connection
+                .execute_batch(
+                    "CREATE TABLE ledger(id INTEGER PRIMARY KEY, body BLOB NOT NULL);
+                 BEGIN IMMEDIATE;
+                 INSERT INTO ledger VALUES (1, x'0001ff'), (2, x'ff1000');
+                 COMMIT;
+                 BEGIN IMMEDIATE;
+                 INSERT INTO ledger VALUES (3, x'deadbeef');
+                 ROLLBACK;",
+                )
+                .unwrap();
+        }
+        let mut statement = connection
+            .prepare("SELECT id, body FROM ledger ORDER BY id")
+            .unwrap();
+        let rows: Vec<(i64, Vec<u8>)> = statement
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(rows, vec![(1, vec![0, 1, 255]), (2, vec![255, 16, 0])]);
+        drop(statement);
+        let integrity: String = connection
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        drop(connection);
+        metadata.close().await.unwrap();
+        // Blocks are deliberately retained between phases. The isolated
+        // harness owns and removes the entire test bucket/data directory.
+        println!("RUSTFS_VFS_RESTART_PHASE_PASS phase={phase}");
+    });
+}
+
+#[test]
 #[ignore = "requires scripts/test-rustfs.sh or an equivalent real PGlite + RustFS environment"]
 fn remote_pglite_rustfs_sqlite_vfs() {
     let runtime = tokio::runtime::Builder::new_multi_thread()

@@ -325,6 +325,11 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W15 — Mount-free SQLite VFS
 
+- [x] Actual RustFS service stop/start now has its own VFS fixture: separate
+  prepare/reopen test processes share the persisted metadata/block prefix,
+  verify two exact committed binary rows, exclusion of a rolled-back row,
+  and `integrity_check = ok`. Full local RustFS harness passed both phases.
+  PGlite itself was not restarted; this is not a power-loss or WAL result.
 - [x] Live PGlite metadata + RustFS blocks VFS test passed locally: real SQLite
   transaction, exact binary bytes and integrity after reconnecting both clients.
   Added it to the standard RustFS harness instead of leaving it opt-in only.

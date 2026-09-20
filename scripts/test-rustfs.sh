@@ -857,6 +857,12 @@ run_combo_command() {
 
 run_combo_command
 
+RUSTFS_VFS_RESTART_PHASE=prepare cargo test \
+  --manifest-path "$repo_dir/Cargo.toml" \
+  --locked -p mount-rs-sqlite-vfs --features remote-harness \
+  --test remote_storage_bridge -- \
+  remote_vfs_survives_rustfs_restart --exact --ignored --nocapture
+
 bounded_docker_action "stop" docker stop --time=5 "$container_name"
 if container_is_running; then
   echo "RustFS container remained running after fault injection" >&2
@@ -880,6 +886,12 @@ wait_for_ready
 bootstrap_bucket
 echo "RUSTFS_FAULT_RECOVERY_PASS endpoint=$rustfs_endpoint"
 echo "RUSTFS_RESTART_READY endpoint=$rustfs_endpoint"
+
+RUSTFS_VFS_RESTART_PHASE=reopen cargo test \
+  --manifest-path "$repo_dir/Cargo.toml" \
+  --locked -p mount-rs-sqlite-vfs --features remote-harness \
+  --test remote_storage_bridge -- \
+  remote_vfs_survives_rustfs_restart --exact --ignored --nocapture
 
 cargo test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
