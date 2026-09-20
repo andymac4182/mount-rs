@@ -43,6 +43,10 @@ cases still require audit.
   passed all four hosted jobs in [CI run 35479549553](https://github.com/andymac4182/mount-rs/actions/runs/35479549553).
   This covers userspace transport tests, not real kernel mounts; subsequent
   changes require their own hosted evidence.
+- Linux rootless FUSE mounted-file write/read/readdir/unmount passed for
+  checkpoint `24af979` in [native FUSE job 105996579367](https://github.com/andymac4182/mount-rs/actions/runs/35480223176/job/105996579367).
+  Its log confirms one actual native test passed, zero ignored. This does not
+  establish native NFS/9P/WebDAV behavior or mounted persistent-backend coverage.
 - Run the live Cloudflare R2 gate with the target bucket and credentials.
 - Port and test the upstream transport/server layers: FUSE, 9P, NFS,
   WebDAV, and S3 gateway behavior.

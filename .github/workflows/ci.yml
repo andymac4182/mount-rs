@@ -24,6 +24,12 @@ jobs:
         env:
           MOUNT_RS_RUN_NATIVE_FUSE: '1'
         run: timeout 180s cargo test --locked -p mount-rs-fuse --test native_mount -- --ignored --nocapture
+      - name: Build mounted backend integration test
+        run: cargo test --locked -p mount-rs-core --test native_fuse_backends --no-run
+      - name: Verify mounted memory and persisted backend operations
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 180s cargo test --locked -p mount-rs-core --test native_fuse_backends -- --ignored --nocapture
 
   rust:
     strategy:
