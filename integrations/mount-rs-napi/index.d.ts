@@ -510,8 +510,6 @@ export declare function fuseDecodeGetattrIn(body: Uint8Array, context?: NativeFu
 
 export declare function fuseDecodeGetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
 
-export declare function fuseDecodeGetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseGetxattrIn
-
 export declare function fuseDecodeGetxattrOut(body: Uint8Array): NativeFuseGetxattrOut
 
 export declare function fuseDecodeInHeader(bytes: Uint8Array): NativeFuseInHeader
@@ -522,7 +520,9 @@ export declare function fuseDecodeInitOut(body: Uint8Array): NativeFuseInitOut
 
 export declare function fuseDecodeInterruptIn(body: Uint8Array): NativeFuseInterruptIn
 
-export declare function fuseDecodeListxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseListxattrIn
+export declare function fuseDecodeIoctlIn(body: Uint8Array): NativeFuseIoctlIn
+
+export declare function fuseDecodeIoctlOut(body: Uint8Array): NativeFuseIoctlOut
 
 export declare function fuseDecodeLookupIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseNameIn
 
@@ -554,13 +554,9 @@ export declare function fuseDecodeReadOut(body: Uint8Array): NativeFuseRawData
 
 export declare function fuseDecodeReleaseIn(body: Uint8Array): NativeFuseReleaseIn
 
-export declare function fuseDecodeRemovexattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseNameIn
-
 export declare function fuseDecodeSetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseSetattrIn
 
 export declare function fuseDecodeSetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
-
-export declare function fuseDecodeSetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseSetxattrIn
 
 export declare function fuseDecodeStatfsIn(body: Uint8Array): NativeFuseEmpty
 
@@ -602,8 +598,6 @@ export declare function fuseEncodeGetattrIn(value: NativeFuseGetattrIn, context?
 
 export declare function fuseEncodeGetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
-export declare function fuseEncodeGetxattrIn(value: NativeFuseGetxattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
-
 export declare function fuseEncodeGetxattrOut(value: NativeFuseGetxattrOut): Buffer
 
 export declare function fuseEncodeInHeader(value: NativeFuseInHeader): Buffer
@@ -614,7 +608,9 @@ export declare function fuseEncodeInitOut(value: NativeFuseInitOut, context?: Na
 
 export declare function fuseEncodeInterruptIn(value: NativeFuseInterruptIn): Buffer
 
-export declare function fuseEncodeListxattrIn(value: NativeFuseListxattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+export declare function fuseEncodeIoctlIn(value: NativeFuseIoctlIn): Buffer
+
+export declare function fuseEncodeIoctlOut(value: NativeFuseIoctlOut): Buffer
 
 export declare function fuseEncodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -646,15 +642,11 @@ export declare function fuseEncodeReadOut(value: NativeFuseRawData): Buffer
 
 export declare function fuseEncodeReleaseIn(value: NativeFuseReleaseIn): Buffer
 
-export declare function fuseEncodeRemovexattrIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
-
 export declare function fuseEncodeReply(unique: bigint, body?: Uint8Array): Buffer
 
 export declare function fuseEncodeSetattrIn(value: NativeFuseSetattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeSetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
-
-export declare function fuseEncodeSetxattrIn(value: NativeFuseSetxattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeStatfsIn(value: NativeFuseEmpty): Buffer
 
@@ -967,11 +959,6 @@ export interface NativeFuseGetattrIn {
   fh: bigint
 }
 
-export interface NativeFuseGetxattrIn {
-  size: number
-  name: string
-}
-
 export interface NativeFuseGetxattrOut {
   size: number
 }
@@ -1042,6 +1029,22 @@ export interface NativeFuseInterruptIn {
   unique: bigint
 }
 
+export interface NativeFuseIoctlIn {
+  fh: bigint
+  flags: number
+  cmd: number
+  arg: bigint
+  inSize: number
+  outSize: number
+}
+
+export interface NativeFuseIoctlOut {
+  result: number
+  flags: number
+  inIovs: number
+  outIovs: number
+}
+
 export interface NativeFuseKstatfs {
   blocks: bigint
   bfree: bigint
@@ -1051,10 +1054,6 @@ export interface NativeFuseKstatfs {
   bsize: number
   namelen: number
   frsize: number
-}
-
-export interface NativeFuseListxattrIn {
-  size: number
 }
 
 export interface NativeFuseNameIn {
@@ -1149,13 +1148,6 @@ export interface NativeFuseSetattrIn {
   mode: number
   uid: number
   gid: number
-}
-
-export interface NativeFuseSetxattrIn {
-  flags: number
-  setxattrFlags: number
-  name: string
-  value: Uint8Array
 }
 
 export interface NativeFuseSplitInitFlags {
