@@ -1039,12 +1039,15 @@ dependencies = [
  "mount-rs-chunked",
  "mount-rs-fuse",
  "mount-rs-host",
+ "mount-rs-kv",
  "mount-rs-memory",
  "mount-rs-nfs",
  "mount-rs-persist",
  "mount-rs-pglite",
  "mount-rs-r2",
+ "mount-rs-s3",
  "mount-rs-sqlite",
+ "mount-rs-webdav",
  "object_store",
  "serde",
  "serde_json",
@@ -1073,6 +1076,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-kv"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "mount-rs-core",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-memory"
 version = "0.1.0"
 dependencies = [
@@ -1084,8 +1097,10 @@ dependencies = [
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
+ "mount-rs-auto",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-host",
  "mount-rs-memory",
  "mount-rs-pglite",
  "mount-rs-r2",

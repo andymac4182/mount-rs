@@ -10,8 +10,10 @@ license = "MIT"
 crate-type = ["cdylib"]
 
 [dependencies]
+mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-chunked = { path = "../mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
+mount-rs-host = { path = "../mount-rs-host" }
 mount-rs-memory = { path = "../mount-rs-memory" }
 mount-rs-pglite = { path = "../mount-rs-pglite" }
 mount-rs-r2 = { path = "../mount-rs-r2" }

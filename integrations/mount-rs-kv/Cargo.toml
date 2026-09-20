@@ -1,0 +1,17 @@
+[package]
+name = "mount-rs-kv"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Generic key-value storage adapter with mount-rs filesystem semantics"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
