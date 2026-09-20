@@ -580,6 +580,10 @@ export declare function fuseSupportedOpcodes(): Array<number>
 
 export declare function fuseUnimplementedOpcodes(): Array<number>
 
+export declare function packDirents(entries: Iterable<NativeFuseDirent>, maxSize: number): { buffer: Buffer; packed: number }
+
+export declare function unpackDirents(body: Uint8Array): Array<NativeFuseDirent>
+
 export declare function isFsError(error: unknown, code?: string | undefined | null): error is FsError
 
 export declare function isNormalizedPath(path: string): boolean
@@ -862,6 +866,13 @@ export interface NativeFuseInodeStats {
 
 export interface NativeFuseInodeTableOptions {
   useDriverIno?: boolean
+}
+
+export interface NativeFuseDirent {
+  ino: bigint
+  off: bigint
+  type: number
+  name: string
 }
 
 export interface NativeFuseKstatfs {
