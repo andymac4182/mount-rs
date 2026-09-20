@@ -50,8 +50,8 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | Site draft ready; deployment pending | Main |
-| W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
-| W26 | Apache Ozone S3 backend | Implementing; unverified | Darwin |
+| W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
+| W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
 | W27 | Native Windows support and CI | CI added; qualification pending | Lagrange / Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -500,8 +500,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W25 — Actual AWS S3 integration
 
-- [ ] W25.1 Connect AWS MCP (not exposed in current tool inventory) and resolve
-  account/region; user requested an isolated S3 testing setup.
+- [x] W25.1 AWS MCP became available after the app restart. STS identity and
+  account-owned bucket inventory verified; testing region is `ap-southeast-2`.
+- [x] Create and read back private bucket
+  `mount-rs-integration-106427005394-ap-southeast-2`: all four public-access
+  blocks enabled, bucket-owner-enforced ownership, AES256 server-side
+  encryption, test-resource tags, seven-day expiry under `mount-rs-tests/`,
+  and one-day incomplete multipart cleanup. No access keys were created.
+  Local `myroot` SSO credentials are expired; secure local test authentication
+  and least-privilege test access remain pending. MCP provisioning is not a
+  Rust integration test result.
 - [ ] W25.2 Provision private test bucket, narrowly scoped access, and test-data
   cleanup/retention policy. Keep credentials outside chat and source control.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
@@ -510,6 +518,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W26 — Apache Ozone S3 backend
 
+- [x] Land isolated, digest-pinned Apache Ozone 2.2.1 gateway harness and
+  an Ubuntu CI gate. Main's real Linux-arm64 Docker run passed immutable
+  blocks, conditional create/read/write and CAS, concurrent publication,
+  service restart/reopen, and owned-resource cleanup. Hosted Linux-amd64
+  results and mixed metadata-provider/Node/CLI coverage remain open. The
+  all-in-one non-secure test deployment is loopback-only, not production auth
+  or replicated-durability acceptance.
 - [ ] W26.1 Pin an Apache Ozone release and container digests; provide isolated
   local/CI orchestration, readiness, authentication and bounded cleanup on
   macOS/Linux. Record service topology, replication and durability settings.
