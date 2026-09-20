@@ -432,6 +432,10 @@ the closure items listed above.
   processes writing and reading through the same mount, verified the Node
   bytes from Rust after the write, and confirmed clean unmount plus backing
   directory persistence. This does not qualify FUSE, FSKit or remote providers.
+- **PASS** — the matching Node CLI command with a temporary HostFs backing and
+  `--transport nfs --self-test` mounted through the Node SDK, wrote and read
+  through the native mount, unmounted, and left its backing directory clean.
+  Linux FUSE, FSKit and live-provider acceptance remain separate.
 
 ### W01 parallel packet evidence (2026-09-21)
 
