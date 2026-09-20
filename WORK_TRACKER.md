@@ -411,7 +411,7 @@ complete.
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
-| W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
+| W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade and application boundary wiring landed; collector/benchmark/platform qualification pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
 ## Decisions and external prerequisites
@@ -1323,6 +1323,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   context propagation, redaction, disabled mode, dropped connections, exporter
   failures and shutdown. Benchmark overhead and qualify macOS/Linux/Windows;
   document setup and dashboards/examples without claiming unverified coverage.
+
+Implementation note (2026-09-21): the separate `mount-rs-observability` crate,
+feature-gated HTTP/SDK/Node/CLI integration, bounded redaction contract, W3C
+carrier helpers, OTLP/HTTP provider setup, and deterministic tests are in the
+current implementation. Collector-backed export, overhead benchmarking, and
+cross-platform qualification remain explicitly unverified.
 
 ## W31 — Per-drive mounts from one backing datastore (future)
 

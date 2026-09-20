@@ -2295,11 +2295,11 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
         Box::pin(async { Ok::<(), FsError>(()) })
     });
     Ok(super::Filesystem {
-        driver: Arc::new(JsDriver {
+        driver: super::instrument_driver(Arc::new(JsDriver {
             lifecycle,
             callbacks,
             capabilities,
-        }),
+        })),
         shutdown: Some(shutdown),
     })
 }

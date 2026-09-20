@@ -8,6 +8,8 @@ use mount_rs_core::{
     Capabilities, DirEntry, FileHandle, FsDriver, FsError, MemoryFs, Result, Stats,
 };
 use mount_rs_http::{DriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions};
+#[cfg(feature = "observability")]
+use mount_rs_observability::{Telemetry, TelemetryConfig};
 use mount_rs_sqlite::open_sqlite_memory;
 use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, RANGE, WWW_AUTHENTICATE};
 use serde_json::json;
@@ -206,6 +208,52 @@ async fn test_server() -> HttpServer {
     )
     .await
     .expect("HTTP server")
+}
+
+#[cfg(feature = "observability")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observability_records_success_and_bounded_http_errors() {
+    let telemetry = Telemetry::new(TelemetryConfig::enabled("mount-rs-http-test"));
+    let memory = Arc::new(MemoryFs::empty());
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(DriveConfig::new("memory", memory, MEMORY_TOKEN).expect("memory drive config"))
+        .expect("memory drive registration");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions::default().with_telemetry(telemetry.clone()),
+    )
+    .await
+    .expect("HTTP server");
+
+    let client = reqwest::Client::new();
+    let base = server.url();
+    let discovery = client
+        .get(format!("{base}/v1/drives"))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .header(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        )
+        .send()
+        .await
+        .expect("discovery response");
+    assert_eq!(discovery.status(), reqwest::StatusCode::OK);
+
+    let missing = client
+        .get(format!("{base}/v1/drives/missing/file"))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .send()
+        .await
+        .expect("missing-drive response");
+    assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+
+    let snapshot = telemetry.snapshot();
+    assert_eq!(snapshot.operations, 2);
+    assert_eq!(snapshot.successes, 1);
+    assert_eq!(snapshot.errors, 1);
+
+    server.close().await.expect("server close");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -14,6 +14,8 @@ use mount_rs_core::{ErrorCode, FsDriver, FsError, Loopback, Result as FsResult};
 use mount_rs_http::{
     DriveConfig as HttpDriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions,
 };
+#[cfg(feature = "observability")]
+use mount_rs_observability::{Telemetry, set_global as set_global_telemetry};
 use mount_rs_sdk::{
     Filesystem, FilesystemKind, HostOptions, MemoryOptions, SplitOptions, StoreConfig,
 };
@@ -171,7 +173,15 @@ impl DriverRuntime {
     }
 
     fn driver(&self) -> Arc<dyn FsDriver> {
-        self.filesystem.driver()
+        #[cfg(feature = "observability")]
+        {
+            self.filesystem
+                .driver_with_telemetry(mount_rs_observability::global())
+        }
+        #[cfg(not(feature = "observability"))]
+        {
+            self.filesystem.driver()
+        }
     }
 
     async fn shutdown(&self) -> FsResult<()> {
@@ -311,6 +321,9 @@ where
     I: IntoIterator<Item = S>,
     S: Into<std::ffi::OsString>,
 {
+    #[cfg(feature = "observability")]
+    set_global_telemetry(Telemetry::from_env("mount-rs-cli"));
+
     match parse_args(args)? {
         Command::Help => {
             println!("{}", help_text(Color::from_env()));
@@ -540,6 +553,8 @@ fn http_server_options(config: &HttpServiceConfig) -> HttpServerOptions {
         max_request_bytes: config.max_request_bytes,
         read_chunk_bytes: config.read_chunk_bytes,
         drain_timeout: Duration::from_millis(config.drain_timeout_ms),
+        #[cfg(feature = "observability")]
+        telemetry: mount_rs_observability::global(),
     }
 }
 
@@ -607,7 +622,19 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
         }
     };
 
-    let mounted = match mount_rs_auto::mount(watched, &mountpoint, mount_options).await {
+    let mount_future = mount_rs_auto::mount(watched, &mountpoint, mount_options);
+    #[cfg(feature = "observability")]
+    let mount_result = {
+        let mount_path = mountpoint.to_string_lossy().into_owned();
+        mount_rs_observability::global()
+            .observe_result("mount", "mount", Some(&mount_path), mount_future, |_| {
+                Some("mount_error")
+            })
+            .await
+    };
+    #[cfg(not(feature = "observability"))]
+    let mount_result = mount_future.await;
+    let mounted = match mount_result {
         Ok(mounted) => mounted,
         Err(error) => {
             let _ = runtime.shutdown().await;

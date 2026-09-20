@@ -15,6 +15,10 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
+#[cfg(feature = "observability")]
+use mount_rs_observability::Telemetry;
+#[cfg(feature = "observability-otlp")]
+use mount_rs_observability::extract_headers;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -156,6 +160,8 @@ pub struct HttpServerOptions {
     pub max_request_bytes: usize,
     pub read_chunk_bytes: usize,
     pub drain_timeout: Duration,
+    #[cfg(feature = "observability")]
+    pub telemetry: Telemetry,
 }
 
 impl Default for HttpServerOptions {
@@ -166,7 +172,18 @@ impl Default for HttpServerOptions {
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             read_chunk_bytes: DEFAULT_READ_CHUNK_BYTES,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+            #[cfg(feature = "observability")]
+            telemetry: Telemetry::disabled(),
         }
+    }
+}
+
+#[cfg(feature = "observability")]
+impl HttpServerOptions {
+    /// Enable application-owned HTTP telemetry for this listener.
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
+        self
     }
 }
 
@@ -201,6 +218,8 @@ struct RequestConfig {
     max_request_bytes: usize,
     read_chunk_bytes: usize,
     control: RuntimeControl,
+    #[cfg(feature = "observability")]
+    telemetry: Telemetry,
 }
 
 #[derive(Clone)]
@@ -285,6 +304,8 @@ impl HttpServer {
                     max_request_bytes: options.max_request_bytes.max(1),
                     read_chunk_bytes: options.read_chunk_bytes.max(1),
                     control,
+                    #[cfg(feature = "observability")]
+                    telemetry: options.telemetry,
                 },
             }),
             host: options.host,
@@ -760,22 +781,95 @@ struct ByteRange {
     length: u64,
 }
 
+#[cfg(feature = "observability")]
+struct HttpResponseFailure {
+    response: Response<HttpBody>,
+    error_code: &'static str,
+}
+
+#[cfg(feature = "observability")]
+impl HttpResponseFailure {
+    fn from_response(
+        response: Response<HttpBody>,
+    ) -> std::result::Result<Response<HttpBody>, Box<Self>> {
+        let status = response.status();
+        let error_code = if status.is_client_error() {
+            Some("http_client_error")
+        } else if status.is_server_error() {
+            Some("http_server_error")
+        } else {
+            None
+        };
+        match error_code {
+            Some(error_code) => Err(Box::new(Self {
+                response,
+                error_code,
+            })),
+            None => Ok(response),
+        }
+    }
+}
+
 async fn handle_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
+    #[cfg(feature = "observability")]
+    if state.config.telemetry.is_enabled() {
+        let path = request.uri().path().to_owned();
+        let telemetry = state.config.telemetry.clone();
+        #[cfg(feature = "observability-otlp")]
+        let parent_context = extract_headers(request.headers());
+        #[cfg(feature = "observability-otlp")]
+        let response = telemetry
+            .observe_result_with_context(
+                "http",
+                "request",
+                Some(&path),
+                &parent_context,
+                async move {
+                    HttpResponseFailure::from_response(
+                        handle_request_uninstrumented(request, state).await,
+                    )
+                },
+                |failure| Some(failure.error_code),
+            )
+            .await;
+        #[cfg(not(feature = "observability-otlp"))]
+        let response = telemetry
+            .observe_result(
+                "http",
+                "request",
+                Some(&path),
+                async move {
+                    HttpResponseFailure::from_response(
+                        handle_request_uninstrumented(request, state).await,
+                    )
+                },
+                |failure| Some(failure.error_code),
+            )
+            .await;
+        return Ok(match response {
+            Ok(response) => response,
+            Err(failure) => failure.response,
+        });
+    }
+
+    Ok(handle_request_uninstrumented(request, state).await)
+}
+
+async fn handle_request_uninstrumented(
+    request: Request<Incoming>,
+    state: Arc<AppState>,
+) -> Response<HttpBody> {
     let (parts, body) = request.into_parts();
     let route = match parse_route(parts.uri.path()) {
         Ok(route) => route,
-        Err(error) => return Ok(error_response(error)),
+        Err(error) => return error_response(error),
     };
 
     if matches!(route, Route::Discovery) {
-        return Ok(handle_discovery(
-            &parts.method,
-            &parts.headers,
-            &state.registry,
-        ));
+        return handle_discovery(&parts.method, &parts.headers, &state.registry);
     }
 
     let drive_id = match &route {
@@ -785,13 +879,13 @@ async fn handle_request(
         Route::Discovery => unreachable!(),
     };
     let Some(drive) = state.registry.get(drive_id).cloned() else {
-        return Ok(error_response(RequestError::not_found()));
+        return error_response(RequestError::not_found());
     };
     if !authorized(&parts.headers, &drive) {
-        return Ok(error_response(RequestError::unauthorized()));
+        return error_response(RequestError::unauthorized());
     }
     if content_length_exceeds(&parts.headers, state.config.max_request_bytes) {
-        return Ok(error_response(RequestError::body_too_large()));
+        return error_response(RequestError::body_too_large());
     }
 
     let result = match route {
@@ -812,7 +906,7 @@ async fn handle_request(
         }
         Route::Discovery => unreachable!(),
     };
-    Ok(result.unwrap_or_else(error_response))
+    result.unwrap_or_else(error_response)
 }
 
 fn handle_discovery(

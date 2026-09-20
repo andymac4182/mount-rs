@@ -1,0 +1,37 @@
+[package]
+name = "mount-rs-observability"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Opt-in OpenTelemetry instrumentation for mount-rs applications"
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/mount-rs"
+readme = "README.md"
+
+[features]
+default = []
+otlp = [
+    "dep:opentelemetry",
+    "dep:opentelemetry-appender-tracing",
+    "dep:opentelemetry-otlp",
+    "dep:opentelemetry_sdk",
+    "dep:tracing-opentelemetry",
+    "dep:tracing-subscriber",
+]
+http-propagation = ["otlp", "dep:http"]
+
+[dependencies]
+async-trait = "0.1"
+http = { version = "1", optional = true }
+mount-rs-core = { path = "../.." }
+tracing = "0.1"
+
+opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"], optional = true }
+opentelemetry-appender-tracing = { version = "0.32", optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"], optional = true }
+tracing-opentelemetry = { version = "0.33", optional = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "registry", "std"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }

@@ -646,7 +646,7 @@ pub fn create_unstorage_driver(
     });
 
     Ok(super::Filesystem {
-        driver: Arc::new(filesystem),
+        driver: super::instrument_driver(Arc::new(filesystem)),
         shutdown: Some(shutdown),
     })
 }

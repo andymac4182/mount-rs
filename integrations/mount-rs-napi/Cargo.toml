@@ -6,6 +6,10 @@ rust-version = "1.95"
 description = "Node.js N-API bindings for mount-rs"
 license = "Apache-2.0"
 
+[features]
+default = []
+observability = ["dep:mount-rs-observability"]
+
 [lib]
 crate-type = ["cdylib"]
 
@@ -21,6 +25,7 @@ mount-rs-chunked = { path = "../mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
 mount-rs-host = { path = "../mount-rs-host" }
 mount-rs-memory = { path = "../mount-rs-memory" }
+mount-rs-observability = { path = "../../crates/mount-rs-observability", optional = true }
 mount-rs-pglite = { path = "../mount-rs-pglite" }
 mount-rs-r2 = { path = "../mount-rs-r2" }
 mount-rs-sqlite = { path = "../mount-rs-sqlite" }

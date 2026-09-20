@@ -26,3 +26,16 @@ filesystem.shutdown().await?;
 Use [`SplitOptions`] when metadata and byte storage need different providers.
 The SDK owns the provider handles and closes PGlite connections after the
 chunked filesystem has released its writer lease.
+
+## Optional observability
+
+Enable the `observability` feature when the application wants the SDK to
+decorate a returned driver with the separate `mount-rs-observability` crate:
+
+```toml
+mount-rs-sdk = { version = "0.1", features = ["observability"] }
+```
+
+Call `driver_with_telemetry` with an application-owned handle, or install a
+handle with `set_global_telemetry` and call `observed_driver`. The default
+handle is disabled and exporter setup remains owned by the application.

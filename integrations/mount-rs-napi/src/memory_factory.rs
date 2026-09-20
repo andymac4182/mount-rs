@@ -51,12 +51,12 @@ pub fn create_memory_driver(
     let root_mode = super::optional_u32("rootMode", options.root_mode, 0o755)?;
 
     Ok(Filesystem {
-        driver: Arc::new(MemoryFs::new(MemoryOptions {
+        driver: super::instrument_driver(Arc::new(MemoryFs::new(MemoryOptions {
             uid,
             gid,
             umask,
             root_mode,
-        })),
+        }))),
         shutdown: None,
     })
 }

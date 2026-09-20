@@ -30,6 +30,10 @@ pub use mount_rs_core::{
     OpenFlags, Result, Stats, StatsFs,
 };
 pub use mount_rs_host::HostFsOptions as HostOptions;
+#[cfg(feature = "observability")]
+pub use mount_rs_observability::{
+    Telemetry, TelemetryConfig, global as global_telemetry, set_global as set_global_telemetry,
+};
 
 /// A provider selected for the metadata or immutable block side of a
 /// split-store filesystem.
@@ -171,6 +175,28 @@ impl Filesystem {
         }
     }
 
+    /// Return a driver decorated with optional application-owned telemetry.
+    ///
+    /// The decorator is feature-gated so the default SDK build has no
+    /// observability dependency or runtime work. It only instruments this
+    /// returned driver view; filesystem construction, shutdown, and the
+    /// existing [`Self::driver`] behavior remain unchanged.
+    #[cfg(feature = "observability")]
+    pub fn driver_with_telemetry(&self, telemetry: Telemetry) -> Arc<dyn FsDriver> {
+        mount_rs_observability::InstrumentedDriver::from_arc(self.driver(), telemetry).into_arc()
+    }
+
+    /// Return a driver decorated with the process-wide application telemetry.
+    ///
+    /// Applications can install exporters and then call
+    /// [`set_global_telemetry`] during startup. The default global handle is
+    /// disabled, so this method is also a no-op at runtime until the
+    /// application explicitly enables telemetry.
+    #[cfg(feature = "observability")]
+    pub fn observed_driver(&self) -> Arc<dyn FsDriver> {
+        self.driver_with_telemetry(global_telemetry())
+    }
+
     pub const fn kind(&self) -> FilesystemKind {
         match &self.inner {
             FilesystemInner::Memory(_) => FilesystemKind::Memory,
@@ -210,28 +236,89 @@ impl Clone for Filesystem {
 }
 
 #[derive(Clone)]
-struct ErasedMetadataStore(Arc<dyn MetadataStore>);
+struct ErasedMetadataStore {
+    inner: Arc<dyn MetadataStore>,
+    #[cfg(feature = "observability")]
+    telemetry: Telemetry,
+}
+
+impl ErasedMetadataStore {
+    fn new(inner: Arc<dyn MetadataStore>) -> Self {
+        Self {
+            inner,
+            #[cfg(feature = "observability")]
+            telemetry: mount_rs_observability::global(),
+        }
+    }
+}
 
 #[async_trait]
 impl MetadataStore for ErasedMetadataStore {
     fn durable(&self) -> bool {
-        self.0.durable()
+        self.inner.durable()
     }
 
     async fn load(&self) -> Result<LoadedMetadata> {
-        self.0.load().await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs("provider.metadata", "load", None, self.inner.load())
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.load().await
     }
 
     async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
-        self.0.acquire_writer(owner, ttl).await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "lease.acquire",
+                    None,
+                    self.inner.acquire_writer(owner, ttl),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.acquire_writer(owner, ttl).await
     }
 
     async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
-        self.0.renew_writer(lease, ttl).await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "lease.renew",
+                    None,
+                    self.inner.renew_writer(lease, ttl),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.renew_writer(lease, ttl).await
     }
 
     async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
-        self.0.release_writer(lease).await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "lease.release",
+                    None,
+                    self.inner.release_writer(lease),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.release_writer(lease).await
     }
 
     async fn publish(
@@ -240,37 +327,111 @@ impl MetadataStore for ErasedMetadataStore {
         lease: &WriterLease,
         namespace: Namespace,
     ) -> Result<u64> {
-        self.0.publish(expected_revision, lease, namespace).await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.metadata",
+                    "publish",
+                    None,
+                    self.inner.publish(expected_revision, lease, namespace),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner
+            .publish(expected_revision, lease, namespace)
+            .await
     }
 
     async fn flush(&self) -> Result<()> {
-        self.0.flush().await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs("provider.metadata", "flush", None, self.inner.flush())
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.flush().await
     }
 }
 
 #[derive(Clone)]
-struct ErasedBlockStore(Arc<dyn BlockStore>);
+struct ErasedBlockStore {
+    inner: Arc<dyn BlockStore>,
+    #[cfg(feature = "observability")]
+    telemetry: Telemetry,
+}
+
+impl ErasedBlockStore {
+    fn new(inner: Arc<dyn BlockStore>) -> Self {
+        Self {
+            inner,
+            #[cfg(feature = "observability")]
+            telemetry: mount_rs_observability::global(),
+        }
+    }
+}
 
 #[async_trait]
 impl BlockStore for ErasedBlockStore {
     fn durable(&self) -> bool {
-        self.0.durable()
+        self.inner.durable()
     }
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
-        self.0.put(bytes).await
+        #[cfg(feature = "observability")]
+        {
+            let count = bytes.len() as u64;
+            let result = self
+                .telemetry
+                .observe_fs("provider.blocks", "put", None, self.inner.put(bytes))
+                .await?;
+            self.telemetry.record_bytes("write", count);
+            return Ok(result);
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.put(bytes).await
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
-        self.0.get(id).await
+        #[cfg(feature = "observability")]
+        {
+            let result = self
+                .telemetry
+                .observe_fs("provider.blocks", "get", None, self.inner.get(id))
+                .await?;
+            self.telemetry.record_bytes("read", result.len() as u64);
+            return Ok(result);
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.get(id).await
     }
 
     async fn flush(&self) -> Result<()> {
-        self.0.flush().await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs("provider.blocks", "flush", None, self.inner.flush())
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.flush().await
     }
 
     async fn delete(&self, id: &BlockId) -> Result<()> {
-        self.0.delete(id).await
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs("provider.blocks", "delete", None, self.inner.delete(id))
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.delete(id).await
     }
 }
 
@@ -328,8 +489,8 @@ async fn open_storage(metadata: &StoreConfig, blocks: &StoreConfig) -> Result<Op
     };
     metadata_resources.append(&mut block_resources);
     Ok(OpenStorage {
-        metadata: ErasedMetadataStore(metadata),
-        blocks: ErasedBlockStore(blocks),
+        metadata: ErasedMetadataStore::new(metadata),
+        blocks: ErasedBlockStore::new(blocks),
         resources: StorageResources {
             resources: metadata_resources,
         },
@@ -432,6 +593,18 @@ mod tests {
         view.write_file("/split.txt", b"split sdk").await.unwrap();
         assert_eq!(view.read_file("/split.txt").await.unwrap(), b"split sdk");
         assert_eq!(filesystem.kind(), FilesystemKind::SplitStore);
+        filesystem.shutdown().await.unwrap();
+    }
+
+    #[cfg(feature = "observability")]
+    #[tokio::test]
+    async fn opt_in_driver_telemetry_preserves_sdk_roundtrip() {
+        let filesystem = Filesystem::memory(MemoryOptions::default());
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("sdk-test"));
+        let view = Loopback::from_arc(filesystem.driver_with_telemetry(telemetry.clone()));
+        view.write_file("/observed.txt", b"observed").await.unwrap();
+        assert_eq!(view.read_file("/observed.txt").await.unwrap(), b"observed");
+        assert!(telemetry.snapshot().operations > 0);
         filesystem.shutdown().await.unwrap();
     }
 }

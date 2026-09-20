@@ -13,6 +13,16 @@ mount-rs probe
 mount-rs validate-config --config PATH
 mount-rs sdk-self-test [--config PATH] [--reopen]
 
+## Optional observability
+
+Build the CLI with `--features observability` to enable the application-owned
+`mount-rs-observability` facade at the CLI and HTTP boundaries. The feature is
+off by default and does not add exporter SDKs to the ordinary binary. Set
+`MOUNT_RS_TELEMETRY=1` before running the feature-enabled binary to activate
+bounded local spans, metrics, and structured events; configure an exporter and
+subscriber in the embedding application when OTLP export is required. See
+`docs/observability.md` for the signal contract and shutdown requirements.
+
 --help, --version, and probe do not create a driver or a mount. The probe
 output describes the current host's FUSE, 9P, and NFS prerequisites and the
 auto preference. Naming a transport skips that probe and does not fall back

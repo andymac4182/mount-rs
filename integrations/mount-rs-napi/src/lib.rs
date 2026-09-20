@@ -28,6 +28,8 @@ use mount_rs_core::{
 };
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
+#[cfg(feature = "observability")]
+use mount_rs_observability::{InstrumentedDriver, Telemetry};
 use mount_rs_pglite::{
     PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions, connect_pglite_with_store,
 };
@@ -40,6 +42,28 @@ use napi_derive::napi;
 const ERROR_MARKER: &str = "__mount_rs_error_v1__";
 const RANGE_ERROR_MARKER: &str = "__mount_rs_range_error_v1__";
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+/// Apply the optional Node application-boundary decorator at construction
+/// time. The feature is off by default; when enabled, an embedding Rust
+/// application may install a process-wide handle, while Node consumers can
+/// opt in with `MOUNT_RS_TELEMETRY=1` before loading the native module.
+pub(crate) fn instrument_driver(driver: Arc<dyn FsDriver>) -> Arc<dyn FsDriver> {
+    #[cfg(feature = "observability")]
+    {
+        let telemetry = {
+            let global = mount_rs_observability::global();
+            if global.is_enabled() {
+                global
+            } else {
+                Telemetry::from_env("mount-rs-node")
+            }
+        };
+        InstrumentedDriver::from_arc(driver, telemetry).into_arc()
+    }
+
+    #[cfg(not(feature = "observability"))]
+    driver
+}
 
 fn hex(value: &str) -> String {
     let mut output = String::with_capacity(value.len() * 2);
@@ -2315,7 +2339,7 @@ pub struct Filesystem {
 #[napi]
 impl Filesystem {
     fn from_driver(driver: Arc<dyn FsDriver>, shutdown: Option<Arc<ShutdownCallback>>) -> Self {
-        let slot = Arc::new(DriverSlot::new(driver));
+        let slot = Arc::new(DriverSlot::new(instrument_driver(driver)));
         let controller = ShutdownController::new(Arc::clone(&slot), shutdown);
         Self {
             driver: slot,

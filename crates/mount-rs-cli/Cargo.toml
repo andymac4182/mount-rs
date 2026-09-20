@@ -6,6 +6,14 @@ rust-version = "1.95"
 description = "The mount-rs command-line mount and transport probe tool"
 license = "Apache-2.0"
 
+[features]
+default = []
+observability = [
+    "dep:mount-rs-observability",
+    "mount-rs-http/observability",
+    "mount-rs-sdk/observability",
+]
+
 [[bin]]
 name = "mount-rs"
 path = "src/main.rs"
@@ -15,6 +23,7 @@ async-trait = "0.1"
 mount-rs-auto = { path = "../../transports/mount-rs-auto" }
 mount-rs-core = { path = "../.." }
 mount-rs-http = { path = "../mount-rs-http" }
+mount-rs-observability = { path = "../mount-rs-observability", optional = true }
 mount-rs-nfs = { path = "../../transports/mount-rs-nfs" }
 mount-rs-sdk = { path = "../mount-rs-sdk" }
 serde_json = "1"
