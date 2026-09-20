@@ -18,9 +18,7 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: integrations/mount-rs-fault-injection -> target
-      - run: cargo fmt --manifest-path integrations/mount-rs-fault-injection/Cargo.toml -- --check
-      - run: cargo test --locked --manifest-path integrations/mount-rs-fault-injection/Cargo.toml
-      - run: cargo test --locked --manifest-path integrations/mount-rs-fault-injection/Cargo.toml --all-features
-      - run: cargo clippy --locked --manifest-path integrations/mount-rs-fault-injection/Cargo.toml --all-targets --all-features -- -D warnings
+      - run: cargo fmt -p mount-rs-fault-injection -- --check
+      - run: cargo test --locked -p mount-rs-fault-injection
+      - run: cargo test --locked -p mount-rs-fault-injection --all-features
+      - run: cargo clippy --locked -p mount-rs-fault-injection --all-targets --all-features -- -D warnings

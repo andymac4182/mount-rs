@@ -15,14 +15,14 @@ Traces record pending, completed and cancelled injections without file contents,
 paths or credentials. The seed labels a run; it does **not** control concurrent
 scheduling. Replay requires the same caller-controlled operation ordering.
 
-This crate currently has an isolated workspace and lockfile. Root workspace
-registration and CLI/Node/VFS/HTTP integration remain pending. The tests cover
+This crate is a root workspace member using the shared lockfile.
+CLI/Node/VFS/HTTP integration remains pending. The tests cover
 storage-wrapper semantics, not kernel faults, network partitions, power loss,
 or the complete SQLite reliability matrix.
 
 ```sh
-cargo test --locked --manifest-path integrations/mount-rs-fault-injection/Cargo.toml
-cargo test --locked --manifest-path integrations/mount-rs-fault-injection/Cargo.toml --all-features
+cargo test --locked -p mount-rs-fault-injection
+cargo test --locked -p mount-rs-fault-injection --all-features
 ```
 
 CI runs these gates on Linux, macOS and Windows; configured jobs are not proof

@@ -53,7 +53,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
 | W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
 | W27 | Native Windows support and CI | CI added; qualification pending | Main |
-| W28 | Deterministic fault injection | Implementing | Arendt |
+| W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
 
@@ -508,7 +508,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   redacted pending/completed/cancelled traces and optional delays. Main passed
   seven all-feature tests and strict Clippy locally. Seed labels evidence, not
   randomized scheduling. Dedicated Linux/macOS/Windows CI added; hosted results
-  and root-workspace registration remain pending.
+  remain pending.
+- [x] Register the crate in the root workspace and shared lockfile. Add four
+  composed filesystem tests, each exercised with memory and SQLite metadata/block
+  stores: pre-write ENOSPC, lost publish acknowledgement, failed metadata flush,
+  and invalidated writer lease. Assert namespace/bytes on reopen and explicit
+  temporary-directory cleanup. Local all-feature suite: 11 passed. These are
+  in-process wrapper faults, not power-loss or remote-service qualification.
 - [ ] W28.1 Add a separate minimal-dependency fault-injection crate with explicit
   opt-in plans, operation/occurrence selectors, seeded replay and event evidence.
   Wrap metadata and block stores without changing production defaults.

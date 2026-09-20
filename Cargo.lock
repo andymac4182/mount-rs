@@ -1060,6 +1060,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-fault-injection"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-chunked",
+ "mount-rs-core",
+ "mount-rs-memory",
+ "mount-rs-sqlite",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-fuse"
 version = "0.1.0"
 dependencies = [

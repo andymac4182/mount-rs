@@ -18,9 +18,9 @@ mount-rs-core = { path = "../.." }
 tokio = { version = "1", default-features = false, features = ["time"], optional = true }
 
 [dev-dependencies]
+mount-rs-chunked = { path = "../mount-rs-chunked" }
+mount-rs-memory = { path = "../mount-rs-memory" }
+mount-rs-sqlite = { path = "../mount-rs-sqlite" }
+serde_json = "1"
+tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
-
-# This draft integration is independently checkable until the workspace owner
-# registers it in the root members list and merges its dependencies into the
-# root Cargo.lock.
-[workspace]
