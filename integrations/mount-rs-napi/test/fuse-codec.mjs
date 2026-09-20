@@ -48,18 +48,14 @@ import {
   encodeStatfsOut as namedEncodeStatfsOut,
   decodeInterruptIn as namedDecodeInterruptIn,
   encodeInterruptIn as namedEncodeInterruptIn,
+  decodeIoctlIn as namedDecodeIoctlIn,
+  encodeIoctlIn as namedEncodeIoctlIn,
+  decodeIoctlOut as namedDecodeIoctlOut,
+  encodeIoctlOut as namedEncodeIoctlOut,
   decodePollIn as namedDecodePollIn,
   encodePollIn as namedEncodePollIn,
   decodePollOut as namedDecodePollOut,
   encodePollOut as namedEncodePollOut,
-  decodeSetxattrIn as namedDecodeSetxattrIn,
-  encodeSetxattrIn as namedEncodeSetxattrIn,
-  decodeGetxattrIn as namedDecodeGetxattrIn,
-  encodeGetxattrIn as namedEncodeGetxattrIn,
-  decodeListxattrIn as namedDecodeListxattrIn,
-  encodeListxattrIn as namedEncodeListxattrIn,
-  decodeRemovexattrIn as namedDecodeRemovexattrIn,
-  encodeRemovexattrIn as namedEncodeRemovexattrIn,
 } from "../fuse.cjs";
 
 for (const [name, value] of [
@@ -109,18 +105,14 @@ for (const [name, value] of [
   ["encodeStatfsOut", namedEncodeStatfsOut],
   ["decodeInterruptIn", namedDecodeInterruptIn],
   ["encodeInterruptIn", namedEncodeInterruptIn],
+  ["decodeIoctlIn", namedDecodeIoctlIn],
+  ["encodeIoctlIn", namedEncodeIoctlIn],
+  ["decodeIoctlOut", namedDecodeIoctlOut],
+  ["encodeIoctlOut", namedEncodeIoctlOut],
   ["decodePollIn", namedDecodePollIn],
   ["encodePollIn", namedEncodePollIn],
   ["decodePollOut", namedDecodePollOut],
   ["encodePollOut", namedEncodePollOut],
-  ["decodeSetxattrIn", namedDecodeSetxattrIn],
-  ["encodeSetxattrIn", namedEncodeSetxattrIn],
-  ["decodeGetxattrIn", namedDecodeGetxattrIn],
-  ["encodeGetxattrIn", namedEncodeGetxattrIn],
-  ["decodeListxattrIn", namedDecodeListxattrIn],
-  ["encodeListxattrIn", namedEncodeListxattrIn],
-  ["decodeRemovexattrIn", namedDecodeRemovexattrIn],
-  ["encodeRemovexattrIn", namedEncodeRemovexattrIn],
 ]) {
   assert.equal(value, fuse[name], `FUSE named export ${name}`);
 }
@@ -261,23 +253,6 @@ const classifyProtocolError = (fn) => {
     code: result.code,
     offset: result.offset,
   };
-};
-const compareProtocolOutcome = (actualFn, expectedFn, message) => {
-  const actual = classify(actualFn);
-  const expected = classify(expectedFn);
-  if (actual.ok && expected.ok) {
-    assert.deepEqual(actual.value, expected.value, message);
-    return;
-  }
-  if (!actual.ok && !expected.ok) {
-    assert.deepEqual(
-      { ok: false, name: actual.name, code: actual.code, offset: actual.offset },
-      { ok: false, name: expected.name, code: expected.code, offset: expected.offset },
-      message,
-    );
-    return;
-  }
-  assert.deepEqual(actual, expected, message);
 };
 
 const dirents = [
@@ -471,39 +446,73 @@ for (const ctx of pollContexts) {
   );
 }
 
-const xattrContexts = [
+const ioctlInput = {
+  fh: 0x0102030405060708n,
+  flags: 0x3,
+  cmd: 0x80185879,
+  arg: 0x1112131415161718n,
+  inSize: 0x21222324,
+  outSize: 0x31323334,
+};
+const ioctlReplyValue = {
+  result: -25,
+  flags: 0x5,
+  inIovs: 0x41424344,
+  outIovs: 0x51525354,
+};
+const ioctlContexts = [
   { minor: 41, setxattrExt: false },
-  { minor: 41, setxattrExt: true },
   { minor: 39, setxattrExt: false },
   { minor: 8, setxattrExt: false },
+  { minor: 3, setxattrExt: false },
 ];
-const setxattrInput = {
-  flags: fuse.XATTR_CREATE,
-  setxattrFlags: fuse.FUSE_SETXATTR_ACL_KILL_SGID,
-  name: "user.mountx",
-  value: Uint8Array.from([0, 1, 2, 3, 255]),
+const encodeIoctlInOracle = (value) => {
+  const body = Buffer.alloc(32);
+  body.writeBigUInt64LE(value.fh, 0);
+  body.writeUInt32LE(value.flags, 8);
+  body.writeUInt32LE(value.cmd, 12);
+  body.writeBigUInt64LE(value.arg, 16);
+  body.writeUInt32LE(value.inSize, 24);
+  body.writeUInt32LE(value.outSize, 28);
+  return body;
 };
-const getxattrInput = { size: 0x80, name: "user.mountx" };
-const listxattrInput = { size: 0x100 };
-const removexattrInput = { name: "user.mountx" };
-for (const ctx of xattrContexts) {
-  const setxattrBody = fuse.encodeSetxattrIn(setxattrInput, ctx);
-  const decodedSetxattr = fuse.decodeSetxattrIn(setxattrBody, ctx);
-  assert.equal(setxattrBody.length, (ctx.setxattrExt ? 16 : 8) + Buffer.byteLength(setxattrInput.name) + 1 + setxattrInput.value.length);
-  assert.deepEqual(
-    { ...decodedSetxattr, value: Buffer.from(decodedSetxattr.value) },
-    { ...setxattrInput, setxattrFlags: ctx.setxattrExt ? setxattrInput.setxattrFlags : 0, value: Buffer.from(setxattrInput.value) },
-  );
-  const getxattrBody = fuse.encodeGetxattrIn(getxattrInput, ctx);
-  assert.equal(getxattrBody.length, 8 + Buffer.byteLength(getxattrInput.name) + 1);
-  assert.deepEqual(fuse.decodeGetxattrIn(getxattrBody, ctx), getxattrInput);
-  const listxattrBody = fuse.encodeListxattrIn(listxattrInput, ctx);
-  assert.equal(listxattrBody.length, 8);
-  assert.deepEqual(fuse.decodeListxattrIn(listxattrBody, ctx), listxattrInput);
-  const removexattrBody = fuse.encodeRemovexattrIn(removexattrInput, ctx);
-  assert.equal(removexattrBody.length, Buffer.byteLength(removexattrInput.name) + 1);
-  assert.deepEqual(fuse.decodeRemovexattrIn(removexattrBody, ctx), removexattrInput);
+const encodeIoctlOutOracle = (value) => {
+  const body = Buffer.alloc(16);
+  body.writeInt32LE(value.result, 0);
+  body.writeUInt32LE(value.flags, 4);
+  body.writeUInt32LE(value.inIovs, 8);
+  body.writeUInt32LE(value.outIovs, 12);
+  return body;
+};
+const ioctlBody = fuse.encodeIoctlIn(ioctlInput);
+const ioctlReplyBody = fuse.encodeIoctlOut(ioctlReplyValue);
+assert.equal(fuse.FUSE_IOCTL, 39);
+assert.equal(ioctlBody.length, 32);
+assert.equal(ioctlReplyBody.length, 16);
+assert.deepEqual(fuse.decodeIoctlIn(ioctlBody), ioctlInput);
+assert.deepEqual(fuse.decodeIoctlOut(ioctlReplyBody), ioctlReplyValue);
+assert.deepEqual([...ioctlBody], [...encodeIoctlInOracle(ioctlInput)]);
+assert.deepEqual([...ioctlReplyBody], [...encodeIoctlOutOracle(ioctlReplyValue)]);
+for (let length = 0; length < ioctlBody.length; length++) {
+  const result = classifyProtocolError(() => fuse.decodeIoctlIn(ioctlBody.subarray(0, length)));
+  assert.equal(result.name, "ProtocolError");
+  assert.equal(result.code, "ERR_FUSE_PROTOCOL");
 }
+for (let length = 0; length < ioctlReplyBody.length; length++) {
+  const result = classifyProtocolError(() => fuse.decodeIoctlOut(ioctlReplyBody.subarray(0, length)));
+  assert.equal(result.name, "ProtocolError");
+  assert.equal(result.code, "ERR_FUSE_PROTOCOL");
+}
+assert.equal(
+  classifyProtocolError(() => fuse.decodeIoctlIn(Buffer.concat([ioctlBody, Buffer.from([0])]))).offset,
+  32,
+);
+assert.equal(
+  classifyProtocolError(() => fuse.decodeIoctlOut(Buffer.concat([ioctlReplyBody, Buffer.from([0])]))).offset,
+  16,
+);
+const ioctlErrorReply = fuse.encodeErrorReply(99n, "EIO");
+assert.deepEqual(fuse.decodeOutHeader(ioctlErrorReply), { len: 16, error: -5, unique: 99n });
 
 const lifecycleInput = {
   release: {
@@ -538,6 +547,103 @@ assert.equal(fuse.encodeReply(99n).length, fuse.FUSE_OUT_HEADER_SIZE);
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
+  const oracleIoctlIsTyped =
+    typeof oracle.encodeRequestBody === "function" &&
+    !Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(fuse.FUSE_IOCTL);
+  for (const ctx of ioctlContexts) {
+    const expectedRequest = encodeIoctlInOracle(ioctlInput);
+    const expectedReply = encodeIoctlOutOracle(ioctlReplyValue);
+    assert.deepEqual(
+      [...ioctlBody],
+      [...expectedRequest],
+      `IOCTL request bytes match the pinned FUSE oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      [...ioctlReplyBody],
+      [...expectedReply],
+      `IOCTL reply bytes match the pinned FUSE oracle for minor ${ctx.minor}`,
+    );
+    const ioctlRequest = Buffer.concat([
+      fuse.encodeInHeader({
+        len: fuse.FUSE_IN_HEADER_SIZE + ioctlBody.length,
+        opcode: fuse.FUSE_IOCTL,
+        unique: 99n,
+        nodeid: fuse.FUSE_ROOT_ID,
+        uid: 501,
+        gid: 20,
+        pid: 7,
+        totalExtlen: 0,
+      }),
+      ioctlBody,
+    ]);
+    const oracleRequest = oracle.encodeRequest({
+      opcode: fuse.FUSE_IOCTL,
+      unique: 99n,
+      nodeid: fuse.FUSE_ROOT_ID,
+      uid: 501,
+      gid: 20,
+      pid: 7,
+      payload: ioctlBody,
+    }, ctx);
+    assert.deepEqual([...ioctlRequest], [...oracleRequest], `IOCTL request framing matches oracle for minor ${ctx.minor}`);
+    assert.deepEqual(
+      [...oracle.decodeRequest(oracleRequest, ctx).payload],
+      [...ioctlBody],
+      `IOCTL request payload matches oracle for minor ${ctx.minor}`,
+    );
+    const ioctlReply = fuse.encodeReply(99n, ioctlReplyBody);
+    const oracleReplyFrame = oracle.encodeReply(99n, ioctlReplyBody);
+    assert.deepEqual([...ioctlReply], [...oracleReplyFrame], `IOCTL reply framing matches oracle for minor ${ctx.minor}`);
+    assert.deepEqual(
+      [...oracle.decodeReply(oracleReplyFrame, fuse.FUSE_IOCTL, ctx).payload],
+      [...ioctlReplyBody],
+      `IOCTL reply payload matches oracle for minor ${ctx.minor}`,
+    );
+    if (oracleIoctlIsTyped) {
+      const oracleTypedRequest = oracle.encodeRequestBody(fuse.FUSE_IOCTL, ioctlInput, ctx);
+      const oracleTypedReply = oracle.encodeReplyBody(fuse.FUSE_IOCTL, ioctlReplyValue, ctx);
+      assert.deepEqual([...ioctlBody], [...oracleTypedRequest], `IOCTL request bytes match oracle for minor ${ctx.minor}`);
+      assert.deepEqual([...ioctlReplyBody], [...oracleTypedReply], `IOCTL reply bytes match oracle for minor ${ctx.minor}`);
+      assert.deepEqual(
+        fuse.decodeIoctlIn(ioctlBody),
+        oracle.decodeRequestBody(fuse.FUSE_IOCTL, oracleTypedRequest, ctx),
+        `IOCTL request decode matches oracle for minor ${ctx.minor}`,
+      );
+      assert.deepEqual(
+        fuse.decodeIoctlOut(ioctlReplyBody),
+        oracle.decodeReplyBody(fuse.FUSE_IOCTL, oracleTypedReply, ctx),
+        `IOCTL reply decode matches oracle for minor ${ctx.minor}`,
+      );
+      for (let length = 0; length < ioctlBody.length; length++) {
+        const body = ioctlBody.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => fuse.decodeIoctlIn(body)),
+          classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_IOCTL, body, ctx)),
+          `IOCTL request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      for (let length = 0; length < ioctlReplyBody.length; length++) {
+        const body = ioctlReplyBody.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => fuse.decodeIoctlOut(body)),
+          classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_IOCTL, body, ctx)),
+          `IOCTL reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      const requestTrailing = Buffer.concat([ioctlBody, Buffer.from([0])]);
+      const replyTrailing = Buffer.concat([ioctlReplyBody, Buffer.from([0])]);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeIoctlIn(requestTrailing)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_IOCTL, requestTrailing, ctx)),
+        `IOCTL request trailing-byte classification for minor ${ctx.minor}`,
+      );
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeIoctlOut(replyTrailing)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_IOCTL, replyTrailing, ctx)),
+        `IOCTL reply trailing-byte classification for minor ${ctx.minor}`,
+      );
+    }
+  }
   for (const ctx of [readContext, { minor: 8, setxattrExt: false }]) {
     const oracleRead = oracle.encodeRequestBody(fuse.FUSE_READ, readInput, ctx);
     const actualRead = fuse.encodeReadIn(readInput, ctx);
@@ -963,73 +1069,6 @@ if (source) {
     assert.equal(decodedError.body, undefined, `POLL error body is empty for minor ${ctx.minor}`);
   }
 
-  const xattrRequestCases = [
-    ["SETXATTR", fuse.FUSE_SETXATTR, setxattrInput, fuse.decodeSetxattrIn, fuse.encodeSetxattrIn, (value) => ({ ...value, value: [...value.value] })],
-    ["GETXATTR", fuse.FUSE_GETXATTR, getxattrInput, fuse.decodeGetxattrIn, fuse.encodeGetxattrIn, (value) => value],
-    ["LISTXATTR", fuse.FUSE_LISTXATTR, listxattrInput, fuse.decodeListxattrIn, fuse.encodeListxattrIn, (value) => value],
-    ["REMOVEXATTR", fuse.FUSE_REMOVEXATTR, removexattrInput, fuse.decodeRemovexattrIn, fuse.encodeRemovexattrIn, (value) => value],
-  ];
-  for (const ctx of xattrContexts) {
-    for (const [name, opcode, input, decodeIn, encodeIn, normalize] of xattrRequestCases) {
-      const oracleRequest = oracle.encodeRequestBody(opcode, input, ctx);
-      const actualRequest = encodeIn(input, ctx);
-      assert.deepEqual([...actualRequest], [...oracleRequest], `${name} request bytes match oracle for minor ${ctx.minor}, extension ${ctx.setxattrExt}`);
-      assert.deepEqual(normalize(decodeIn(actualRequest, ctx)), normalize(oracle.decodeRequestBody(opcode, oracleRequest, ctx)), `${name} request decode matches oracle for minor ${ctx.minor}, extension ${ctx.setxattrExt}`);
-      for (let length = 0; length < actualRequest.length; length++) {
-        const body = actualRequest.subarray(0, length);
-        assert.deepEqual(classifyProtocolError(() => decodeIn(body, ctx)), classifyProtocolError(() => oracle.decodeRequestBody(opcode, body, ctx)), `${name} truncation classification at ${length} bytes for minor ${ctx.minor}, extension ${ctx.setxattrExt}`);
-      }
-      const trailing = Buffer.concat([actualRequest, Buffer.from([0])]);
-      assert.deepEqual(classifyProtocolError(() => decodeIn(trailing, ctx)), classifyProtocolError(() => oracle.decodeRequestBody(opcode, trailing, ctx)), `${name} trailing-byte classification for minor ${ctx.minor}, extension ${ctx.setxattrExt}`);
-      if (name !== "LISTXATTR") {
-        const malformed = { ...input, name: "bad\0name" };
-        assert.deepEqual(classifyProtocolError(() => encodeIn(malformed, ctx)), classifyProtocolError(() => oracle.encodeRequestBody(opcode, malformed, ctx)), `${name} embedded-NUL classification for minor ${ctx.minor}, extension ${ctx.setxattrExt}`);
-      }
-    }
-
-    const malformedSize = Buffer.from(fuse.encodeSetxattrIn(setxattrInput, ctx));
-    malformedSize.writeUInt32LE(setxattrInput.value.length + 1, 0);
-    assert.deepEqual(classifyProtocolError(() => fuse.decodeSetxattrIn(malformedSize, ctx)), classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_SETXATTR, malformedSize, ctx)), `SETXATTR declared-size classification for minor ${ctx.minor}, extension ${ctx.setxattrExt}`);
-
-    const probe = { size: 4096 };
-    const oracleProbe = oracle.encodeGetxattrOut(probe);
-    const actualProbe = fuse.encodeGetxattrOut(probe);
-    assert.deepEqual([...actualProbe], [...oracleProbe], `GETXATTR size-probe bytes match oracle for minor ${ctx.minor}`);
-    assert.deepEqual(fuse.decodeGetxattrOut(actualProbe), oracle.decodeGetxattrOut(oracleProbe), `GETXATTR size-probe decode matches oracle for minor ${ctx.minor}`);
-    for (let length = 0; length < actualProbe.length; length++) {
-      const body = actualProbe.subarray(0, length);
-      assert.deepEqual(classifyProtocolError(() => fuse.decodeGetxattrOut(body)), classifyProtocolError(() => oracle.decodeGetxattrOut(body)), `GETXATTR size-probe truncation at ${length} bytes for minor ${ctx.minor}`);
-    }
-    const probeTrailing = Buffer.concat([actualProbe, Buffer.from([0])]);
-    assert.deepEqual(classifyProtocolError(() => fuse.decodeGetxattrOut(probeTrailing)), classifyProtocolError(() => oracle.decodeGetxattrOut(probeTrailing)), `GETXATTR size-probe trailing-byte classification for minor ${ctx.minor}`);
-
-    const names = ["user.mountx", "user.other"];
-    const oracleNames = oracle.encodeXattrNames(names);
-    const actualNames = fuse.encodeXattrNames(names);
-    assert.deepEqual([...actualNames], [...oracleNames], `LISTXATTR names bytes match oracle for minor ${ctx.minor}`);
-    assert.deepEqual(fuse.decodeXattrNames(actualNames), oracle.decodeXattrNames(oracleNames), `LISTXATTR names decode matches oracle for minor ${ctx.minor}`);
-    for (let length = 0; length < actualNames.length; length++) {
-      const body = actualNames.subarray(0, length);
-      compareProtocolOutcome(() => fuse.decodeXattrNames(body), () => oracle.decodeXattrNames(body), `LISTXATTR names truncation at ${length} bytes for minor ${ctx.minor}`);
-    }
-    const namesTrailing = Buffer.concat([actualNames, Buffer.from("tail")]);
-    compareProtocolOutcome(() => fuse.decodeXattrNames(namesTrailing), () => oracle.decodeXattrNames(namesTrailing), `LISTXATTR names trailing-byte classification for minor ${ctx.minor}`);
-
-    const rawValue = Uint8Array.from([0, 1, 2, 253, 254, 255]);
-    for (const [name, opcode] of [["GETXATTR", fuse.FUSE_GETXATTR], ["LISTXATTR", fuse.FUSE_LISTXATTR]]) {
-      const oracleRaw = oracle.encodeReplyBody(opcode, { data: rawValue }, ctx);
-      const actualRaw = fuse.encodeReadOut({ data: rawValue });
-      assert.deepEqual([...actualRaw], [...oracleRaw], `${name} raw reply bytes match oracle for minor ${ctx.minor}`);
-      assert.deepEqual([...fuse.decodeReadOut(actualRaw).data], [...oracle.decodeReplyBody(opcode, oracleRaw, ctx).data], `${name} raw reply decode matches oracle for minor ${ctx.minor}`);
-    }
-    for (const [name, opcode] of [["SETXATTR", fuse.FUSE_SETXATTR], ["REMOVEXATTR", fuse.FUSE_REMOVEXATTR]]) {
-      const actualReply = fuse.encodeReply(99n);
-      const oracleReply = oracle.encodeReplyFor(99n, opcode, {}, ctx);
-      assert.deepEqual([...actualReply], [...oracleReply], `${name} empty reply framing matches oracle for minor ${ctx.minor}`);
-      assert.deepEqual(oracle.decodeReplyBody(opcode, actualReply.subarray(fuse.FUSE_OUT_HEADER_SIZE), ctx), {}, `${name} empty reply decode matches oracle for minor ${ctx.minor}`);
-    }
-  }
-
   const lifecycleContext = { minor: 41, setxattrExt: false };
   for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases) {
     const oracleRequest = oracle.encodeRequestBody(opcode, input, lifecycleContext);
@@ -1259,7 +1298,9 @@ if (source) {
   console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE POLL request/typed-reply differential: PASS (pinned oracle)");
-  console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: PASS (pinned oracle)");
+  console.log(
+    `mount-rs N-API FUSE IOCTL request/reply differential: PASS (pinned oracle${oracleIoctlIsTyped ? " typed" : " raw-layout"})`,
+  );
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -1276,7 +1317,7 @@ if (source) {
   console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE POLL request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
-  console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE IOCTL request/reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
