@@ -228,9 +228,11 @@ Node SDK mounting through native NFS, writing and reading its file, unmounting,
 and leaving the temporary backing directory clean. This is a separate Node CLI
 consumer check; it does not qualify Linux FUSE, FSKit or live providers.
 
-The third W01 implementation rotation is locally integrated and verified. The
-Rust FUSE packet is `15026f2`, the napi-rs packet is `5b7f982`, and the CI
-packet is `d28f31a`. Rust now validates the fixed-width FUSE `POLL` request at
+The third W01 implementation rotation was validated locally and published
+sequentially to `origin/main` (verified remote ref
+`10666e8dcca35c0cb39483317272de6832acb984`). The Rust FUSE packet is
+`15026f2`, the napi-rs packet is `5b7f982`, and the CI packet is `d28f31a`.
+Rust now validates the fixed-width FUSE `POLL` request at
 the session boundary, rejects malformed/truncated/trailing frames with
 `EINVAL`, and keeps valid `POLL` at an explicit safe `ENOSYS` boundary until a
 driver supplies poll semantics. napi-rs exposes the matching request/reply
@@ -552,13 +554,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The full locked Rust workspace, oracle-enabled N-API suite, 25-row Unstorage
   packet and previous native Node CLI acceptance all passed. Hosted Linux and
   Windows, FSKit, live R2/PGlite, and kernel-level cancellation remain open.
-- [x] The third W01 rotation is integrated locally: `15026f2` validates FUSE
-  `POLL` frames at the Rust session boundary; `5b7f982` exposes the matching
-  napi-rs request/reply codecs and pinned-oracle tests; and `d28f31a` adds the
-  opt-in Linux/macOS Node SDK CLI native gate to CI. The locked all-feature
-  workspace, 50-test FUSE package gate, scoped Clippy, build/typecheck and full
-  oracle-enabled N-API suite passed. Hosted CI and kernel poll semantics remain
-  explicit acceptance boundaries.
+- [x] The third W01 rotation is integrated and published sequentially: `15026f2`
+  validates FUSE `POLL` frames at the Rust session boundary; `5b7f982` exposes
+  the matching napi-rs request/reply codecs and pinned-oracle tests; and
+  `d28f31a` adds the opt-in Linux/macOS Node SDK CLI native gate to CI. The
+  locked all-feature workspace, 50-test FUSE package gate, scoped Clippy,
+  build/typecheck and full oracle-enabled N-API suite passed. The verified
+  remote ref after publication is
+  `10666e8dcca35c0cb39483317272de6832acb984`. Hosted CI and kernel poll
+  semantics remain explicit acceptance boundaries.
 - [x] The second-rotation implementation and documentation files were published
   sequentially to `origin/main`; the verified remote ref after that packet was
   `9c5f910489741c169031f2f737c3eb51ed427c89`. The local checkout remains
