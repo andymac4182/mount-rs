@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `a5d1dd2`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `95aca9c`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -65,14 +65,15 @@ non-overlapping packet. The current five-packet allocation is:
 | --- | --- | --- | --- |
 | Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Implementing |
 | Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Implementing |
-| Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Implementing |
-| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Implementing |
-| Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Implementing |
+| Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Checkpoint complete; Main integrating |
+| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Child task active |
+| Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Closed; no change recommended |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
-design review), and Raman (scoped napi-rs package distribution). Main rotates
-those slots rather than assigning multiple workers to the same files.
+design review), Raman (scoped napi-rs package distribution), Aristotle (the
+unsigned FSKit bridge checkpoint), and Ohm (storage-dispatch review). Main
+rotates those slots rather than assigning multiple workers to the same files.
 
 ### Narrow-band completion order
 
@@ -114,7 +115,7 @@ complete.
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
 | W11 | Config-driven CLI | HTTP landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
-| W13 | macOS FSKit | Unsigned draft awaiting integration | Aristotle / Main |
+| W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Rollback/lifetime landed; WAL design starting | Peirce / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
@@ -392,7 +393,9 @@ complete.
 
 - [x] Land unsigned SDK compile target (`5993984`); main arm64 compile passed,
   worker reported x64 compile. Neither is a mounted-filesystem result.
-- [ ] W13.1 Implement FSVolume operations/read-write and tested Swift/Rust IPC.
+- [x] W13.1 Implement FSVolume operations/read-write and tested Swift/Rust IPC
+  (`95aca9c`); Rust bridge tests, Swift frame tests, XPC lifecycle tests, and
+  unsigned arm64 Xcode targets passed locally.
 - [ ] W13.2 Verify errors, handles, identity, concurrency and lifecycle at the seam.
 - [ ] W13.3 Complete packaging, entitlements and signing plan, then request D03.
 - [ ] W13.4 Activate and test real FSKit mounts, CLI integration, persistence and
@@ -766,5 +769,6 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `c4058f2` | CLI macOS NFS native lifecycle | Host-backed native lane passed |
 | `29ffb3b` | PGlite cleanup/slot ordering | Local regressions; hosted rerun pending |
 | `5993984` | FSKit SDK compile target | Unsigned compilation, not activation |
+| `95aca9c` | FSKit Rust/Swift/XPC bridge checkpoint | Local tests and unsigned arm64 Xcode builds; signing/activation/mount pending |
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |
