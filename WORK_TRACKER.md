@@ -361,6 +361,7 @@ patch):
 | Zeno the 2nd | W01 Unstorage capability boundary parity | `tests/unstorage/**` | Integrated as `e0e8195`; published through `9b74c87`; 14 rows passed with 5 supported, 9 explicit ENOSYS, zero ENOTSUP mismatches and zero skips |
 | Kant the 2nd | W01 Unstorage hardlink capability boundary | `tests/unstorage/**` | Integrated as `99c7d32`; published through `2bce444`; 4 rows passed with 0 supported, 4 exact ENOSYS, zero ENOTSUP mismatches and zero skips |
 | Main | W01 Rust FUSE IOCTL session framing | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated as `f1872f8`; live source/test blobs verified; strict 32-byte header and declared-input-size framing, malformed/trailing `EINVAL`, valid-request `ENOSYS`, and no-mutation coverage passed in 12 focused tests and strict scoped Clippy |
+| Meitner the 2nd | W01 napi-rs FUSE IOCTL codecs | `integrations/mount-rs-napi/**` | Integrated as `32ddee3`; published sequentially through `8ea5f38`; build, typecheck, focused pinned-oracle raw-layout differential, and the full oracle-enabled N-API suite passed |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -632,6 +633,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   synchronization was used.
 
 - [x] `f1872f8` adds the Rust FUSE IOCTL session packet: exact 32-byte header/input-size framing, `EINVAL` for truncated/declared-size/trailing payloads, explicit `ENOSYS` for valid requests, and no state mutation. The isolated 12-test FUSE gate and strict scoped Clippy passed. The elevated macOS N-API regression suite also passed, including native NFS server integration and the pinned-oracle/Unstorage/distribution gates; PGlite/R2 and native-mount opt-ins remain explicit skips.
+
+- [x] `32ddee3` adds the N-API FUSE IOCTL codec packet: 32-byte request and 16-byte reply layouts, declared input-size framing, protocol-context handling, signed results, malformed/trailing rejection, and pinned-oracle differential coverage. The full oracle-enabled N-API suite passed after publication; PGlite/R2 and native-mount opt-ins remain explicit skips.
 
 ## W02 — Independent metadata, blocks and chunking
 
