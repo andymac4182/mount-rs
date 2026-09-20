@@ -54,6 +54,9 @@ def run_case(directory, journal):
     db.close()
 
     for mode in ("uncommitted", "committed"):
+        # Configure the contender before the child acquires EXCLUSIVE locks:
+        # some SQLite versions read the schema while setting synchronous.
+        contender = connect(path) if mode == "uncommitted" else None
         process = subprocess.Popen(
             [sys.executable, __file__, "--child", str(path), mode],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -61,7 +64,6 @@ def run_case(directory, journal):
         try:
             assert process.stdout.readline() == b"ready\n", process.communicate(timeout=10)
             if mode == "uncommitted":
-                contender = connect(path)
                 try:
                     try:
                         contender.execute("BEGIN IMMEDIATE")
@@ -75,9 +77,12 @@ def run_case(directory, journal):
                         assert contender.execute("SELECT payload FROM items WHERE id=1").fetchone()[0] == original
                 finally:
                     contender.close()
+                    contender = None
             process.kill()
             process.communicate(timeout=10)
         finally:
+            if contender is not None:
+                contender.close()
             if process.poll() is None:
                 process.kill()
                 process.communicate(timeout=10)
