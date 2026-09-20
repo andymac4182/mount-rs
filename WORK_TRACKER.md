@@ -136,6 +136,19 @@ body codec, including UTF-8 names, alignment, bounded packing and malformed
 input. The full locked Rust workspace gate, oracle-enabled N-API gate and the
 real macOS Rust+Node CLI NFS demo all passed after the rotation.
 
+The next SDK-consumer packet is now implemented and locally verified. The
+Rust CLI exposes `sdk-self-test`, a mount-free process-level example that
+constructs memory or configured durable filesystems through
+`mount-rs-sdk::Filesystem`, writes/readbacks through the shared driver, and
+supports a shutdown/reopen assertion. The Node CLI has the matching SQLite
+split-store shutdown/reopen integration row. The provider matrix runs both
+real CLI processes: offline results are 8 CLI passes and 2 explicit
+PGlite/R2 skips; the Rust SDK matrix is 4 passes and 4 explicit external-gate
+skips. The oracle-enabled N-API suite passed, including the public
+`READDIRPLUS` body differential and artifact aggregation. This is a focused
+consumer-path checkpoint, not closure of W01 or live-provider/native-mount
+acceptance.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -176,6 +189,9 @@ patch):
 | Hume | W01 Linux structural FUSE acceptance wiring | `.github/workflows/ci.yml`, `integrations/mount-rs-napi/{README.md,test/structural-native.mjs}` | Integrated as `31d62df`; hosted Linux result pending |
 | Gibbs | W01 Unstorage timestamp metadata parity | `integrations/mount-rs-kv/tests/driver.rs`, Unstorage parity tests | Integrated as `3355cc1`; focused oracle gates passed |
 | Euler | W01 FUSE READDIR body codec | `integrations/mount-rs-napi/{fuse.cjs,postlude-fuse-codec.cjs,index.d.ts,test/fuse-codec.mjs}` | Integrated as `323231f`; pinned differential passed |
+| Confucius | W01 FUSE READDIRPLUS body codec | `integrations/mount-rs-napi/{fuse.cjs,postlude-fuse-codec.cjs,index.d.ts,test/fuse-codec.mjs}` | Integrated in the current SDK/transport packet; pinned differential and aggregation passed |
+| James | W01 Unstorage capability classification | `tests/unstorage/capability-parity.mjs` | Integrated in the current packet; 5 oracle-classified unsupported rows passed |
+| Curie | W01 provider-consumer durability expansion | `tests/provider_matrix/src/main.rs` | Integrated in the current packet; direct and split SQLite reopen rows passed |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -317,11 +333,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   its opt-in real macOS NFS self-test. Linux and provider-backed SDK matrices
   remain unverified here.
 - [x] The isolated provider/consumer matrix exercises Rust SDK, Node SDK and
-  CLI consumers with machine-readable PASS/SKIP/FAIL output. Offline Rust rows
-  are 3/3, offline Node rows are 4/4, and offline CLI rows are 6/6; the local
-  PGlite lifecycle extends those to Rust 4/4, Node 5/5 and CLI 7/7. R2 rows
-  remain explicit skips without credentials and do not count as live-provider
-  acceptance.
+  both real CLI consumers with machine-readable PASS/SKIP/FAIL output. The
+  current offline Rust matrix is 4/4, the process-level CLI matrix is 8/8
+  with two explicit provider-gated skips, and the Node CLI includes a durable
+  SQLite shutdown/reopen row. The local PGlite lifecycle remains the next
+  rerun target for the new CLI rows; R2 rows remain explicit skips without
+  credentials and do not count as live-provider acceptance.
 - [x] `29337f7` makes the Rust CLI construct all local/provider drivers through
   the public `mount-rs-sdk` facade and adds a public Node CLI SDK self-test. The
   Rust SDK example, Rust CLI, Node CLI and provider matrix now exercise the same
@@ -339,6 +356,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the memory durability guard, and wires structural-driver coverage into the
   Windows/macOS Node CI jobs. Focused local gates passed; live R2 and hosted CI
   remain open.
+- [x] The current SDK CLI packet adds the actual Rust binary `sdk-self-test`
+  command and process-level memory/SQLite reopen integration checks, extends
+  the Node CLI with the matching SQLite reopen example, and adds public
+  `READDIRPLUS` codec differential coverage. The focused CLI/N-API/provider
+  gates pass; PGlite, R2, native and hosted platform gates remain open.
 - [x] `fd5eb04` forwards decoded numeric `open_flags` through the structural
   N-API adapter and changes the opt-in native lifecycle from an expected write
   refusal to mounted write/readback. The local macOS NFS run passed; other
@@ -351,7 +373,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   capability-limited rows remain open.
 - [x] `323231f` exposes the FUSE `READDIR` body pack/unpack codec with UTF-8,
   alignment, bounded-packing and malformed-input coverage against the pinned
-  oracle. FUSE session, `READDIRPLUS` and native-mount surfaces remain open.
+  oracle.
+- [x] The current FUSE follow-up exposes and differentially tests the public
+  `READDIRPLUS` body codec, including legacy/default layouts, integer coercion,
+  truncation, padding and missing-entry errors. FUSE session and native-mount
+  surfaces remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
