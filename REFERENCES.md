@@ -8,6 +8,13 @@
 
 ## Inspiration and design references
 
+- [Tensorlake filesystems / TLFS](https://docs.tensorlake.ai/filesystems/introduction):
+  versioned-filesystem reference reviewed for the explicit versioning requirement.
+  The guide distinguishes retained autosaves from permanent snapshots, supports
+  historical reads and forks, and describes pinned versus following read-only
+  mounts. Remote recovery reaches the last durable checkpoint, not necessarily
+  the last local write. Its shared-writer last-writer-wins policy must not be
+  assumed suitable for SQLite files. See versioning acceptance in REQUIREMENTS.md.
 - [slatedb/slatedb](https://github.com/slatedb/slatedb): user-selected reference
   for potential S3-backed storage design. Study object-storage LSM layout,
   batched writes, explicit durable-write/flush boundaries, manifest publication,

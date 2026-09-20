@@ -26,6 +26,8 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
 - **Implement fixed-size chunking initially behind an extensible interface.**
   Persist algorithm/version and parameter identification. Additional algorithms
   are future extensions; the user selected fixed-size for initial delivery.
+- **Support versioned filesystems**, including stable historical views and
+  explicit durable snapshots, as specified below. This is current scope.
 - **Add and run aligned storage benchmarks.** Use the ComputeSDK storage suite
   below as the workload reference; record reproducible results alongside, not
   instead of, correctness and durability evidence.
@@ -222,6 +224,37 @@ for the pinned mountx behavioral oracle.
 - Preserve minimal dependencies and inspect licensing before any code reuse.
   Additional systems such as NBD or HA require an explicit scope decision;
   copy-on-write remains the future requirement below.
+
+## Versioned-filesystem acceptance
+
+Review [TLFS](https://docs.tensorlake.ai/filesystems/introduction) as the design
+reference, not a new behavioral oracle or an automatic dependency.
+
+- Define durable version IDs, ordered history, immutable snapshots with optional
+  labels, historical reads, and read-only mounts pinned to a selected version.
+  Distinguish a pinned view from a read-only mount following the current head.
+- Provide an explicit restore/fork operation from a retained version. Publishing
+  a restored head must be atomic and concurrency-checked; never overwrite live
+  writer state silently. Fork changes must not alter their source snapshot.
+- Define checkpoint capture boundaries under concurrent writes, cancellation,
+  provider failure, and restart. A returned durable snapshot must reference
+  durable blocks and metadata; incomplete publication must not appear in history.
+- Expose versioning through Rust, Node, and config-driven CLI operations. Test
+  old and current bytes, namespace, metadata, sparse files, rename/delete,
+  mixed providers, concurrent publication, and recovery on macOS and Linux.
+- Specify retention, snapshot deletion, open-view pinning, and block reclamation
+  before implementing cleanup. Never reclaim data reachable from a retained
+  version, active view, or in-progress publication.
+- Keep SQLite snapshots application-consistent using a documented quiescence or
+  database-aware checkpoint/backup procedure. Arbitrary filesystem snapshots
+  and last-writer-wins file merging do not establish safe SQLite backup/restore.
+- Document volatile memfs limitations and each provider's persistence guarantees.
+  Autosave, multi-writer merge policy, and remote replication timing require
+  explicit design decisions; do not inherit TLFS policies without evaluation.
+
+Versioning is required now. Efficient physical copy-on-write remains a future
+implementation requirement: correct initial snapshots/forks may use copying,
+but must disclose costs and cannot be advertised as copy-on-write.
 
 ## End-of-primary-work review and distributed cache follow-on
 
