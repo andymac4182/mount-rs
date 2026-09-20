@@ -14,6 +14,8 @@ import {
   encodeCreateIn as namedEncodeCreateIn,
   decodeCreateOut as namedDecodeCreateOut,
   encodeCreateOut as namedEncodeCreateOut,
+  decodeBatchForgetIn as namedDecodeBatchForgetIn,
+  encodeBatchForgetIn as namedEncodeBatchForgetIn,
   decodeReadlinkIn as namedDecodeReadlinkIn,
   encodeReadlinkIn as namedEncodeReadlinkIn,
   decodeReadlinkOut as namedDecodeReadlinkOut,
@@ -44,6 +46,8 @@ import {
   encodeStatfsIn as namedEncodeStatfsIn,
   decodeStatfsOut as namedDecodeStatfsOut,
   encodeStatfsOut as namedEncodeStatfsOut,
+  decodeInterruptIn as namedDecodeInterruptIn,
+  encodeInterruptIn as namedEncodeInterruptIn,
 } from "../fuse.cjs";
 
 for (const [name, value] of [
@@ -59,6 +63,8 @@ for (const [name, value] of [
   ["encodeCreateIn", namedEncodeCreateIn],
   ["decodeCreateOut", namedDecodeCreateOut],
   ["encodeCreateOut", namedEncodeCreateOut],
+  ["decodeBatchForgetIn", namedDecodeBatchForgetIn],
+  ["encodeBatchForgetIn", namedEncodeBatchForgetIn],
   ["decodeReadlinkIn", namedDecodeReadlinkIn],
   ["encodeReadlinkIn", namedEncodeReadlinkIn],
   ["decodeReadlinkOut", namedDecodeReadlinkOut],
@@ -89,6 +95,8 @@ for (const [name, value] of [
   ["encodeStatfsIn", namedEncodeStatfsIn],
   ["decodeStatfsOut", namedDecodeStatfsOut],
   ["encodeStatfsOut", namedEncodeStatfsOut],
+  ["decodeInterruptIn", namedDecodeInterruptIn],
+  ["encodeInterruptIn", namedEncodeInterruptIn],
 ]) {
   assert.equal(value, fuse[name], `FUSE named export ${name}`);
 }
@@ -373,6 +381,24 @@ assert.deepEqual(fuse.decodeReadlinkOut(readlinkBody), readlinkValue);
 const statfsRoundTrip = fuse.encodeStatfsOut(statfsValue, { minor: 41, setxattrExt: false });
 assert.equal(statfsRoundTrip.length, fuse.kstatfsSize(41));
 assert.deepEqual(fuse.decodeStatfsOut(statfsRoundTrip, { minor: 41, setxattrExt: false }), statfsValue);
+
+const batchForgetValue = {
+  forgets: [
+    { nodeid: 2n, nlookup: 3n },
+    { nodeid: 0x0102030405060708n, nlookup: 0x1112131415161718n },
+  ],
+};
+const batchForgetBody = fuse.encodeBatchForgetIn(batchForgetValue);
+assert.equal(batchForgetBody.length, 8 + batchForgetValue.forgets.length * 16);
+assert.deepEqual(fuse.decodeBatchForgetIn(batchForgetBody), batchForgetValue);
+const emptyBatchForget = { forgets: [] };
+assert.equal(fuse.encodeBatchForgetIn(emptyBatchForget).length, 8);
+assert.deepEqual(fuse.decodeBatchForgetIn(fuse.encodeBatchForgetIn(emptyBatchForget)), emptyBatchForget);
+
+const interruptValue = { unique: 0x6162636465666768n };
+const interruptBody = fuse.encodeInterruptIn(interruptValue);
+assert.equal(interruptBody.length, 8);
+assert.deepEqual(fuse.decodeInterruptIn(interruptBody), interruptValue);
 
 const lifecycleInput = {
   release: {
@@ -680,6 +706,86 @@ if (source) {
     );
   }
 
+  for (const ctx of [
+    { minor: 41, setxattrExt: false },
+    { minor: 39, setxattrExt: false },
+    { minor: 8, setxattrExt: false },
+    { minor: 3, setxattrExt: false },
+  ]) {
+    const oracleBatchForget = oracle.encodeRequestBody(fuse.FUSE_BATCH_FORGET, batchForgetValue, ctx);
+    assert.deepEqual(
+      [...batchForgetBody],
+      [...oracleBatchForget],
+      `BATCH_FORGET request bytes match oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      fuse.decodeBatchForgetIn(batchForgetBody),
+      oracle.decodeRequestBody(fuse.FUSE_BATCH_FORGET, oracleBatchForget, ctx),
+      `BATCH_FORGET request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < batchForgetBody.length; length++) {
+      const body = batchForgetBody.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeBatchForgetIn(body)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_BATCH_FORGET, body, ctx)),
+        `BATCH_FORGET request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const batchTrailing = Buffer.concat([batchForgetBody, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeBatchForgetIn(batchTrailing)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_BATCH_FORGET, batchTrailing, ctx)),
+      `BATCH_FORGET request trailing-byte classification for minor ${ctx.minor}`,
+    );
+    const malformedCount = Buffer.from(batchForgetBody);
+    malformedCount.writeUInt32LE(batchForgetValue.forgets.length + 1, 0);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeBatchForgetIn(malformedCount)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_BATCH_FORGET, malformedCount, ctx)),
+      `BATCH_FORGET count mismatch classification for minor ${ctx.minor}`,
+    );
+
+    const oracleInterrupt = oracle.encodeRequestBody(fuse.FUSE_INTERRUPT, interruptValue, ctx);
+    assert.deepEqual(
+      [...interruptBody],
+      [...oracleInterrupt],
+      `INTERRUPT request bytes match oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      fuse.decodeInterruptIn(interruptBody),
+      oracle.decodeRequestBody(fuse.FUSE_INTERRUPT, oracleInterrupt, ctx),
+      `INTERRUPT request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < interruptBody.length; length++) {
+      const body = interruptBody.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeInterruptIn(body)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_INTERRUPT, body, ctx)),
+        `INTERRUPT request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const interruptTrailing = Buffer.concat([interruptBody, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeInterruptIn(interruptTrailing)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_INTERRUPT, interruptTrailing, ctx)),
+      `INTERRUPT request trailing-byte classification for minor ${ctx.minor}`,
+    );
+
+    for (const [name, opcode] of [
+      ["BATCH_FORGET", fuse.FUSE_BATCH_FORGET],
+      ["INTERRUPT", fuse.FUSE_INTERRUPT],
+    ]) {
+      const actualReply = fuse.encodeReply(99n);
+      const oracleReply = oracle.encodeReplyFor(99n, opcode, {}, ctx);
+      assert.deepEqual([...actualReply], [...oracleReply], `${name} empty reply framing matches oracle`);
+      assert.deepEqual(
+        oracle.decodeReplyBody(opcode, actualReply.subarray(fuse.FUSE_OUT_HEADER_SIZE), ctx),
+        {},
+        `${name} oracle accepts empty reply body`,
+      );
+    }
+  }
+
   const lifecycleContext = { minor: 41, setxattrExt: false };
   for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases) {
     const oracleRequest = oracle.encodeRequestBody(opcode, input, lifecycleContext);
@@ -906,6 +1012,8 @@ if (source) {
   console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE READLINK request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE STATFS request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -919,6 +1027,8 @@ if (source) {
   console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READLINK request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE STATFS request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
