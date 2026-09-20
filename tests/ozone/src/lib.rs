@@ -6,6 +6,8 @@
 //! RustFS gate: every block is create-only, stale conditional writes fail, and
 //! a successful block publication can be read by a fresh client.
 
+mod chunked_composition;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

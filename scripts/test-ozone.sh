@@ -481,12 +481,33 @@ bounded_cargo_test() {
       --locked \
       -- "$test_name" --exact --test-threads=1 --nocapture "$@"; then
     return 0
+  else
+    test_status=$?
   fi
-  test_status=$?
   if [ "$test_status" -eq 124 ] || [ "$test_status" -eq 125 ]; then
     echo "Apache Ozone cargo test exceeded its bounded timeout: $test_name" >&2
   else
     echo "Apache Ozone cargo test failed with status $test_status: $test_name" >&2
+  fi
+  return "$test_status"
+}
+
+bounded_ignored_cargo_test() {
+  test_name=$1
+  shift
+  if bounded_process_command_for_timeout "$ozone_test_timeout" "ozone-cargo-$test_name" \
+    cargo test \
+      --manifest-path "$repo_dir/tests/ozone/Cargo.toml" \
+      --locked \
+      -- "$test_name" --exact --ignored --test-threads=1 --nocapture "$@"; then
+    return 0
+  else
+    test_status=$?
+  fi
+  if [ "$test_status" -eq 124 ] || [ "$test_status" -eq 125 ]; then
+    echo "Apache Ozone ignored cargo test exceeded its bounded timeout: $test_name" >&2
+  else
+    echo "Apache Ozone ignored cargo test failed with status $test_status: $test_name" >&2
   fi
   return "$test_status"
 }
@@ -528,5 +549,16 @@ bootstrap_bucket
 echo "OZONE_RESTART_READY endpoint=$ozone_endpoint"
 
 bounded_cargo_test "real_ozone_reopen_after_service_restart"
+
+if [ "${MOUNT_RS_OZONE_COMPOSITIONS:-0}" = "1" ]; then
+  : "${MOUNT_RS_OZONE_COMPOSITION_HARNESS:?MOUNT_RS_OZONE_COMPOSITION_HARNESS must be set by scripts/test-ozone-compositions.sh}"
+  : "${PGLITE_DATABASE_URL:?PGLITE_DATABASE_URL must be supplied by the Ozone composition harness}"
+  : "${PGLITE_DATA_DIR:?PGLITE_DATA_DIR must be supplied by the Ozone composition harness}"
+  : "${OZONE_SQLITE_METADATA_FILE:?OZONE_SQLITE_METADATA_FILE must be supplied by the Ozone composition harness}"
+  export MOUNT_RS_OZONE_CHUNKED_SQLITE=1
+  export MOUNT_RS_OZONE_CHUNKED_PGLITE=1
+  bounded_ignored_cargo_test "chunked_composition::real_ozone_sqlite_chunked_composition"
+  bounded_ignored_cargo_test "chunked_composition::real_ozone_pglite_chunked_composition"
+fi
 
 echo "OZONE_INTEGRATION_PASS endpoint=$ozone_endpoint bucket=$ozone_bucket prefix=$OZONE_TEST_PREFIX"

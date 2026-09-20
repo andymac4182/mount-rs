@@ -59,3 +59,41 @@ From the repository root:
 
 Docker and a running Docker daemon are prerequisites. If they are unavailable,
 the script exits without claiming integration coverage passed.
+
+## ChunkedFs compositions
+
+The W26.3 composition packet is a separate, ignored, explicitly-gated lane.
+It composes the real Ozone S3 Gateway block store with each of these
+independent metadata providers:
+
+- file-backed SQLite metadata;
+- a real disk-backed PGlite PostgreSQL-wire metadata service from
+  `tests/pglite/server.mjs`.
+
+The tests use seven-byte chunks and exercise multi-chunk writes, partial
+writes, shrink and extend truncation, range reads, provider CAS conflicts,
+expired-writer fencing, fresh `ChunkedFs` reopen, and deletion of every test
+block object. The composition harness also removes its PGlite data directory
+and SQLite file. It never replaces Ozone or PGlite with an in-memory or mock
+service.
+
+Install the existing PGlite service dependencies once, then run the exact
+opt-in gate from the repository root:
+
+```sh
+pnpm --dir tests/pglite install --frozen-lockfile
+MOUNT_RS_OZONE_COMPOSITIONS=1 ./scripts/test-ozone-compositions.sh
+```
+
+The wrapper refuses to run without the explicit environment gate or without
+the PGlite service dependencies. Docker, a running Docker daemon, Node, and
+the loopback-only Ozone service remain required. The underlying ignored Rust
+tests are invoked with `--ignored` only by this wrapper; a normal
+`cargo test --manifest-path tests/ozone/Cargo.toml` does not claim composition
+coverage. If Docker, PGlite, or either provider is unavailable, the lane is a
+blocked/non-passing attempt rather than a fabricated pass.
+
+TiDB and FoundationDB are intentionally not added to this Ozone packet: their
+existing real composition harnesses are RustFS-specific and no Ozone-aware
+real-service composition was available here. Their separate gates remain the
+evidence for those providers.
