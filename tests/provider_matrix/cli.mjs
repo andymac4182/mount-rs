@@ -104,6 +104,17 @@ await writeFile(
   { mode: 0o600 },
 );
 await commandCase(
+  "node-cli-sdk-self-test-sqlite-reopen",
+  process.execPath,
+  [
+    "examples/node-cli/index.mjs",
+    "--config",
+    rustConfigPath,
+    "--sdk-self-test",
+    "--reopen",
+  ],
+);
+await commandCase(
   "rust-cli-sdk-self-test-sqlite-reopen",
   "cargo",
   [
