@@ -1,5 +1,8 @@
 //! SQLite-backed filesystem integration.
 
+mod storage;
+pub use storage::{SqliteBlockStore, SqliteMetadataStore};
+
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -189,7 +192,7 @@ mod tests {
         }
     }
 
-    fn unique_database_path() -> std::path::PathBuf {
+    pub(super) fn unique_database_path() -> std::path::PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -11,3 +11,4 @@ async-trait = "0.1"
 mount-rs-core = { path = "../.." }
 mount-rs-persist = { path = "../mount-rs-persist" }
 rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
