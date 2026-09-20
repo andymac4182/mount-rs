@@ -4,7 +4,21 @@ pub mod device;
 pub mod init;
 pub mod inodes;
 pub mod mount;
+pub mod notify;
+pub mod record;
 pub mod session;
+
+pub use notify::{
+    FUSE_NAME_MAX, FUSE_NOTIFY_INVAL_ENTRY, FUSE_NOTIFY_INVAL_INODE, FUSE_NOTIFY_UNIQUE,
+    FuseNotification, FuseNotifyInvalEntryOut, FuseNotifyInvalInodeOut, NotifyError, decode_notify,
+    decode_notify_inval_entry, decode_notify_inval_inode, encode_notify, encode_notify_inval_entry,
+    encode_notify_inval_inode,
+};
+pub use record::{
+    ReplayFailure, ReplayReport, TRANSCRIPT_MAGIC, TRANSCRIPT_VERSION, TranscriptDirection,
+    TranscriptError, TranscriptFrame, TranscriptRecorder, decode_transcript, encode_transcript,
+    replay_transcript,
+};
 
 pub const IN_HEADER_SIZE: usize = 40;
 pub const OUT_HEADER_SIZE: usize = 16;
