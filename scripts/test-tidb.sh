@@ -8,6 +8,7 @@ set -eu
 # loopback-only and ephemeral.
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 cd "$repo_dir"
 if ! command -v docker >/dev/null 2>&1; then
   echo "test-tidb.sh: Docker is required" >&2

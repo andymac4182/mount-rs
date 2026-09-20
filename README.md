@@ -103,9 +103,24 @@ provider/consumer integration matrix before native transport tests are run.
 
 ## Development
 
+Use the repository wrapper for normal Cargo commands so all mount-rs
+worktrees share one per-user target directory instead of rebuilding into
+separate `target/` trees:
+
 ```sh
-cargo fmt --all -- --check
-cargo test --workspace --all-targets
+./scripts/cargo-shared test --workspace --all-targets --locked
+./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings
+```
+
+The default is `~/Library/Caches/mount-rs/cargo-target` on macOS and
+`$XDG_CACHE_HOME/mount-rs/cargo-target` (or `~/.cache/mount-rs/cargo-target`)
+elsewhere. Set `MOUNT_RS_CARGO_TARGET_DIR` to choose a different shared
+location. An explicit `CARGO_TARGET_DIR` still wins for gates that need an
+isolated target.
+
+```sh
+./scripts/cargo-shared fmt --all -- --check
+./scripts/cargo-shared test --workspace --all-targets
 
 # Differential tests against a checkout of pithings/mountx.
 MOUNTX_SOURCE=/path/to/mountx node scripts/check-parity.mjs

@@ -9,8 +9,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
+. "$REPO_ROOT/scripts/cargo-shared-env.sh"
 DEMO_ROOT="$REPO_ROOT/examples/demo"
-CLI_BIN="$REPO_ROOT/target/debug/mount-rs"
+CLI_BIN="$CARGO_TARGET_DIR/debug/mount-rs"
 RUST_SOURCE="$DEMO_ROOT/rust-fs-io.rs"
 NODE_SOURCE="$DEMO_ROOT/node-fs-io.mjs"
 

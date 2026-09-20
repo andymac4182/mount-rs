@@ -9,6 +9,7 @@ umask 077
 export AWS_EC2_METADATA_DISABLED=true
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 
 if [ "${MOUNT_RS_RUN_AWS_S3:-0}" != "1" ]; then
   echo "AWS_S3_TEST_SKIPPED reason=opt_in_required"

@@ -2,6 +2,7 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 server_dir="$repo_dir/tests/pglite"
 port=$(node -e 'const net=require("net"); const s=net.createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 log_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-pglite.XXXXXX")

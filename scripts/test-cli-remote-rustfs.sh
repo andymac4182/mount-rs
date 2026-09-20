@@ -6,6 +6,7 @@ set -eu
 # accepts only the harness's loopback RustFS endpoint and never prints any
 # credential value.
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "CLI remote test requires cargo" >&2

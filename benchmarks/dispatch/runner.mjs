@@ -376,9 +376,23 @@ function rustArgs(config) {
   ]
 }
 
+function sharedCargoTargetDir() {
+  if (process.env.CARGO_TARGET_DIR) return process.env.CARGO_TARGET_DIR
+  if (process.env.MOUNT_RS_CARGO_TARGET_DIR) return process.env.MOUNT_RS_CARGO_TARGET_DIR
+  const userHome = process.env.HOME
+  if (!userHome) return undefined
+  const cacheRoot =
+    process.platform === "darwin"
+      ? resolve(userHome, "Library", "Caches")
+      : process.env.XDG_CACHE_HOME || resolve(userHome, ".cache")
+  return resolve(cacheRoot, "mount-rs", "cargo-target")
+}
+
 function runRust(config, rustTimeoutMs) {
+  const targetDir = sharedCargoTargetDir()
   const child = spawnSync("cargo", rustArgs(config), {
     cwd: repoRoot,
+    env: targetDir ? { ...process.env, CARGO_TARGET_DIR: targetDir } : process.env,
     encoding: "utf8",
     maxBuffer: 128 * 1024 * 1024,
     timeout: rustTimeoutMs,
