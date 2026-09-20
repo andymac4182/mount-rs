@@ -132,10 +132,14 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   concurrent publication with independently selected metadata providers.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
 - [ ] W05.4 Record service identity and revision without recording credentials.
-- [ ] W05.5 Fix live Node factory expected-byte assertion and guarantee unique
-  cloud fixture keys with exact cleanup. The full PGlite/R2 run stopped at the
-  factory assertion: overwriting three bytes of `r2:one` correctly returned
-  `twoone`; the test expected `two:one`. Remaining gates did not execute.
+- [x] W05.5 Fix live Node factory expected-byte assertion and guarantee unique
+  cloud fixture keys with exact cleanup. Main reran the full PGlite/R2 script
+  successfully: actual R2 Node factory and DELETE/HEAD cleanup, independent
+  PGlite metadata + R2 blocks, provider lifecycle/restart/fencing, Node chunked
+  factories and userspace FUSE. Upstream: 1,194 passed, 88 skipped; eight seeded
+  lanes × five seeds × 621 operations passed. The object-store trace lanes are
+  local, not live R2 traces. This is local dirty-worktree evidence, not hosted
+  platform or full release acceptance.
 
 ## W06 — RustFS integration service
 
