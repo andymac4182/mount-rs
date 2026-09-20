@@ -309,8 +309,14 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Extensions";
-				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
+				LIBRARY_SEARCH_PATHS = (
+					"$(CARGO_TARGET_DIR)/aarch64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/aarch64-apple-darwin/debug",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(CARGO_TARGET_DIR)/x86_64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/x86_64-apple-darwin/debug",
+				);
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				OTHER_LDFLAGS = (
@@ -342,8 +348,14 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Extensions";
-				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
+				LIBRARY_SEARCH_PATHS = (
+					"$(CARGO_TARGET_DIR)/aarch64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/aarch64-apple-darwin/debug",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(CARGO_TARGET_DIR)/x86_64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/x86_64-apple-darwin/debug",
+				);
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				OTHER_LDFLAGS = (
@@ -371,8 +383,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/XPCService-Info.plist;
-				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
+				LIBRARY_SEARCH_PATHS = (
+					"$(CARGO_TARGET_DIR)/aarch64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/aarch64-apple-darwin/debug",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(CARGO_TARGET_DIR)/x86_64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/x86_64-apple-darwin/debug",
+				);
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				OTHER_LDFLAGS = (
 					"-lmount_rs_fskit_bridge",
@@ -399,8 +417,14 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/XPCService-Info.plist;
-				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
-				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
+				LIBRARY_SEARCH_PATHS = (
+					"$(CARGO_TARGET_DIR)/aarch64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/aarch64-apple-darwin/debug",
+				);
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = (
+					"$(CARGO_TARGET_DIR)/x86_64-apple-darwin/debug",
+					"$(PROJECT_DIR)/target/x86_64-apple-darwin/debug",
+				);
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
 				OTHER_LDFLAGS = (
 					"-lmount_rs_fskit_bridge",

@@ -109,11 +109,11 @@ remain in Rust.
 Run from the repository root for Rust:
 
 ```sh
-cargo fmt --manifest-path integrations/mount-rs-fskit/Cargo.toml -- --check
-cargo test --manifest-path integrations/mount-rs-fskit/Cargo.toml --locked
-cargo clippy --manifest-path integrations/mount-rs-fskit/Cargo.toml \
+./scripts/cargo-shared fmt --manifest-path integrations/mount-rs-fskit/Cargo.toml -- --check
+./scripts/cargo-shared test --manifest-path integrations/mount-rs-fskit/Cargo.toml --locked
+./scripts/cargo-shared clippy --manifest-path integrations/mount-rs-fskit/Cargo.toml \
   --all-targets --locked -- -D warnings
-MACOSX_DEPLOYMENT_TARGET=15.4 cargo build \
+MACOSX_DEPLOYMENT_TARGET=15.4 ./scripts/cargo-shared build \
   --manifest-path integrations/mount-rs-fskit/Cargo.toml \
   --locked --target aarch64-apple-darwin
 ```
@@ -151,13 +151,14 @@ The real in-process XPC lifecycle test links the arm64 Rust static library:
 
 ```sh
 cd integrations/mount-rs-fskit
+. ../../scripts/cargo-shared-env.sh
 SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
 MODULE_CACHE=/tmp/mount-rs-fskit-module-cache-xpc
 mkdir -p "$MODULE_CACHE"
 xcrun swiftc -module-cache-path "$MODULE_CACHE" -target arm64-apple-macos15.4 -sdk "$SDKROOT" -swift-version 5 \
   Sources/MountRsXPCDelegate.swift Sources/MountRsRustWorker.swift \
   Tests/MountRsXPCServiceLifecycleTests.swift \
-  -L target/aarch64-apple-darwin/debug -lmount_rs_fskit_bridge \
+  -L "$CARGO_TARGET_DIR/aarch64-apple-darwin/debug" -lmount_rs_fskit_bridge \
   -o /tmp/mount-rs-fskit-xpc-lifecycle-tests
 /tmp/mount-rs-fskit-xpc-lifecycle-tests
 ```
@@ -165,6 +166,8 @@ xcrun swiftc -module-cache-path "$MODULE_CACHE" -target arm64-apple-macos15.4 -s
 The project gates are unsigned and use the local macOS 26.5 SDK:
 
 ```sh
+. scripts/cargo-shared-env.sh
+
 xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
   -scheme MountRsFSKit -configuration Debug -sdk macosx26.5 \
   -derivedDataPath /tmp/mount-rs-fskit-derived-volume-arm64 \
@@ -182,6 +185,28 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
 
 test -f /tmp/mount-rs-fskit-derived-host-arm64/Build/Products/Debug/mount-rs.app/Contents/Extensions/MountRsFSKit.appex/Contents/MacOS/MountRsFSKit
 ```
+
+The Xcode project first searches the exported `CARGO_TARGET_DIR` and keeps
+the old project-local target path as a compatibility fallback. This prevents
+the Swift targets from silently linking a stale Rust archive when the shared
+Cargo target wrapper is used.
+
+The opt-in activation gate reports the installed FSKit modules through
+`FSClient`, validates the host bundle's signing state, and attempts one
+isolated path-resource mount with `mount(8)`. It only reports activation as a
+pass after a read and write through the mounted path; compile-only, in-process,
+and uninstalled bundles remain explicit blockers:
+
+```sh
+MOUNT_RS_FSKIT_ACTIVATION_REQUIRED=1 \
+MOUNT_RS_FSKIT_APP=/tmp/mount-rs-fskit-derived-host-arm64/Build/Products/Debug/mount-rs.app \
+integrations/mount-rs-fskit/scripts/test-activation.sh
+```
+
+Without `MOUNT_RS_FSKIT_ACTIVATION_REQUIRED=1`, the script is diagnostic-only
+and exits successfully after printing `FSKIT_ACTIVATION=BLOCKED` when signing,
+installation, or host privileges are unavailable. This is intentional: an
+unsigned app extension must never be presented as an activated filesystem.
 
 All three arm64 targets build and link. The extension also builds for x86_64
 against the SDK. The XPC service cannot currently link x86_64 because the
