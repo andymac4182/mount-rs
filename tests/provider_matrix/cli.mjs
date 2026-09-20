@@ -164,6 +164,57 @@ if (process.env.PGLITE_DATABASE_URL) {
     ],
   );
   await rm(configDirectory, { recursive: true, force: true });
+
+  // Exercise the matching Rust CLI path against the same live PGlite socket.
+  // This is deliberately a process-level SDK consumer check, not merely
+  // `validate-config`: the command writes, shuts down both providers, reopens
+  // them through the public Rust SDK facade, and verifies the committed bytes.
+  const rustPgliteDirectory = await mkdtemp(join(tmpdir(), "mount-rs-rust-cli-pglite-"));
+  const rustPgliteConfigPath = join(rustPgliteDirectory, "pglite.json");
+  await writeFile(
+    rustPgliteConfigPath,
+    `${JSON.stringify({
+      version: 1,
+      driver: {
+        kind: "splitstore",
+        storage: {
+          metadata: {
+            kind: "pglite",
+            connection: { env: "PGLITE_DATABASE_URL" },
+            volume_key: `provider-matrix-rust-cli-${providerRunId}-metadata`,
+            durable: false,
+          },
+          blocks: {
+            kind: "pglite",
+            connection: { env: "PGLITE_DATABASE_URL" },
+            volume_key: `provider-matrix-rust-cli-${providerRunId}-blocks`,
+            durable: false,
+          },
+          chunk_size_bytes: 7,
+          owner: `provider-matrix-rust-cli-${providerRunId}`,
+        },
+      },
+    }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  await commandCase(
+    "rust-cli-pglite-config-reopen",
+    "cargo",
+    [
+      "run",
+      "--quiet",
+      "--offline",
+      "--locked",
+      "-p",
+      "mount-rs-cli",
+      "--",
+      "sdk-self-test",
+      "--config",
+      rustPgliteConfigPath,
+      "--reopen",
+    ],
+  );
+  await rm(rustPgliteDirectory, { recursive: true, force: true });
 } else {
   skips += 1;
   console.log("SKIP cli case=node-cli-pglite-config-reopen gate=PGLITE_DATABASE_URL");
