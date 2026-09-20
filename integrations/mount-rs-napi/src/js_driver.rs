@@ -16,7 +16,7 @@ use std::task::{Context, Poll, Waker};
 
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FileType, FsDriver, FsError,
-    MkdirOptions, Result as CoreResult, Stats, StatsFs,
+    MkdirOptions, OpenFlags, Result as CoreResult, Stats, StatsFs,
 };
 use napi::bindgen_prelude::{
     BigInt, Either, FnArgs, FromNapiValue, Function, JsObjectValue, JsValue, JsValuesTupleIntoVec,
@@ -31,7 +31,7 @@ type JsCallback<T> = ThreadsafeFunction<T, JsReturn, T, Status, false, false>;
 
 type PathArgs = FnArgs<(String,)>;
 type ReaddirArgs = FnArgs<(String, super::JsReaddirOptions)>;
-type OpenArgs = FnArgs<(String, String, u32)>;
+type OpenArgs = FnArgs<(String, Either<String, f64>, u32)>;
 type MkdirArgs = FnArgs<(String, super::JsMkdirOptions)>;
 type TwoPathArgs = FnArgs<(String, String)>;
 type ChownArgs = FnArgs<(String, u32, u32)>;
@@ -1498,7 +1498,128 @@ where
     build_callback(driver, name, lifecycle, false)
 }
 
+/// Encode the normalized flags used by the Rust driver contract into the
+/// numeric namespace accepted by a structural Node FsDriver. Native
+/// transports frequently need combinations which have no Node string alias,
+/// such as write-only without create or truncate; passing the numeric form
+/// preserves that decoded intent across the N-API boundary.
+fn encode_open_flags(flags: OpenFlags, path: &str) -> CoreResult<f64> {
+    let access = match (flags.read, flags.write) {
+        (true, false) => 0_u64,
+        (false, true) => 1_u64,
+        (true, true) => 2_u64,
+        (false, false) => {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("open")
+                .with_path(path)
+                .with_message("decoded open flags do not select read or write access"));
+        }
+    };
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (access, flags);
+        return Err(FsError::enotsup("open").with_path(path));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    {
+        let mut bits = access;
+
+        #[cfg(target_os = "linux")]
+        {
+            const O_CREAT: u64 = 0o100;
+            const O_EXCL: u64 = 0o200;
+            const O_TRUNC: u64 = 0o1000;
+            const O_APPEND: u64 = 0o2000;
+            if flags.create {
+                bits |= O_CREAT;
+            }
+            if flags.exclusive {
+                bits |= O_EXCL;
+            }
+            if flags.truncate {
+                bits |= O_TRUNC;
+            }
+            if flags.append {
+                bits |= O_APPEND;
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            const O_CREAT: u64 = 0x0200;
+            const O_EXCL: u64 = 0x0800;
+            const O_TRUNC: u64 = 0x0400;
+            const O_APPEND: u64 = 0x0008;
+            if flags.create {
+                bits |= O_CREAT;
+            }
+            if flags.exclusive {
+                bits |= O_EXCL;
+            }
+            if flags.truncate {
+                bits |= O_TRUNC;
+            }
+            if flags.append {
+                bits |= O_APPEND;
+            }
+        }
+
+        // Node exposes the Microsoft CRT open flags on Windows. These are
+        // distinct from Linux values for create, exclusive, and truncate.
+        #[cfg(target_os = "windows")]
+        {
+            const O_CREAT: u64 = 0x0100;
+            const O_EXCL: u64 = 0x0400;
+            const O_TRUNC: u64 = 0x0200;
+            const O_APPEND: u64 = 0x0008;
+            if flags.create {
+                bits |= O_CREAT;
+            }
+            if flags.exclusive {
+                bits |= O_EXCL;
+            }
+            if flags.truncate {
+                bits |= O_TRUNC;
+            }
+            if flags.append {
+                bits |= O_APPEND;
+            }
+        }
+
+        Ok(bits as f64)
+    }
+}
+
 impl JsDriver {
+    fn open_with_flags(
+        &self,
+        path: &str,
+        flags: Either<String, f64>,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + '_>> {
+        let lifecycle = Arc::clone(&self.lifecycle);
+        let callback = self.callbacks.open.clone();
+        let parse_lifecycle = Arc::clone(&self.lifecycle);
+        let parse =
+            Arc::new(move |env, value| parse_handle(env, value, Arc::clone(&parse_lifecycle)));
+        let value = FnArgs::from((path.to_owned(), flags, mode));
+        Box::pin(async move {
+            let handle = invoke(
+                callback,
+                lifecycle.clone(),
+                &lifecycle.waiters,
+                value,
+                "open",
+                parse,
+            )
+            .await
+            .map_err(|error| error.into_fs_error("open", None, None))?;
+            Ok(handle as Arc<dyn CoreFileHandle>)
+        })
+    }
+
     fn call_path<'a, R>(
         &'a self,
         callback: Arc<CallbackSlot<PathArgs>>,
@@ -1642,25 +1763,25 @@ impl FsDriver for JsDriver {
         'c: 'async_trait,
         Self: 'async_trait,
     {
-        let lifecycle = Arc::clone(&self.lifecycle);
-        let callback = self.callbacks.open.clone();
-        let parse_lifecycle = Arc::clone(&self.lifecycle);
-        let parse =
-            Arc::new(move |env, value| parse_handle(env, value, Arc::clone(&parse_lifecycle)));
-        let value = FnArgs::from((path.to_owned(), flags.to_owned(), mode));
-        Box::pin(async move {
-            let handle = invoke(
-                callback,
-                lifecycle.clone(),
-                &lifecycle.waiters,
-                value,
-                "open",
-                parse,
-            )
-            .await
-            .map_err(|error| error.into_fs_error("open", None, None))?;
-            Ok(handle as Arc<dyn CoreFileHandle>)
-        })
+        self.open_with_flags(path, Either::A(flags.to_owned()), mode)
+    }
+
+    fn open_flags<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: OpenFlags,
+        mode: u32,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let numeric = match encode_open_flags(flags, path) {
+            Ok(value) => value,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        self.open_with_flags(path, Either::B(numeric), mode)
     }
 
     fn mkdir<'a, 'b, 'async_trait>(
@@ -2181,4 +2302,51 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
         }),
         shutdown: Some(shutdown),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn numeric_open_flags_preserve_write_only_without_create_or_truncate() {
+        let flags = OpenFlags {
+            read: false,
+            write: true,
+            create: false,
+            truncate: false,
+            append: false,
+            exclusive: false,
+        };
+        assert_eq!(encode_open_flags(flags, "/file").unwrap(), 1.0);
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn numeric_open_flags_match_platform_node_bits() {
+        let flags = OpenFlags::parse("ax+", "/file").unwrap();
+        let encoded = encode_open_flags(flags, "/file").unwrap();
+        #[cfg(target_os = "linux")]
+        let expected = 2_u64 | 0o100 | 0o200 | 0o2000;
+        #[cfg(target_os = "macos")]
+        let expected = 2_u64 | 0x0200 | 0x0800 | 0x0008;
+        #[cfg(target_os = "windows")]
+        let expected = 2_u64 | 0x0100 | 0x0400 | 0x0008;
+        assert_eq!(encoded, expected as f64);
+    }
+
+    #[test]
+    fn numeric_open_flags_reject_missing_access_mode() {
+        let flags = OpenFlags {
+            read: false,
+            write: false,
+            create: false,
+            truncate: false,
+            append: false,
+            exclusive: false,
+        };
+        let error = encode_open_flags(flags, "/file").unwrap_err();
+        assert!(error.is(ErrorCode::Einval));
+    }
 }
