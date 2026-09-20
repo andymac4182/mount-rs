@@ -6,6 +6,7 @@ set -eu
 # apache/ozone-docker project; do not replace them with a floating tag.
 # Digest source: https://github.com/apache/ozone-docker/pkgs/container/ozone
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 ozone_image_repository="ghcr.io/apache/ozone"
 ozone_version="2.2.1"
 ozone_license="Apache-2.0"

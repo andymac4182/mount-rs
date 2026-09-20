@@ -6,6 +6,7 @@ set -eu
 # RustFS remains the deterministic local S3-compatible lane, while this gate
 # proves the same CLI path against Cloudflare's hosted service.
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 
 if ! command -v cargo >/dev/null 2>&1 || ! command -v node >/dev/null 2>&1; then
   echo "Cloudflare R2 CLI test requires cargo and node" >&2

@@ -2,6 +2,7 @@
 set -eu
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+. "$repo_dir/scripts/cargo-shared-env.sh"
 rustfs_image="rustfs/rustfs:1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff"
 rustfs_bucket="mount-rs-rustfs-test"
 rustfs_access_key="mount-rs-rustfs-test"

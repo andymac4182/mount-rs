@@ -10,6 +10,7 @@ if [ -z "$mountx_source" ]; then
 fi
 
 cd "$repo_dir"
+. "$repo_dir/scripts/cargo-shared-env.sh"
 
 # This script starts its own isolated PGlite server in the dedicated gate
 # below. A caller's inherited URL must not make earlier suites connect to a
