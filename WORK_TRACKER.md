@@ -542,6 +542,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `9c5f910489741c169031f2f737c3eb51ed427c89`. The local checkout remains
   intentionally divergent because the Contents API creates one remote commit
   per file.
+- [x] Current-tree demo rerun after the second rotation also exited 0:
+  `bash scripts/demo-end-to-end.sh` mounted the Rust CLI through macOS NFS,
+  exercised independent Rust and Node clients on one mount, verified the
+  cross-process bytes after unmount, and retained the backing data; the Node
+  SDK CLI native self-test independently passed its NFS mount/read/write,
+  unmount and persistence checks.
 - [x] The three implementation packets were published sequentially to
   `origin/main`; their verified implementation ref before the tracker-only
   publication was `bcf465334273c8701161c0fb35be7bfc4ddfb538`, followed by
