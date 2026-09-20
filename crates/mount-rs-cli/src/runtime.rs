@@ -10,7 +10,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use mount_rs_auto::{AutoMount, AutoMountError, AutoMountOptions, AutoTransport};
-use mount_rs_core::{ErrorCode, FsDriver, FsError, Result as FsResult};
+use mount_rs_core::{ErrorCode, FsDriver, FsError, Loopback, Result as FsResult};
 use mount_rs_http::{
     DriveConfig as HttpDriveConfig, DriveRegistry, HttpServer, HttpServerError, HttpServerOptions,
 };
@@ -332,11 +332,106 @@ where
             println!("valid config: {}", path.display());
             Ok(())
         }
+        Command::SdkSelfTest { config, reopen } => {
+            sdk_self_test_command(config.as_deref(), reopen).await
+        }
         Command::ServeHttp(path) => serve_http_command(&path).await,
         Command::Mount(options) => {
             let options = resolve_cli_options(options)?;
             mount_command(options).await
         }
+    }
+}
+
+/// Exercise the public Rust SDK through the actual CLI binary without
+/// requiring a native mount helper. This is intentionally a separate command
+/// from the native mount lifecycle: it proves the CLI constructs a filesystem
+/// through `mount-rs-sdk`, performs real driver I/O, and releases provider
+/// resources before an optional durable reopen.
+async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Result<(), CliError> {
+    let raw = CliOptions {
+        config: config_path.map(Path::to_owned),
+        ..CliOptions::default()
+    };
+    let options = resolve_cli_options(raw)?;
+    if reopen && !supports_sdk_reopen(&options) {
+        return Err(CliError::usage(
+            "sdk-self-test --reopen requires a durable host, sqlite, or splitstore provider",
+        ));
+    }
+
+    let (uid, gid) = effective_identity();
+    let runtime = DriverRuntime::open(&options, uid, gid).await?;
+    let path = format!(
+        "/.mount-rs-rust-sdk-self-test-{}-{}.bin",
+        std::process::id(),
+        unique_default_owner()
+    );
+    let expected = b"mount-rs Rust SDK CLI self-test payload\0";
+    let view = Loopback::from_arc(runtime.driver());
+    let result = async {
+        view.write_file(&path, expected).await?;
+        let actual = view.read_file(&path).await?;
+        if actual != expected {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("sdk-self-test")
+                .with_message("Rust SDK CLI readback mismatch"));
+        }
+        view.syncfs().await?;
+        if !reopen {
+            view.unlink(&path).await?;
+            view.syncfs().await?;
+        }
+        Ok::<(), FsError>(())
+    }
+    .await;
+    let shutdown = runtime.shutdown().await;
+    result.map_err(CliError::from)?;
+    shutdown.map_err(CliError::from)?;
+
+    if reopen {
+        let reopened = DriverRuntime::open(&options, uid, gid).await?;
+        let reopened_view = Loopback::from_arc(reopened.driver());
+        let result = async {
+            let actual = reopened_view.read_file(&path).await?;
+            if actual != expected {
+                return Err(FsError::new(ErrorCode::Eio)
+                    .with_syscall("sdk-self-test")
+                    .with_message("Rust SDK CLI reopen readback mismatch"));
+            }
+            reopened_view.unlink(&path).await?;
+            reopened_view.syncfs().await
+        }
+        .await;
+        let shutdown = reopened.shutdown().await;
+        result.map_err(CliError::from)?;
+        shutdown.map_err(CliError::from)?;
+        println!(
+            "sdk self-test passed: Rust SDK wrote, shut down, reopened, and read {} (driver={})",
+            path,
+            options.driver.as_str()
+        );
+    } else {
+        println!(
+            "sdk self-test passed: Rust SDK wrote and read {} (driver={})",
+            path,
+            options.driver.as_str()
+        );
+    }
+    Ok(())
+}
+
+fn supports_sdk_reopen(options: &CliOptions) -> bool {
+    match options.driver {
+        DriverChoice::Memory => false,
+        DriverChoice::Host | DriverChoice::Sqlite => true,
+        DriverChoice::SplitStore => options.storage.as_deref().map_or(
+            options.database.is_some() && options.blocks.is_some(),
+            |storage| {
+                !matches!(&storage.metadata, StorageProvider::Memory)
+                    || !matches!(&storage.blocks, StorageProvider::Memory)
+            },
+        ),
     }
 }
 
