@@ -6,6 +6,50 @@ async fn memory() -> Loopback {
     Loopback::new(MemoryFs::empty())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn recursive_mkdir_reports_creation_atomically() {
+    use mount_rs_core::FsDriver;
+    let fs = MemoryFs::empty();
+    let mut tasks = Vec::new();
+    for _ in 0..16 {
+        let fs = fs.clone();
+        tasks.push(tokio::spawn(async move {
+            fs.mkdir(
+                "/first/second",
+                MkdirOptions {
+                    recursive: true,
+                    mode: None,
+                },
+            )
+            .await
+            .unwrap()
+        }));
+    }
+    let mut created = Vec::new();
+    for task in tasks {
+        if let Some(path) = task.await.unwrap() {
+            created.push(path);
+        }
+    }
+    assert_eq!(created, ["/first"]);
+    assert_eq!(
+        fs.mkdir("/single", MkdirOptions::default()).await.unwrap(),
+        None
+    );
+    assert_eq!(
+        fs.mkdir(
+            "/",
+            MkdirOptions {
+                recursive: true,
+                mode: None
+            }
+        )
+        .await
+        .unwrap(),
+        None
+    );
+}
+
 #[tokio::test]
 async fn rename_rejects_resolved_descendants_through_symlinks() {
     let fs = memory().await;

@@ -20,6 +20,11 @@ export async function exercise(fs) {
     recursive: true,
     mode: 0o755,
   });
+  const existingRecursiveMkdirResult = await fs.mkdir("/tree/sub", {
+    recursive: true,
+  });
+  assert.equal(recursiveMkdirResult, "/tree");
+  assert.equal(existingRecursiveMkdirResult, undefined);
   await fs.writeFile("/tree/data", Buffer.from("0123456789"));
 
   const handle = await fs.open("/tree/data", "r+");
@@ -116,6 +121,7 @@ export async function exercise(fs) {
   return {
     data: text(await fs.readFile("/tree/data")),
     recursiveMkdirResult,
+    existingRecursiveMkdirResult,
     entries: (await fs.readdir("/tree", { withFileTypes: true })).map((entry) => [
       entry.name,
       entry.isDirectory(),

@@ -57,7 +57,10 @@ pub trait FsDriver: Send + Sync {
         Err(crate::FsError::enotsup("open").with_path(path))
     }
 
-    async fn mkdir(&self, _path: &str, _options: MkdirOptions) -> Result<()> {
+    /// Creates a directory, returning the first created path for recursive
+    /// creation, or `None` when a non-recursive call succeeds or a recursive
+    /// call creates nothing. Existing non-recursive targets return `EEXIST`.
+    async fn mkdir(&self, _path: &str, _options: MkdirOptions) -> Result<Option<String>> {
         Err(crate::error::FsError::enosys("mkdir"))
     }
     async fn rmdir(&self, _path: &str) -> Result<()> {
@@ -160,7 +163,7 @@ impl Loopback {
             .await
     }
 
-    pub async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<()> {
+    pub async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
         self.driver.mkdir(&normalize_path(path), options).await
     }
 

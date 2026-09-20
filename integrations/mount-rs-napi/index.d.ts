@@ -45,14 +45,10 @@ export declare class Filesystem {
   readFile(path: string): Promise<Uint8Array>
   writeFile(path: string, data: string | Uint8Array): Promise<void>
   /**
-   * The core driver contract returns only success for mkdir. In particular,
-   * it cannot report the first component created by a recursive operation.
-   * Do not derive that result with a stat/preflight pass: another caller can
-   * create a component between the observation and mkdir. An atomic core
-   * `mkdir` result such as `Result<Option<String>>` is required for exact
-   * upstream semantics.
+   * Return the first path created by a recursive mkdir, or `undefined` when
+   * the directory already existed or the call was non-recursive.
    */
-  mkdir(path: string, options?: boolean | JsMkdirOptions | undefined | null): Promise<void>
+  mkdir(path: string, options?: boolean | JsMkdirOptions | undefined | null): Promise<string | undefined>
   rmdir(path: string): Promise<void>
   unlink(path: string): Promise<void>
   rename(oldPath: string, newPath: string): Promise<void>

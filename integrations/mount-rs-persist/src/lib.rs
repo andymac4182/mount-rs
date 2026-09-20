@@ -325,9 +325,10 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
         }))
     }
 
-    async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<()> {
-        self.core.mkdir(path, options).await?;
-        self.persist().await
+    async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
+        let first_created = self.core.mkdir(path, options).await?;
+        self.persist().await?;
+        Ok(first_created)
     }
     async fn rmdir(&self, path: &str) -> Result<()> {
         self.core.rmdir(path).await?;

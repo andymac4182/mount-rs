@@ -10,15 +10,29 @@ use serde_json::{Value, json};
 
 async fn scenario(driver: Arc<dyn FsDriver>) -> Value {
     let fs = Loopback::from_arc(driver);
-    fs.mkdir(
-        "/workspace/src",
-        MkdirOptions {
-            recursive: true,
-            mode: None,
-        },
-    )
-    .await
-    .unwrap();
+    let first_created = fs
+        .mkdir(
+            "/workspace/src",
+            MkdirOptions {
+                recursive: true,
+                mode: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first_created.as_deref(), Some("/workspace"));
+    assert_eq!(
+        fs.mkdir(
+            "/workspace/src",
+            MkdirOptions {
+                recursive: true,
+                mode: None
+            }
+        )
+        .await
+        .unwrap(),
+        None
+    );
     fs.write_file("/workspace/src/lib.rs", b"pub fn answer() -> u8 { 42 }\n")
         .await
         .unwrap();

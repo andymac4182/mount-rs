@@ -916,12 +916,13 @@ impl FsDriver for MemoryFs {
         }))
     }
 
-    async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<()> {
+    async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
         let normalized = normalize_path(path);
         let mut state = self.lock()?;
         let mode = S_IFDIR | ((options.mode.unwrap_or(0o777)) & !state.umask & 0o7777);
         if options.recursive {
             let mut current = "/".to_owned();
+            let mut first_created = None;
             for segment in split_path(&normalized) {
                 if current != "/" {
                     current.push('/');
@@ -941,9 +942,10 @@ impl FsDriver for MemoryFs {
                 } else {
                     let node = Self::create_node(&mut state, mode, 0, None);
                     Self::link_entry(&mut state, &entry, node)?;
+                    first_created.get_or_insert_with(|| current.clone());
                 }
             }
-            return Ok(());
+            return Ok(first_created);
         }
         let entry = Self::walk(&state, &normalized, false, "mkdir", 0)?;
         if entry.node.is_some() {
@@ -952,7 +954,8 @@ impl FsDriver for MemoryFs {
                 .with_path(entry.path));
         }
         let node = Self::create_node(&mut state, mode, 0, None);
-        Self::link_entry(&mut state, &entry, node)
+        Self::link_entry(&mut state, &entry, node)?;
+        Ok(None)
     }
 
     async fn rmdir(&self, path: &str) -> Result<()> {

@@ -28,7 +28,7 @@ cases still require audit.
   without a kernel mount; native lifecycle work is in progress.
 - Workspace-integrated 9P2000.L, NFSv3, WebDAV, and S3 gateway crates with
   userspace protocol and loopback network tests.
-- Seeded differential traces: five seeds, each with 553 operations against the TypeScript memory
+- Seeded differential traces: five seeds, each with 557 operations against the TypeScript memory
   oracle for Rust memory, SQLite, local object-store, and real local PGlite.
   This caught and fixed PGlite named prepared-statement collisions across
   reconnecting clients; the adapter now uses typed unnamed statements.
@@ -38,7 +38,11 @@ cases still require audit.
 
 ## Still required before the overall porting goal is complete
 
-- Native macOS and Linux CI must pass for Rust, Node addon builds, and backend/transport integration tests. The CI matrix includes both; hosted results are still pending.
+- Keep revision-matched macOS and Linux CI green for Rust, Node addon builds,
+  and backend/transport integration tests. The initial checkpoint `877afb6`
+  passed all four hosted jobs in [CI run 35479549553](https://github.com/andymac4182/mount-rs/actions/runs/35479549553).
+  This covers userspace transport tests, not real kernel mounts; subsequent
+  changes require their own hosted evidence.
 - Run the live Cloudflare R2 gate with the target bucket and credentials.
 - Port and test the upstream transport/server layers: FUSE, 9P, NFS,
   WebDAV, and S3 gateway behavior.

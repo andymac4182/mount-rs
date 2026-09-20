@@ -11,12 +11,14 @@ if (seeds.some(seed => !Number.isInteger(seed) || seed < 0 || seed > 0xffffffff)
 }
 for (const initialSeed of seeds) {
 const fs = createLoopback(createMemoryDriver());
-const commands = [['mkdir','/dir'],['write','/dir/file','data'],['symlink','dir','/alias']];
+const commands = [['mkdir','/dir'],['write','/dir/file','data'],['symlink','dir','/alias'],
+  ['mkdir_recursive','/new/deep'],['mkdir_recursive','/new/deep'],
+  ['mkdir_recursive','/alias/nested/leaf'],['mkdir_recursive','/']];
 let seed = initialSeed;
 // Use high bits: low LCG bits alternate predictably and under-exercise operations.
 const next = n => {seed=(Math.imul(seed,1664525)+1013904223)>>>0;return Math.floor(seed / 0x100000000 * n);};
 const paths=['/a','/b','/dir','/dir/file','/dir/a','/alias/file','/missing/x','/z','/'];
-const ops=['write','mkdir','rename','link','symlink','unlink','rmdir','truncate','read','list','stat','lstat'];
+const ops=['write','mkdir','rename','link','symlink','unlink','rmdir','truncate','read','list','stat','lstat','mkdir_recursive'];
 for(let i=0;i<500;i++) {
   const op=ops[next(ops.length)], path=paths[next(paths.length)];
   commands.push([op,path,op==='write'?`value-${i}`:op==='truncate'?next(12):paths[next(paths.length)]]);
@@ -29,6 +31,7 @@ for(const [op,path,arg] of commands) {
     switch(op) {
       case 'write': await fs.writeFile(path,arg);break;
       case 'mkdir': await fs.mkdir(path,{mode:0o755});break;
+      case 'mkdir_recursive': value=(await fs.mkdir(path,{mode:0o755,recursive:true})) ?? null;break;
       case 'rename': await fs.rename(path,arg);break;
       case 'link': await fs.link(path,arg);break;
       case 'symlink': await fs.symlink(path,arg);break;

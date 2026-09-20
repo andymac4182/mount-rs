@@ -16,7 +16,19 @@ async fn execute(fs: &Loopback, command: &Value) -> Result<Value> {
                     mode: Some(0o755),
                 },
             )
-            .await?
+            .await?;
+        }
+        "mkdir_recursive" => {
+            return Ok(json!(
+                fs.mkdir(
+                    path,
+                    MkdirOptions {
+                        recursive: true,
+                        mode: Some(0o755),
+                    }
+                )
+                .await?
+            ));
         }
         "rename" => fs.rename(path, other).await?,
         "link" => fs.link(path, other).await?,

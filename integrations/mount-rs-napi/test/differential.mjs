@@ -20,17 +20,11 @@ const [{ createMemoryDriver }, { createLoopback }] = await Promise.all([
 const native = await exercise(Filesystem.memory());
 const oracle = await exercise(createLoopback(createMemoryDriver()));
 
-// The oracle returns the first directory it created for recursive mkdir. The
-// Rust core currently returns only success, so the binding must remain
-// `undefined` rather than guessing from a racy preflight/stat pass.
-assert.equal(oracle.recursiveMkdirResult, "/tree");
-assert.equal(native.recursiveMkdirResult, undefined);
-
 assert.deepEqual(
   {
     data: native.data,
-    // Intentionally omitted: recursive mkdir's first-created return is a
-    // documented shared-core gap, not a value the facade can derive safely.
+    recursiveMkdirResult: native.recursiveMkdirResult,
+    existingRecursiveMkdirResult: native.existingRecursiveMkdirResult,
     entries: native.entries,
     numericMode: native.numericMode,
     owner: native.owner,
@@ -42,6 +36,8 @@ assert.deepEqual(
   },
   {
     data: oracle.data,
+    recursiveMkdirResult: oracle.recursiveMkdirResult,
+    existingRecursiveMkdirResult: oracle.existingRecursiveMkdirResult,
     entries: oracle.entries,
     numericMode: oracle.numericMode,
     owner: oracle.owner,
@@ -52,4 +48,4 @@ assert.deepEqual(
     },
   },
 );
-console.log("mount-rs N-API differential: PASS (mkdir return gap recorded)");
+console.log("mount-rs N-API differential: PASS");

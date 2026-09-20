@@ -932,18 +932,14 @@ impl Filesystem {
         }
     }
 
-    /// The core driver contract returns only success for mkdir. In particular,
-    /// it cannot report the first component created by a recursive operation.
-    /// Do not derive that result with a stat/preflight pass: another caller can
-    /// create a component between the observation and mkdir. An atomic core
-    /// `mkdir` result such as `Result<Option<String>>` is required for exact
-    /// upstream semantics.
-    #[napi]
+    /// Return the first path created by a recursive mkdir, or `undefined` when
+    /// the directory already existed or the call was non-recursive.
+    #[napi(ts_return_type = "Promise<string | undefined>")]
     pub async fn mkdir(
         &self,
         path: String,
         options: Option<Either<bool, JsMkdirOptions>>,
-    ) -> napi::Result<()> {
+    ) -> napi::Result<Option<String>> {
         self.driver
             .mkdir(&normalized_path(&path), parse_mkdir_options(options)?)
             .await

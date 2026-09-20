@@ -51,7 +51,7 @@ function structuredError(error) {
   return error
 }
 
-function wrapAsync(prototype, name, transform = (args) => args) {
+function wrapAsync(prototype, name, transform = (args) => args, resultTransform = (value) => value) {
   const original = prototype && prototype[name]
   if (typeof original !== "function" || original.__mountRsWrapped) return
   function wrapped(...args) {
@@ -61,7 +61,7 @@ function wrapAsync(prototype, name, transform = (args) => args) {
     } catch (error) {
       throw structuredError(error)
     }
-    return Promise.resolve(result).catch((error) => {
+    return Promise.resolve(result).then(resultTransform).catch((error) => {
       throw structuredError(error)
     })
   }
@@ -95,7 +95,6 @@ module.exports = function install(binding) {
     "open",
     "readFile",
     "writeFile",
-    "mkdir",
     "rmdir",
     "unlink",
     "rename",
@@ -110,6 +109,11 @@ module.exports = function install(binding) {
   ]) {
     wrapAsync(Filesystem.prototype, name)
   }
+  // napi-rs represents Rust Option<T> as null, while mountx's FsDriver
+  // contract uses undefined for an existing/non-recursive mkdir result.
+  wrapAsync(Filesystem.prototype, "mkdir", undefined, (value) =>
+    value === null ? undefined : value,
+  )
   wrapAsync(Filesystem.prototype, "utimes", (args) => [
     args[0],
     timeArgument(args[1]),
