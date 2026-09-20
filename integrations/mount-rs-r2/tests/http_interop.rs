@@ -5,6 +5,8 @@ use mount_rs_core::{ErrorCode, Loopback, MemoryFs};
 use mount_rs_persist::PersistedFs;
 use mount_rs_r2::{R2BlockStore, R2Config, R2Store};
 use mount_rs_s3::{Credentials, S3Server, S3ServerOptions, S3Session, S3SessionOptions};
+use object_store::path::Path as ObjectPath;
+use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -42,12 +44,133 @@ async fn signed_r2_client_reopens_and_rejects_stale_writes_over_http() {
     assert_eq!(reopened.read_file("/file").await.unwrap(), b"new");
     store.delete_snapshot().await.unwrap();
     let blocks = R2BlockStore::from_config(&config, "http-test/blocks").unwrap();
+    let object_store = config.build_store().unwrap();
     let payload = (0..1_048_593).map(|i| (i * 37) as u8).collect::<Vec<_>>();
     let id = blocks.put(&payload).await.unwrap();
     blocks.flush().await.unwrap();
     // Rebuild the signed HTTP client, not just the filesystem wrapper.
     let fresh = R2BlockStore::from_config(&config, "http-test/blocks").unwrap();
     assert_eq!(fresh.get(&id).await.unwrap(), payload);
+    let path = ObjectPath::from(format!("http-test/blocks/{}", id.0));
+    assert_eq!(
+        object_store
+            .get(&path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        payload
+    );
+    assert_eq!(
+        object_store
+            .get_range(&path, 17..63)
+            .await
+            .unwrap()
+            .as_ref(),
+        &payload[17..63]
+    );
+    let ranges = object_store
+        .get_ranges(&path, &[0..9, 500_000..500_017])
+        .await
+        .unwrap();
+    assert_eq!(ranges[0].as_ref(), &payload[0..9]);
+    assert_eq!(ranges[1].as_ref(), &payload[500_000..500_017]);
+
+    let immutable_overwrite = object_store
+        .put_opts(
+            &path,
+            PutPayload::from(b"must-not-overwrite".to_vec()),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("the HTTP S3 gateway must preserve immutable block publication");
+    assert!(matches!(
+        immutable_overwrite,
+        object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }
+    ));
+
+    let conditional_path = ObjectPath::from("http-test/blocks/conditional-object");
+    object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(b"first conditional value".to_vec()),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let conditional_meta = object_store.head(&conditional_path).await.unwrap();
+    let stale_read = object_store
+        .get_opts(
+            &conditional_path,
+            GetOptions {
+                if_match: Some("\"not-the-current-etag\"".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("the HTTP S3 gateway must reject a stale conditional read");
+    assert!(matches!(
+        stale_read,
+        object_store::Error::Precondition { .. }
+    ));
+    let stale_write = object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(b"must-not-win-the-CAS".to_vec()),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: Some("\"not-the-current-etag\"".to_owned()),
+                    version: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("the HTTP S3 gateway must reject a stale conditional write");
+    assert!(matches!(
+        stale_write,
+        object_store::Error::Precondition { .. }
+    ));
+    object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(b"second conditional value".to_vec()),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: conditional_meta.e_tag,
+                    version: conditional_meta.version,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let mut workers = Vec::new();
+    for worker in 0..8_u8 {
+        let config = config.clone();
+        workers.push(tokio::spawn(async move {
+            let blocks = R2BlockStore::from_config(&config, "http-test/blocks").unwrap();
+            let body = vec![worker; 4096];
+            let id = blocks.put(&body).await.unwrap();
+            (id, body)
+        }));
+    }
+    let mut concurrent = Vec::new();
+    for worker in workers {
+        let (worker_id, body) = worker.await.unwrap();
+        assert_eq!(fresh.get(&worker_id).await.unwrap(), body);
+        concurrent.push(worker_id);
+    }
+
     let replacement = fresh.put(b"independent immutable object").await.unwrap();
     assert_ne!(replacement, id);
     assert_eq!(blocks.get(&id).await.unwrap(), payload);
@@ -56,8 +179,26 @@ async fn signed_r2_client_reopens_and_rejects_stale_writes_over_http() {
         other_prefix.get(&id).await.unwrap_err().code,
         ErrorCode::Enoent
     );
+    for worker_id in concurrent {
+        fresh.delete(&worker_id).await.unwrap();
+    }
     fresh.delete(&id).await.unwrap();
     fresh.delete(&replacement).await.unwrap();
+    object_store.delete(&conditional_path).await.unwrap();
+    let remaining = object_store
+        .list_with_delimiter(Some(&ObjectPath::from("http-test/blocks")))
+        .await
+        .unwrap();
+    let unexpected_objects = remaining
+        .objects
+        .iter()
+        .filter(|object| object.location.as_ref() != "http-test/blocks")
+        .map(|object| object.location.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        unexpected_objects.is_empty() && remaining.common_prefixes.is_empty(),
+        "HTTP test objects remained after exact cleanup: {unexpected_objects:?}"
+    );
     assert_eq!(blocks.get(&id).await.unwrap_err().code, ErrorCode::Enoent);
     server.close().await.unwrap();
 }

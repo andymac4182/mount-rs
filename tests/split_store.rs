@@ -1,11 +1,18 @@
 //! Composed-driver acceptance across independently selected storage providers.
+use std::collections::BTreeSet;
+use std::future::Future;
+use std::sync::{Arc, Mutex};
+
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{
     FsDriver, Loopback, MkdirOptions,
-    storage::{BlockStore, MetadataStore},
+    storage::{BlockId, BlockStore, MetadataStore},
 };
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
+use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
+use object_store::path::Path as ObjectPath;
+use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
 async fn exercise<M, B>(metadata: M, blocks: B)
 where
@@ -81,12 +88,83 @@ async fn memory_metadata_with_memory_blocks() {
     exercise(MemoryMetadataStore::new(), MemoryBlockStore::new()).await;
 }
 
-/// Records only IDs successfully created by this test, never lists/deletes a
-/// bucket or a pre-existing prefix. Cleanup runs only after the driver closes.
+/// Records only objects successfully created by this test, never lists/deletes
+/// a bucket or a pre-existing prefix. Cleanup runs only after the driver
+/// closes and verifies that the unique owned prefix is empty.
 #[derive(Clone)]
 struct TrackedR2Blocks {
-    inner: mount_rs_r2::R2BlockStore,
-    created: std::sync::Arc<std::sync::Mutex<Vec<mount_rs_core::storage::BlockId>>>,
+    inner: R2BlockStore,
+    object_store: Arc<dyn ObjectStore>,
+    prefix: String,
+    created: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl TrackedR2Blocks {
+    fn new(config: &R2Config, prefix: String) -> Self {
+        let object_store = config.build_store().expect("live R2 object store");
+        let inner = R2BlockStore::new(object_store.clone(), prefix.clone(), true)
+            .expect("live R2 block store");
+        Self {
+            inner,
+            object_store,
+            prefix,
+            created: Default::default(),
+        }
+    }
+
+    fn object_path(&self, name: &str) -> ObjectPath {
+        ObjectPath::from(format!("{}/{}", self.prefix, name))
+    }
+
+    fn track_key(&self, key: impl Into<String>) {
+        self.created
+            .lock()
+            .expect("tracked R2 object lock")
+            .insert(key.into());
+    }
+
+    fn track_block(&self, id: &BlockId) {
+        self.track_key(format!("{}/{}", self.prefix, id.0));
+    }
+
+    async fn cleanup(&self) {
+        let keys = self
+            .created
+            .lock()
+            .expect("tracked R2 object lock")
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            match self.object_store.delete(&ObjectPath::from(key)).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
+                Err(error) => panic!("delete owned live R2 object: {error}"),
+            }
+        }
+
+        let remaining = self
+            .object_store
+            .list_with_delimiter(Some(&ObjectPath::from(self.prefix.clone())))
+            .await
+            .expect("list owned live R2 prefix after cleanup");
+        assert!(
+            remaining.objects.is_empty() && remaining.common_prefixes.is_empty(),
+            "live R2 owned prefix still contains objects after exact cleanup: {:?}",
+            remaining.objects
+        );
+    }
+}
+
+async fn run_with_exact_r2_cleanup<F>(blocks: TrackedR2Blocks, operation: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    // A spawned test body lets cleanup run even when an assertion panics. The
+    // cleanup itself remains exact-key-only and still verifies the unique
+    // owned prefix after all successful operations have finished.
+    let result = tokio::spawn(operation).await;
+    blocks.cleanup().await;
+    result.expect("live R2 test operation panicked");
 }
 
 #[async_trait::async_trait]
@@ -96,17 +174,215 @@ impl BlockStore for TrackedR2Blocks {
     }
     async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<mount_rs_core::storage::BlockId> {
         let id = self.inner.put(bytes).await?;
-        self.created.lock().unwrap().push(id.clone());
+        self.track_block(&id);
         Ok(id)
     }
-    async fn get(&self, id: &mount_rs_core::storage::BlockId) -> mount_rs_core::Result<Vec<u8>> {
+    async fn get(&self, id: &BlockId) -> mount_rs_core::Result<Vec<u8>> {
         self.inner.get(id).await
     }
     async fn flush(&self) -> mount_rs_core::Result<()> {
         self.inner.flush().await
     }
-    async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> mount_rs_core::Result<()> {
-        self.inner.delete(id).await
+    async fn delete(&self, id: &BlockId) -> mount_rs_core::Result<()> {
+        let result = self.inner.delete(id).await;
+        if result.is_ok() {
+            self.created
+                .lock()
+                .expect("tracked R2 object lock")
+                .remove(&format!("{}/{}", self.prefix, id.0));
+        }
+        result
+    }
+}
+
+async fn assert_live_r2_block_contract(config: &R2Config, blocks: &TrackedR2Blocks) {
+    let payload = (0_u32..131_072)
+        .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
+        .collect::<Vec<_>>();
+    let first_id = blocks.put(&payload).await.unwrap();
+    let second_id = blocks.put(&payload).await.unwrap();
+    assert_ne!(
+        first_id, second_id,
+        "live R2 immutable block publication reused an ID"
+    );
+    blocks.flush().await.unwrap();
+    assert_eq!(blocks.get(&first_id).await.unwrap(), payload);
+
+    // Rebuild both provider clients after publication. The full read goes
+    // through a fresh R2BlockStore; the range calls go through fresh signed
+    // ObjectStore clients because BlockStore intentionally exposes full reads.
+    let fresh_blocks = R2BlockStore::from_config(config, blocks.prefix.clone()).unwrap();
+    assert_eq!(fresh_blocks.get(&first_id).await.unwrap(), payload);
+    let fresh_object_store = config.build_store().unwrap();
+    let first_path = blocks.object_path(&first_id.0);
+    assert_eq!(
+        fresh_object_store
+            .get(&first_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        payload
+    );
+    assert_eq!(
+        fresh_object_store
+            .get_range(&first_path, 7..23)
+            .await
+            .unwrap()
+            .as_ref(),
+        &payload[7..23]
+    );
+    let ranges = fresh_object_store
+        .get_ranges(&first_path, &[0..11, 4096..4113, 131_000..131_072])
+        .await
+        .unwrap();
+    assert_eq!(ranges[0].as_ref(), &payload[0..11]);
+    assert_eq!(ranges[1].as_ref(), &payload[4096..4113]);
+    assert_eq!(ranges[2].as_ref(), &payload[131_000..131_072]);
+
+    // A block object itself is immutable: a second create-only publication at
+    // its exact key must fail and must not replace its bytes.
+    let duplicate = fresh_object_store
+        .put_opts(
+            &first_path,
+            PutPayload::from(b"must-not-overwrite".to_vec()),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("live R2 must reject an immutable block overwrite");
+    assert!(
+        matches!(
+            duplicate,
+            object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }
+        ),
+        "unexpected live R2 immutable overwrite error: {duplicate}"
+    );
+    assert_eq!(fresh_blocks.get(&first_id).await.unwrap(), payload);
+
+    let conditional_name = "conditional-object";
+    let conditional_path = blocks.object_path(conditional_name);
+    blocks.track_key(conditional_path.to_string());
+    let conditional_body = b"first conditional value";
+    let created = fresh_object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(conditional_body.to_vec()),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let duplicate = fresh_object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(b"must-not-overwrite".to_vec()),
+            PutOptions {
+                mode: PutMode::Create,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("live R2 must reject a duplicate conditional create");
+    assert!(
+        matches!(
+            duplicate,
+            object_store::Error::AlreadyExists { .. } | object_store::Error::Precondition { .. }
+        ),
+        "unexpected live R2 conditional-create error: {duplicate}"
+    );
+
+    let metadata = fresh_object_store.head(&conditional_path).await.unwrap();
+    assert!(
+        metadata.e_tag.is_some(),
+        "live R2 conditional-write coverage requires an object ETag"
+    );
+    let stale_read = fresh_object_store
+        .get_opts(
+            &conditional_path,
+            GetOptions {
+                if_match: Some("\"not-the-current-etag\"".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("live R2 must reject a stale conditional read");
+    assert!(
+        matches!(stale_read, object_store::Error::Precondition { .. }),
+        "unexpected live R2 stale-read error: {stale_read}"
+    );
+    let stale_update = fresh_object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(b"must-not-win-the-CAS".to_vec()),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: Some("\"not-the-current-etag\"".to_owned()),
+                    version: None,
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("live R2 must reject a stale conditional write");
+    assert!(
+        matches!(stale_update, object_store::Error::Precondition { .. }),
+        "unexpected live R2 stale-write error: {stale_update}"
+    );
+    let updated = fresh_object_store
+        .put_opts(
+            &conditional_path,
+            PutPayload::from(b"second conditional value".to_vec()),
+            PutOptions {
+                mode: PutMode::Update(UpdateVersion {
+                    e_tag: metadata.e_tag.clone(),
+                    version: metadata.version.clone(),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_ne!(created.e_tag, updated.e_tag);
+    assert_eq!(
+        fresh_object_store
+            .get(&conditional_path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .as_ref(),
+        b"second conditional value"
+    );
+
+    // Publish through independent signed clients concurrently. Each task
+    // reconstructs its client so this also covers reconnect/fresh-client
+    // publication instead of sharing one in-process HTTP client.
+    let mut workers = Vec::new();
+    for worker in 0..8_u8 {
+        let config = config.clone();
+        let prefix = blocks.prefix.clone();
+        workers.push(tokio::spawn(async move {
+            let client = R2BlockStore::from_config(&config, prefix).unwrap();
+            let body = vec![worker; 4096];
+            let id = client.put(&body).await.unwrap();
+            (id, body)
+        }));
+    }
+    let mut concurrent_ids = BTreeSet::new();
+    for worker in workers {
+        let (id, body) = worker.await.unwrap();
+        assert!(concurrent_ids.insert(id.0.clone()));
+        blocks.track_block(&id);
+        let fresh_client = R2BlockStore::from_config(config, blocks.prefix.clone()).unwrap();
+        assert_eq!(fresh_client.get(&id).await.unwrap(), body);
     }
 }
 
@@ -125,40 +401,42 @@ async fn live_r2_blocks_with_independent_sqlite_metadata() {
     );
     let blocks = TrackedR2Blocks {
         inner: mount_rs_r2::R2BlockStore::from_config(&config, prefix.clone()).unwrap(),
+        object_store: config.build_store().unwrap(),
+        prefix: prefix.clone(),
         created: Default::default(),
     };
-    let directory = tempfile::tempdir().unwrap();
-    let metadata_path = directory.path().join("metadata.sqlite");
-    exercise(
-        SqliteMetadataStore::open(&metadata_path).unwrap(),
-        blocks.clone(),
-    )
+    run_with_exact_r2_cleanup(blocks.clone(), async move {
+        assert_live_r2_block_contract(&config, &blocks).await;
+        let directory = tempfile::tempdir().unwrap();
+        let metadata_path = directory.path().join("metadata.sqlite");
+        exercise(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            blocks.clone(),
+        )
+        .await;
+        // Fresh metadata connection and fresh authenticated R2 client, rather
+        // than merely retaining the original driver's in-process handles.
+        let reopened = ChunkedFs::open(
+            SqliteMetadataStore::open(&metadata_path).unwrap(),
+            mount_rs_r2::R2BlockStore::from_config(&config, prefix).unwrap(),
+            ChunkedOptions::fixed("live-r2-reopen", 4096).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+        expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
+        expected.resize(84, 0);
+        expected[82..].copy_from_slice(&[99, 98]);
+        assert_eq!(
+            Loopback::new(reopened.clone())
+                .read_file("/alias")
+                .await
+                .unwrap(),
+            expected
+        );
+        reopened.shutdown().await.unwrap();
+    })
     .await;
-    // Fresh metadata connection and fresh authenticated R2 client, rather than
-    // merely retaining the original driver's in-process handles.
-    let reopened = ChunkedFs::open(
-        SqliteMetadataStore::open(&metadata_path).unwrap(),
-        mount_rs_r2::R2BlockStore::from_config(&config, prefix).unwrap(),
-        ChunkedOptions::fixed("live-r2-reopen", 4096).unwrap(),
-    )
-    .await
-    .unwrap();
-    let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
-    expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
-    expected.resize(84, 0);
-    expected[82..].copy_from_slice(&[99, 98]);
-    assert_eq!(
-        Loopback::new(reopened.clone())
-            .read_file("/alias")
-            .await
-            .unwrap(),
-        expected
-    );
-    reopened.shutdown().await.unwrap();
-    let created = blocks.created.lock().unwrap().clone();
-    for id in created {
-        blocks.delete(&id).await.unwrap();
-    }
 }
 
 #[tokio::test]
@@ -214,43 +492,41 @@ async fn live_r2_blocks_with_independent_pglite_metadata() {
             .as_nanos()
     );
     let prefix = format!("mount-rs-tests/{scope}");
-    let blocks = TrackedR2Blocks {
-        inner: mount_rs_r2::R2BlockStore::from_config(&config, prefix.clone()).unwrap(),
-        created: Default::default(),
-    };
-    exercise(
-        PgliteMetadataStore::connect_with_key(&url, &scope)
-            .await
-            .unwrap(),
-        blocks.clone(),
-    )
+    let blocks = TrackedR2Blocks::new(&config, prefix.clone());
+    run_with_exact_r2_cleanup(blocks.clone(), async move {
+        assert_live_r2_block_contract(&config, &blocks).await;
+        exercise(
+            PgliteMetadataStore::connect_with_key(&url, &scope)
+                .await
+                .unwrap(),
+            blocks.clone(),
+        )
+        .await;
+        // Both clients are fresh; no retained in-process byte cache can
+        // satisfy this read.
+        let reopened = ChunkedFs::open(
+            PgliteMetadataStore::connect_with_key(&url, &scope)
+                .await
+                .unwrap(),
+            mount_rs_r2::R2BlockStore::from_config(&config, prefix).unwrap(),
+            ChunkedOptions::fixed("pglite-r2-reopen", 65536).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+        expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
+        expected.resize(84, 0);
+        expected[82..].copy_from_slice(&[99, 98]);
+        assert_eq!(
+            Loopback::new(reopened.clone())
+                .read_file("/alias")
+                .await
+                .unwrap(),
+            expected
+        );
+        reopened.shutdown().await.unwrap();
+    })
     .await;
-    // Both clients are fresh; no retained in-process byte cache can satisfy this read.
-    let reopened = ChunkedFs::open(
-        PgliteMetadataStore::connect_with_key(&url, &scope)
-            .await
-            .unwrap(),
-        mount_rs_r2::R2BlockStore::from_config(&config, prefix).unwrap(),
-        ChunkedOptions::fixed("pglite-r2-reopen", 65536).unwrap(),
-    )
-    .await
-    .unwrap();
-    let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
-    expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
-    expected.resize(84, 0);
-    expected[82..].copy_from_slice(&[99, 98]);
-    assert_eq!(
-        Loopback::new(reopened.clone())
-            .read_file("/alias")
-            .await
-            .unwrap(),
-        expected
-    );
-    reopened.shutdown().await.unwrap();
-    let created = blocks.created.lock().unwrap().clone();
-    for id in created {
-        blocks.delete(&id).await.unwrap();
-    }
     // The metadata volume belongs to the isolated test server. Never clear a
     // shared database or list/delete objects outside the exact created IDs.
 }

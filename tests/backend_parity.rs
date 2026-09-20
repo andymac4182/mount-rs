@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use mount_rs_core::{ErrorCode, FsDriver, Loopback, MemoryFs, MkdirOptions, OpenFlags};
-use mount_rs_persist::PersistedFs;
+use mount_rs_persist::{PersistedFs, StateStore};
 use mount_rs_r2::{R2Store, open_object_store};
 use mount_rs_sqlite::{SqliteStore, open_sqlite_memory};
 use object_store::ObjectStore;
@@ -163,6 +163,19 @@ fn unique_state_key(prefix: &str) -> String {
             .unwrap()
             .as_nanos()
     )
+}
+
+async fn cleanup_live_r2_snapshot(config: &mount_rs_r2::R2Config) {
+    R2Store::from_config(config)
+        .unwrap()
+        .delete_snapshot()
+        .await
+        .unwrap();
+    let verified = R2Store::from_config(config).unwrap();
+    assert!(
+        verified.load_versioned().await.unwrap().snapshot.is_none(),
+        "live R2 snapshot remained after exact-key cleanup"
+    );
 }
 
 #[tokio::test]
@@ -355,5 +368,86 @@ async fn cloudflare_r2_matches_the_same_contract_when_configured() {
     let actual = scenario(Arc::new(filesystem)).await;
     let expected = scenario(Arc::new(MemoryFs::empty())).await;
     assert_eq!(actual, expected);
-    store.delete_snapshot().await.unwrap();
+    cleanup_live_r2_snapshot(&config).await;
+}
+
+#[tokio::test]
+#[ignore = "requires dedicated Cloudflare R2 credentials; run explicitly with --ignored"]
+async fn cloudflare_r2_rejects_concurrent_snapshot_publication_with_fresh_clients() {
+    let required = [
+        "R2_ENDPOINT",
+        "R2_BUCKET",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+    ];
+    assert!(
+        required.iter().all(|name| std::env::var_os(name).is_some()),
+        "R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY are required"
+    );
+    let mut config = mount_rs_r2::R2Config::from_env().unwrap();
+    config.state_key = unique_state_key("r2-concurrent-cas");
+
+    let seed = PersistedFs::open(R2Store::from_config(&config).unwrap())
+        .await
+        .unwrap();
+    let seed = Loopback::from_arc(Arc::new(seed));
+    seed.write_file("/base", b"base").await.unwrap();
+    drop(seed);
+
+    // Each filesystem has a newly constructed authenticated R2 client and
+    // loads the same ETag before racing its first publication.
+    let left = Loopback::from_arc(Arc::new(
+        PersistedFs::open(R2Store::from_config(&config).unwrap())
+            .await
+            .unwrap(),
+    ));
+    let right = Loopback::from_arc(Arc::new(
+        PersistedFs::open(R2Store::from_config(&config).unwrap())
+            .await
+            .unwrap(),
+    ));
+    let (left_result, right_result) = tokio::join!(
+        left.write_file("/left", b"left"),
+        right.write_file("/right", b"right")
+    );
+    let winner = match (left_result, right_result) {
+        (Ok(()), Err(error)) => {
+            assert!(
+                error.is(ErrorCode::Eagain),
+                "stale live R2 writer returned the wrong error: {error}"
+            );
+            ("/left", b"left".as_slice(), "/right")
+        }
+        (Err(error), Ok(())) => {
+            assert!(
+                error.is(ErrorCode::Eagain),
+                "stale live R2 writer returned the wrong error: {error}"
+            );
+            ("/right", b"right".as_slice(), "/left")
+        }
+        (Ok(()), Ok(())) => panic!("both live R2 snapshot writers committed the same ETag"),
+        (Err(left), Err(right)) => {
+            panic!("both live R2 snapshot writers failed: left={left}; right={right}")
+        }
+    };
+    drop(left);
+    drop(right);
+
+    // Reopen with another fresh client and prove that the conditional winner
+    // is the only concurrent publication visible in the committed snapshot.
+    let reopened = PersistedFs::open(R2Store::from_config(&config).unwrap())
+        .await
+        .unwrap();
+    let reopened = Loopback::from_arc(Arc::new(reopened));
+    assert_eq!(reopened.read_file("/base").await.unwrap(), b"base");
+    assert_eq!(reopened.read_file(winner.0).await.unwrap(), winner.1);
+    assert!(
+        reopened
+            .stat(winner.2)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Enoent),
+        "losing live R2 writer unexpectedly appeared in the committed snapshot"
+    );
+    cleanup_live_r2_snapshot(&config).await;
 }
