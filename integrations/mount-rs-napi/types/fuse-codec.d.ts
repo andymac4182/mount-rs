@@ -13,6 +13,7 @@ import type {
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseKstatfs,
+  NativeFuseNameIn,
   NativeFuseNotification,
   NativeFuseNotifyInvalEntryOut,
   NativeFuseNotifyInvalInodeOut,
@@ -41,6 +42,7 @@ export type {
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseKstatfs,
+  NativeFuseNameIn,
   NativeFuseNotification,
   NativeFuseNotifyInvalEntryOut,
   NativeFuseNotifyInvalInodeOut,
@@ -154,6 +156,10 @@ export declare function initOutSize(minor: number): number
 export declare function readWriteInSize(minor: number): number
 export declare function decodeEntryOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
 export declare function encodeEntryOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeLookupIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseNameIn
+export declare function encodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeLookupOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeLookupOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
 export declare function encodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetattrIn
