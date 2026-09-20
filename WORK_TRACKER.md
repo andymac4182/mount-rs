@@ -228,6 +228,21 @@ Node SDK mounting through native NFS, writing and reading its file, unmounting,
 and leaving the temporary backing directory clean. This is a separate Node CLI
 consumer check; it does not qualify Linux FUSE, FSKit or live providers.
 
+The next three implementation packets were validated and published to
+`origin/main` on 2026-09-21. The HostFs packet is local `72d570f` and finished
+publishing at remote commit `1352fa9`; the N-API FUSE lifecycle packet is local
+`13c3acb` and finished at remote commit `5ba69dd`; and the pure Rust FUSE INIT
+packet is local `b2040f6` and finished at remote commit `63c4264`. The HostFs
+packet adds libuv-aligned Windows read-only creation/unlink behavior and
+Win32 hard-link lifetime coverage. The N-API packet adds pinned-oracle
+`RELEASE`/`RELEASEDIR`, `FLUSH`, and `FSYNC`/`FSYNCDIR` request/status codecs.
+The Rust packet hardens version-gated `FUSE_INIT_EXT`/`flags2` handling and
+adds six wire-negotiation integration tests. The combined locked Rust suite
+and full pinned-oracle N-API suite passed; the N-API packet's scoped Clippy
+gate still excludes the pre-existing `js_driver.rs` type-complexity warning.
+Hosted Windows runtime, live R2/PGlite, FSKit activation and privileged native
+FUSE acceptance remain separate gates.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -277,6 +292,9 @@ patch):
 | Lagrange | W27 Windows HostFs symlink portability | `crates/mount-rs-host/**` | Integrated as `80f2efd` / published `e5902bed`; focused macOS and Windows-target gates passed; hosted Windows runtime remains open |
 | Mendel | W10 Rust FUSE ACCESS session dispatch | `transports/mount-rs-fuse/**` | Integrated as `16b2180` / published `9832b60`; focused locked session tests passed; native device/mount remains open |
 | Euler | W01 napi-rs FUSE LOOKUP request/reply codecs | `integrations/mount-rs-napi/**` | Integrated as `7dd9a60` / published `83466d7`; pinned protocol differential and full N-API gates passed |
+| Locke | W27 Windows HostFs read-only/link lifetime parity | `integrations/mount-rs-host/**` | Integrated as `72d570f` / published through `1352fa9`; 15 macOS tests, Windows-target check and target Clippy passed; hosted Windows runtime remains open |
+| Singer | W01 napi-rs FUSE lifecycle codecs | `integrations/mount-rs-napi/**` | Integrated as `13c3acb` / published through `5ba69dd`; pinned differential and full N-API suite passed; strict pre-existing Clippy lint remains |
+| Zeno | W01 Rust FUSE INIT wire negotiation | `transports/mount-rs-fuse/{src/init.rs,tests/init.rs}` | Integrated as `b2040f6` / published through `63c4264`; six focused tests and strict scoped Clippy passed |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -324,7 +342,7 @@ complete.
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
-| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec/session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
+| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
 | W11 | Config-driven CLI | Rust CLI now consumes the Rust SDK; Node CLI consumes the Node SDK; provider/remote/hosted gates remain | Main |
 | W12 | Safely hosting SQLite files | Local journal/WAL matrix, fail-closed bridge, and recovery gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
 | W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
@@ -341,7 +359,7 @@ complete.
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
-| W27 | Native Windows support and CI | HostFs Windows symlink packet landed; hosted runtime, flags, hard-links and mount qualification pending | Main |
+| W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
@@ -490,6 +508,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The combined locked Rust and oracle-enabled N-API gates passed. Hosted
   Windows, live R2, FSKit activation and privileged native mount evidence
   remain open.
+- [x] The current implementation rotation is integrated: `72d570f` adds
+  Windows read-only create/unlink and hard-link lifetime parity; `13c3acb`
+  exposes the Rust-backed N-API `RELEASE`/`RELEASEDIR`, `FLUSH`, and
+  `FSYNC`/`FSYNCDIR` codecs; and `b2040f6` hardens pure Rust FUSE INIT
+  negotiation with six integration tests. The combined locked Rust workspace
+  and pinned-oracle N-API gates passed. The N-API scoped Clippy run retains
+  the pre-existing `js_driver.rs` type-complexity exclusion; hosted Windows,
+  live providers, FSKit and privileged native mount evidence remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
