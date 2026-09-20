@@ -952,6 +952,7 @@ mod tests {
     #[test]
     fn refusal_messages_cover_macos_ownership_and_v4() {
         assert!(ownership_refusal(NfsPlatform::Macos, Path::new("/tmp/mount"), 501, 502).is_some());
+        assert!(ownership_refusal(NfsPlatform::Macos, Path::new("/tmp/mount"), 501, 0).is_none());
         assert!(ownership_refusal(NfsPlatform::Linux, Path::new("/tmp/mount"), 501, 502).is_none());
         assert!(version_refusal(NfsPlatform::Macos, NfsVersion::V4_1).is_some());
         assert!(version_refusal(NfsPlatform::Linux, NfsVersion::V4_1).is_none());

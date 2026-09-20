@@ -6,22 +6,32 @@ on:
 
 jobs:
   native-nfs:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Install the actual Linux NFS client
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y nfs-common
           sudo modprobe nfs
+          sudo modprobe nfsv4
       - name: Build and run privileged native NFS tests
         run: |
           native_test=$(cargo test --locked -p mount-rs-nfs --test native_mount --no-run --message-format=json | python3 -c 'import json,sys; print([x["executable"] for line in sys.stdin if (x:=json.loads(line)).get("executable")][0])')
           test -x "$native_test"
-          sudo env MOUNT_RS_NFS_NATIVE_TEST=1 timeout 240s "$native_test" --ignored --nocapture
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo env MOUNT_RS_NFS_NATIVE_TEST=1 MOUNT_RS_NFS_NATIVE_V4_TEST=1 timeout 240s "$native_test" --ignored --nocapture
+          else
+            MOUNT_RS_NFS_NATIVE_TEST=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=240)' "$native_test"
+          fi
 
   native-9p:
     runs-on: ubuntu-latest

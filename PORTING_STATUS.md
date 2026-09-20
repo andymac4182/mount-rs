@@ -63,6 +63,12 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `e15179d`: [native FUSE job 106005427389](https://github.com/andymac4182/mount-rs/actions/runs/35483491213/job/106005427389)
+  passed both real mount-service graceful restart and SIGKILL recovery tests
+  (two passed, zero ignored, 21.02s). Separate SQLite metadata/block files
+  preserved committed DELETE/WAL databases across fresh service processes and
+  production lease expiry. This does not simulate host power loss or injected
+  backend failures. See [`ARCHITECTURE.md`](ARCHITECTURE.md) for scope.
 - `91577ab`: [native FUSE job 106004365456](https://github.com/andymac4182/mount-rs/actions/runs/35483110170/job/106004365456)
   passed actual SQLite DELETE/WAL hosting and reopen on separate metadata and
   block SQLite databases in 4.47s, plus the real auto-facade mount. This

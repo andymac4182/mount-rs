@@ -23,23 +23,26 @@ filesystem-backed attributes exposed by `FsDriver`.
 ## Native macOS/Linux mount lifecycle
 
 `nfs_client_probe` reports host prerequisites and `mount_nfs` starts the
-in-process NFSv3 server before invoking the platform's `mount(8)`. Teardown is
-idempotent and retryable: it checks the mount table, tries `umount`, and then
-uses `umount -f` (plus Linux-only `umount -l`) within the configured deadline.
-`unmount_all_nfs` provides process-local cleanup for application shutdown; the
-crate does not install signal handlers, so signal policy remains with the host
-application.
+in-process NFSv3 or Linux NFSv4.1 server selected by `NfsMountOptions` before
+invoking the platform's `mount(8)`. Teardown is idempotent and retryable: it
+checks the mount table, tries `umount`, and then uses `umount -f` (plus
+Linux-only `umount -l`) within the configured deadline. `unmount_all_nfs`
+provides process-local cleanup for application shutdown; the crate does not
+install signal handlers, so signal policy remains with the host application.
 
-Native verification is a separate, privileged/manual test. The host must have
-an NFS client and a writable empty mount point:
+Native verification is a separate manual host-client test. Linux requires
+privilege; macOS can run it rootlessly when the process owns the writable empty
+mount point. In both cases the host must have an NFS client:
 
 * Linux needs the distribution NFS client tools (`nfs-common` on Debian-family
   systems or `nfs-utils` on Fedora-family systems), plus root or the equivalent
   `CAP_SYS_ADMIN` mount capability. The native helper reports this as a
   prerequisite; a rootless Linux wire test is not a native mount test.
-* macOS uses its built-in `/sbin/mount_nfs` client. An ordinary user must own
-  the mountpoint, and macOS privacy/security policy may require Full Disk
-  Access for the terminal or process running the test.
+* macOS uses its built-in `/sbin/mount_nfs` client; Homebrew NFS packages are
+  not required. Run the harness as the ordinary user who owns its temporary
+  mountpoint (root is also accepted, but is not needed), and grant Full Disk
+  Access to the terminal or process if macOS privacy/security policy requires
+  it.
 
 The native helper uses an ephemeral loopback TCP port and supplies both
 `port=` and `mountport=` for NFSv3, so `rpcbind`/portmap is not needed. Linux
@@ -50,11 +53,30 @@ explicit TCP options. These prerequisites do not claim that native mounting
 has been run or passed here.
 
 The ignored integration harness can be deliberately enabled on a prepared
-host; it performs a real kernel mount only when explicitly selected:
+host; it performs a real kernel mount only when explicitly selected. The v3
+case runs on both supported platforms and covers directory rename, `stat`,
+`mkdir`, `readdir`, file rename, truncate, and hard-link/readback. The v4.1
+case is compiled and run only on Linux and covers the same operations plus
+nested directories, offset read/write with `sync_all`, cross-directory rename,
+and a 256-entry directory listing:
 
 ```text
-MOUNT_RS_NFS_NATIVE_TEST=1 cargo test -p mount-rs-nfs --test native_mount -- --ignored --nocapture
+# macOS or Linux: NFSv3
+MOUNT_RS_NFS_NATIVE_TEST=1 cargo test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture
+
+# Linux only: NFSv4.1
+MOUNT_RS_NFS_NATIVE_V4_TEST=1 cargo test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_v4_1_round_trip --nocapture
 ```
+
+On macOS the first command is the native verification command: run it without
+`sudo` when the test creates its own temporary directory, or run the same
+command as root only when the CI job intentionally provides a root test. The
+helper emits the platform-correct v3 options `vers=3,proto=tcp,port=...,`
+`mountport=...,nolocks,soft,timeo=...,retrans=...,nobrowse`; it does not use
+Linux's `nolock`, and it does not require `rpcbind`. A failure from
+`mount_nfs`, a privacy refusal, or teardown is a real native-test failure, not
+an implicit pass. This NFS validation does not establish SQLite hosting or
+other storage support on macOS.
 
 The normal crate tests remain rootless and do not invoke `mount(8)`.
 
