@@ -581,6 +581,56 @@ async fn windows_hard_link_metadata_and_open_handle_match_node() {
 
 #[cfg(windows)]
 #[tokio::test]
+async fn windows_read_only_hard_link_delete_and_handle_lifetime_match_node() {
+    let root = TempDir::new();
+    let driver = HostFs::new(root.path());
+    let flags = OpenFlags {
+        read: true,
+        write: false,
+        create: true,
+        truncate: false,
+        append: false,
+        exclusive: false,
+    };
+    let handle = driver
+        .open_flags("/rust-readonly-links", flags, 0o400)
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.write(b"x", None).await.unwrap_err().code,
+        ErrorCode::Ebadf
+    );
+    driver
+        .link("/rust-readonly-links", "/rust-readonly-links.first")
+        .await
+        .unwrap();
+    let before = [
+        driver.stat("/rust-readonly-links").await.unwrap(),
+        driver.stat("/rust-readonly-links.first").await.unwrap(),
+    ];
+    driver.unlink("/rust-readonly-links.first").await.unwrap();
+    let after_alias = handle.stat().await.unwrap();
+    driver.unlink("/rust-readonly-links").await.unwrap();
+    let after_final = handle.stat().await.unwrap();
+    handle.close().await.unwrap();
+    let missing = driver.stat("/rust-readonly-links").await.unwrap_err().code;
+    assert_eq!(missing, ErrorCode::Enoent);
+
+    let observed = format!(
+        "EBADF,{},{},{},{}",
+        before[0].nlink, before[1].nlink, after_alias.nlink, after_final.nlink
+    );
+    assert_eq!(
+        format!("{observed},ENOENT"),
+        windows_oracle(
+            "readonly-hard-links",
+            &root.path().join("node-readonly-links")
+        )
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
 async fn windows_read_only_creation_matches_node_and_preserves_existing_data() {
     let root = TempDir::new();
     let driver = HostFs::new(root.path());
