@@ -71,12 +71,15 @@ The existing `FuseSession` native path remains intact. Its current dispatch
 handles `INIT` (modern 7.12+ layout), `MKNOD`, `FLUSH`, `FSYNCDIR`, `SETATTR`,
 `DESTROY`, `OPENDIR`, `READDIR`, `READDIRPLUS`, `RELEASEDIR`, `STATFS`,
 `FSYNC`, `CREATE`, `READLINK`, `SYMLINK`, `MKDIR`, `UNLINK`, `RMDIR`,
-`RENAME`, `LINK`, `LOOKUP`, `GETATTR`, `OPEN`, `READ`, `WRITE`, and `RELEASE`.
+`RENAME`, `LINK`, `LOOKUP`, `GETATTR`, `OPEN`, `READ`, `WRITE`, `ACCESS`, and
+`RELEASE`. `ACCESS` evaluates the request uid/gid against driver metadata;
+supplementary groups remain an explicit boundary because this session does not
+negotiate or receive them.
 `FORGET` and `BATCH_FORGET` remain bookkeeping paths, while
 `NOTIFY_REPLY` is ignored without a reply.
 
 The native session still returns `ENOSYS` for the other codec-covered
 operations, including `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
-`GETLK`, `SETLK`, `SETLKW`, `ACCESS`, `INTERRUPT`, `BMAP`, `POLL`,
+`GETLK`, `SETLK`, `SETLKW`, `INTERRUPT`, `BMAP`, `POLL`,
 `FALLOCATE`, `LSEEK`, and `RENAME2`. Native device/mount behavior and the
 N-API `./fuse` boundary are outside this scoped slice.
