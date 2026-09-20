@@ -64,6 +64,11 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `b63e616`: [complete CI run 35486840994](https://github.com/andymac4182/mount-rs/actions/runs/35486840994)
+  passed all 13 jobs: Rust macOS/Linux, four Node platform/architecture builds,
+  native NFS and WebDAV on both platforms, Linux FUSE and 9P, and native addon
+  artifact aggregation. This is a revision-specific checkpoint, not proof for
+  later changes, live R2, macOS NFS WAL, or unfinished benchmark/API work.
 - `b63e616`: [native Linux NFS job 106014665000](https://github.com/andymac4182/mount-rs/actions/runs/35486840994/job/106014665000)
   passed actual NFSv3 and NFSv4.1 mounts, expanded namespace/handle I/O, and
   unmount cleanup: two passed, zero ignored, 0.37s. This retains the original
@@ -71,6 +76,11 @@ cases still require audit.
   earlier repeated delays. It does not prove distributed SQLite locking.
   Local combined upstream driver/NFS/9P conformance at this revision passed
   878 tests with 45 capability/privilege skips; platform-wide CI is separate.
+  The Linux [x64 Node job 106014665018](https://github.com/andymac4182/mount-rs/actions/runs/35486840994/job/106014665018)
+  and [ARM64 Node job 106014665016](https://github.com/andymac4182/mount-rs/actions/runs/35486840994/job/106014665016)
+  passed native FUSE addon I/O, memory factory parity, disk-backed PGlite
+  restart, KV/HTTP parity, and the real-PGlite-expanded upstream suites
+  (1,088 passed, 48 skipped). macOS CI is not implied by these Linux results.
 - `c95e48b`: [native FUSE job 106012611132](https://github.com/andymac4182/mount-rs/actions/runs/35486085535/job/106012611132)
   passed real SQLite DELETE/WAL hosting through all three PGlite/SQLite split
   store compositions, including competing processes, killed-writer recovery,
