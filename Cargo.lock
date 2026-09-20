@@ -1195,6 +1195,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-versioned"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-chunked",
+ "mount-rs-core",
+ "mount-rs-memory",
+ "mount-rs-sqlite",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-webdav"
 version = "0.1.0"
 dependencies = [

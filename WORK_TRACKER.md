@@ -39,7 +39,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W11 | Config-driven CLI | Landed; extending | Chandrasekhar |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
 | W13 | macOS FSKit | Implementing | James |
-| W14 | Versioned filesystems | Review fixes in progress | Chandrasekhar |
+| W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Implementing | Hume |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Confucius / Main |
 | W17 | Multi-drive HTTP server | Implementing | Copernicus |
@@ -282,6 +282,14 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   supported SQLite workloads. NFS/FUSE fallback does not satisfy this stream.
 
 ## W14 — Versioned filesystems
+
+- [x] Land additive core versioning contract, separate coordinator crate and
+  memory/SQLite history providers. Includes explicit publication identities,
+  lost-ack fork reconciliation, pinned read-only views, restore, cross-store
+  copying, schema/head validation and cancellation-safe pin accounting.
+  Main tested the exact staged checkout: 6 memory, 10 SQLite and 20 versioning
+  tests passed. This is not remote/Node/CLI/platform acceptance or physical COW;
+  dropped views may retain pins until TTL unless explicitly closed.
 
 - [x] Record versioning design (`dc6b0bb`).
 - [x] Local uncommitted prototype passed four tests covering history, restore,

@@ -11,6 +11,10 @@ use async_trait::async_trait;
 use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
+use mount_rs_core::versioning::{
+    PublicationId, ReadLease, ReadLeaseRequest, VersionHead, VersionId, VersionInfo,
+    VersionPublication, VersionedMetadataStore, VolumeId,
+};
 use mount_rs_core::{ErrorCode, FsError, Result};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -79,12 +83,36 @@ struct LeaseState {
     expires_at_ms: u64,
 }
 
-#[derive(Default)]
 struct MetadataState {
     revision: u64,
     namespace: Option<Namespace>,
     last_fence: u64,
     lease: Option<LeaseState>,
+    volume_id: VolumeId,
+    next_version: u64,
+    versions: BTreeMap<VersionId, VersionInfo>,
+    head: Option<VersionId>,
+    next_read_fence: u64,
+    pins: BTreeMap<String, ReadLease>,
+    operations: BTreeMap<String, VersionId>,
+}
+
+impl Default for MetadataState {
+    fn default() -> Self {
+        Self {
+            revision: 0,
+            namespace: None,
+            last_fence: 0,
+            lease: None,
+            volume_id: VolumeId("uninitialized".to_owned()),
+            next_version: 1,
+            versions: BTreeMap::new(),
+            head: None,
+            next_read_fence: 0,
+            pins: BTreeMap::new(),
+            operations: BTreeMap::new(),
+        }
+    }
 }
 
 /// Volatile metadata store with a linearizable in-process lease/revision CAS.
@@ -118,8 +146,15 @@ impl MemoryMetadataStore {
     }
 
     pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        static NEXT_VOLUME: AtomicU64 = AtomicU64::new(1);
+        let sequence = NEXT_VOLUME.fetch_add(1, Ordering::Relaxed);
+        let volume_id = VolumeId::new(format!("memory-{}-{sequence}", std::process::id()))
+            .expect("generated memory volume id is valid");
         Self {
-            state: Arc::new(Mutex::new(MetadataState::default())),
+            state: Arc::new(Mutex::new(MetadataState {
+                volume_id,
+                ..MetadataState::default()
+            })),
             clock,
         }
     }
@@ -231,6 +266,261 @@ impl MetadataStore for MemoryMetadataStore {
     }
 }
 
+#[async_trait]
+impl VersionedMetadataStore for MemoryMetadataStore {
+    fn volume_id(&self) -> VolumeId {
+        self.state
+            .lock()
+            .map(|state| state.volume_id.clone())
+            .unwrap_or_else(|_| VolumeId("memory-poisoned".to_owned()))
+    }
+
+    async fn version_head(&self) -> Result<Option<VersionHead>> {
+        let state = self.lock_state()?;
+        let Some(version) = state.head.clone() else {
+            return Ok(None);
+        };
+        if version.volume != state.volume_id {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("version head")
+                .with_message("stored version head belongs to another volume"));
+        }
+        let record = state.versions.get(&version).ok_or_else(|| {
+            FsError::new(ErrorCode::Eio)
+                .with_syscall("version head")
+                .with_message("stored version head references a missing version")
+        })?;
+        record.validate_for_volume(&state.volume_id)?;
+        Ok(Some(VersionHead {
+            version,
+            revision: state.revision,
+        }))
+    }
+
+    async fn load_version(&self, id: &VersionId) -> Result<VersionInfo> {
+        let state = self.lock_state()?;
+        if id.volume != state.volume_id {
+            return Err(FsError::new(ErrorCode::Enoent)
+                .with_syscall("load version")
+                .with_message("version belongs to another volume"));
+        }
+        let version = state
+            .versions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| FsError::new(ErrorCode::Enoent).with_syscall("load version"))?;
+        version.validate_for_volume(&state.volume_id)?;
+        Ok(version)
+    }
+
+    async fn list_versions(&self) -> Result<Vec<VersionInfo>> {
+        let state = self.lock_state()?;
+        state
+            .versions
+            .values()
+            .cloned()
+            .map(|version| {
+                version.validate_for_volume(&state.volume_id)?;
+                Ok(version)
+            })
+            .collect()
+    }
+
+    async fn find_publication(&self, operation_id: &PublicationId) -> Result<Option<VersionInfo>> {
+        let state = self.lock_state()?;
+        let Some(id) = state.operations.get(&operation_id.0) else {
+            return Ok(None);
+        };
+        let version = state
+            .versions
+            .get(id)
+            .cloned()
+            .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+        version.validate_for_volume(&state.volume_id)?;
+        Ok(Some(version))
+    }
+
+    async fn publish_version(
+        &self,
+        lease: &WriterLease,
+        publication: VersionPublication,
+    ) -> Result<VersionInfo> {
+        let mut state = self.lock_state()?;
+        if let Some(existing_id) = state.operations.get(&publication.operation_id.0) {
+            let existing = state
+                .versions
+                .get(existing_id)
+                .cloned()
+                .ok_or_else(|| FsError::new(ErrorCode::Eio))?;
+            existing.validate_for_volume(&state.volume_id)?;
+            if !publication.matches_committed(&existing)? {
+                return Err(FsError::new(ErrorCode::Eexist)
+                    .with_syscall("publish version")
+                    .with_message("publication id was reused with a different payload"));
+            }
+            return Ok(existing);
+        }
+        publication.validate(&state.volume_id)?;
+        if publication.durable {
+            return Err(FsError::new(ErrorCode::Enotsup)
+                .with_syscall("publish version")
+                .with_message("memory version store is volatile"));
+        }
+        let now_ms = self.clock.now_ms();
+        validate_lease(&state, lease, now_ms)?;
+        if state.revision != publication.expected_revision {
+            return Err(FsError::new(ErrorCode::Eagain)
+                .with_syscall("publish version")
+                .with_message(format!(
+                    "metadata revision conflict: expected {}, actual {}",
+                    publication.expected_revision, state.revision
+                )));
+        }
+        if let Some(head) = state.head.as_ref()
+            && (head.volume != state.volume_id || !state.versions.contains_key(head))
+        {
+            return Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("publish version")
+                .with_message("stored version head references an invalid version"));
+        }
+        if state.head.as_ref() != publication.expected_parent.as_ref() {
+            return Err(FsError::new(ErrorCode::Eagain)
+                .with_syscall("publish version")
+                .with_message("version head changed concurrently"));
+        }
+        let sequence = state.next_version;
+        let id = VersionId::new(state.volume_id.clone(), sequence)?;
+        let info = VersionInfo {
+            id: id.clone(),
+            parent: publication.expected_parent,
+            restored_from: publication.restored_from,
+            forked_from: publication.forked_from,
+            kind: publication.kind,
+            namespace: publication.namespace.clone(),
+            block_store_id: publication.block_store_id,
+            created_at_ms: i64::try_from(now_ms).unwrap_or(i64::MAX),
+            durable: false,
+        };
+        info.validate()?;
+        let next_sequence = state
+            .next_version
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        state.next_version = next_sequence;
+        state.namespace = Some(publication.namespace);
+        state.revision = revision;
+        state.head = Some(id.clone());
+        state
+            .operations
+            .insert(publication.operation_id.0, id.clone());
+        state.versions.insert(id, info.clone());
+        Ok(info)
+    }
+
+    async fn open_view_pin(&self, id: &VersionId, request: ReadLeaseRequest) -> Result<ReadLease> {
+        let ttl_ms = request.validate()?;
+        let mut state = self.lock_state()?;
+        if id.volume != state.volume_id || !state.versions.contains_key(id) {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("open version view"));
+        }
+        let now_ms = self.clock.now_ms();
+        let expires_at_ms = now_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        state.next_read_fence = state
+            .next_read_fence
+            .checked_add(1)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let view_id = format!("{}-view-{}", state.volume_id, state.next_read_fence);
+        let lease = ReadLease {
+            volume: state.volume_id.clone(),
+            version: id.clone(),
+            view_id: view_id.clone(),
+            owner: request.owner,
+            fence: state.next_read_fence,
+            expires_at_ms,
+        };
+        state.pins.insert(view_id, lease.clone());
+        Ok(lease)
+    }
+
+    async fn renew_view_pin(
+        &self,
+        lease: &ReadLease,
+        request: ReadLeaseRequest,
+    ) -> Result<ReadLease> {
+        let ttl_ms = request.validate()?;
+        let mut state = self.lock_state()?;
+        let now_ms = self.clock.now_ms();
+        let current = state
+            .pins
+            .get(&lease.view_id)
+            .cloned()
+            .ok_or_else(|| FsError::new(ErrorCode::Estale).with_syscall("renew view"))?;
+        validate_read_lease(&current, lease, now_ms)?;
+        if current.owner != request.owner {
+            return Err(FsError::new(ErrorCode::Estale).with_syscall("renew view"));
+        }
+        let expires_at_ms = now_ms
+            .checked_add(ttl_ms)
+            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+        let renewed = ReadLease {
+            expires_at_ms,
+            ..current
+        };
+        state.pins.insert(lease.view_id.clone(), renewed.clone());
+        Ok(renewed)
+    }
+
+    async fn close_view_pin(&self, lease: &ReadLease) -> Result<()> {
+        let mut state = self.lock_state()?;
+        let Some(current) = state.pins.get(&lease.view_id).cloned() else {
+            return Ok(());
+        };
+        if current == *lease && current.expires_at_ms <= self.clock.now_ms() {
+            state.pins.remove(&lease.view_id);
+            return Ok(());
+        }
+        validate_read_lease(&current, lease, self.clock.now_ms())?;
+        state.pins.remove(&lease.view_id);
+        Ok(())
+    }
+
+    async fn delete_version(&self, lease: &WriterLease, id: &VersionId) -> Result<()> {
+        let mut state = self.lock_state()?;
+        let now_ms = self.clock.now_ms();
+        validate_lease(&state, lease, now_ms)?;
+        if id.volume != state.volume_id {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
+        }
+        if state.head.as_ref() == Some(id) {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("delete version")
+                .with_message("current version cannot be deleted"));
+        }
+        if state
+            .pins
+            .values()
+            .any(|pin| pin.version == *id && pin.expires_at_ms > now_ms)
+        {
+            return Err(FsError::new(ErrorCode::Ebusy)
+                .with_syscall("delete version")
+                .with_message("version has an active read lease"));
+        }
+        if state.versions.remove(id).is_none() {
+            return Err(FsError::new(ErrorCode::Enoent).with_syscall("delete version"));
+        }
+        state
+            .operations
+            .retain(|_, operation_id| operation_id != id);
+        Ok(())
+    }
+}
+
 /// Volatile immutable block store. A clone shares the same block map.
 #[derive(Debug, Clone, Default)]
 pub struct MemoryBlockStore {
@@ -330,6 +620,22 @@ fn validate_lease(state: &MetadataState, lease: &WriterLease, now_ms: u64) -> Re
     Ok(())
 }
 
+fn validate_read_lease(current: &ReadLease, supplied: &ReadLease, now_ms: u64) -> Result<()> {
+    if now_ms >= current.expires_at_ms {
+        return Err(FsError::new(ErrorCode::Estale).with_syscall("read lease"));
+    }
+    if current.volume != supplied.volume
+        || current.version != supplied.version
+        || current.view_id != supplied.view_id
+        || current.owner != supplied.owner
+        || current.fence != supplied.fence
+        || current.expires_at_ms != supplied.expires_at_ms
+    {
+        return Err(FsError::new(ErrorCode::Estale).with_syscall("read lease"));
+    }
+    Ok(())
+}
+
 fn stale_lease(message: &'static str) -> FsError {
     FsError::new(ErrorCode::Estale).with_message(message)
 }
@@ -385,6 +691,7 @@ mod tests {
     use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
     use mount_rs_core::storage::{BlockExtent, FileLayout, NodeData, NodeMetadata};
     use mount_rs_core::types::{S_IFDIR, S_IFREG, Stats};
+    use mount_rs_core::versioning::{BlockStoreId, VersionKind};
     use std::future::Future;
     use std::task::{Context, Poll, Wake, Waker};
 
@@ -520,6 +827,51 @@ mod tests {
         let loaded_again = block_on(store.load()).unwrap();
         assert_eq!(loaded_again.revision, 1);
         assert_eq!(loaded_again.namespace.unwrap().nodes[&1].stats.size, 7);
+    }
+
+    #[test]
+    fn version_head_rejects_dangling_record_and_forged_lease_owner() {
+        let clock = Arc::new(ManualClock::new(0));
+        let store = MemoryMetadataStore::with_clock(clock);
+        let writer = block_on(store.acquire_writer("owner", Duration::from_secs(10))).unwrap();
+        let publication = VersionPublication {
+            expected_revision: 0,
+            expected_parent: None,
+            operation_id: PublicationId::new("head-integrity").unwrap(),
+            namespace: sample_namespace(1),
+            block_store_id: BlockStoreId::new("memory-blocks").unwrap(),
+            kind: VersionKind::Snapshot,
+            restored_from: None,
+            forked_from: None,
+            durable: false,
+        };
+        let version = block_on(store.publish_version(&writer, publication)).unwrap();
+        let pin = block_on(store.open_view_pin(
+            &version.id,
+            ReadLeaseRequest {
+                owner: "reader".to_owned(),
+                ttl: Duration::from_secs(10),
+            },
+        ))
+        .unwrap();
+        let forged = ReadLease {
+            owner: "forged".to_owned(),
+            ..pin.clone()
+        };
+        assert_error(
+            block_on(store.renew_view_pin(
+                &forged,
+                ReadLeaseRequest {
+                    owner: pin.owner.clone(),
+                    ttl: Duration::from_secs(10),
+                },
+            )),
+            ErrorCode::Estale,
+        );
+
+        store.state.lock().unwrap().head =
+            Some(VersionId::new(store.volume_id(), version.id.sequence + 1).unwrap());
+        assert_error(block_on(store.version_head()), ErrorCode::Eio);
     }
 
     #[test]

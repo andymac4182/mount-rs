@@ -11,6 +11,7 @@ pub mod memory;
 pub mod path;
 pub mod storage;
 pub mod types;
+pub mod versioning;
 
 pub use driver::{FileHandle, FsDriver, Loopback};
 pub use error::{ErrorCode, FsError, Result, backend_error};
