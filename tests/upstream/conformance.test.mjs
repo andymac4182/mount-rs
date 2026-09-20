@@ -25,6 +25,14 @@ conformance({
   capabilities: new binding.Filesystem().capabilities,
   setup: async () => ({ fs: new binding.Filesystem() }),
 });
+conformance({
+  name: 'Rust createMemoryDriver via napi-rs',
+  capabilities: binding.createMemoryDriver().capabilities,
+  setup: async () => {
+    const fs = binding.createMemoryDriver();
+    return { fs, cleanup: () => fs.shutdown() };
+  },
+});
 for (const implementation of ['TypeScript', 'Rust']) {
   const factory = implementation === 'Rust' ? binding.createNodeFsDriver : createNodeFsDriver;
   conformance({
