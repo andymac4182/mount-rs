@@ -192,7 +192,7 @@ sqlite3 blocks.sqlite \
     name: 'PGlite',
     eyebrow: 'Provider / PostgreSQL wire',
     maturity: 'Preview',
-    maturityNote: 'Real socket-server, fencing, reopen, and Node lifecycle evidence; deployment durability remains caller-owned.',
+    maturityNote: 'Real socket-server, fencing, reconnect/restart, split-store, and Rust/Node/CLI matrix evidence; deployment durability remains caller-owned.',
     summary: (
       <>
         PGlite provides SQL-backed metadata and blocks through PostgreSQL wire
@@ -259,9 +259,11 @@ SQL`,
     ),
     evidence: (
       <>
-        Real PGlite socket tests cover fencing, CAS, immutable blocks, reopen,
-        cleanup, and Node factories. The project still distinguishes those
-        checks from broad hosted and release acceptance.
+        Fresh current-tree PGlite lifecycle acceptance covers provider
+        parity/reconnect/fencing/cancellation, disk-server restart, split
+        metadata/blocks, Rust/Node/CLI matrices, and all 40 PGlite-inclusive
+        seeded trace lanes. R2 rows were explicit skips without credentials;
+        hosted and release acceptance remain separate.
       </>
     ),
     sources: [

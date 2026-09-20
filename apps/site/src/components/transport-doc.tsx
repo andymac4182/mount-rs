@@ -27,7 +27,7 @@ export const transportSpecs = {
     name: 'FUSE',
     eyebrow: 'Transport / kernel-facing Unix mount',
     maturity: 'Preview',
-    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; codec and platform scope remain explicit.',
+    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; focused Rust-backed Node codec/inode coverage is implemented, while codec and platform scope remain explicit.',
     summary: (
       <>
         FUSE is the kernel-facing route for a host that can provide the FUSE
@@ -85,12 +85,15 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     evidence: (
       <>
         Revision-matched Linux native checks and local protocol tests are
-        recorded, including selected SQLite hosting and fault paths. The
-        maturity is scoped to those Linux/session surfaces.
+        recorded, including selected SQLite hosting and fault paths. The Node
+        package now exposes a Rust-backed <code>./fuse</code> codec/inode
+        subpath; focused inode parity is tested, while request/reply body,
+        session, and native-mount surfaces remain open.
       </>
     ),
     sources: [
       { label: 'FUSE transport boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-fuse/README.md' },
+      { label: 'N-API FUSE parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#native-prerequisites' },
     ],
   },

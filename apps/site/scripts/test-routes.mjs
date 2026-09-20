@@ -62,7 +62,7 @@ const routes = [
     path: '/docs/providers/pglite',
     status: 200,
     contentType: 'text/html',
-    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL'],
+    expected: ['PGlite', 'mount_rs_blocks', 'information_schema.columns', 'mount_rs_state', 'PGLITE_DATABASE_URL', '40 PGlite-inclusive'],
   },
   {
     path: '/docs/providers/r2',
@@ -111,7 +111,7 @@ const routes = [
     path: '/docs/transports/fuse',
     status: 200,
     contentType: 'text/html',
-    expected: ['FUSE', '/dev/fuse', 'Preview'],
+    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse'],
   },
   {
     path: '/docs/transports/nfs',
