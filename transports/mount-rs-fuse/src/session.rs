@@ -4,7 +4,7 @@ use crate::{
     Request,
     constants::{
         FUSE_BATCH_FORGET, FUSE_FORGET, FUSE_INTERRUPT, FUSE_KERNEL_MINOR_VERSION,
-        FUSE_NOTIFY_REPLY, FUSE_READLINK, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_SETXATTR_EXT, FUSE_STATFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -67,6 +67,7 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         18 | 25 | 29 => Some(24),
         20 | 30 => Some(16),
         FUSE_INTERRUPT => Some(8),
+        FUSE_POLL => Some(24),
         _ => None,
     };
     if exact.is_some_and(|size| body.len() != size) {
@@ -668,6 +669,13 @@ impl FuseSession {
                 Err(FsError::new(ErrorCode::Eagain).with_message(format!(
                     "FUSE_INTERRUPT target {target_unique} is not safely cancellable"
                 )))
+            }
+            FUSE_POLL => {
+                // FsDriver has no readiness/poll capability yet. Keep this
+                // operation explicitly unsupported after validating its
+                // fixed wire body; libfuse treats ENOSYS as a successful
+                // default poll result and will not keep sending POLL calls.
+                Err(FsError::enosys("poll"))
             }
             20 => {
                 let handle = self
