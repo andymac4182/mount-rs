@@ -1,0 +1,11 @@
+[package]
+name = "mount-rs-memory"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Volatile independent metadata and immutable block stores for mount-rs"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
