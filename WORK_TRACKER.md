@@ -55,8 +55,8 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 - [ ] **D01 — Live R2:** obtain dedicated test bucket and credentials through a
   safe channel. Do not put secrets in this tracker or substitute RustFS evidence.
-  User authorized setup through their Cloudflare MCP; current tool/resource and
-  plugin discovery did not expose that server. Connection must become available.
+  Cloudflare MCP is now connected. Actual bucket-list API returned error 10042:
+  R2 must first be enabled in the Cloudflare dashboard. No bucket/token created.
 - [ ] **D02 — License:** resolve root Apache-2.0 versus MIT package declarations
   with the user before release; do not silently select a license.
 - [ ] **D03 — FSKit:** obtain signing/install/activation authorization and host
@@ -264,9 +264,17 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 - [ ] W16.1 Finish separate just-bash and Mastra adapters over mount-rs drives.
 - [ ] W16.2 Pin and execute actual consumer libraries, not just adapter mocks.
+  Main independently passed actual just-bash 3.4.2 and Mastra 1.67.0 tests plus
+  strict TypeScript checking for the uncommitted adapter checkpoint. Persistent
+  backend/shared-namespace coverage is being added before landing.
 - [ ] W16.3 Verify binary/path/error behavior, readonly/versioned views, shared
   namespace visibility, persistence and lifecycle in consumer integration tests.
 - [ ] W16.4 Reuse the drive abstraction with W17 without requiring OS mounts.
+- [ ] W16.5 Fix review findings before landing: reject recursive copy into a
+  descendant (including symlink aliases), preserve source on same-object copy,
+  and handle partial/zero-progress writes. Add targeted regressions.
+- [ ] W16.6 Specify close/cancellation honestly: waiting for admitted operations
+  does not establish bounded cleanup if a backend request never resolves.
 
 ## W17 — Multi-drive HTTP server
 
