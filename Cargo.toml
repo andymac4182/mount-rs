@@ -11,6 +11,7 @@ members = [
     "integrations/mount-rs-r2",
     "integrations/mount-rs-pglite",
     "integrations/mount-rs-versioned",
+    "integrations/mount-rs-sqlite-vfs",
     "integrations/mount-rs-napi",
     "transports/mount-rs-fuse",
     "transports/mount-rs-9p",

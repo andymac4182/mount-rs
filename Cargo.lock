@@ -1227,6 +1227,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-sqlite-vfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "libc",
+ "mount-rs-core",
+ "mount-rs-memory",
+ "mount-rs-pglite",
+ "mount-rs-r2",
+ "mount-rs-sqlite",
+ "rusqlite",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-versioned"
 version = "0.1.0"
 dependencies = [

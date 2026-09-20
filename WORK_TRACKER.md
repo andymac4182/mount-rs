@@ -325,6 +325,14 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W15 — Mount-free SQLite VFS
 
+- [x] Root-integrate the separate rollback-journal VFS and metadata/block
+  storage bridge. Main passed 22 local tests and strict all-feature Clippy;
+  the remote PGlite/RustFS test remains ignored in this run. Host-backed engine
+  tests cover DELETE/TRUNCATE/PERSIST x NORMAL/FULL/EXTRA with exact binary
+  ledgers and reopen checks. Memory/SQLite storage bridges have separate engine,
+  fencing, failure and subprocess checks, not yet the full nine-cell matrix.
+  WAL is explicitly rejected and remains unimplemented; Windows qualification,
+  remote recovery, Node exposure, and broader crash/fault coverage stay open.
 - [ ] W15.1 Complete separate draft crate and actual mount-rs storage bridge;
   host-file reference implementation alone does not satisfy the requirement.
 - [ ] W15.2 Fix registration lifetime escapes through connection extraction or

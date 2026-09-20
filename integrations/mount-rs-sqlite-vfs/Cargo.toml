@@ -1,0 +1,25 @@
+[package]
+name = "mount-rs-sqlite-vfs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Synchronous rollback-journal SQLite VFS boundary for mount-rs integrations"
+license = "Apache-2.0"
+
+[features]
+default = []
+tokio-executor = ["dep:tokio"]
+remote-harness = ["tokio-executor", "dep:mount-rs-pglite", "dep:mount-rs-r2"]
+
+[dependencies]
+libc = "0.2"
+mount-rs-core = { path = "../.." }
+mount-rs-pglite = { path = "../mount-rs-pglite", optional = true }
+mount-rs-r2 = { path = "../mount-rs-r2", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio = { version = "1", default-features = false, features = ["rt", "rt-multi-thread"], optional = true }
+
+[dev-dependencies]
+async-trait = "0.1"
+mount-rs-memory = { path = "../mount-rs-memory" }
+mount-rs-sqlite = { path = "../mount-rs-sqlite" }
