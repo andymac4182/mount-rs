@@ -1,7 +1,7 @@
 use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_fuse::{
     RequestHeader,
-    constants::FUSE_STATFS,
+    constants::{FUSE_BATCH_FORGET, FUSE_INTERRUPT, FUSE_STATFS},
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::FuseSession,
 };
@@ -122,6 +122,75 @@ async fn access_dispatch_checks_credentials_and_fixed_wire_mask() {
         -22
     );
 }
+
+#[tokio::test]
+async fn batch_forget_is_validated_before_no_reply_inode_release() {
+    let fs = Arc::new(MemoryFs::empty());
+    for path in ["/one", "/two"] {
+        let file = fs.open(path, "w", 0o644).await.unwrap();
+        file.close().await.unwrap();
+    }
+    let mut session = FuseSession::new(fs);
+    let one = number(&request(&mut session, 1, 1, b"one\0").await, 0);
+    let two = number(&request(&mut session, 1, 1, b"two\0").await, 0);
+
+    let mut malformed = 1u32.to_le_bytes().to_vec();
+    malformed.extend([0; 4]);
+    let rejected = session
+        .handle(&frame(FUSE_BATCH_FORGET, 0, &malformed))
+        .await;
+    assert!(rejected.is_err());
+    assert_eq!(session.inodes.get(one).unwrap().nlookup, 1);
+    assert_eq!(session.inodes.get(two).unwrap().nlookup, 1);
+
+    let mut batch = 2u32.to_le_bytes().to_vec();
+    batch.extend([0; 4]);
+    for inode in [one, two] {
+        batch.extend(inode.to_le_bytes());
+        batch.extend(1u64.to_le_bytes());
+    }
+    assert!(
+        session
+            .handle(&frame(FUSE_BATCH_FORGET, 0, &batch))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(session.inodes.get(one).is_none());
+    assert!(session.inodes.get(two).is_none());
+}
+
+#[tokio::test]
+async fn interrupt_rejects_bad_wire_and_classifies_unknown_target_without_teardown() {
+    let fs = Arc::new(MemoryFs::empty());
+    let file = fs.open("/still-alive", "w", 0o644).await.unwrap();
+    file.close().await.unwrap();
+    let mut session = FuseSession::new(fs);
+    let entry = request(&mut session, 1, 1, b"still-alive\0").await;
+    assert_eq!(entry.len(), 128);
+
+    let malformed = session
+        .handle(&frame(FUSE_INTERRUPT, 0, &[0; 7]))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(i32::from_le_bytes(malformed[4..8].try_into().unwrap()), -22);
+
+    let target = 0x6162_6364_6566_6768u64.to_le_bytes();
+    let interrupt = session
+        .handle(&frame(FUSE_INTERRUPT, 0, &target))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(i32::from_le_bytes(interrupt[4..8].try_into().unwrap()), -11);
+    assert_eq!(number(&interrupt, 8), 42);
+
+    assert_eq!(
+        number(&request(&mut session, 1, 1, b"still-alive\0").await, 0),
+        number(&entry, 0)
+    );
+}
+
 fn io_body(handle: u64, offset: u64, size: u32) -> Vec<u8> {
     let mut body = vec![0; 40];
     body[..8].copy_from_slice(&handle.to_le_bytes());
