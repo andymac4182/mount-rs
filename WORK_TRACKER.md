@@ -55,6 +55,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W27 | Native Windows support and CI | CI added; qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Arendt |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
+| W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
 
 ## Decisions and external prerequisites
 
@@ -513,6 +514,26 @@ listing a source does not mean it has been reviewed or its code can be reused.
   registration/removal, hook failures, connection drops/reconnects, startup and
   shutdown, concurrent operations and process failures across supported entry
   points/backends/platforms. Integrate W28 fault injection and document gaps.
+
+## W30 — OpenTelemetry observability (later)
+
+- [ ] W30.1 Define trace spans, metric instruments and structured log events
+  across filesystem operations, metadata/block providers, chunking/compression,
+  SQLite VFS, mounts, Node, CLI and HTTP services. Include lifecycle, latency,
+  errors, retries, lease/fencing, cache behavior and durability boundaries.
+- [ ] W30.2 Implement optional instrumentation and a separate integration crate
+  where practical; keep exporters/SDK dependencies out of the minimal core and
+  preserve a low-overhead disabled mode. Applications own provider/exporter setup.
+- [ ] W30.3 Propagate context across Rust async tasks, napi-rs/Node, HTTP and
+  backend calls; correlate traces and logs. Define sampling, resource identity,
+  versioned event/attribute conventions and bounded metric cardinality.
+- [ ] W30.4 Provide configurable OTLP export for traces, metrics and logs with
+  bounded queues, timeouts, flush/shutdown and exporter-failure isolation. Avoid
+  secrets, file contents and unbounded/sensitive paths in telemetry by default.
+- [ ] W30.5 Add collector-backed integration tests for all three signals,
+  context propagation, redaction, disabled mode, dropped connections, exporter
+  failures and shutdown. Benchmark overhead and qualify macOS/Linux/Windows;
+  document setup and dashboards/examples without claiming unverified coverage.
 
 ## Recent landed chunks
 

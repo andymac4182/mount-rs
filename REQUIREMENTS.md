@@ -479,6 +479,20 @@ draining. Distinguish operation completion from durable commit, prevent recursiv
 hook loops, and preserve SQLite, transaction and fencing guarantees. Include
 integration and fault-injection tests for success, failure and recovery paths.
 
+## Deferred feature: OpenTelemetry observability
+
+Add OpenTelemetry tracing, metrics and logs as a later workstream (W30). Cover
+the core filesystem, separate storage integrations and Rust/Node/CLI/HTTP/mount/
+SQLite VFS entry points, including lifecycle and failure/recovery behavior.
+
+Keep instrumentation optional and dependencies minimal; separate exporter/SDK
+integration from the core where practical. Define context propagation, trace/log
+correlation, sampling, bounded metric cardinality and privacy-safe attributes.
+Support configurable OTLP export with bounded buffering and reliable flush/
+shutdown; telemetry failures must not alter storage correctness. Verify all
+three signals with a real collector, fault-injection tests and overhead
+benchmarks before claiming support. This is deferred work, not implemented.
+
 ## Future requirement: copy-on-write
 
 Track copy-on-write as future work, not a current feature or a requirement to
