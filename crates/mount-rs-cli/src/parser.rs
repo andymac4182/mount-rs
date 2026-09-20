@@ -178,6 +178,10 @@ pub enum Command {
     ServeHttp(PathBuf),
     Probe,
     ValidateConfig(PathBuf),
+    SdkSelfTest {
+        config: Option<PathBuf>,
+        reopen: bool,
+    },
     Help,
     Version,
 }
@@ -268,6 +272,54 @@ where
             return config_path
                 .map(Command::ValidateConfig)
                 .ok_or_else(|| ParseError::new("validate-config requires --config <path>"));
+        }
+        if first_argument && raw == "sdk-self-test" {
+            let mut config_path = None;
+            let mut reopen = false;
+            while let Some(raw) = args.next() {
+                let raw = raw.to_string_lossy().into_owned();
+                if raw == "--help" || raw == "-h" {
+                    return Ok(Command::Help);
+                }
+                if raw == "--reopen" {
+                    if reopen {
+                        return Err(ParseError::new(
+                            "sdk-self-test accepts --reopen at most once",
+                        ));
+                    }
+                    reopen = true;
+                    continue;
+                }
+                let Some(name) = raw.strip_prefix("--") else {
+                    return Err(ParseError::new(
+                        "sdk-self-test accepts only --config <path> and --reopen",
+                    ));
+                };
+                let (name, inline_value) = match name.split_once('=') {
+                    Some((name, value)) => (name, Some(value.to_owned())),
+                    None => (name, None),
+                };
+                if name != "config" {
+                    return Err(ParseError::new(
+                        "sdk-self-test accepts only --config <path> and --reopen",
+                    ));
+                }
+                if config_path.is_some() {
+                    return Err(ParseError::new(
+                        "sdk-self-test accepts only one --config <path>",
+                    ));
+                }
+                config_path = Some(PathBuf::from(value("config", inline_value, &mut args)?));
+            }
+            if reopen && config_path.is_none() {
+                return Err(ParseError::new(
+                    "sdk-self-test --reopen requires --config <path>",
+                ));
+            }
+            return Ok(Command::SdkSelfTest {
+                config: config_path,
+                reopen,
+            });
         }
         if first_argument && raw == "serve-http" {
             let mut config_path = None;
@@ -549,7 +601,7 @@ pub fn help_text(color: Color) -> String {
     let b = |text: &str| color.bold(text).to_string();
     let d = |text: &str| color.dim(text).to_string();
     let output = format!(
-        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
+        "\n{} {}\n\n{}  mount-rs [mountpoint] [options]\n       mount-rs mount [mountpoint] [options]\n       mount-rs serve-http --config <path>\n       mount-rs sdk-self-test [--config <path>] [--reopen]\n\n{}\n  -m, --mountpoint {}  where to mount {}\n  -t, --transport {}   auto | fuse | 9p | nfs {}\n      --sqlite-single-host  use the single-host SQLite NFS profile (nfs or auto)\n  -q, --quiet              do not log filesystem requests\n  -v, --verbose            log metadata polls too {}\n  -r, --read-only          mount read-only\n      --empty              start without the memory README\n      --allow-other        let other users see the FUSE mount\n      --driver {}    memory | host | sqlite | splitstore {}\n      --root {}      host driver root {}\n      --database {}  SQLite state/metadata database\n      --blocks {}    splitstore block database\n      --probe              print transport availability without mounting\n  -h, --help               this\n  -V, --version            print the version\n\n{}\n{}\n",
         b("mount-rs"),
         d("— mount a selected filesystem driver and watch kernel requests"),
         b("Usage:"),
@@ -650,6 +702,35 @@ mod tests {
         );
         assert_eq!(parse(&["mount-rs", "serve-http", "--help"]), Command::Help);
         let error = parse_args(["mount-rs", "serve-http"]).unwrap_err();
+        assert!(error.message().contains("requires --config"));
+    }
+
+    #[test]
+    fn sdk_self_test_accepts_an_optional_config_and_reopen() {
+        assert_eq!(
+            parse(&["mount-rs", "sdk-self-test"]),
+            Command::SdkSelfTest {
+                config: None,
+                reopen: false,
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "mount-rs",
+                "sdk-self-test",
+                "--config=state.json",
+                "--reopen",
+            ]),
+            Command::SdkSelfTest {
+                config: Some(PathBuf::from("state.json")),
+                reopen: true,
+            }
+        );
+        assert_eq!(
+            parse(&["mount-rs", "sdk-self-test", "--help"]),
+            Command::Help
+        );
+        let error = parse_args(["mount-rs", "sdk-self-test", "--reopen"]).unwrap_err();
         assert!(error.message().contains("requires --config"));
     }
 
