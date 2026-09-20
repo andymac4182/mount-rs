@@ -500,6 +500,10 @@ export declare function fuseDecodeCreateOut(body: Uint8Array, context?: NativeFu
 
 export declare function fuseDecodeEntryOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseEntryOut
 
+export declare function fuseDecodeFlushIn(body: Uint8Array): NativeFuseFlushIn
+
+export declare function fuseDecodeFsyncIn(body: Uint8Array): NativeFuseFsyncIn
+
 export declare function fuseDecodeGetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseGetattrIn
 
 export declare function fuseDecodeGetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
@@ -531,6 +535,8 @@ export declare function fuseDecodeOutHeader(bytes: Uint8Array): NativeFuseOutHea
 export declare function fuseDecodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseReadIn
 
 export declare function fuseDecodeReadOut(body: Uint8Array): NativeFuseRawData
+
+export declare function fuseDecodeReleaseIn(body: Uint8Array): NativeFuseReleaseIn
 
 export declare function fuseDecodeSetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseSetattrIn
 
@@ -564,6 +570,10 @@ export declare function fuseEncodeEntryOut(value: NativeFuseEntryOut, context?: 
 
 export declare function fuseEncodeErrorReply(unique: bigint, errno: number): Buffer
 
+export declare function fuseEncodeFlushIn(value: NativeFuseFlushIn): Buffer
+
+export declare function fuseEncodeFsyncIn(value: NativeFuseFsyncIn): Buffer
+
 export declare function fuseEncodeGetattrIn(value: NativeFuseGetattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeGetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
@@ -595,6 +605,8 @@ export declare function fuseEncodeOutHeader(value: NativeFuseOutHeader): Buffer
 export declare function fuseEncodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeReadOut(value: NativeFuseRawData): Buffer
+
+export declare function fuseEncodeReleaseIn(value: NativeFuseReleaseIn): Buffer
 
 export declare function fuseEncodeReply(unique: bigint, body?: Uint8Array): Buffer
 
@@ -883,6 +895,16 @@ export interface NativeFuseEntryOut {
   attr: NativeFuseAttr
 }
 
+export interface NativeFuseFlushIn {
+  fh: bigint
+  lockOwner: bigint
+}
+
+export interface NativeFuseFsyncIn {
+  fh: bigint
+  fsyncFlags: number
+}
+
 export interface NativeFuseGetattrIn {
   getattrFlags: number
   fh: bigint
@@ -1019,6 +1041,13 @@ export interface NativeFuseReadIn {
   readFlags: number
   lockOwner: bigint
   flags: number
+}
+
+export interface NativeFuseReleaseIn {
+  fh: bigint
+  flags: number
+  releaseFlags: number
+  lockOwner: bigint
 }
 
 export interface NativeFuseSetattrIn {
