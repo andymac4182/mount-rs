@@ -203,14 +203,36 @@ let releasePending
 const pending = new Promise((resolve) => {
   releasePending = resolve
 })
+let callbackStarted
+const callbackStartedPromise = new Promise((resolve) => {
+  callbackStarted = resolve
+})
 const pendingDriver = {
   ...createMemoryDriver(),
-  stat: () => pending,
+  stat: () => {
+    callbackStarted()
+    return pending
+  },
 }
 const pendingFs = createDriver(pendingDriver)
 const pendingStat = pendingFs.stat("/pending")
+const pendingAssertion = assert.rejects(
+  pendingStat,
+  (error) => error.code === "EBADF" || error.code === "EIO",
+)
+let callbackTimer
+try {
+  await Promise.race([
+    callbackStartedPromise,
+    new Promise((_, reject) => {
+      callbackTimer = setTimeout(() => reject(new Error("driver callback did not start")), 5000)
+    }),
+  ])
+} finally {
+  clearTimeout(callbackTimer)
+}
 await pendingFs.shutdown()
-await assert.rejects(pendingStat, (error) => error.code === "EBADF" || error.code === "EIO")
+await pendingAssertion
 releasePending()
 
 console.log("mount-rs N-API JS FsDriver: PASS")
