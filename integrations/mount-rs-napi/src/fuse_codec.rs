@@ -566,6 +566,28 @@ fn name_in(value: NativeFuseNameIn) -> protocol::FuseNameIn {
 }
 
 #[napi(object)]
+pub struct NativeFuseEmpty {}
+
+#[napi(object)]
+pub struct NativeFuseReadlinkOut {
+    pub target: String,
+}
+
+impl From<protocol::FuseReadlinkOut> for NativeFuseReadlinkOut {
+    fn from(value: protocol::FuseReadlinkOut) -> Self {
+        Self {
+            target: value.target,
+        }
+    }
+}
+
+fn readlink_out(value: NativeFuseReadlinkOut) -> protocol::FuseReadlinkOut {
+    protocol::FuseReadlinkOut {
+        target: value.target,
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseAttrOut {
     #[napi(js_name = "attrValid")]
     pub attr_valid: BigInt,
@@ -1464,6 +1486,70 @@ pub fn fuse_encode_create_out(
     )
     .map(Buffer::from)
     .map_err(protocol_error)
+}
+
+fn decode_empty_request(opcode: u32, body: &[u8], expected: &str) -> napi::Result<NativeFuseEmpty> {
+    match protocol::decode_request_body(opcode, body, None).map_err(protocol_error)? {
+        protocol::FuseRequestBody::Empty => Ok(NativeFuseEmpty {}),
+        _ => Err(protocol_error(ProtocolError::new(format!(
+            "{expected} did not decode as an empty request"
+        )))),
+    }
+}
+
+fn encode_empty_request(opcode: u32) -> napi::Result<Buffer> {
+    protocol::encode_request_body(opcode, &protocol::FuseRequestBody::Empty, None)
+        .map(Buffer::from)
+        .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeReadlinkIn")]
+pub fn fuse_decode_readlink_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseEmpty> {
+    decode_empty_request(mount_rs_fuse::FUSE_READLINK, body.as_ref(), "FUSE_READLINK")
+}
+
+#[napi(js_name = "fuseEncodeReadlinkIn")]
+pub fn fuse_encode_readlink_in(_value: NativeFuseEmpty) -> napi::Result<Buffer> {
+    encode_empty_request(mount_rs_fuse::FUSE_READLINK)
+}
+
+#[napi(js_name = "fuseDecodeReadlinkOut")]
+pub fn fuse_decode_readlink_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseReadlinkOut> {
+    match protocol::decode_reply_body(mount_rs_fuse::FUSE_READLINK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Readlink(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_READLINK did not decode as a readlink reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeReadlinkOut")]
+pub fn fuse_encode_readlink_out(value: NativeFuseReadlinkOut) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_READLINK,
+        &protocol::FuseReplyBody::Readlink(readlink_out(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeStatfsIn")]
+pub fn fuse_decode_statfs_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseEmpty> {
+    decode_empty_request(mount_rs_fuse::FUSE_STATFS, body.as_ref(), "FUSE_STATFS")
+}
+
+#[napi(js_name = "fuseEncodeStatfsIn")]
+pub fn fuse_encode_statfs_in(_value: NativeFuseEmpty) -> napi::Result<Buffer> {
+    encode_empty_request(mount_rs_fuse::FUSE_STATFS)
 }
 
 #[napi(js_name = "fuseDecodeReleaseIn")]
