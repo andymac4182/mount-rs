@@ -1285,6 +1285,7 @@ dependencies = [
  "async-trait",
  "mount-rs-core",
  "mount-rs-persist",
+ "mount-rs-versioned",
  "serde_json",
  "tokio",
  "tokio-postgres",
