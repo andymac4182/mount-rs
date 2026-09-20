@@ -10,6 +10,7 @@ mod blocks;
 
 pub use blocks::R2BlockStore;
 
+use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -19,13 +20,26 @@ use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct R2Config {
     pub endpoint: String,
     pub bucket: String,
     pub access_key_id: String,
     pub secret_access_key: String,
     pub state_key: String,
+}
+
+impl fmt::Debug for R2Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("R2Config")
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("access_key_id", &"<redacted>")
+            .field("secret_access_key", &"<redacted>")
+            .field("state_key", &self.state_key)
+            .finish()
+    }
 }
 
 impl R2Config {
@@ -239,6 +253,21 @@ mod tests {
             };
             assert!(config.build_store().is_ok(), "endpoint: {endpoint}");
         }
+    }
+
+    #[test]
+    fn debug_output_redacts_credentials() {
+        let config = R2Config {
+            endpoint: "https://account-id.r2.cloudflarestorage.com".to_owned(),
+            bucket: "mount-rs-tests".to_owned(),
+            access_key_id: "access-key-sentinel".to_owned(),
+            secret_access_key: "secret-key-sentinel".to_owned(),
+            state_key: "state.json".to_owned(),
+        };
+        let debug = format!("{config:?}");
+        assert!(!debug.contains("access-key-sentinel"));
+        assert!(!debug.contains("secret-key-sentinel"));
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]

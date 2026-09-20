@@ -178,16 +178,31 @@ fn remote_prefix() -> String {
     prefix
 }
 
+fn allow_external_endpoint() -> bool {
+    matches!(
+        std::env::var("MOUNT_RS_CLI_REMOTE_ALLOW_EXTERNAL_ENDPOINT").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 fn write_config(root: &Path) -> PathBuf {
     let endpoint = required_env("R2_ENDPOINT");
     let bucket = required_env("R2_BUCKET");
     let _access_key = required_env("R2_ACCESS_KEY_ID");
     let _secret_key = required_env("R2_SECRET_ACCESS_KEY");
     let pglite_url = required_env("PGLITE_DATABASE_URL");
+    let loopback_endpoint =
+        endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:");
     assert!(
-        endpoint.starts_with("http://127.0.0.1:") || endpoint.starts_with("http://localhost:"),
-        "remote CLI tests require a loopback RustFS R2_ENDPOINT"
+        loopback_endpoint || allow_external_endpoint(),
+        "remote CLI tests require a loopback RustFS R2_ENDPOINT unless MOUNT_RS_CLI_REMOTE_ALLOW_EXTERNAL_ENDPOINT is enabled"
     );
+    if !loopback_endpoint {
+        assert!(
+            endpoint.starts_with("https://"),
+            "external remote CLI tests require an HTTPS object-store endpoint"
+        );
+    }
     assert!(
         pglite_url.starts_with("postgresql://"),
         "remote CLI tests require a PostgreSQL-compatible PGLITE_DATABASE_URL"

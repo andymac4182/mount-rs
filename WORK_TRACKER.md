@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `753df86`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `a5d1dd2`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -60,19 +60,19 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
-| W05 | Cloudflare R2 | Live local tests passed; acceptance incomplete | Main |
+| W05 | Cloudflare R2 | Live provider tests passed; CLI gate added, credentialed execution pending | Main |
 | W06 | RustFS integration service | Landed; extending | Main |
 | W07 | FoundationDB | Real composition passed; correctness review | Maxwell / Main |
 | W08 | TiDB | Real harness repair and qualification | Mill / Main |
 | W09 | Node / napi-rs and public API | Verifying | Main / Lagrange |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel / Main |
-| W11 | Config-driven CLI | HTTP landed; real remote tests implementing | Epicurus / Main |
+| W11 | Config-driven CLI | HTTP landed; RustFS remote gate passed, Cloudflare gate pending | Main |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
 | W13 | macOS FSKit | Unsigned draft awaiting integration | Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Rollback/lifetime landed; WAL design starting | Peirce / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
-| W17 | Multi-drive HTTP server | Server/CLI landed; remote acceptance pending | Epicurus / Main |
+| W17 | Multi-drive HTTP server | Server/CLI landed; RustFS remote passed, Cloudflare acceptance pending | Main |
 | W18 | Benchmarks and dependency budget | Partial implementation | Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
@@ -188,6 +188,10 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
   and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
   oracle, with per-run snapshot cleanup. CLI/native and benchmarks remain open.
 - [ ] W05.4 Record service identity and revision without recording credentials.
+- [ ] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
+  R2 endpoint with scoped S3 credentials. The opt-in runner now validates the
+  endpoint, proves both block prefixes contain objects, and removes only its
+  owned prefix; credentialed execution and a cleanup readback remain open.
 - [x] W05.5 Fix live Node factory expected-byte assertion and guarantee unique
   cloud fixture keys with exact cleanup. Main reran the full PGlite/R2 script
   successfully: actual R2 Node factory and DELETE/HEAD cleanup, independent
