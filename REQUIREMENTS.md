@@ -60,6 +60,32 @@ updates or workload deviations.
 Benchmark implementation and measured results remain pending; this section
 records the requested work, not completed evidence.
 
+### Dispatch and dependency performance acceptance
+
+Before completion, review `async-trait`, handle erasure, and dynamic dispatch
+across `FsDriver`, `FileHandle`, `MetadataStore`, and `BlockStore` on Rust 1.95.
+Prefer native async / `impl Future + Send` on generic paths where practical;
+retain explicit dynamic adapters where runtime backend selection requires them.
+Preserve independent metadata/block composition, extensibility, and Node APIs.
+Removing a macro while retaining equivalent boxing is dependency cleanup, not
+evidence of a performance improvement.
+
+- Audit NAPI `DynMetadataStore`, `DynBlockStore`, and `MountDriver` forwarding
+  for redundant future boxing, Arc cloning, and path/key/byte copies. Remove
+  only costs that can safely be avoided within the required lifetimes.
+- Establish reproducible before/after small-operation baselines: memfs reads
+  and writes, stat/open/close, small blocks, chunk-size scaling, concurrency,
+  latency/throughput, and allocations where feasible. Distinguish direct
+  generic Rust, erased Rust, and Node overhead. These supplement, not replace,
+  the ComputeSDK-aligned large-file benchmarks.
+- Label volatile, cached, durable SQLite, PGlite, and live R2 measurements
+  separately. Preserve synchronization guarantees; report unavailable backend
+  evidence honestly and never infer percentage gains without measurements.
+- After changes, rerun parity, mixed-store, cancellation/lifecycle,
+  SQLite-hosting, and macOS/Linux gates. Document the final dispatch design,
+  direct dependency footprint, remaining dynamic boundaries, reasons for any
+  retained `async-trait`, and measured performance/build-size/time trade-offs.
+
 ### Metadata, block storage, and chunking acceptance
 
 - Keep metadata-store, block-store, chunking, and filesystem orchestration
