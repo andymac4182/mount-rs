@@ -44,7 +44,7 @@ described as a complete session or native-mount implementation.
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
-| CLI | Rust CLI constructs drivers through `mount-rs-sdk`; Node CLI has direct SDK and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
+| CLI | Rust CLI constructs drivers through `mount-rs-sdk` and exposes a real `sdk-self-test`/durable-reopen path; Node CLI uses the N-API SDK for direct and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
 The oracle source used for comparison is local and immutable for this audit;
 the relevant upstream package map, types, harness, auto API, and transport
@@ -121,10 +121,12 @@ The Rust implementation has useful, tested FUSE pieces:
   [`record.rs`](../transports/mount-rs-fuse/src/record.rs#L1-L245);
 - [`notify_record.rs`](../transports/mount-rs-fuse/tests/notify_record.rs#L30-L257)
   contains upstream fixtures, malformed-input checks, and replay reports.
-- the N-API `./fuse` barrel now also exposes oracle-shaped `packDirents` and
-  `unpackDirents` for bounded `READDIR` bodies. UTF-8 names, 8-byte alignment,
-  bounded packing and malformed input are differentially tested against the
-  pinned oracle in [`fuse-codec.mjs`](../integrations/mount-rs-napi/test/fuse-codec.mjs);
+- the N-API `./fuse` barrel now also exposes oracle-shaped `packDirents`,
+  `unpackDirents`, `packDirentsPlus` and `unpackDirentsPlus` for bounded
+  `READDIR`/`READDIRPLUS` bodies. UTF-8 names, 8-byte alignment, bounded
+  packing, protocol layouts, integer coercion and malformed input are
+  differentially tested against the pinned oracle in
+  [`fuse-codec.mjs`](../integrations/mount-rs-napi/test/fuse-codec.mjs);
 - the Rust-backed `InodeTable` is now exposed from the N-API `./fuse` barrel;
   its facade preserves oracle-shaped `Inode` views and `Set` paths while the
   state and mutation logic remain in Rust. The focused oracle test covers
@@ -136,9 +138,8 @@ The Rust implementation has useful, tested FUSE pieces:
 The oracle FUSE barrel also exports constants, init, inodes, mount, notify,
 protocol, record, and session, including a broad request/reply body codec.
 The N-API package still does not expose the complete request/reply body codec,
-`READDIRPLUS`, init negotiation, session, or native mount objects. Therefore
-this packet proves focused body/inode components only, not full FUSE transport
-parity.
+init negotiation, session, or native mount objects. Therefore this packet
+proves focused body/inode components only, not full FUSE transport parity.
 
 ### P1 — auto/mount option and lifecycle parity: PARTIAL; UNVERIFIED
 
@@ -233,7 +234,7 @@ cleanup, and stale-mount cleanup. See
 [`parser.rs`](../crates/mount-rs-cli/src/parser.rs#L1-L15) and
 [`runtime.rs`](../crates/mount-rs-cli/src/runtime.rs#L289-L405).
 Focused tests cover help/version/probe, parser values, transport/driver
-selection, and configuration validation in
+selection, configuration validation, and actual Rust-binary SDK self-tests in
 [`cli.rs`](../crates/mount-rs-cli/tests/cli.rs#L6-L121).
 
 The CLI README explicitly separates ordinary tests from native FUSE subprocess
@@ -264,11 +265,11 @@ from the smallest contract boundary to the larger environment boundary:
    cancellation/close, fault-injection, SQLite and PGlite gates now cover the
    main storage paths, including the SDK-backed CLI reopen flow. Hosted crash,
    live-R2 and native transport concurrency remain separate acceptance gates.
-4. **Remaining public transport/API surface (P1):** the FUSE `READDIR` body
-   codec is now public and oracle-differentially tested. Expose the remaining
-   request/reply bodies, `READDIRPLUS`, session and native-mount surfaces, then
-   run oracle-backed subpath tests for every exported transport rather than
-   treating codec or inode fixture tests as transport completion.
+4. **Remaining public transport/API surface (P1):** the FUSE `READDIR` and
+   `READDIRPLUS` body codecs are now public and oracle-differentially tested.
+   Expose the remaining request/reply bodies, session and native-mount
+   surfaces, then run oracle-backed subpath tests for every exported transport
+   rather than treating codec or inode fixture tests as transport completion.
 
 The first two items are behavior or environment gaps in the current W01 slice;
 the third and fourth retain broader acceptance boundaries. Provider,
@@ -392,6 +393,28 @@ shown to exercise and verify one of the APIs above.
 The deterministic checker now rejects a configured but non-pinned
 `MOUNTX_SOURCE` and uses Cargo's locked mode. These checks still do not claim
 the closure items listed above.
+
+### SDK-backed CLI and transport follow-up (2026-09-21)
+
+- **PASS** — `cargo test --locked --offline -p mount-rs-cli`: the actual
+  `mount-rs` binary's `sdk-self-test` passed for memory and a SQLite-backed
+  split store with shutdown/reopen readback; 39 unit tests and 8 CLI tests
+  passed, with only the explicit native opt-ins ignored.
+- **PASS** — `node integrations/mount-rs-napi/test/node-cli.mjs`: the Node
+  SDK CLI passed its direct memory self-test and SQLite split-store
+  shutdown/reopen test.
+- **PASS** — `node tests/provider_matrix/cli.mjs`: 8 process-level CLI cases
+  passed and 2 provider-gated cases were explicit skips; no failures.
+- **PASS** — `cargo run --manifest-path tests/provider_matrix/Cargo.toml
+  --offline --locked`: Rust SDK memfs, memory/memory, direct SQLite reopen,
+  and SQLite/SQLite reopen rows passed; PGlite/R2 rows remained explicit
+  skips without their environment gates.
+- **PASS** — the oracle-enabled N-API suite, including public FUSE
+  `READDIRPLUS`, completed its functional tests and artifact aggregation.
+
+This follow-up proves the process-level SDK consumer paths, not native mount
+support or live R2/PGlite acceptance. The remaining transport/session and
+hosted/live boundaries stay open below.
 
 ## Working-tree provenance and freeze boundary
 
