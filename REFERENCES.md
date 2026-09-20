@@ -53,6 +53,12 @@
 
 ## Benchmark alignment
 
+- [Cloudflare Artifact FS](https://github.com/cloudflare/artifact-fs):
+  user-selected architecture inspiration, feature comparison, and benchmark
+  target. Review lazy Git blob hydration, filesystem generation publication,
+  local overlays, prefetch scheduling, and recovery. Track source-pinned review
+  and comparable measurements under
+  [Artifact FS comparison acceptance](REQUIREMENTS.md#artifact-fs-inspiration-and-benchmark-comparison).
 - [RustFS](https://rustfs.com/): required real S3-compatible integration-test
   service and candidate shared backend for the ZeroFS comparison. Pin the
   tested release/image and verify required semantics rather than inferring

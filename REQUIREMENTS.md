@@ -250,6 +250,31 @@ for the pinned mountx behavioral oracle.
   Additional systems such as NBD or HA require an explicit scope decision;
   copy-on-write remains the future requirement below.
 
+## Artifact FS inspiration and benchmark comparison
+
+Include [cloudflare/artifact-fs](https://github.com/cloudflare/artifact-fs)
+as architecture inspiration and an additional feature/benchmark comparison
+target; mountx remains the behavioral oracle.
+
+- Pin a source revision and review lazy hydration, metadata availability before
+  bytes arrive, prefetch priorities/concurrency, cache behavior, local overlays,
+  generation publication, restart recovery, and macOS/Linux mount support.
+  Record applicable lessons and explicitly distinguish verified features from
+  proposed mount-rs work; adding a reference does not require a Git backend.
+- Produce a source-backed feature matrix alongside the ZeroFS comparison.
+  Mark unsupported or non-equivalent workloads rather than implying parity
+  between a Git-backed filesystem and arbitrary storage engines.
+- Benchmark time to usable tree, first-file read, cold/warm reads, selective
+  versus full hydration, small-file metadata operations, and concurrent reads
+  where both systems support equivalent workloads. Validate returned bytes.
+- Pin builds and datasets; record mount protocol, hardware/OS, backend/network,
+  cache/prefetch settings, downloaded bytes, memory, raw samples, latency and
+  throughput. Separate preparation, mount readiness, and hydration costs;
+  include end-to-end startup totals so deferred work is not hidden.
+- Preserve the ComputeSDK and ZeroFS benchmark requirements. Record actual
+  results or explicit prerequisites/unsupported cases, never inferred wins.
+  Inspect licensing before code reuse and retain minimal dependencies.
+
 ## Mount-free SQLite VFS
 
 - Deliver a separate SQLite VFS integration crate backed by mount-rs storage
