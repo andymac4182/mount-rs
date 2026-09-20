@@ -78,6 +78,13 @@ memory rather than reporting a false durability result. Full offline workspace
 tests and the N-API package gate passed after this slice; hosted CI is still
 queued and does not count as green evidence.
 
+The follow-up structural-driver slice at local `fd5eb04` was published as
+`88f8f9b` and `f7e630e`. It forwards normalized numeric `open_flags` with the
+Linux/macOS/Windows Node flag namespaces, and the rebuilt addon passed the
+opt-in macOS NFS structural mount lifecycle with mounted write/readback,
+callback reachability, unmount and cleanup. Linux, non-NFS transports, hosted
+Windows execution and full FUSE/FSKit acceptance remain separate gates.
+
 Focused current-head acceptance after the follow-up packets: `mount-rs-sdk`
 unit tests passed (2/2), the Rust provider matrix passed memfs, memory/memory,
 SQLite/SQLite and PGlite/PGlite (4/4, with R2 explicit skips), the Node SDK CLI
@@ -311,6 +318,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the memory durability guard, and wires structural-driver coverage into the
   Windows/macOS Node CI jobs. Focused local gates passed; live R2 and hosted CI
   remain open.
+- [x] `fd5eb04` forwards decoded numeric `open_flags` through the structural
+  N-API adapter and changes the opt-in native lifecycle from an expected write
+  refusal to mounted write/readback. The local macOS NFS run passed; other
+  transport/platform acceptance remains open.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -565,6 +576,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   self-test and PGlite integration-matrix row. The PGlite config-to-SDK path
   passed through clean shutdown/reopen; memory is correctly rejected for
   `--reopen` because it is process-local.
+- [x] `fd5eb04` makes the Node structural-driver lifecycle exercise real
+  mounted writes and readback on the authorized macOS NFS path.
 - [ ] W11.6 Run the same SDK-backed CLI flow against the configured metadata/
   block providers, including restart and cleanup, before treating the demo as a
   provider-integrated acceptance path. The local PGlite path is covered; live
@@ -1066,3 +1079,4 @@ cross-drive isolation.
 | `3042d09` | Rust-backed FUSE inode state in napi-rs | Rust/Node inode parity, generated package checks and complete local N-API suite passed; native mount remains open |
 | `71e826f` | Pinned-oracle W01 parity audit and closure queue | Core/concurrency traces passed with zero mismatches; structural native, NFS handle, Unstorage and durability gaps remain explicit |
 | `21803fd` (published as `9868e93`..`b43a4e9`) | Public-SDK provider matrices and Node CLI config/reopen | Rust/Node/PGlite and CLI local gates passed; memory durability guard added; R2 credentials and hosted CI remain pending |
+| `fd5eb04` (published as `88f8f9b` / `f7e630e`) | Structural N-API open flags and native lifecycle | macOS NFS mounted write/readback passed; Linux, other transports, Windows hosted and full FSKit/FUSE acceptance remain open |
