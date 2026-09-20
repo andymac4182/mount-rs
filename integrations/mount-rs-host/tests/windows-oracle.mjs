@@ -53,6 +53,27 @@ else if (operation === "stat") {
   ].join(","))
   fs.unlinkSync(second)
   fs.unlinkSync(moved)
+} else if (operation === "readonly-hard-links") {
+  const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_CREAT, 0o400)
+  let writeCode
+  try { fs.writeSync(fd, Buffer.from("x")) } catch (error) { writeCode = error.code }
+  const first = `${path}.first`
+  fs.linkSync(path, first)
+  const before = [fs.statSync(path), fs.statSync(first)]
+  fs.unlinkSync(first)
+  const afterAlias = fs.fstatSync(fd)
+  fs.unlinkSync(path)
+  const afterFinal = fs.fstatSync(fd)
+  fs.closeSync(fd)
+  let missing
+  try { fs.statSync(path) } catch (error) { missing = error.code }
+  console.log([
+    writeCode,
+    ...before.map((stats) => stats.nlink),
+    afterAlias.nlink,
+    afterFinal.nlink,
+    missing,
+  ].join(","))
 } else if (operation === "handle-lifecycle") {
   const fd = fs.openSync(path, "w+")
   fs.writeSync(fd, Buffer.from("a"))
