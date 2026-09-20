@@ -72,6 +72,13 @@ reopen and readback that the Node CLI already performed. The live CLI matrix
 is now 10 passes and one explicit R2 skip; no config-validation row is being
 counted as live R2 evidence.
 
+The bounded RustFS run on the current tree also exited 0. It passed real
+immutable block writes/reopens, SQLite and PGlite metadata compositions, N-API
+factories, remote CLI HTTP graceful-reopen, the SQLite VFS over RustFS blocks,
+fault recovery, service restart/reopen, and the RustFS block benchmark. This
+is strong S3-compatible evidence, but it is intentionally not counted as live
+Cloudflare R2 evidence.
+
 Latest SDK-consumer slice at local `21803fd` was published to `main` as the
 sequential API commits `9868e93`, `83153ef`, `b8a49a0`, `9163a39`, `b09965c`,
 `cc605c7` and `b43a4e9`. The Rust provider matrix now opens PGlite/R2 through
