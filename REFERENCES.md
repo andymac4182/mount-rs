@@ -80,6 +80,14 @@ Before reusing implementation code, inspect its license and preserve any
 required attribution. A reference project's claims are not evidence that
 mount-rs satisfies its own durability or platform acceptance gates.
 
+## Required additional backend
+
+- [Apache Ozone](https://github.com/apache/ozone): Apache-2.0 distributed object
+  storage with an S3 gateway. Required real-service backend qualification, not
+  merely inspiration; see W26 in [the tracker](WORK_TRACKER.md) and
+  [acceptance requirements](REQUIREMENTS.md#apache-ozone-backend-acceptance).
+  Verify pinned-release semantics and attribution before reusing code.
+
 ## End-of-primary-work review
 
 - [Erlang gen_statem behaviour](https://www.erlang.org/doc/system/statem.html):

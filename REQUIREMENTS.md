@@ -246,6 +246,24 @@ with isolated namespaces and recorded resource,
 cache, transport, and durability settings. Record setup failures and unsupported
 combinations instead of fabricating benchmark results.
 
+## Apache Ozone backend acceptance
+
+Add [Apache Ozone](https://github.com/apache/ozone) to the required backend test
+matrix through its S3 gateway, reusing the S3 block integration without adding
+Ozone dependencies to core. Support remains unverified until real-service tests
+pass; protocol compatibility alone is not acceptance.
+
+Provide pinned, isolated local/CI service orchestration with macOS/Linux
+instructions, readiness, authentication, restart fixtures and bounded cleanup.
+Test immutable conditional publication, concurrency, full/range reads, binary
+chunk boundaries, partial writes, truncation, errors and restart/reopen. Verify
+required conditional-write semantics rather than silently weakening them.
+Exercise independent SQLite, PGlite, TiDB and FoundationDB metadata with Ozone
+chunk storage, including CAS and stale-writer fencing. Cover Node factories and
+CLI configuration, retain version-specific results and limitations, and require
+actual service gates rather than mocks or skipped tests. This does not replace
+Cloudflare R2, AWS S3 or RustFS acceptance.
+
 ## Artifact FS inspiration and benchmark comparison
 
 Include [cloudflare/artifact-fs](https://github.com/cloudflare/artifact-fs)

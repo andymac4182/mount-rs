@@ -30,7 +30,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Jason |
 | W04 | PGlite | Verifying | Copernicus / Main |
-| W05 | Cloudflare R2 | Live credentials needed | Main |
+| W05 | Cloudflare R2 | Credentials verified; integration pending | Main |
 | W06 | RustFS integration service | Landed; extending | Hooke |
 | W07 | FoundationDB | Implementing | Hilbert |
 | W08 | TiDB | Implementing | Arendt |
@@ -51,14 +51,14 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | Planned; approval needed | User / Main |
 | W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
+| W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
 
 ## Decisions and external prerequisites
 
-- [ ] **D01 — Live R2:** obtain dedicated test bucket and credentials through a
-  safe channel. Do not put secrets in this tracker or substitute RustFS evidence.
-  R2 is activated. Created `mount-rs-integration-tests` in Oceania, Standard
-  storage, default jurisdiction. Scoped account-token creation and permission
-  discovery both returned 9109 (unauthorized); bucket exists, credentials do not.
+- [x] **D01 — Live R2 credentials:** created bucket-scoped object read/write
+  credentials for `mount-rs-integration-tests`, stored in macOS Keychain, expiring
+  2026-09-27. Read-only S3 listing passed. Full integration acceptance remains
+  open; credentials are not committed and RustFS evidence is not a substitute.
 - [ ] **D02 — License:** resolve root Apache-2.0 versus MIT package declarations
   with the user before release; do not silently select a license.
 - [ ] **D03 — FSKit:** obtain signing/install/activation authorization and host
@@ -398,6 +398,22 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
   tests with restart/reopen, ranges, conditional immutable writes and cleanup.
   AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance.
+
+## W26 — Apache Ozone S3 backend
+
+- [ ] W26.1 Pin an Apache Ozone release and container digests; provide isolated
+  local/CI orchestration, readiness, authentication and bounded cleanup on
+  macOS/Linux. Record service topology, replication and durability settings.
+- [ ] W26.2 Run the immutable block contract through its actual S3 gateway:
+  conditional publication, concurrent writers, full/range reads, missing objects,
+  binary multi-chunk content, restart/reopen and injected failures. Verify
+  conditional semantics explicitly; never emulate away unsupported guarantees.
+- [ ] W26.3 Test Ozone blocks with independent SQLite, PGlite, TiDB and
+  FoundationDB metadata through ChunkedFs, including partial writes/truncation,
+  revision CAS and stale-writer fencing.
+- [ ] W26.4 Cover Node factories and CLI configuration; add required CI gates
+  and document verified versions, limitations and platform evidence. Ozone is
+  requested support, not yet a verified supported backend.
 
 ## Recent landed chunks
 
