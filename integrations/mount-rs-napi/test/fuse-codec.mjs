@@ -14,6 +14,10 @@ import {
   encodeCreateIn as namedEncodeCreateIn,
   decodeCreateOut as namedDecodeCreateOut,
   encodeCreateOut as namedEncodeCreateOut,
+  decodeReadlinkIn as namedDecodeReadlinkIn,
+  encodeReadlinkIn as namedEncodeReadlinkIn,
+  decodeReadlinkOut as namedDecodeReadlinkOut,
+  encodeReadlinkOut as namedEncodeReadlinkOut,
   decodeReleaseIn as namedDecodeReleaseIn,
   encodeReleaseIn as namedEncodeReleaseIn,
   decodeFlushIn as namedDecodeFlushIn,
@@ -36,6 +40,10 @@ import {
   encodeSetattrIn as namedEncodeSetattrIn,
   decodeSetattrOut as namedDecodeSetattrOut,
   encodeSetattrOut as namedEncodeSetattrOut,
+  decodeStatfsIn as namedDecodeStatfsIn,
+  encodeStatfsIn as namedEncodeStatfsIn,
+  decodeStatfsOut as namedDecodeStatfsOut,
+  encodeStatfsOut as namedEncodeStatfsOut,
 } from "../fuse.cjs";
 
 for (const [name, value] of [
@@ -51,6 +59,10 @@ for (const [name, value] of [
   ["encodeCreateIn", namedEncodeCreateIn],
   ["decodeCreateOut", namedDecodeCreateOut],
   ["encodeCreateOut", namedEncodeCreateOut],
+  ["decodeReadlinkIn", namedDecodeReadlinkIn],
+  ["encodeReadlinkIn", namedEncodeReadlinkIn],
+  ["decodeReadlinkOut", namedDecodeReadlinkOut],
+  ["encodeReadlinkOut", namedEncodeReadlinkOut],
   ["decodeReleaseIn", namedDecodeReleaseIn],
   ["encodeReleaseIn", namedEncodeReleaseIn],
   ["decodeFlushIn", namedDecodeFlushIn],
@@ -73,6 +85,10 @@ for (const [name, value] of [
   ["encodeSetattrIn", namedEncodeSetattrIn],
   ["decodeSetattrOut", namedDecodeSetattrOut],
   ["encodeSetattrOut", namedEncodeSetattrOut],
+  ["decodeStatfsIn", namedDecodeStatfsIn],
+  ["encodeStatfsIn", namedEncodeStatfsIn],
+  ["decodeStatfsOut", namedDecodeStatfsOut],
+  ["encodeStatfsOut", namedEncodeStatfsOut],
 ]) {
   assert.equal(value, fuse[name], `FUSE named export ${name}`);
 }
@@ -332,6 +348,32 @@ for (const ctx of [lookupContext, { minor: 39, setxattrExt: false }, { minor: 8,
   assert.deepEqual(fuse.decodeLookupOut(reply, ctx), plusEntry);
 }
 
+const emptyRequest = {};
+const readlinkValue = { target: "../café/target" };
+const statfsValue = {
+  blocks: 0x0102030405060708n,
+  bfree: 0x1112131415161718n,
+  bavail: 0x2122232425262728n,
+  files: 0x3132333435363738n,
+  ffree: 0x4142434445464748n,
+  bsize: 4096,
+  namelen: 255,
+  frsize: 512,
+};
+for (const [name, opcode, decodeIn, encodeIn] of [
+  ["READLINK", fuse.FUSE_READLINK, fuse.decodeReadlinkIn, fuse.encodeReadlinkIn],
+  ["STATFS", fuse.FUSE_STATFS, fuse.decodeStatfsIn, fuse.encodeStatfsIn],
+]) {
+  const body = encodeIn(emptyRequest);
+  assert.equal(body.length, 0, `${name} request length`);
+  assert.deepEqual(decodeIn(body), emptyRequest, `${name} request round trip`);
+}
+const readlinkBody = fuse.encodeReadlinkOut(readlinkValue);
+assert.deepEqual(fuse.decodeReadlinkOut(readlinkBody), readlinkValue);
+const statfsRoundTrip = fuse.encodeStatfsOut(statfsValue, { minor: 41, setxattrExt: false });
+assert.equal(statfsRoundTrip.length, fuse.kstatfsSize(41));
+assert.deepEqual(fuse.decodeStatfsOut(statfsRoundTrip, { minor: 41, setxattrExt: false }), statfsValue);
+
 const lifecycleInput = {
   release: {
     fh: 0x0102030405060708n,
@@ -565,6 +607,79 @@ if (source) {
     );
   }
 
+  for (const [name, opcode, decodeIn, encodeIn] of [
+    ["READLINK", fuse.FUSE_READLINK, fuse.decodeReadlinkIn, fuse.encodeReadlinkIn],
+    ["STATFS", fuse.FUSE_STATFS, fuse.decodeStatfsIn, fuse.encodeStatfsIn],
+  ]) {
+    const requestContext = { minor: 41, setxattrExt: false };
+    const oracleRequest = oracle.encodeRequestBody(opcode, emptyRequest, requestContext);
+    const actualRequest = encodeIn(emptyRequest);
+    assert.deepEqual([...actualRequest], [...oracleRequest], `${name} request bytes match oracle`);
+    assert.deepEqual(
+      decodeIn(actualRequest),
+      oracle.decodeRequestBody(opcode, oracleRequest, requestContext),
+      `${name} request decode matches oracle`,
+    );
+    assert.deepEqual(
+      classifyProtocolError(() => decodeIn(Buffer.from([0]))),
+      classifyProtocolError(() => oracle.decodeRequestBody(opcode, Buffer.from([0]), requestContext)),
+      `${name} request trailing-byte classification`,
+    );
+  }
+
+  const oracleReadlink = oracle.encodeReplyBody(fuse.FUSE_READLINK, readlinkValue, { minor: 41, setxattrExt: false });
+  assert.deepEqual([...readlinkBody], [...oracleReadlink], "READLINK reply bytes match oracle");
+  assert.deepEqual(
+    fuse.decodeReadlinkOut(readlinkBody),
+    oracle.decodeReplyBody(fuse.FUSE_READLINK, oracleReadlink, { minor: 41, setxattrExt: false }),
+    "READLINK typed reply decode matches oracle",
+  );
+  // READLINK consumes all remaining bytes as the target, so a byte suffix is
+  // payload rather than a trailing-field error.
+  const readlinkSuffix = Buffer.concat([readlinkBody, Buffer.from("/suffix")]);
+  assert.deepEqual(
+    fuse.decodeReadlinkOut(readlinkSuffix),
+    oracle.decodeReplyBody(fuse.FUSE_READLINK, readlinkSuffix, { minor: 41, setxattrExt: false }),
+    "READLINK variable-body suffix classification matches oracle",
+  );
+  assert.deepEqual(
+    classifyProtocolError(() => fuse.encodeReadlinkOut({ target: "bad\0target" })),
+    classifyProtocolError(() => oracle.encodeReplyBody(fuse.FUSE_READLINK, { target: "bad\0target" }, { minor: 41, setxattrExt: false })),
+    "READLINK embedded-NUL classification matches oracle",
+  );
+
+  for (const ctx of [
+    { minor: 41, setxattrExt: false },
+    { minor: 39, setxattrExt: false },
+    { minor: 8, setxattrExt: false },
+    { minor: 4, setxattrExt: false },
+    { minor: 3, setxattrExt: false },
+  ]) {
+    const oracleStatfs = oracle.encodeReplyBody(fuse.FUSE_STATFS, statfsValue, ctx);
+    const actualStatfs = fuse.encodeStatfsOut(statfsValue, ctx);
+    assert.deepEqual([...actualStatfs], [...oracleStatfs], `STATFS reply bytes match oracle for minor ${ctx.minor}`);
+    const expectedStatfs = oracle.decodeReplyBody(fuse.FUSE_STATFS, oracleStatfs, ctx);
+    assert.deepEqual(
+      fuse.decodeStatfsOut(actualStatfs, ctx),
+      expectedStatfs,
+      `STATFS typed reply decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualStatfs.length; length++) {
+      const body = actualStatfs.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeStatfsOut(body, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_STATFS, body, ctx)),
+        `STATFS reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const trailing = Buffer.concat([actualStatfs, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeStatfsOut(trailing, ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_STATFS, trailing, ctx)),
+      `STATFS reply trailing-byte classification for minor ${ctx.minor}`,
+    );
+  }
+
   const lifecycleContext = { minor: 41, setxattrExt: false };
   for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases) {
     const oracleRequest = oracle.encodeRequestBody(opcode, input, lifecycleContext);
@@ -789,6 +904,8 @@ if (source) {
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE READLINK request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE STATFS request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -800,6 +917,8 @@ if (source) {
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE READLINK request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE STATFS request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
