@@ -494,6 +494,10 @@ export declare function fuseAttrSize(minor: number): number
 
 export declare function fuseDecodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
 
+export declare function fuseDecodeCreateIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseCreateIn
+
+export declare function fuseDecodeCreateOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseCreateOut
+
 export declare function fuseDecodeEntryOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseEntryOut
 
 export declare function fuseDecodeGetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseGetattrIn
@@ -547,6 +551,10 @@ export declare function fuseDirentSize(nameByteLength: number): number
 export declare function fuseDirentType(mode: number): number
 
 export declare function fuseEncodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeCreateIn(value: NativeFuseCreateIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeCreateOut(value: NativeFuseCreateOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeEntryOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -842,6 +850,19 @@ export interface NativeFuseAttrOut {
   attrValid: bigint
   attrValidNsec: number
   attr: NativeFuseAttr
+}
+
+export interface NativeFuseCreateIn {
+  flags: number
+  mode: number
+  umask: number
+  openFlags: number
+  name: string
+}
+
+export interface NativeFuseCreateOut {
+  entry: NativeFuseEntryOut
+  open: NativeFuseOpenOut
 }
 
 export interface NativeFuseEntryOut {
