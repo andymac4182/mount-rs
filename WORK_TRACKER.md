@@ -62,7 +62,7 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Live provider tests passed; CLI gate added, credentialed execution pending | Main |
 | W06 | RustFS integration service | Landed; extending | Main |
-| W07 | FoundationDB | Real composition passed; correctness review | Maxwell / Main |
+| W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Main |
 | W08 | TiDB | Real harness repair and qualification | Mill / Main |
 | W09 | Node / napi-rs and public API | Verifying | Main / Lagrange |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel / Main |
@@ -222,15 +222,17 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 
 ## W07 — FoundationDB
 
-- [ ] W07.1 Review and register the separate draft integration crate.
-  Worker feature-enabled check/Clippy passed; this is not live-service evidence.
+- [x] W07.1 Review the separate FoundationDB integration crate and commit its
+  provider/test harness. It remains a standalone package until target-gated root
+  registration is safe for Windows all-features CI.
 - [x] W07.2 Finish isolated real FoundationDB client/server harness. Main ran
   the real pinned 7.4.7 Linux ARM64 server/client in Docker; the provider
   contract passed. The container supplies `fdb_c`; no host install or mock.
 - [ ] W07.3 Resolve production lease/time semantics: default unsupported clock
   behavior and a development clock do not establish safe distributed fencing.
-- [ ] W07.4 Validate transaction/block limits, CAS, stale writers, durability,
-  restart and backend identity against the real service.
+- [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
+  deterministic lease-fencing checks. Provider restart and hosted identity remain
+  separate acceptance work.
 - [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
@@ -708,3 +710,5 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `c4058f2` | CLI macOS NFS native lifecycle | Host-backed native lane passed |
 | `29ffb3b` | PGlite cleanup/slot ordering | Local regressions; hosted rerun pending |
 | `5993984` | FSKit SDK compile target | Unsigned compilation, not activation |
+| `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
+| `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; live credentialed execution pending |

@@ -1,0 +1,17 @@
+[package]
+name = "mount-rs-foundationdb-tests"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[workspace]
+
+[dependencies]
+async-trait = "0.1"
+foundationdb = { version = "0.11.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4"] }
+mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-core = { path = "../.." }
+mount-rs-foundationdb = { path = "../../integrations/mount-rs-foundationdb", features = ["foundationdb"] }
+mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
