@@ -605,6 +605,61 @@ fn open_out(value: NativeFuseOpenOut) -> protocol::FuseOpenOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseWriteIn {
+    pub fh: BigInt,
+    pub offset: BigInt,
+    pub size: u32,
+    #[napi(js_name = "writeFlags")]
+    pub write_flags: u32,
+    #[napi(js_name = "lockOwner")]
+    pub lock_owner: BigInt,
+    pub flags: u32,
+    #[napi(ts_type = "Uint8Array")]
+    pub data: Buffer,
+}
+
+impl From<protocol::FuseWriteIn> for NativeFuseWriteIn {
+    fn from(value: protocol::FuseWriteIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            offset: bigint(value.offset),
+            size: value.size,
+            write_flags: value.write_flags,
+            lock_owner: bigint(value.lock_owner),
+            flags: value.flags,
+            data: Buffer::from(value.data),
+        }
+    }
+}
+
+fn write_in(value: NativeFuseWriteIn) -> protocol::FuseWriteIn {
+    protocol::FuseWriteIn {
+        fh: u64_from_bigint(&value.fh),
+        offset: u64_from_bigint(&value.offset),
+        size: value.size,
+        write_flags: value.write_flags,
+        lock_owner: u64_from_bigint(&value.lock_owner),
+        flags: value.flags,
+        data: value.data.as_ref().to_vec(),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseWriteOut {
+    pub size: u32,
+}
+
+impl From<protocol::FuseWriteOut> for NativeFuseWriteOut {
+    fn from(value: protocol::FuseWriteOut) -> Self {
+        Self { size: value.size }
+    }
+}
+
+fn write_out(value: NativeFuseWriteOut) -> protocol::FuseWriteOut {
+    protocol::FuseWriteOut { size: value.size }
+}
+
+#[napi(object)]
 pub struct NativeFuseKstatfs {
     pub blocks: BigInt,
     pub bfree: BigInt,
@@ -808,6 +863,64 @@ pub fn fuse_encode_open_out(
         &open_out(value),
         protocol_context(context),
     ))
+}
+
+#[napi(js_name = "fuseDecodeWriteIn")]
+pub fn fuse_decode_write_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseWriteIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_WRITE,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Write(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_WRITE did not decode as a write request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeWriteIn")]
+pub fn fuse_encode_write_in(
+    value: NativeFuseWriteIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_WRITE,
+        &protocol::FuseRequestBody::Write(write_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeWriteOut")]
+pub fn fuse_decode_write_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseWriteOut> {
+    match protocol::decode_reply_body(mount_rs_fuse::FUSE_WRITE, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Write(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_WRITE did not decode as a write reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeWriteOut")]
+pub fn fuse_encode_write_out(value: NativeFuseWriteOut) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_WRITE,
+        &protocol::FuseReplyBody::Write(write_out(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeInitIn")]

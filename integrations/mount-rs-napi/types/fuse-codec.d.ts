@@ -18,6 +18,8 @@ import type {
   NativeFuseProtocolContext,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
+  NativeFuseWriteIn,
+  NativeFuseWriteOut,
 } from "../index.js"
 
 export type {
@@ -37,6 +39,8 @@ export type {
   NativeFuseProtocolContext,
   NativeFuseSplitInitFlags,
   NativeFuseTranscriptFrame,
+  NativeFuseWriteIn,
+  NativeFuseWriteOut,
 }
 
 export declare class ProtocolError extends Error {
@@ -133,6 +137,10 @@ export declare function decodeAttrOut(body: Uint8Array, context?: NativeFuseProt
 export declare function encodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseOpenOut
 export declare function encodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeWriteIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseWriteIn
+export declare function encodeWriteIn(value: NativeFuseWriteIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeWriteOut(body: Uint8Array): NativeFuseWriteOut
+export declare function encodeWriteOut(value: NativeFuseWriteOut): Buffer
 export declare function decodeInitIn(body: Uint8Array): NativeFuseInitIn
 export declare function encodeInitIn(value: NativeFuseInitIn): Buffer
 export declare function decodeInitOut(body: Uint8Array): NativeFuseInitOut

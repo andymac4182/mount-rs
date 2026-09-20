@@ -518,6 +518,10 @@ export declare function fuseDecodeStatfsOut(body: Uint8Array, context?: NativeFu
 
 export declare function fuseDecodeTranscript(bytes: Uint8Array): Array<NativeFuseTranscriptFrame>
 
+export declare function fuseDecodeWriteIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseWriteIn
+
+export declare function fuseDecodeWriteOut(body: Uint8Array): NativeFuseWriteOut
+
 export declare function fuseDecodeXattrNames(body: Uint8Array): Array<string>
 
 export declare function fuseDirentAlign(size: number): number
@@ -557,6 +561,10 @@ export declare function fuseEncodeReply(unique: bigint, body?: Uint8Array): Buff
 export declare function fuseEncodeStatfsOut(value: NativeFuseKstatfs, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeTranscript(frames: Array<NativeFuseTranscriptFrame>): Buffer
+
+export declare function fuseEncodeWriteIn(value: NativeFuseWriteIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeWriteOut(value: NativeFuseWriteOut): Buffer
 
 export declare function fuseEncodeXattrNames(names: Array<string>): Buffer
 
@@ -938,6 +946,20 @@ export interface NativeFuseTranscriptFrame {
   direction: string
   timestamp: bigint
   bytes: Uint8Array
+}
+
+export interface NativeFuseWriteIn {
+  fh: bigint
+  offset: bigint
+  size: number
+  writeFlags: number
+  lockOwner: bigint
+  flags: number
+  data: Uint8Array
+}
+
+export interface NativeFuseWriteOut {
+  size: number
 }
 
 export declare function nativeP9DecodeMessage(bytes: Uint8Array): NativeP9Message

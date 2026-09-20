@@ -1,6 +1,21 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import * as fuse from "../fuse.cjs";
+import {
+  decodeWriteIn as namedDecodeWriteIn,
+  encodeWriteIn as namedEncodeWriteIn,
+  decodeWriteOut as namedDecodeWriteOut,
+  encodeWriteOut as namedEncodeWriteOut,
+} from "../fuse.cjs";
+
+for (const [name, value] of [
+  ["decodeWriteIn", namedDecodeWriteIn],
+  ["encodeWriteIn", namedEncodeWriteIn],
+  ["decodeWriteOut", namedDecodeWriteOut],
+  ["encodeWriteOut", namedEncodeWriteOut],
+]) {
+  assert.equal(value, fuse[name], `FUSE named export ${name}`);
+}
 
 assert.equal(fuse.FUSE_KERNEL_VERSION, 7);
 assert.equal(fuse.FUSE_KERNEL_MINOR_VERSION, 41);
@@ -30,6 +45,52 @@ assert.deepEqual(fuse.decodeTranscript(transcript.encode()), [
 assert.equal(fuse.opcodeName(fuse.FUSE_GETATTR), "GETATTR");
 assert.equal(fuse.nameByteLength("é"), 2);
 assert.throws(() => fuse.decodeInHeader(Buffer.alloc(1)), fuse.ProtocolError);
+
+const writeContext = { minor: 41, setxattrExt: false };
+const writeInput = {
+  fh: 0x0102030405060708n,
+  offset: 0x1112131415161718n,
+  // The oracle derives this field from data while encoding. Keep a deliberately
+  // different value here so the public binding proves that behavior rather
+  // than accidentally trusting a stale caller-provided size.
+  size: 0,
+  writeFlags: 3,
+  lockOwner: 0x2122232425262728n,
+  flags: 0x4000,
+  data: Uint8Array.from([0, 1, 2, 255, 254]),
+};
+const writeBody = fuse.encodeWriteIn(writeInput, writeContext);
+assert.equal(writeBody.length, fuse.readWriteInSize(writeContext.minor) + writeInput.data.length);
+assert.deepEqual(fuse.decodeWriteIn(writeBody, writeContext), {
+  ...writeInput,
+  size: writeInput.data.length,
+  data: Buffer.from(writeInput.data),
+});
+assert.deepEqual(fuse.decodeWriteOut(fuse.encodeWriteOut({ size: 4 })), { size: 4 });
+
+const classify = (fn) => {
+  try {
+    return { ok: true, value: fn() };
+  } catch (error) {
+    return {
+      ok: false,
+      name: error?.name,
+      code: error?.code,
+      offset: error?.offset,
+      message: error?.message,
+    };
+  }
+};
+const classifyProtocolError = (fn) => {
+  const result = classify(fn);
+  assert.equal(result.ok, false);
+  return {
+    ok: false,
+    name: result.name,
+    code: result.code,
+    offset: result.offset,
+  };
+};
 
 const dirents = [
   { ino: 11n, off: 12n, type: 4, name: "." },
@@ -111,6 +172,53 @@ assert.deepEqual(fuse.unpackDirentsPlus(wrappedPlusPacked.buffer, plusContext), 
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
+  for (const ctx of [writeContext, { minor: 8, setxattrExt: false }]) {
+    const oracleWrite = oracle.encodeRequestBody(fuse.FUSE_WRITE, writeInput, ctx);
+    const actualWrite = fuse.encodeWriteIn(writeInput, ctx);
+    assert.deepEqual([...actualWrite], [...oracleWrite], `WRITE request bytes match oracle for minor ${ctx.minor}`);
+    const oracleDecoded = oracle.decodeRequestBody(fuse.FUSE_WRITE, oracleWrite, ctx);
+    const actualDecoded = fuse.decodeWriteIn(actualWrite, ctx);
+    assert.deepEqual(
+      { ...actualDecoded, data: [...actualDecoded.data] },
+      { ...oracleDecoded, data: [...oracleDecoded.data] },
+      `WRITE request decode matches oracle for minor ${ctx.minor}`,
+    );
+
+    const oracleWriteReply = oracle.encodeReplyBody(fuse.FUSE_WRITE, { size: 4 }, ctx);
+    const actualWriteReply = fuse.encodeWriteOut({ size: 4 });
+    assert.deepEqual([...actualWriteReply], [...oracleWriteReply], "WRITE reply bytes match oracle");
+    assert.deepEqual(
+      fuse.decodeWriteOut(actualWriteReply),
+      oracle.decodeReplyBody(fuse.FUSE_WRITE, oracleWriteReply, ctx),
+      "WRITE reply decode matches oracle",
+    );
+
+    for (let length = 0; length < actualWrite.length; length++) {
+      const body = actualWrite.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeWriteIn(body, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_WRITE, body, ctx)),
+        `WRITE request truncation classification at ${length} bytes`,
+      );
+    }
+    const corruptSize = Buffer.from(actualWrite);
+    corruptSize.writeUInt32LE(writeInput.data.length + 1, 16);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeWriteIn(corruptSize, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_WRITE, corruptSize, ctx)),
+      "WRITE declared-size classification",
+    );
+  }
+
+  for (let length = 0; length < 8; length++) {
+    const body = Buffer.alloc(length);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeWriteOut(body)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_WRITE, body, writeContext)),
+      `WRITE reply truncation classification at ${length} bytes`,
+    );
+  }
+
   const oraclePacked = oracle.packDirents(dirents, firstDirentSize + 1);
   assert.deepEqual([...packed.buffer], [...oraclePacked.buffer], "READDIR body bytes match oracle");
   assert.equal(packed.packed, oraclePacked.packed, "READDIR packed count matches oracle");
@@ -131,19 +239,6 @@ if (source) {
   }
   const oracleWrappedPlus = oracle.packDirentsPlus(wrappedPlus, 4096, plusContext);
   assert.deepEqual([...wrappedPlusPacked.buffer], [...oracleWrappedPlus.buffer], "READDIRPLUS integer coercions match oracle");
-  const classify = (fn) => {
-    try {
-      return { ok: true, value: fn() };
-    } catch (error) {
-      return {
-        ok: false,
-        name: error?.name,
-        code: error?.code,
-        offset: error?.offset,
-        message: error?.message,
-      };
-    }
-  };
   for (let length = 0; length < plusAll.buffer.length; length++) {
     const body = plusAll.buffer.subarray(0, length);
     const expected = classify(() => oracle.unpackDirentsPlus(body, plusContext));
@@ -177,9 +272,11 @@ if (source) {
   );
   console.log("mount-rs N-API FUSE READDIR body differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE WRITE request/reply differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE WRITE request/reply differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
 console.log("mount-rs N-API FUSE codec subpath: PASS");
