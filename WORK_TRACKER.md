@@ -115,7 +115,7 @@ complete.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Active simple-first parity slice; not complete | Jason / Main |
+| W01 | Core and mountx parity | Active simple-first parallel slices; not complete | Jason/Sartre/Carver/Gauss / Main |
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
