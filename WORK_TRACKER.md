@@ -257,6 +257,14 @@ gate still excludes the pre-existing `js_driver.rs` type-complexity warning.
 Hosted Windows runtime, live R2/PGlite, FSKit activation and privileged native
 FUSE acceptance remain separate gates.
 
+The fourth W01 implementation packet is locally validated in `1a8b112` and is
+queued for sequential publication. Rust FUSE now strictly validates the
+`FALLOCATE`, `RENAME2`, `LSEEK`, and `COPY_FILE_RANGE` request bodies, rejects
+malformed/trailing frames with `EINVAL`, and keeps valid operations at an
+explicit `ENOSYS` boundary without mutating the session. The focused FUSE
+tests and strict scoped Clippy gate passed; publication and hosted/native
+acceptance remain separate gates.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -318,6 +326,7 @@ patch):
 | Aquinas the 2nd | W01 Rust FUSE POLL session validation | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `15026f2`; strict 24-byte framing, malformed/trailing rejection, explicit ENOSYS boundary, 50 package tests and strict scoped Clippy passed |
 | Euclid the 2nd | W01 napi-rs FUSE POLL request/reply codecs | `integrations/mount-rs-napi/**` | Integrated as `5b7f982`; generated artifacts/declarations, protocol-minor oracle differentials, malformed/truncated/trailing tests, build/typecheck and full N-API suite passed |
 | Dalton the 2nd | W01 Node SDK CLI native CI gate | `.github/workflows/ci.yml` | Integrated as `d28f31a`; opt-in Linux/macOS native gate with bounded timeouts and prerequisite probes; hosted results remain unverified |
+| Mendel the 2nd | W01 Rust FUSE advanced-operation validation | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated locally as `1a8b112`; strict FALLOCATE/RENAME2/LSEEK/COPY_FILE_RANGE framing, explicit EINVAL/ENOSYS boundaries, no-mutation/session-survival tests and strict Clippy passed; publication pending |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -563,6 +572,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   remote ref after publication is
   `10666e8dcca35c0cb39483317272de6832acb984`. Hosted CI and kernel poll
   semantics remain explicit acceptance boundaries.
+- [x] The fourth W01 Rust FUSE packet is integrated locally as `1a8b112`:
+  advanced-operation request framing (`FALLOCATE`, `RENAME2`, `LSEEK`, and
+  `COPY_FILE_RANGE`) rejects malformed/trailing input with `EINVAL`, returns
+  explicit `ENOSYS` for valid-but-unsupported operations, and preserves
+  session state without mutation. Focused FUSE tests and strict scoped Clippy
+  passed; sequential remote publication is pending.
 - [x] The second-rotation implementation and documentation files were published
   sequentially to `origin/main`; the verified remote ref after that packet was
   `9c5f910489741c169031f2f737c3eb51ed427c89`. The local checkout remains
@@ -664,10 +679,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   full benchmark matrix remain open. The full `scripts/test-all.sh` rerun at
   `73c33e0` also passed the live R2 lane end-to-end; this does not close the
   native/hosted portions of this task.
-- [ ] W05.4 Record service identity and revision without recording credentials.
-  `scripts/r2-service-evidence.sh` now provides the credential-safe, read-only
-  bucket probe and revision/dirty-state record; live evidence remains open until
-  the command is run against the dedicated service.
+- [x] W05.4 Record service identity and revision without recording credentials.
+  `integrations/mount-rs-r2` now exposes a redacted `R2ServiceIdentity` and
+  `scripts/r2-service-evidence.sh` records only endpoint authority, bucket,
+  revision and owned-prefix object counts; embedded endpoint credentials are
+  rejected. The focused R2 unit/Clippy gates and shell syntax check passed.
 - [x] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
   R2 endpoint with scoped S3 credentials. On 2026-09-20, the live gate passed
   both PGlite-metadata/R2-block and SQLite-metadata/R2-block drives, ranged
