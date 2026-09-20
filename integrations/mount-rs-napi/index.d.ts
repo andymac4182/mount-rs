@@ -494,6 +494,8 @@ export declare function fuseAttrSize(minor: number): number
 
 export declare function fuseDecodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseAttrOut
 
+export declare function fuseDecodeBatchForgetIn(body: Uint8Array): NativeFuseBatchForgetIn
+
 export declare function fuseDecodeCreateIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseCreateIn
 
 export declare function fuseDecodeCreateOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseCreateOut
@@ -515,6 +517,8 @@ export declare function fuseDecodeInHeader(bytes: Uint8Array): NativeFuseInHeade
 export declare function fuseDecodeInitIn(body: Uint8Array): NativeFuseInitIn
 
 export declare function fuseDecodeInitOut(body: Uint8Array): NativeFuseInitOut
+
+export declare function fuseDecodeInterruptIn(body: Uint8Array): NativeFuseInterruptIn
 
 export declare function fuseDecodeLookupIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseNameIn
 
@@ -568,6 +572,8 @@ export declare function fuseDirentType(mode: number): number
 
 export declare function fuseEncodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
+export declare function fuseEncodeBatchForgetIn(value: NativeFuseBatchForgetIn): Buffer
+
 export declare function fuseEncodeCreateIn(value: NativeFuseCreateIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeCreateOut(value: NativeFuseCreateOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
@@ -591,6 +597,8 @@ export declare function fuseEncodeInHeader(value: NativeFuseInHeader): Buffer
 export declare function fuseEncodeInitIn(value: NativeFuseInitIn): Buffer
 
 export declare function fuseEncodeInitOut(value: NativeFuseInitOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeInterruptIn(value: NativeFuseInterruptIn): Buffer
 
 export declare function fuseEncodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -884,6 +892,10 @@ export interface NativeFuseAttrOut {
   attr: NativeFuseAttr
 }
 
+export interface NativeFuseBatchForgetIn {
+  forgets: Array<NativeFuseForgetOne>
+}
+
 export interface NativeFuseCreateIn {
   flags: number
   mode: number
@@ -914,6 +926,11 @@ export interface NativeFuseEntryOut {
 export interface NativeFuseFlushIn {
   fh: bigint
   lockOwner: bigint
+}
+
+export interface NativeFuseForgetOne {
+  nodeid: bigint
+  nlookup: bigint
 }
 
 export interface NativeFuseFsyncIn {
@@ -990,6 +1007,10 @@ export interface NativeFuseDirent {
 export interface NativeFuseDirentPlus {
   entry: NativeFuseEntryOut
   dirent: NativeFuseDirent
+}
+
+export interface NativeFuseInterruptIn {
+  unique: bigint
 }
 
 export interface NativeFuseKstatfs {
