@@ -12,6 +12,8 @@ use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
 use mount_rs_core::{ErrorCode, Loopback, Result};
 use mount_rs_foundationdb::{FoundationDbStorage, FoundationDbStorageOptions, LeaseOracle};
 use mount_rs_r2::{R2BlockStore, R2Config};
+use object_store::path::Path as ObjectPath;
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::collections::BTreeSet;
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -403,6 +405,68 @@ async fn verify_chunked_lease_fencing(
     Ok(())
 }
 
+async fn verify_exact_rustfs_cleanup(
+    config: &R2Config,
+    combo_prefix: &str,
+    block_prefix: &str,
+    blocks: &TrackedRustFsBlocks,
+) -> Result<()> {
+    let object_store = config.build_store()?;
+    let sibling_path = ObjectPath::from(format!("{block_prefix}-sibling/keep"));
+    let parent_path = ObjectPath::from(format!("{combo_prefix}/keep"));
+
+    for path in [&sibling_path, &parent_path] {
+        object_store
+            .put_opts(
+                path,
+                PutPayload::from(b"must-survive-scoped-cleanup".to_vec()),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|error| {
+                mount_rs_core::backend_error(format!("seed cleanup sentinel: {error}"))
+            })?;
+    }
+
+    blocks.delete_created().await?;
+
+    let owned = object_store
+        .list_with_delimiter(Some(&ObjectPath::from(block_prefix)))
+        .await
+        .map_err(|error| {
+            mount_rs_core::backend_error(format!("list cleaned block prefix: {error}"))
+        })?;
+    assert!(
+        owned.objects.is_empty() && owned.common_prefixes.is_empty(),
+        "owned RustFS block prefix was not cleaned exactly: objects={:?} prefixes={:?}",
+        owned.objects,
+        owned.common_prefixes
+    );
+
+    for path in [&sibling_path, &parent_path] {
+        let value = object_store
+            .get(path)
+            .await
+            .map_err(|error| {
+                mount_rs_core::backend_error(format!("read cleanup sentinel: {error}"))
+            })?
+            .bytes()
+            .await
+            .map_err(|error| {
+                mount_rs_core::backend_error(format!("read cleanup sentinel body: {error}"))
+            })?;
+        assert_eq!(value.as_ref(), b"must-survive-scoped-cleanup");
+        object_store.delete(path).await.map_err(|error| {
+            mount_rs_core::backend_error(format!("delete cleanup sentinel: {error}"))
+        })?;
+    }
+
+    Ok(())
+}
+
 async fn run_real_composition() -> Result<()> {
     let cluster_file = required_env("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE");
     let config = local_rustfs_config();
@@ -441,7 +505,7 @@ async fn run_real_composition() -> Result<()> {
     verify_cas_and_fencing(&cluster_file, &volume_prefix).await?;
 
     let blocks = TrackedRustFsBlocks::new(&config, block_prefix, created);
-    blocks.delete_created().await?;
+    verify_exact_rustfs_cleanup(&config, &combo_prefix, blocks.inner.prefix(), &blocks).await?;
     drop(network);
     println!("FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision={revision} volume_prefix={volume_prefix}");
     Ok(())
