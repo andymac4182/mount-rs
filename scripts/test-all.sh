@@ -35,6 +35,7 @@ pnpm --dir "$mountx_source" install --frozen-lockfile --ignore-scripts
 MOUNTX_SOURCE="$mountx_source" pnpm --dir tests/upstream test
 MOUNTX_SOURCE="$mountx_source" node scripts/check-kv-parity.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-http-parity.mjs
+MOUNTX_SOURCE="$mountx_source" node scripts/test-http-early-rejection.mjs
 
 pnpm --dir tests/pglite install --frozen-lockfile
 MOUNTX_SOURCE="$mountx_source" ./scripts/test-pglite.sh
