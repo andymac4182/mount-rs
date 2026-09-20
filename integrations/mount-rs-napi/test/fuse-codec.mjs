@@ -6,6 +6,10 @@ import {
   encodeOpenIn as namedEncodeOpenIn,
   decodeOpenOut as namedDecodeOpenOut,
   encodeOpenOut as namedEncodeOpenOut,
+  decodeLookupIn as namedDecodeLookupIn,
+  encodeLookupIn as namedEncodeLookupIn,
+  decodeLookupOut as namedDecodeLookupOut,
+  encodeLookupOut as namedEncodeLookupOut,
   decodeCreateIn as namedDecodeCreateIn,
   encodeCreateIn as namedEncodeCreateIn,
   decodeCreateOut as namedDecodeCreateOut,
@@ -33,6 +37,10 @@ for (const [name, value] of [
   ["encodeOpenIn", namedEncodeOpenIn],
   ["decodeOpenOut", namedDecodeOpenOut],
   ["encodeOpenOut", namedEncodeOpenOut],
+  ["decodeLookupIn", namedDecodeLookupIn],
+  ["encodeLookupIn", namedEncodeLookupIn],
+  ["decodeLookupOut", namedDecodeLookupOut],
+  ["encodeLookupOut", namedEncodeLookupOut],
   ["decodeCreateIn", namedDecodeCreateIn],
   ["encodeCreateIn", namedEncodeCreateIn],
   ["decodeCreateOut", namedDecodeCreateOut],
@@ -301,6 +309,17 @@ for (const ctx of [createContext, { minor: 39, setxattrExt: false }, { minor: 12
   });
 }
 
+const lookupContext = { minor: 41, setxattrExt: false };
+const lookupInput = { name: "café" };
+for (const ctx of [lookupContext, { minor: 39, setxattrExt: false }, { minor: 8, setxattrExt: false }]) {
+  const body = fuse.encodeLookupIn(lookupInput, ctx);
+  assert.equal(body.length, Buffer.byteLength(lookupInput.name) + 1);
+  assert.deepEqual(fuse.decodeLookupIn(body, ctx), lookupInput);
+  const reply = fuse.encodeLookupOut(plusEntry, ctx);
+  assert.equal(reply.length, fuse.entryOutSize(ctx.minor));
+  assert.deepEqual(fuse.decodeLookupOut(reply, ctx), plusEntry);
+}
+
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
@@ -447,6 +466,60 @@ if (source) {
       classifyProtocolError(() => fuse.decodeCreateOut(replyTrailing, ctx)),
       classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_CREATE, replyTrailing, ctx)),
       `CREATE reply trailing-byte classification for minor ${ctx.minor}`,
+    );
+  }
+
+  for (const ctx of [lookupContext, { minor: 39, setxattrExt: false }, { minor: 8, setxattrExt: false }]) {
+    const oracleRequest = oracle.encodeRequestBody(fuse.FUSE_LOOKUP, lookupInput, ctx);
+    const actualRequest = fuse.encodeLookupIn(lookupInput, ctx);
+    assert.deepEqual([...actualRequest], [...oracleRequest], `LOOKUP request bytes match oracle for minor ${ctx.minor}`);
+    assert.deepEqual(
+      fuse.decodeLookupIn(actualRequest, ctx),
+      oracle.decodeRequestBody(fuse.FUSE_LOOKUP, oracleRequest, ctx),
+      `LOOKUP request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualRequest.length; length++) {
+      const body = actualRequest.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeLookupIn(body, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_LOOKUP, body, ctx)),
+        `LOOKUP request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeLookupIn(requestTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_LOOKUP, requestTrailing, ctx)),
+      `LOOKUP request trailing-byte classification for minor ${ctx.minor}`,
+    );
+    const malformedInput = { name: "bad\0name" };
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.encodeLookupIn(malformedInput, ctx)),
+      classifyProtocolError(() => oracle.encodeRequestBody(fuse.FUSE_LOOKUP, malformedInput, ctx)),
+      `LOOKUP request malformed-name classification for minor ${ctx.minor}`,
+    );
+
+    const oracleReply = oracle.encodeReplyBody(fuse.FUSE_LOOKUP, plusEntry, ctx);
+    const actualReply = fuse.encodeLookupOut(plusEntry, ctx);
+    assert.deepEqual([...actualReply], [...oracleReply], `LOOKUP reply bytes match oracle for minor ${ctx.minor}`);
+    assert.deepEqual(
+      fuse.decodeLookupOut(actualReply, ctx),
+      oracle.decodeReplyBody(fuse.FUSE_LOOKUP, oracleReply, ctx),
+      `LOOKUP typed reply decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualReply.length; length++) {
+      const body = actualReply.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeLookupOut(body, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_LOOKUP, body, ctx)),
+        `LOOKUP reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const replyTrailing = Buffer.concat([actualReply, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeLookupOut(replyTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_LOOKUP, replyTrailing, ctx)),
+      `LOOKUP reply trailing-byte classification for minor ${ctx.minor}`,
     );
   }
 
@@ -632,6 +705,7 @@ if (source) {
   console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -641,6 +715,7 @@ if (source) {
   console.log("mount-rs N-API FUSE SETATTR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
 console.log("mount-rs N-API FUSE codec subpath: PASS");
