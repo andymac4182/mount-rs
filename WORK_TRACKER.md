@@ -175,6 +175,18 @@ passed real service runs; TiDB used the available single-node v8.5.7 topology,
 so replicated/durable capacity and provider restart promotion remain open
 acceptance boundaries rather than being implied by these passes.
 
+The following W01 rotation then completed three more disjoint Luna Max packets
+and published them to `main`: `a31880d` adds seeded positional write,
+truncate, flush and reopen coverage across the Rust SDK, Node SDK, Rust CLI and
+Node CLI provider matrix; `cc73ad5` adds 11 Unstorage path/metadata/handle
+oracle rows with zero mismatches or skips; and `a3795f0` exposes typed FUSE
+`OPEN`/`OPENDIR` request codecs across protocol 7.8, 7.39 and 7.41. The
+focused provider matrix passed 5 Rust SDK, 4 Node SDK and 9 CLI cases with
+explicit PGlite/R2 skips; the Unstorage packet passed its direct, capability,
+edge, N-API and upstream conformance gates; and the full locked Rust workspace
+plus oracle-enabled N-API suite passed. These packets further reduce W01 but
+do not claim native FUSE session/mount or live-provider acceptance.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -218,6 +230,9 @@ patch):
 | Confucius | W01 FUSE READDIRPLUS body codec | `integrations/mount-rs-napi/{fuse.cjs,postlude-fuse-codec.cjs,index.d.ts,test/fuse-codec.mjs}` | Integrated in the current SDK/transport packet; pinned differential and aggregation passed |
 | James | W01 Unstorage capability classification | `tests/unstorage/capability-parity.mjs` | Integrated in the current packet; 5 oracle-classified unsupported rows passed |
 | Curie | W01 provider-consumer durability expansion | `tests/provider_matrix/src/main.rs` | Integrated in the current packet; direct and split SQLite reopen rows passed |
+| Galileo | W01 seeded provider/consumer lifecycle parity | `tests/provider_matrix/**` | Integrated as `a31880d`; 5 Rust SDK, 4 Node SDK and 9 CLI passes; PGlite/R2 explicit skips |
+| Poincare | W01 Unstorage path/metadata/handle parity | `tests/unstorage/**` | Integrated as `cc73ad5`; 11 rows, zero mismatches/skips; remaining capability limits explicit |
+| Socrates | W01 FUSE OPEN/OPENDIR request codecs | `integrations/mount-rs-napi/**` | Integrated as `a3795f0`; protocols 7.8/7.39/7.41 differential passed; native mount remains open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -263,7 +278,7 @@ complete.
 | W05 | Cloudflare R2 | Verifying; local S3/R2 HTTP and configuration gates pass, but live provider acceptance is still credential-gated | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
-| W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
+| W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec subpath landed; native and cross-platform transport acceptance remains open | Main (packet integrated) |
 | W11 | Config-driven CLI | Rust CLI now consumes the Rust SDK; Node CLI consumes the Node SDK; provider/remote/hosted gates remain | Main |
@@ -1147,6 +1162,9 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
+| `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |
+| `a31880d` (published as `1e45692`) | Seeded Rust SDK, Node SDK and CLI provider lifecycle matrix | Positional write, truncate, flush and reopen passed across 5 Rust SDK, 4 Node SDK and 9 CLI rows; PGlite/R2 remain explicit skips |
 | `d6c8a29` (published as `89e4940`) | TiDB + RustFS durable fixture hardening | Real TiDB v8.5.7 and loopback RustFS composition passed seed, partial writes, truncate, reopen, CAS/fencing and exact block/metadata cleanup; replicated durable topology remains capacity-gated |
 | `7da18fb` | FoundationDB + RustFS exact cleanup scope | Real FoundationDB/RustFS harness passed multi-chunk, partial update, truncate/extend, reopen, CAS, stale fencing and sibling/parent sentinel preservation; service restart/root/hosted composition remain open |
 | `3b59dc8` | Public napi-rs FUSE `GETATTR`/`SETATTR` codecs | Protocol 7.41/7.8 pinned differential, typed replies, malformed/truncated/trailing checks, generated declarations and full N-API suite passed; native FUSE session/device/mount remains open |
