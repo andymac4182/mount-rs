@@ -17,30 +17,6 @@ const securityHeaders = {
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
 }
 
-const vercelRoutes = [
-  {
-    src: '/assets/(.*)',
-    headers: {
-      ...securityHeaders,
-      'cache-control': 'public, max-age=31536000, immutable',
-    },
-  },
-  {
-    src: '/(.*)',
-    headers: securityHeaders,
-  },
-  { handle: 'filesystem' },
-  {
-    src: '/assets/(.*)',
-    status: 404,
-    headers: {
-      ...securityHeaders,
-      'cache-control': 'no-store',
-    },
-  },
-  { src: '/(.*)', dest: '/__server' },
-]
-
 export default defineConfig({
   plugins: [
     tanstackStart({
@@ -54,12 +30,6 @@ export default defineConfig({
     }),
     viteReact(),
     nitro({
-      vercel: {
-        config: {
-          version: 3,
-          routes: vercelRoutes,
-        },
-      },
       routeRules: {
         '/assets/**': { headers: securityHeaders },
         '/**': { headers: securityHeaders },
