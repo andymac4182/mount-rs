@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-21. Baseline: `3042d09`, plus explicitly identified uncommitted
+Updated: 2026-09-21. Baseline: `71e826f`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -248,6 +248,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the public `mount-rs-sdk` facade and adds a public Node CLI SDK self-test. The
   Rust SDK example, Rust CLI, Node CLI and provider matrix now exercise the same
   SDK contract; native mount and live remote-provider acceptance remain separate.
+- [x] `71e826f` pins the parity checker to the oracle revision, requires locked
+  Cargo execution, and records the next simple-first W01 closure queue. The
+  pinned 56-step core trace and six-scenario concurrency trace still pass with
+  zero mismatches; the listed lifecycle, capability and native gaps remain open.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -979,3 +983,4 @@ cross-drive isolation.
 | `29337f7` | Public Rust SDK facade, Rust CLI routing and Node SDK CLI self-test | SDK unit/example, Rust/Node/provider matrix and CLI self-tests passed locally; live remote/native/hosted lanes remain open |
 | `d6b80f4` | Chunked persistence, SQLite VFS failure handling and Windows HostFs acceptance packets | Focused local chunked, SQLite and HostFs gates passed; hosted Windows and remote-provider lanes remain open |
 | `3042d09` | Rust-backed FUSE inode state in napi-rs | Rust/Node inode parity, generated package checks and complete local N-API suite passed; native mount remains open |
+| `71e826f` | Pinned-oracle W01 parity audit and closure queue | Core/concurrency traces passed with zero mismatches; structural native, NFS handle, Unstorage and durability gaps remain explicit |
