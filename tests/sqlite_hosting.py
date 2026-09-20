@@ -12,6 +12,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+SPILL_ROWS = 16  # 128 KiB exceeds the child's 8-page (32 KiB) cache.
+
 
 def connect(path):
     db = sqlite3.connect(path, timeout=0.1)
@@ -25,7 +27,7 @@ def child(path, mode):
     db.execute("BEGIN IMMEDIATE")
     db.execute("UPDATE items SET payload=? WHERE id=1", (b"uncommitted",))
     # Force dirty-page spills rather than testing only SQLite's page cache.
-    db.executemany("INSERT INTO items(payload) VALUES(?)", [(b"x" * 8192,)] * 128)
+    db.executemany("INSERT INTO items(payload) VALUES(?)", [(b"x" * 8192,)] * SPILL_ROWS)
     if mode == "committed":
         db.commit()
     print("ready", flush=True)
@@ -38,6 +40,7 @@ def integrity(db):
 
 
 def run_case(directory, journal):
+    print(json.dumps({"phase": "start", "journal": journal}), flush=True)
     path = directory / (journal.lower() + ".sqlite")
     original = bytes(range(256)) * 257
     db = connect(path)
@@ -63,6 +66,7 @@ def run_case(directory, journal):
         )
         try:
             assert process.stdout.readline() == b"ready\n", process.communicate(timeout=10)
+            print(json.dumps({"phase": "writer_ready", "journal": journal, "mode": mode}), flush=True)
             if mode == "uncommitted":
                 try:
                     try:
@@ -94,7 +98,7 @@ def run_case(directory, journal):
         if mode == "uncommitted":
             assert count == 1 and payload == original, (count, payload[:20])
         else:
-            assert count == 129 and payload == b"uncommitted", count
+            assert count == SPILL_ROWS + 1 and payload == b"uncommitted", count
         if journal == "WAL":
             checkpoint = reopened.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
             assert checkpoint[0] == 0, checkpoint

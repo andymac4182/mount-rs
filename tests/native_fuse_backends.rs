@@ -162,8 +162,10 @@ async fn sqlite_engine_round_trip(driver: Arc<dyn FsDriver>) {
             "/tests/sqlite_hosting.py"
         ))
         .arg(&directory)
-        .kill_on_drop(true);
-    let output = tokio::time::timeout(std::time::Duration::from_secs(90), command.output()).await;
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let output = tokio::time::timeout(std::time::Duration::from_secs(90), command.status()).await;
     let unmounted =
         tokio::time::timeout(std::time::Duration::from_secs(15), unmount(mounted)).await;
     if unmounted.as_ref().is_ok_and(Result::is_ok) {
@@ -172,11 +174,9 @@ async fn sqlite_engine_round_trip(driver: Arc<dyn FsDriver>) {
     let output = output
         .expect("SQLite process harness deadline")
         .expect("start Python SQLite engine");
-    println!("{}", String::from_utf8_lossy(&output.stdout));
     assert!(
-        output.status.success(),
-        "SQLite hosting failed: {}",
-        String::from_utf8_lossy(&output.stderr)
+        output.success(),
+        "SQLite hosting failed: {output} (see phase diagnostics above)"
     );
     assert!(
         unmounted.as_ref().is_ok_and(Result::is_ok),
