@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{FsDriver, MemoryFs};
+use async_trait::async_trait;
+use mount_rs_core::{Capabilities, FileHandle, FsDriver, MemoryFs, Result as FsResult};
 use mount_rs_s3::{
     CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, PresignRequest, S3BindError,
     S3Request, S3Response, S3Server, S3ServerOptions, S3Session, S3SessionOptions,
@@ -13,6 +15,8 @@ use mount_rs_s3::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
+use tokio::time::{Duration, timeout};
 
 fn request(
     method: &str,
@@ -842,6 +846,70 @@ async fn http_server_is_rootless_and_sigv4_supports_header_and_presigned_forms()
 }
 
 #[tokio::test]
+async fn real_http_signed_body_digest_mismatch_is_rejected() {
+    let credentials = Credentials::new("AKIAMOUNTX7DIGEST", "test-secret-key");
+    let memory = MemoryFs::empty();
+    let session = Arc::new(S3Session::new_with_options(
+        memory.clone(),
+        S3SessionOptions {
+            credentials: Some(credentials.clone()),
+            region: Some("us-east-1".to_owned()),
+            ..S3SessionOptions::default()
+        },
+    ));
+    let server = S3Server::start(session, S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let expected = b"the signed payload";
+    let tampered = b"the forged payload";
+    assert_eq!(expected.len(), tampered.len());
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64;
+    let amz_date = format_amz_date(now);
+    let payload_hash = sha256_hex(expected);
+    let headers = vec![
+        HeaderEntry::new("host", server.address().to_string()),
+        HeaderEntry::new("x-amz-date", &amz_date),
+        HeaderEntry::new("x-amz-content-sha256", &payload_hash),
+        HeaderEntry::new("content-length", tampered.len().to_string()),
+    ];
+    let signed_names = headers
+        .iter()
+        .map(|header| header.name.clone())
+        .collect::<Vec<_>>();
+    let authorization = sign_request(SignRequest {
+        method: "PUT",
+        path: "/mountx/digest-mismatch.txt",
+        query: &[],
+        headers: &headers,
+        signed_headers: &signed_names,
+        credentials: &credentials,
+        region: "us-east-1",
+        timestamp_ms: now,
+        payload_hash: &payload_hash,
+    });
+    let mut wire_headers = headers
+        .iter()
+        .map(|header| (header.name.clone(), header.value.clone()))
+        .collect::<Vec<_>>();
+    wire_headers.push(("authorization".to_owned(), authorization));
+    let response = wire_request(
+        &server,
+        "PUT",
+        "/mountx/digest-mismatch.txt",
+        &wire_headers,
+        tampered,
+    )
+    .await;
+    assert_eq!(response.status, 403);
+    assert!(String::from_utf8_lossy(&response.body).contains("<Code>SignatureDoesNotMatch</Code>"));
+    assert!(memory.stat("/digest-mismatch.txt").await.is_err());
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn unauthenticated_server_refuses_non_loopback_bind() {
     let session = Arc::new(S3Session::new(MemoryFs::empty()));
     let result = S3Server::start(
@@ -858,11 +926,297 @@ async fn unauthenticated_server_refuses_non_loopback_bind() {
     ));
 }
 
+#[derive(Clone)]
+struct ProbeSignals {
+    first_write: Arc<Notify>,
+    first_read: Arc<Notify>,
+    release_read: Arc<Notify>,
+    writes: Arc<AtomicUsize>,
+    reads: Arc<AtomicUsize>,
+}
+
+impl ProbeSignals {
+    fn new() -> Self {
+        Self {
+            first_write: Arc::new(Notify::new()),
+            first_read: Arc::new(Notify::new()),
+            release_read: Arc::new(Notify::new()),
+            writes: Arc::new(AtomicUsize::new(0)),
+            reads: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ProbeFs {
+    inner: MemoryFs,
+    signals: ProbeSignals,
+}
+
+struct ProbeHandle {
+    inner: Arc<dyn FileHandle>,
+    signals: ProbeSignals,
+}
+
+#[async_trait]
+impl FileHandle for ProbeHandle {
+    async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> FsResult<usize> {
+        let count = self.inner.read(buffer, position).await?;
+        if count > 0 {
+            let previous = self.signals.reads.fetch_add(1, Ordering::Relaxed);
+            if previous == 0 {
+                self.signals.first_read.notify_one();
+            } else if previous == 1 {
+                self.signals.release_read.notified().await;
+            }
+        }
+        Ok(count)
+    }
+
+    async fn write(&self, buffer: &[u8], position: Option<u64>) -> FsResult<usize> {
+        let count = self.inner.write(buffer, position).await?;
+        if count > 0 {
+            self.signals.writes.fetch_add(1, Ordering::Relaxed);
+            self.signals.first_write.notify_one();
+        }
+        Ok(count)
+    }
+
+    async fn stat(&self) -> FsResult<mount_rs_core::Stats> {
+        self.inner.stat().await
+    }
+
+    async fn truncate(&self, length: u64) -> FsResult<()> {
+        self.inner.truncate(length).await
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.inner.close().await
+    }
+}
+
+#[async_trait]
+impl FsDriver for ProbeFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<mount_rs_core::DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        let inner = self.inner.open(path, flags, mode).await?;
+        Ok(Arc::new(ProbeHandle {
+            inner,
+            signals: self.signals.clone(),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn real_http_fragmented_upload_reaches_driver_before_body_end() {
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: MemoryFs::empty(),
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(session, S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let payload = vec![0x5a; 4 * 1024 * 1024];
+    let first_fragment = 64 * 1024;
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/fragmented-upload.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        server.address(),
+        payload.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write request head");
+    stream
+        .write_all(&payload[..first_fragment])
+        .await
+        .expect("write first request fragment");
+    timeout(Duration::from_secs(2), signals.first_write.notified())
+        .await
+        .expect("driver write before complete request body");
+    for fragment in payload[first_fragment..].chunks(64 * 1024) {
+        stream
+            .write_all(fragment)
+            .await
+            .expect("write request fragment");
+    }
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers.get("content-length").map(String::as_str),
+        Some("0")
+    );
+    assert!(signals.writes.load(Ordering::Relaxed) > 0);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_fragmented_aws_chunked_upload_decodes_before_terminal_frame() {
+    let signals = ProbeSignals::new();
+    let memory = MemoryFs::empty();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(session, S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let payload = vec![0x42; 2 * 1024 * 1024];
+    let encoded =
+        unsigned_chunked_body_with_trailer(&payload, "x-amz-checksum-crc32", "1B2M2Y8=", true);
+    let first_fragment = 64 * 1024;
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/fragmented-chunked.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\nContent-Encoding: aws-chunked\r\nX-Amz-Content-Sha256: {}\r\nX-Amz-Trailer: x-amz-checksum-crc32\r\nX-Amz-Decoded-Content-Length: {}\r\n\r\n",
+        server.address(),
+        encoded.len(),
+        STREAMING_UNSIGNED_PAYLOAD_TRAILER,
+        payload.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write request head");
+    stream
+        .write_all(&encoded[..first_fragment])
+        .await
+        .expect("write first encoded fragment");
+    timeout(Duration::from_secs(2), signals.first_write.notified())
+        .await
+        .expect("decoded driver write before terminal frame");
+    for fragment in encoded[first_fragment..].chunks(31_337) {
+        stream
+            .write_all(fragment)
+            .await
+            .expect("write encoded fragment");
+    }
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+
+    let handle = memory
+        .open("/fragmented-chunked.bin", "r", 0)
+        .await
+        .expect("stored object");
+    let mut stored = vec![0_u8; payload.len()];
+    let count = handle
+        .read(&mut stored, Some(0))
+        .await
+        .expect("read object");
+    handle.close().await.expect("close object");
+    assert_eq!(count, payload.len());
+    assert_eq!(stored, payload);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_download_sends_first_chunk_before_next_driver_read() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x31; 2 * 1024 * 1024];
+    let handle = memory
+        .open("/fragmented-download.bin", "w", 0o666)
+        .await
+        .unwrap();
+    handle.write(&payload, Some(0)).await.unwrap();
+    handle.close().await.unwrap();
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory,
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(session, S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/fragmented-download.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    let mut raw = Vec::new();
+    loop {
+        let mut buffer = [0_u8; 8192];
+        let count = timeout(Duration::from_secs(2), stream.read(&mut buffer))
+            .await
+            .expect("response bytes before next driver read")
+            .expect("read response");
+        assert!(count > 0, "response ended before first body chunk");
+        raw.extend_from_slice(&buffer[..count]);
+        if let Some(offset) = raw.windows(4).position(|window| window == b"\r\n\r\n")
+            && raw.len() > offset + 4
+        {
+            break;
+        }
+    }
+    timeout(Duration::from_secs(2), signals.first_read.notified())
+        .await
+        .expect("driver performed first read");
+    signals.release_read.notify_one();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .expect("read response body");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, payload);
+    server.close().await.expect("clean shutdown");
+}
+
 #[derive(Debug)]
 struct WireResponse {
     status: u16,
     headers: BTreeMap<String, String>,
     body: Vec<u8>,
+}
+
+fn parse_wire_response(raw: Vec<u8>) -> WireResponse {
+    let separator = raw
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("HTTP response headers");
+    let head = String::from_utf8_lossy(&raw[..separator]);
+    let mut lines = head.lines();
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .expect("HTTP response status");
+    let mut headers = BTreeMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
+        }
+    }
+    WireResponse {
+        status,
+        headers,
+        body: raw[separator + 4..].to_vec(),
+    }
 }
 
 async fn wire_request(

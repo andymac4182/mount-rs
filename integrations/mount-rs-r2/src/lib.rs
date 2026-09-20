@@ -6,6 +6,10 @@
 //! differential-tested. The object key is configurable so multiple virtual
 //! filesystems can share a bucket safely.
 
+mod blocks;
+
+pub use blocks::R2BlockStore;
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

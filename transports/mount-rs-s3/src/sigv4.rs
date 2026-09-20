@@ -135,7 +135,11 @@ fn hmac_bytes(key: &[u8], data: &[u8]) -> Vec<u8> {
 pub fn sha256_hex(data: impl AsRef<[u8]>) -> String {
     let mut digest = Sha256::new();
     digest.update(data.as_ref());
-    hex_lower(&digest.finalize())
+    sha256_hex_digest(digest.finalize())
+}
+
+pub(crate) fn sha256_hex_digest(digest: impl AsRef<[u8]>) -> String {
+    hex_lower(digest.as_ref())
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
@@ -573,6 +577,27 @@ pub struct PresignRequest<'a> {
 
 /// Verify either Authorization-header or presigned-query SigV4.
 pub fn verify_request(input: VerifyRequest<'_>) -> Result<VerifiedRequest, SigV4Failure> {
+    verify_request_inner(input, true)
+}
+
+/// Verify the SigV4 envelope without hashing the request body.
+///
+/// This is the verification mode used by the streaming HTTP boundary.  The
+/// canonical request still includes the payload hash or sentinel supplied by
+/// the client. The request stream handler verifies ordinary hex payload hashes
+/// incrementally and the streaming payload decoder verifies aws-chunked
+/// signatures. This mode must not consume or buffer a body before the driver
+/// can receive its first chunk.
+pub fn verify_request_without_body(
+    input: VerifyRequest<'_>,
+) -> Result<VerifiedRequest, SigV4Failure> {
+    verify_request_inner(input, false)
+}
+
+fn verify_request_inner(
+    input: VerifyRequest<'_>,
+    verify_body: bool,
+) -> Result<VerifiedRequest, SigV4Failure> {
     let presigned =
         has_query(input.query, "X-Amz-Algorithm") || has_query(input.query, "X-Amz-Signature");
     let (parsed, amz_date, expiration_ms) = if presigned {
@@ -616,7 +641,8 @@ pub fn verify_request(input: VerifyRequest<'_>) -> Result<VerifiedRequest, SigV4
         header_value(input.headers, "x-amz-content-sha256")
             .ok_or_else(|| SigV4Failure::Malformed("missing x-amz-content-sha256".to_owned()))?
     };
-    if payload_hash != UNSIGNED_PAYLOAD
+    if verify_body
+        && payload_hash != UNSIGNED_PAYLOAD
         && payload_hash != STREAMING_PAYLOAD
         && payload_hash != STREAMING_PAYLOAD_TRAILER
         && payload_hash != STREAMING_UNSIGNED_PAYLOAD_TRAILER

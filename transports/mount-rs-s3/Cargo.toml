@@ -10,6 +10,7 @@ license = "MIT"
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
+futures-core = { version = "0.3", default-features = false }
 hmac = "0.12"
 md-5 = "0.10"
 mount-rs-core = { path = "../.." }
@@ -22,3 +23,6 @@ sha2 = "0.10"
 subtle = "2"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync"] }
+
+[dev-dependencies]
+async-trait = "0.1"

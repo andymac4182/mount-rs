@@ -59,11 +59,17 @@ cases still require audit.
   FULL synchronous, competing processes, forced dirty-page spills, killed writers,
   reopen and integrity checks. The host-filesystem control passed. The first
   Linux mounted run failed during contender setup under a correctly held lock;
-  `2eda510` moves contender setup before the writer starts. Mounted acceptance
-  remains pending the corrected CI result. Mount-service crashes, backend faults,
+  `2eda510` moves contender setup before the writer starts. `7006719` bounds
+  the dirty-page spill workload to 128 KiB (still exceeding the 32 KiB cache)
+  after the transitional snapshot backend exceeded the original deadline.
+  [Native job 106001538402](https://github.com/andymac4182/mount-rs/actions/runs/35482069213/job/106001538402)
+  then passed actual SQLite 3.45.1 DELETE/WAL process recovery on both mounted
+  memfs and SQLite snapshot persistence, with FULL synchronization, in 30.41s.
+  Mount-service crashes, backend faults,
   power loss and the final split-store architecture are not covered by this probe.
-- `4150b5d` adds an explicit native Linux 9P CI job. Its prerequisites and actual
-  mounted I/O must pass; ordinary userspace tests do not substitute for that job.
+- `4150b5d`: [native Linux 9P job 106000928554](https://github.com/andymac4182/mount-rs/actions/runs/35481837691/job/106000928554)
+  passed both actual mounted I/O/lifecycle and external-unmount tests, zero
+  ignored. Ordinary userspace tests do not substitute for that job.
 
 ## Still required before the overall porting goal is complete
 

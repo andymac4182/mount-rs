@@ -5,16 +5,19 @@
 //! operator-selected non-loopback bind.
 
 use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 use axum::{
     Router,
-    body::{Body, to_bytes},
+    body::{Body, BodyDataStream},
     extract::State,
     http::{HeaderName, HeaderValue, Request, Response, StatusCode},
     response::IntoResponse,
     routing::any,
 };
+use futures_core::Stream;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -22,8 +25,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::protocol::S3Response;
-use crate::session::{S3RequestHead, S3Session};
+use crate::session::{S3RequestBody, S3RequestHead, S3Session, S3StreamBody, S3StreamResponse};
 use crate::sigv4::{Credentials, HeaderEntry};
 
 pub const DEFAULT_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
@@ -155,18 +157,11 @@ async fn handle_http(
         .iter()
         .map(|(name, value)| HeaderEntry::new(name.as_str(), value.to_str().unwrap_or_default()))
         .collect::<Vec<_>>();
-    let body = match to_bytes(request.into_body(), session.options.max_body_bytes).await {
-        Ok(body) => body.to_vec(),
-        Err(_) => {
-            return response_from_s3(S3Response {
-                status: 413,
-                headers: vec![("content-length".to_owned(), "0".to_owned())],
-                body: Vec::new(),
-            });
-        }
-    };
+    let body: S3RequestBody = Box::pin(RequestBodyStream {
+        inner: request.into_body().into_data_stream(),
+    });
     let response = session
-        .handle_request(
+        .handle_request_stream(
             S3RequestHead {
                 method,
                 target,
@@ -178,7 +173,24 @@ async fn handle_http(
     response_from_s3(response)
 }
 
-fn response_from_s3(response: S3Response) -> Response<Body> {
+struct RequestBodyStream {
+    inner: BodyDataStream,
+}
+
+impl Stream for RequestBodyStream {
+    type Item = Result<Vec<u8>, String>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.inner).poll_next(context) {
+            Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes.to_vec()))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.to_string()))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+fn response_from_s3(response: S3StreamResponse) -> Response<Body> {
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let mut builder = Response::builder().status(status);
     for (name, value) in response.headers {
@@ -189,7 +201,12 @@ fn response_from_s3(response: S3Response) -> Response<Body> {
             builder = builder.header(name, value);
         }
     }
-    builder.body(Body::from(response.body)).unwrap_or_else(|_| {
+    let body = match response.body {
+        Some(S3StreamBody::Bytes(bytes)) => Body::from(bytes),
+        Some(S3StreamBody::Stream(stream)) => Body::from_stream(stream),
+        None => Body::empty(),
+    };
+    builder.body(body).unwrap_or_else(|_| {
         Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
             .body(Body::empty())

@@ -5,12 +5,14 @@
 //! mount-rs-core::FsDriver contract for all storage.
 
 use std::collections::BTreeMap;
-use std::future::Future;
+use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use futures_core::Stream;
 use md5::{Digest as Md5Digest, Md5};
 use mount_rs_core::{
     FileType, FsDriver, MkdirOptions, Stats,
@@ -20,7 +22,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::protocol::{
     self, ByteRange, ListObjectsXml, ListPartsXml, ListedObject, ListedPart, MAX_PART_SIZE,
@@ -54,6 +56,25 @@ struct UploadBody<'a> {
     head: &'a S3RequestHead,
     body: &'a [u8],
     verified: Option<&'a sigv4::VerifiedRequest>,
+}
+
+struct StreamUploadBody<'a> {
+    head: &'a S3RequestHead,
+    body: S3RequestBody,
+    verified: Option<&'a sigv4::VerifiedRequest>,
+}
+
+struct StreamWriteRequest<'a> {
+    driver: &'a Arc<dyn FsDriver>,
+    path: &'a str,
+    headers: &'a [HeaderEntry],
+    body: S3RequestBody,
+    verified: Option<&'a sigv4::VerifiedRequest>,
+    credentials: Option<&'a Credentials>,
+    max_body_bytes: usize,
+    exclusive: bool,
+    create_parent: bool,
+    cleanup_on_error: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +124,31 @@ impl S3RequestHead {
 pub struct S3Request {
     pub head: S3RequestHead,
     pub body: Vec<u8>,
+}
+
+pub(crate) type S3RequestBody = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + Send>>;
+pub(crate) type S3ResponseBodyStream =
+    Pin<Box<dyn Stream<Item = Result<Vec<u8>, std::io::Error>> + Send>>;
+
+pub(crate) enum S3StreamBody {
+    Bytes(Vec<u8>),
+    Stream(S3ResponseBodyStream),
+}
+
+pub(crate) struct S3StreamResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<S3StreamBody>,
+}
+
+impl From<S3Response> for S3StreamResponse {
+    fn from(response: S3Response) -> Self {
+        Self {
+            status: response.status,
+            headers: response.headers,
+            body: Some(S3StreamBody::Bytes(response.body)),
+        }
+    }
 }
 
 impl S3Request {
@@ -215,6 +261,121 @@ impl S3Session {
             stats.errors += 1;
         }
         response
+    }
+
+    /// Answer one HTTP request while consuming its body incrementally.
+    ///
+    /// The in-process [`handle_request`] API intentionally remains a simple
+    /// byte-buffer API.  The Axum boundary uses this sibling entry point so
+    /// uploads are handed to the driver as the HTTP body arrives and object
+    /// downloads are pulled from the driver only as Axum asks for more data.
+    pub(crate) async fn handle_request_stream(
+        &self,
+        head: S3RequestHead,
+        body: S3RequestBody,
+    ) -> S3StreamResponse {
+        {
+            let mut stats = self.stats.lock().await;
+            stats.requests += 1;
+        }
+        let request_id = self
+            .next_request_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let request_id = format!("mountx-{request_id:016x}");
+        let resource = Some(head.target.as_str());
+        let result = self.dispatch_stream(&head, body).await;
+        let response = match result {
+            Ok(mut response) => {
+                response
+                    .headers
+                    .push(("x-amz-request-id".to_owned(), request_id));
+                if head.method.eq_ignore_ascii_case("HEAD") {
+                    response.body = None;
+                }
+                response
+            }
+            Err(error) => {
+                S3StreamResponse::from(error_response(&error.error(), &request_id, resource))
+            }
+        };
+        let mut stats = self.stats.lock().await;
+        stats.replies += 1;
+        if response.status >= 400 {
+            stats.errors += 1;
+        }
+        // Keep the response owned by this function until after statistics are
+        // updated.  This also makes the error path mirror handle_request.
+        response
+    }
+
+    async fn dispatch_stream(
+        &self,
+        head: &S3RequestHead,
+        mut body: S3RequestBody,
+    ) -> S3Result<S3StreamResponse> {
+        let target = parse_request_target(&head.target)?;
+        let verified = self.authorize_stream(head, &target)?;
+        let operation = protocol::route_request(&head.method, &target, &head.headers)?;
+        let streamable = matches!(
+            &operation,
+            Operation::GetObject(_)
+                | Operation::HeadObject(_)
+                | Operation::PutObject(_)
+                | Operation::UploadPart { .. }
+        );
+        if !streamable {
+            let buffered = collect_request_body(&mut body, self.options.max_body_bytes).await?;
+            return self
+                .dispatch(head, &buffered)
+                .await
+                .map(S3StreamResponse::from);
+        }
+
+        self.count_operation(operation_name(&operation)).await;
+        let bucket_name = operation_bucket(&operation);
+        let driver = if let Some(bucket) = bucket_name {
+            self.buckets
+                .get(bucket)
+                .ok_or_else(|| S3Failure::s3("NoSuchBucket"))?
+                .clone()
+        } else {
+            self.buckets
+                .values()
+                .next()
+                .cloned()
+                .ok_or_else(|| S3Failure::s3("NoSuchBucket"))?
+        };
+        match operation {
+            Operation::GetObject(target) => {
+                self.get_object_stream(driver, &target, head, false).await
+            }
+            Operation::HeadObject(target) => {
+                self.get_object_stream(driver, &target, head, true).await
+            }
+            Operation::PutObject(target) => {
+                self.put_object_stream(driver, &target, head, body, verified.as_ref())
+                    .await
+            }
+            Operation::UploadPart {
+                target,
+                upload_id,
+                part_number,
+            } => {
+                self.upload_part_stream(
+                    driver,
+                    &target,
+                    &upload_id,
+                    part_number,
+                    StreamUploadBody {
+                        head,
+                        body,
+                        verified: verified.as_ref(),
+                    },
+                )
+                .await
+            }
+            _ => unreachable!("streamability was checked above"),
+        }
     }
 
     async fn dispatch(&self, head: &S3RequestHead, body: &[u8]) -> S3Result<S3Response> {
@@ -372,6 +533,36 @@ impl S3Session {
         })
     }
 
+    fn authorize_stream(
+        &self,
+        head: &S3RequestHead,
+        target: &protocol::ParsedTarget,
+    ) -> S3Result<Option<sigv4::VerifiedRequest>> {
+        let Some(credentials) = &self.options.credentials else {
+            return Ok(None);
+        };
+        sigv4::verify_request_without_body(sigv4::VerifyRequest {
+            method: &head.method,
+            path: &target.path,
+            query: &target.query,
+            headers: &head.headers,
+            body: &[],
+            credentials,
+            expected_region: self.options.region.as_deref(),
+            now_ms: now_ms(),
+        })
+        .map(Some)
+        .map_err(|failure| {
+            S3Failure::S3(sigv4_error(
+                failure,
+                target
+                    .query
+                    .iter()
+                    .any(|entry| entry.name.starts_with("X-Amz-")),
+            ))
+        })
+    }
+
     async fn count_operation(&self, operation: &str) {
         let mut stats = self.stats.lock().await;
         *stats.operations.entry(operation.to_owned()).or_default() += 1;
@@ -449,6 +640,74 @@ impl S3Session {
         Ok(response)
     }
 
+    async fn get_object_stream(
+        &self,
+        driver: Arc<dyn FsDriver>,
+        target: &ObjectTarget,
+        head: &S3RequestHead,
+        is_head: bool,
+    ) -> S3Result<S3StreamResponse> {
+        let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
+        let is_directory = stats.file_type() == FileType::Directory;
+        if target.directory != is_directory || (!target.directory && !stats.is_file()) {
+            return Err(S3Failure::s3("NoSuchKey"));
+        }
+        let etag = object_etag(&stats);
+        if let Some(status) = evaluate_get_conditionals(&stats, &etag, &head.headers, &head.method)
+        {
+            return Ok(S3StreamResponse {
+                status,
+                headers: vec![("etag".to_owned(), protocol::etag_header(&etag))],
+                body: None,
+            });
+        }
+        let mut selected_range = None;
+        if let Some(raw_range) = header_value(&head.headers, "range") {
+            let range = protocol::parse_range(&raw_range, stats.size);
+            if let Some(if_range) = header_value(&head.headers, "if-range") {
+                if if_range_matches(&if_range, &etag, stats.mtime_ms) {
+                    selected_range = range;
+                }
+            } else {
+                selected_range = range;
+            }
+            if range.is_none() && header_value(&head.headers, "if-range").is_none() {
+                return Ok(S3StreamResponse {
+                    status: 416,
+                    headers: vec![(
+                        "content-range".to_owned(),
+                        format!("bytes */{}", stats.size),
+                    )],
+                    body: None,
+                });
+            }
+        }
+        let status = if selected_range.is_some() { 206 } else { 200 };
+        let mut response = S3StreamResponse {
+            status,
+            headers: protocol::object_headers(
+                &etag,
+                if target.directory { 0 } else { stats.size },
+                stats.mtime_ms,
+                selected_range,
+                stats.size,
+            ),
+            body: None,
+        };
+        if !is_head && !target.directory && stats.size > 0 {
+            let range_size = selected_range.map_or(stats.size, |range| range.end - range.start + 1);
+            let start = selected_range.map_or(0, |range| range.start);
+            response.body = Some(S3StreamBody::Stream(stream_file(
+                driver,
+                &target.path,
+                start,
+                range_size,
+                self.options.read_chunk_bytes,
+            )));
+        }
+        Ok(response)
+    }
+
     async fn put_object(
         &self,
         driver: Arc<dyn FsDriver>,
@@ -508,6 +767,72 @@ impl S3Session {
         Ok(S3Response::empty(200)
             .header("etag", protocol::etag_header(&object_etag(&stats)))
             .header("content-length", "0"))
+    }
+
+    async fn put_object_stream(
+        &self,
+        driver: Arc<dyn FsDriver>,
+        target: &ObjectTarget,
+        head: &S3RequestHead,
+        body: S3RequestBody,
+        verified: Option<&sigv4::VerifiedRequest>,
+    ) -> S3Result<S3StreamResponse> {
+        let existing = driver.stat(&target.path).await.ok();
+        check_put_conditionals(existing.as_ref(), &head.headers)?;
+        let requested_mtime =
+            parse_meta_mtime(header_value(&head.headers, "x-amz-meta-mtime").as_deref());
+        if target.directory {
+            consume_stream_body(
+                body,
+                &head.headers,
+                self.options.max_body_bytes,
+                verified,
+                self.options.credentials.as_ref(),
+            )
+            .await?;
+            driver
+                .mkdir(
+                    &target.path,
+                    MkdirOptions {
+                        recursive: true,
+                        mode: Some(0o777),
+                    },
+                )
+                .await
+                .map_err(S3Failure::Fs)?;
+            if let Some(mtime) = requested_mtime {
+                apply_mtime(&driver, &target.path, mtime).await?;
+            }
+            let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
+            return Ok(S3StreamResponse::from(
+                S3Response::empty(200)
+                    .header("etag", protocol::etag_header(&object_etag(&stats)))
+                    .header("content-length", "0"),
+            ));
+        }
+        let exclusive = existing.is_none() && check_create_only(&head.headers);
+        write_stream_body(StreamWriteRequest {
+            driver: &driver,
+            path: &target.path,
+            headers: &head.headers,
+            body,
+            verified,
+            credentials: self.options.credentials.as_ref(),
+            max_body_bytes: self.options.max_body_bytes,
+            exclusive,
+            create_parent: true,
+            cleanup_on_error: existing.is_none(),
+        })
+        .await?;
+        if let Some(mtime) = requested_mtime {
+            apply_mtime(&driver, &target.path, mtime).await?;
+        }
+        let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
+        Ok(S3StreamResponse::from(
+            S3Response::empty(200)
+                .header("etag", protocol::etag_header(&object_etag(&stats)))
+                .header("content-length", "0"),
+        ))
     }
 
     async fn delete_object(
@@ -852,6 +1177,53 @@ impl S3Session {
             .header("content-length", "0"))
     }
 
+    async fn upload_part_stream(
+        &self,
+        driver: Arc<dyn FsDriver>,
+        target: &ObjectTarget,
+        upload_id: &str,
+        part_number: u32,
+        request: StreamUploadBody<'_>,
+    ) -> S3Result<S3StreamResponse> {
+        let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
+        let path = part_path(upload_id, part_number);
+        let max_part_bytes = self
+            .options
+            .max_body_bytes
+            .min(usize::try_from(MAX_PART_SIZE).unwrap_or(usize::MAX));
+        let cleanup_on_error = driver.stat(&path).await.is_err();
+        write_stream_body(StreamWriteRequest {
+            driver: &driver,
+            path: &path,
+            headers: &request.head.headers,
+            body: request.body,
+            verified: request.verified,
+            credentials: self.options.credentials.as_ref(),
+            max_body_bytes: max_part_bytes,
+            exclusive: false,
+            create_parent: false,
+            cleanup_on_error,
+        })
+        .await
+        .map_err(|error| match error {
+            S3Failure::Fs(ref fs_error)
+                if matches!(
+                    fs_error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+            {
+                S3Failure::s3("NoSuchUpload")
+            }
+            other => other,
+        })?;
+        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        Ok(S3StreamResponse::from(
+            S3Response::empty(200)
+                .header("etag", protocol::etag_header(&object_etag(&stats)))
+                .header("content-length", "0"),
+        ))
+    }
+
     async fn complete_multipart(
         &self,
         driver: Arc<dyn FsDriver>,
@@ -1025,6 +1397,22 @@ impl S3Session {
     }
 }
 
+async fn next_request_body(body: &mut S3RequestBody) -> Option<Result<Vec<u8>, String>> {
+    poll_fn(|context| body.as_mut().poll_next(context)).await
+}
+
+async fn collect_request_body(body: &mut S3RequestBody, max_bytes: usize) -> S3Result<Vec<u8>> {
+    let mut output = Vec::new();
+    while let Some(chunk) = next_request_body(body).await {
+        let chunk = chunk.map_err(|_| S3Failure::s3("IncompleteBody"))?;
+        if output.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        output.extend_from_slice(&chunk);
+    }
+    Ok(output)
+}
+
 #[derive(Debug, Clone)]
 struct ListingEntry {
     key: String,
@@ -1178,6 +1566,261 @@ async fn write_bytes(
     Ok(())
 }
 
+async fn open_stream_handle(
+    driver: &Arc<dyn FsDriver>,
+    path: &str,
+    exclusive: bool,
+    create_parent: bool,
+) -> S3Result<Arc<dyn mount_rs_core::FileHandle>> {
+    let flags = if exclusive { "wx" } else { "w" };
+    match driver.open(path, flags, 0o666).await {
+        Ok(handle) => Ok(handle),
+        Err(error)
+            if create_parent
+                && matches!(
+                    error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+        {
+            ensure_parent(driver, path).await?;
+            driver.open(path, flags, 0o666).await.map_err(S3Failure::Fs)
+        }
+        Err(error) => Err(S3Failure::Fs(error)),
+    }
+}
+
+async fn write_stream_chunk(
+    handle: &Arc<dyn mount_rs_core::FileHandle>,
+    position: &mut u64,
+    bytes: &[u8],
+) -> S3Result<()> {
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let written = handle
+            .write(&bytes[offset..], Some(*position))
+            .await
+            .map_err(S3Failure::Fs)?;
+        if written == 0 {
+            return Err(S3Failure::s3("InternalError"));
+        }
+        if written > bytes.len() - offset {
+            return Err(S3Failure::s3("InternalError"));
+        }
+        offset += written;
+        *position += written as u64;
+    }
+    Ok(())
+}
+
+struct StreamingPayloadHash {
+    expected: String,
+    digest: Sha256,
+}
+
+impl StreamingPayloadHash {
+    fn new(headers: &[HeaderEntry]) -> S3Result<Option<Self>> {
+        let Some(value) = header_value(headers, "x-amz-content-sha256") else {
+            return Ok(None);
+        };
+        if matches!(
+            value.as_str(),
+            sigv4::UNSIGNED_PAYLOAD
+                | sigv4::STREAMING_PAYLOAD
+                | sigv4::STREAMING_PAYLOAD_TRAILER
+                | sigv4::STREAMING_UNSIGNED_PAYLOAD_TRAILER
+        ) {
+            return Ok(None);
+        }
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(S3Failure::s3("SignatureDoesNotMatch"));
+        }
+        Ok(Some(Self {
+            expected: value.to_ascii_lowercase(),
+            digest: Sha256::new(),
+        }))
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        self.digest.update(bytes);
+    }
+
+    fn verify(self) -> S3Result<()> {
+        let actual = sigv4::sha256_hex_digest(self.digest.finalize());
+        if actual
+            .as_bytes()
+            .ct_eq(self.expected.as_bytes())
+            .unwrap_u8()
+            != 1
+        {
+            return Err(S3Failure::s3("SignatureDoesNotMatch"));
+        }
+        Ok(())
+    }
+}
+
+async fn write_stream_body(request: StreamWriteRequest<'_>) -> S3Result<u64> {
+    let StreamWriteRequest {
+        driver,
+        path,
+        headers,
+        mut body,
+        verified,
+        credentials,
+        max_body_bytes,
+        exclusive,
+        create_parent,
+        cleanup_on_error,
+    } = request;
+    let chunked = aws_chunked_body(headers);
+    let declared_length = if chunked {
+        None
+    } else {
+        let raw = header_value(headers, "content-length")
+            .ok_or_else(|| S3Failure::s3("MissingContentLength"))?;
+        let declared =
+            parse_declared_length(&raw).ok_or_else(|| S3Failure::s3("InvalidArgument"))?;
+        if declared > max_body_bytes as u64 {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        Some(declared)
+    };
+    let mut decoder = StreamingBodyDecoder::new(headers, max_body_bytes, verified, credentials)?;
+    let mut payload_hash = StreamingPayloadHash::new(headers)?;
+    let mut handle: Option<Arc<dyn mount_rs_core::FileHandle>> = None;
+    let mut position = 0_u64;
+    let operation: S3Result<()> = async {
+        while let Some(chunk) = next_request_body(&mut body).await {
+            let chunk = chunk.map_err(|_| S3Failure::s3("IncompleteBody"))?;
+            let payloads = if let Some(decoder) = decoder.as_mut() {
+                decoder.feed(&chunk)?
+            } else {
+                if declared_length
+                    .is_some_and(|length| position.saturating_add(chunk.len() as u64) > length)
+                {
+                    return Err(S3Failure::s3("IncompleteBody"));
+                }
+                vec![chunk]
+            };
+            for payload in payloads {
+                if let Some(payload_hash) = payload_hash.as_mut() {
+                    payload_hash.update(&payload);
+                }
+                if payload.is_empty() {
+                    continue;
+                }
+                if handle.is_none() {
+                    handle =
+                        Some(open_stream_handle(driver, path, exclusive, create_parent).await?);
+                }
+                write_stream_chunk(
+                    handle.as_ref().expect("stream handle opened above"),
+                    &mut position,
+                    &payload,
+                )
+                .await?;
+            }
+        }
+        if let Some(decoder) = decoder.as_mut() {
+            for payload in decoder.finish()? {
+                if let Some(payload_hash) = payload_hash.as_mut() {
+                    payload_hash.update(&payload);
+                }
+                if payload.is_empty() {
+                    continue;
+                }
+                if handle.is_none() {
+                    handle =
+                        Some(open_stream_handle(driver, path, exclusive, create_parent).await?);
+                }
+                write_stream_chunk(
+                    handle.as_ref().expect("stream handle opened above"),
+                    &mut position,
+                    &payload,
+                )
+                .await?;
+            }
+        } else if declared_length != Some(position) {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        if let Some(payload_hash) = payload_hash {
+            payload_hash.verify()?;
+        }
+        if handle.is_none() {
+            handle = Some(open_stream_handle(driver, path, exclusive, create_parent).await?);
+        }
+        Ok(())
+    }
+    .await;
+    let opened = handle.is_some();
+    let close_result = if let Some(handle) = handle {
+        handle.close().await.map_err(S3Failure::Fs)
+    } else {
+        Ok(())
+    };
+    let result = operation.and(close_result).map(|()| position);
+    if result.is_err() && cleanup_on_error && opened {
+        let _ = driver.unlink(path).await;
+    }
+    result
+}
+
+async fn consume_stream_body(
+    mut body: S3RequestBody,
+    headers: &[HeaderEntry],
+    max_body_bytes: usize,
+    verified: Option<&sigv4::VerifiedRequest>,
+    credentials: Option<&Credentials>,
+) -> S3Result<()> {
+    let chunked = aws_chunked_body(headers);
+    let declared_length = if chunked {
+        None
+    } else {
+        let raw = header_value(headers, "content-length")
+            .ok_or_else(|| S3Failure::s3("MissingContentLength"))?;
+        Some(parse_declared_length(&raw).ok_or_else(|| S3Failure::s3("InvalidArgument"))?)
+    };
+    let mut decoder = StreamingBodyDecoder::new(headers, max_body_bytes, verified, credentials)?;
+    let mut payload_hash = StreamingPayloadHash::new(headers)?;
+    let mut received = 0_u64;
+    while let Some(chunk) = next_request_body(&mut body).await {
+        let chunk = chunk.map_err(|_| S3Failure::s3("IncompleteBody"))?;
+        let payloads = if let Some(decoder) = decoder.as_mut() {
+            decoder.feed(&chunk)?
+        } else {
+            received = received.saturating_add(chunk.len() as u64);
+            if received > max_body_bytes as u64 {
+                return Err(S3Failure::s3("EntityTooLarge"));
+            }
+            vec![chunk]
+        };
+        for payload in &payloads {
+            if let Some(payload_hash) = payload_hash.as_mut() {
+                payload_hash.update(payload);
+            }
+        }
+        if payloads.iter().any(|payload| !payload.is_empty()) {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+    }
+    if let Some(decoder) = decoder.as_mut() {
+        let payloads = decoder.finish()?;
+        for payload in &payloads {
+            if let Some(payload_hash) = payload_hash.as_mut() {
+                payload_hash.update(payload);
+            }
+        }
+        if payloads.iter().any(|payload| !payload.is_empty()) {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+    } else if declared_length != Some(received) {
+        return Err(S3Failure::s3("IncompleteBody"));
+    }
+    if let Some(payload_hash) = payload_hash {
+        payload_hash.verify()?;
+    }
+    Ok(())
+}
+
 async fn read_bytes_range(
     driver: Arc<dyn FsDriver>,
     path: &str,
@@ -1210,6 +1853,94 @@ async fn read_bytes_range(
     }
     handle.close().await.map_err(S3Failure::Fs)?;
     Ok(output)
+}
+
+struct FileBodyStream {
+    receiver: mpsc::Receiver<Result<Vec<u8>, std::io::Error>>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+impl Stream for FileBodyStream {
+    type Item = Result<Vec<u8>, std::io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.receiver.poll_recv(context)
+    }
+}
+
+impl Drop for FileBodyStream {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
+fn stream_file(
+    driver: Arc<dyn FsDriver>,
+    path: &str,
+    start: u64,
+    length: u64,
+    chunk_bytes: usize,
+) -> S3ResponseBodyStream {
+    let (sender, receiver) = mpsc::channel(1);
+    let (cancel, mut cancelled) = oneshot::channel();
+    let path = path.to_owned();
+    tokio::spawn(async move {
+        let handle = match driver.open(&path, "r", 0).await {
+            Ok(handle) => handle,
+            Err(error) => {
+                let _ = sender
+                    .send(Err(std::io::Error::other(error.to_string())))
+                    .await;
+                return;
+            }
+        };
+        let mut position = start;
+        let mut remaining = length;
+        while remaining > 0 {
+            let read_length = remaining.min(chunk_bytes.max(1) as u64) as usize;
+            let mut buffer = vec![0_u8; read_length];
+            let result = tokio::select! {
+                _ = &mut cancelled => None,
+                result = handle.read(&mut buffer, Some(position)) => Some(result),
+            };
+            let Some(result) = result else {
+                break;
+            };
+            let count = match result {
+                Ok(count) => count,
+                Err(error) => {
+                    let _ = sender
+                        .send(Err(std::io::Error::other(error.to_string())))
+                        .await;
+                    break;
+                }
+            };
+            if count == 0 {
+                break;
+            }
+            if count > buffer.len() {
+                let _ = sender
+                    .send(Err(std::io::Error::other(
+                        "file driver returned more bytes than requested",
+                    )))
+                    .await;
+                break;
+            }
+            buffer.truncate(count);
+            position += count as u64;
+            remaining -= count as u64;
+            if sender.send(Ok(buffer)).await.is_err() {
+                break;
+            }
+        }
+        let _ = handle.close().await;
+    });
+    Box::pin(FileBodyStream {
+        receiver,
+        cancel: Some(cancel),
+    })
 }
 
 async fn apply_mtime(driver: &Arc<dyn FsDriver>, path: &str, mtime_ms: i64) -> S3Result<()> {
@@ -1784,6 +2515,427 @@ fn decode_trailers(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamingDecodeState {
+    Header,
+    Payload,
+    PayloadCr,
+    PayloadLf,
+    Trailer,
+    Epilogue,
+    Done,
+}
+
+/// Incremental aws-chunked decoder used by the HTTP write path.
+///
+/// Unsigned payload chunks are released as soon as they arrive. Signed chunks
+/// are held only for the duration of their individual signature check, matching
+/// mountx's decoder and its eight-megabyte signed-frame bound. Header and
+/// trailer buffers are independently bounded so a fragmented peer cannot turn
+/// framing into an unbounded allocation.
+struct StreamingBodyDecoder<'a> {
+    encoded: Vec<u8>,
+    state: StreamingDecodeState,
+    current_size: u64,
+    current_remaining: u64,
+    current_signature: Option<String>,
+    current_payload: Vec<u8>,
+    previous_signature: Option<String>,
+    decoded_length: Option<u64>,
+    decoded: u64,
+    max_body_bytes: usize,
+    signing: Option<ChunkSigning<'a>>,
+    declared_trailers: Vec<String>,
+    trailer_block: Vec<u8>,
+    seen_trailers: Vec<String>,
+}
+
+impl<'a> StreamingBodyDecoder<'a> {
+    fn new(
+        headers: &[HeaderEntry],
+        max_body_bytes: usize,
+        verified: Option<&'a sigv4::VerifiedRequest>,
+        credentials: Option<&'a Credentials>,
+    ) -> S3Result<Option<Self>> {
+        if !aws_chunked_body(headers) {
+            return Ok(None);
+        }
+        let streaming = header_value(headers, "x-amz-content-sha256").unwrap_or_default();
+        let signed_streaming = matches!(
+            streaming.as_str(),
+            sigv4::STREAMING_PAYLOAD | sigv4::STREAMING_PAYLOAD_TRAILER
+        );
+        let decoded_length = header_value(headers, "x-amz-decoded-content-length")
+            .map(|value| {
+                parse_declared_length(&value).ok_or_else(|| S3Failure::s3("InvalidArgument"))
+            })
+            .transpose()?;
+        let declared_trailers = header_value(headers, "x-amz-trailer")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(|name| name.to_ascii_lowercase())
+                    .fold(Vec::new(), |mut names, name| {
+                        if !names.iter().any(|existing| existing == &name) {
+                            names.push(name);
+                        }
+                        names
+                    })
+            })
+            .unwrap_or_default();
+        let signing = if signed_streaming {
+            match (credentials, verified) {
+                (Some(credentials), Some(verified)) if !verified.presigned => Some(ChunkSigning {
+                    credentials,
+                    verified,
+                }),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let previous_signature = signing
+            .as_ref()
+            .map(|chunk| chunk.verified.signature.clone());
+        Ok(Some(Self {
+            encoded: Vec::new(),
+            state: StreamingDecodeState::Header,
+            current_size: 0,
+            current_remaining: 0,
+            current_signature: None,
+            current_payload: Vec::new(),
+            previous_signature,
+            decoded_length,
+            decoded: 0,
+            max_body_bytes,
+            signing,
+            declared_trailers,
+            trailer_block: Vec::new(),
+            seen_trailers: Vec::new(),
+        }))
+    }
+
+    fn feed(&mut self, bytes: &[u8]) -> S3Result<Vec<Vec<u8>>> {
+        if self.state == StreamingDecodeState::Done && !bytes.is_empty() {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        self.encoded.extend_from_slice(bytes);
+        let mut output = Vec::new();
+        loop {
+            let progressed = match self.state {
+                StreamingDecodeState::Header => self.consume_header()?,
+                StreamingDecodeState::Payload => self.consume_payload(&mut output)?,
+                StreamingDecodeState::PayloadCr => self.consume_payload_cr()?,
+                StreamingDecodeState::PayloadLf => self.consume_payload_lf(&mut output)?,
+                StreamingDecodeState::Trailer => self.consume_trailer()?,
+                StreamingDecodeState::Epilogue => self.consume_epilogue()?,
+                StreamingDecodeState::Done => {
+                    if self.encoded.is_empty() {
+                        false
+                    } else {
+                        return Err(S3Failure::s3("IncompleteBody"));
+                    }
+                }
+            };
+            if !progressed {
+                break;
+            }
+        }
+        Ok(output)
+    }
+
+    fn finish(&mut self) -> S3Result<Vec<Vec<u8>>> {
+        if self.state == StreamingDecodeState::Trailer && self.encoded.is_empty() {
+            if self.signing.is_some() {
+                return Err(S3Failure::s3("IncompleteBody"));
+            }
+            ensure_trailers_present(&self.declared_trailers, &self.seen_trailers)?;
+            self.state = StreamingDecodeState::Epilogue;
+        }
+        if self.state == StreamingDecodeState::Epilogue && self.encoded.is_empty() {
+            self.check_decoded_length()?;
+            self.state = StreamingDecodeState::Done;
+            return Ok(Vec::new());
+        }
+        if self.state == StreamingDecodeState::Done && self.encoded.is_empty() {
+            return Ok(Vec::new());
+        }
+        Err(S3Failure::s3("IncompleteBody"))
+    }
+
+    fn consume_header(&mut self) -> S3Result<bool> {
+        let Some(line_end) = find_crlf(&self.encoded) else {
+            if self.encoded.len() > MAX_CHUNK_HEADER_BYTES + 1 {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+            return Ok(false);
+        };
+        if line_end > MAX_CHUNK_HEADER_BYTES {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        let line = self.encoded[..line_end].to_vec();
+        self.encoded.drain(..line_end + 2);
+        let line = latin1(&line);
+        let mut extensions = line.split(';').map(str::to_owned);
+        let size_text = extensions.next().unwrap_or_default();
+        if size_text.is_empty() || size_text.len() > 16 {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        let size =
+            u64::from_str_radix(&size_text, 16).map_err(|_| S3Failure::s3("InvalidRequest"))?;
+        let provided_signature = extensions.find_map(|extension| {
+            let (name, value) = extension.split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case("chunk-signature")
+                .then(|| value.trim().to_owned())
+        });
+        if self.signing.is_some() {
+            let Some(signature) = provided_signature.as_deref() else {
+                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+            };
+            if signature.len() != 64 || !signature.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+        }
+        if self.signing.is_some() && size > MAX_SIGNED_CHUNK_BYTES {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        if self.signing.is_none() && size > MAX_SAFE_LENGTH {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        self.check_decoded_size(size)?;
+        self.current_size = size;
+        self.current_remaining = size;
+        self.current_signature = provided_signature;
+        self.current_payload.clear();
+        if self.signing.is_some() && size > 0 {
+            self.current_payload = Vec::with_capacity(
+                usize::try_from(size).map_err(|_| S3Failure::s3("EntityTooLarge"))?,
+            );
+        }
+        if size == 0 {
+            self.finish_chunk(&mut Vec::new())?;
+        } else {
+            self.state = StreamingDecodeState::Payload;
+        }
+        Ok(true)
+    }
+
+    fn consume_payload(&mut self, output: &mut Vec<Vec<u8>>) -> S3Result<bool> {
+        if self.encoded.is_empty() {
+            return Ok(false);
+        }
+        let take = self.current_remaining.min(self.encoded.len() as u64) as usize;
+        let bytes = self.encoded.drain(..take).collect::<Vec<_>>();
+        if self.signing.is_some() {
+            self.current_payload.extend_from_slice(&bytes);
+        } else {
+            output.push(bytes);
+        }
+        self.current_remaining -= take as u64;
+        self.decoded = self.decoded.saturating_add(take as u64);
+        if self.current_remaining == 0 {
+            self.state = StreamingDecodeState::PayloadCr;
+        }
+        Ok(true)
+    }
+
+    fn consume_payload_cr(&mut self) -> S3Result<bool> {
+        let Some(byte) = self.encoded.first().copied() else {
+            return Ok(false);
+        };
+        if byte != b'\r' {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        self.encoded.remove(0);
+        self.state = StreamingDecodeState::PayloadLf;
+        Ok(true)
+    }
+
+    fn consume_payload_lf(&mut self, output: &mut Vec<Vec<u8>>) -> S3Result<bool> {
+        let Some(byte) = self.encoded.first().copied() else {
+            return Ok(false);
+        };
+        if byte != b'\n' {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        self.encoded.remove(0);
+        self.finish_chunk(output)?;
+        Ok(true)
+    }
+
+    fn consume_trailer(&mut self) -> S3Result<bool> {
+        let Some(line_end) = find_crlf(&self.encoded) else {
+            if self.encoded.len() > MAX_TRAILER_BYTES.saturating_sub(self.trailer_block.len()) + 1 {
+                return Err(S3Failure::s3("EntityTooLarge"));
+            }
+            return Ok(false);
+        };
+        if line_end > 0
+            && line_end.saturating_add(1)
+                > MAX_TRAILER_BYTES.saturating_sub(self.trailer_block.len())
+        {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        let raw_line = self.encoded[..line_end].to_vec();
+        self.encoded.drain(..line_end + 2);
+        if raw_line.is_empty() {
+            if self.signing.is_some() {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+            ensure_trailers_present(&self.declared_trailers, &self.seen_trailers)?;
+            self.state = StreamingDecodeState::Epilogue;
+            return Ok(true);
+        }
+        let line = latin1(&raw_line);
+        let (name, value) = line
+            .split_once(':')
+            .ok_or_else(|| S3Failure::s3("InvalidRequest"))?;
+        let name = name.trim().to_ascii_lowercase();
+        let value = value.trim();
+        if name == TRAILER_SIGNATURE_HEADER {
+            let Some(signing) = self.signing.as_ref() else {
+                return Err(S3Failure::s3("InvalidRequest"));
+            };
+            if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return Err(S3Failure::s3("InvalidRequest"));
+            }
+            ensure_trailers_present(&self.declared_trailers, &self.seen_trailers)?;
+            let previous = self
+                .previous_signature
+                .as_deref()
+                .ok_or_else(|| S3Failure::s3("SignatureDoesNotMatch"))?;
+            let expected = sigv4::sign_trailer(
+                &signing.credentials.secret_access_key,
+                &signing.verified.scope,
+                &sigv4::format_amz_date(signing.verified.timestamp_ms),
+                previous,
+                &sigv4::sha256_hex(&self.trailer_block),
+            );
+            if expected
+                .as_bytes()
+                .ct_eq(value.to_ascii_lowercase().as_bytes())
+                .unwrap_u8()
+                != 1
+            {
+                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+            }
+            self.state = StreamingDecodeState::Epilogue;
+            return Ok(true);
+        }
+        if name.is_empty()
+            || !self
+                .declared_trailers
+                .iter()
+                .any(|declared| declared == &name)
+            || self.seen_trailers.iter().any(|seen| seen == &name)
+        {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        if self
+            .trailer_block
+            .len()
+            .saturating_add(raw_line.len())
+            .saturating_add(1)
+            > MAX_TRAILER_BYTES
+        {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        self.trailer_block.extend_from_slice(&raw_line);
+        self.trailer_block.push(b'\n');
+        self.seen_trailers.push(name);
+        Ok(true)
+    }
+
+    fn consume_epilogue(&mut self) -> S3Result<bool> {
+        if self.encoded.is_empty() {
+            return Ok(false);
+        }
+        if self.encoded.len() > 2 {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        if self.encoded[0] != b'\r' {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        if self.encoded.len() == 1 {
+            return Ok(false);
+        }
+        if self.encoded[1] != b'\n' {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        self.encoded.clear();
+        self.check_decoded_length()?;
+        self.state = StreamingDecodeState::Done;
+        Ok(true)
+    }
+
+    fn finish_chunk(&mut self, output: &mut Vec<Vec<u8>>) -> S3Result<()> {
+        let terminal = self.current_size == 0;
+        if let Some(signing) = self.signing.as_ref() {
+            let previous = self
+                .previous_signature
+                .as_deref()
+                .ok_or_else(|| S3Failure::s3("SignatureDoesNotMatch"))?;
+            let expected =
+                chunk_signature(signing, previous, &sigv4::sha256_hex(&self.current_payload));
+            let provided = self
+                .current_signature
+                .as_deref()
+                .expect("signed chunk signature checked above")
+                .to_ascii_lowercase();
+            if expected.as_bytes().ct_eq(provided.as_bytes()).unwrap_u8() != 1 {
+                return Err(S3Failure::s3("SignatureDoesNotMatch"));
+            }
+            self.previous_signature = Some(expected);
+            if !terminal && !self.current_payload.is_empty() {
+                output.push(std::mem::take(&mut self.current_payload));
+            }
+        }
+        if terminal {
+            self.check_decoded_length()?;
+            self.state = if self.declared_trailers.is_empty() {
+                StreamingDecodeState::Epilogue
+            } else {
+                StreamingDecodeState::Trailer
+            };
+        } else {
+            self.state = StreamingDecodeState::Header;
+        }
+        self.current_size = 0;
+        self.current_remaining = 0;
+        self.current_signature = None;
+        self.current_payload.clear();
+        Ok(())
+    }
+
+    fn check_decoded_size(&self, additional: u64) -> S3Result<()> {
+        let next = self.decoded.saturating_add(additional);
+        if next > self.max_body_bytes as u64 {
+            return Err(S3Failure::s3("EntityTooLarge"));
+        }
+        if self.decoded_length.is_some_and(|length| next > length) {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        Ok(())
+    }
+
+    fn check_decoded_length(&self) -> S3Result<()> {
+        if self
+            .decoded_length
+            .is_some_and(|length| self.decoded != length)
+        {
+            return Err(S3Failure::s3("IncompleteBody"));
+        }
+        Ok(())
+    }
+}
+
+fn find_crlf(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(2).position(|pair| pair == b"\r\n")
+}
+
 fn latin1(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| char::from(*byte)).collect()
 }
@@ -1875,5 +3027,49 @@ fn sigv4_error(failure: SigV4Failure, presigned: bool) -> protocol::S3Error {
             protocol::error_with_message("AccessDenied", "Request has expired")
         }
         SigV4Failure::SignatureMismatch => s3_error("SignatureDoesNotMatch"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mount_rs_core::{ErrorCode, FileHandle, FsError, Result as FsResult, Stats};
+
+    struct ReturnedWriteCount(usize);
+
+    #[async_trait::async_trait]
+    impl FileHandle for ReturnedWriteCount {
+        async fn read(&self, _buffer: &mut [u8], _position: Option<u64>) -> FsResult<usize> {
+            Err(FsError::new(ErrorCode::Eio))
+        }
+
+        async fn write(&self, _buffer: &[u8], _position: Option<u64>) -> FsResult<usize> {
+            Ok(self.0)
+        }
+
+        async fn stat(&self) -> FsResult<Stats> {
+            Err(FsError::new(ErrorCode::Eio))
+        }
+
+        async fn truncate(&self, _length: u64) -> FsResult<()> {
+            Err(FsError::new(ErrorCode::Eio))
+        }
+
+        async fn close(&self) -> FsResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_writes_reject_zero_and_oversized_driver_counts() {
+        for returned in [0, 4] {
+            let handle: Arc<dyn FileHandle> = Arc::new(ReturnedWriteCount(returned));
+            let mut position = 0;
+            let error = write_stream_chunk(&handle, &mut position, b"abc")
+                .await
+                .expect_err("invalid write count");
+            assert!(matches!(error, S3Failure::S3(ref error) if error.code == "InternalError"));
+            assert_eq!(position, 0);
+        }
     }
 }
