@@ -680,6 +680,33 @@ fn host_wal_cross_process_reader_writer_checkpoint_and_reopen() {
 
 #[cfg(target_os = "windows")]
 #[test]
+fn windows_wal_shared_memory_mapping_round_trips() {
+    let root = temp_root("windows-wal-shm-map");
+    let backend = HostDirectory::new(&root).expect("host backend");
+    let options = OpenOptions {
+        read_only: false,
+        create: true,
+        delete_on_close: false,
+        kind: mount_rs_sqlite_vfs::FileKind::MainDatabase,
+        raw_flags: 0,
+        wal_scope: WalScope::HostLocal,
+    };
+    let mut file = backend.open(b"mapping.db", options).expect("database");
+    let mapped = file
+        .shm_map(0, 32 * 1024, true)
+        .expect("map WAL shared memory");
+    assert!(!mapped.is_null(), "WAL shared-memory map must be non-null");
+    unsafe {
+        *mapped.cast::<u8>() = 0xa5;
+    }
+    file.shm_barrier();
+    file.shm_unmap(false).expect("unmap WAL shared memory");
+    drop(file);
+    fs::remove_dir_all(root).expect("cleanup");
+}
+
+#[cfg(target_os = "windows")]
+#[test]
 fn windows_native_locks_preserve_rollback_state_transitions() {
     let root = temp_root("windows-lock-states");
     let backend = HostDirectory::new(&root).expect("host backend");
