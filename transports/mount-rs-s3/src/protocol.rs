@@ -159,6 +159,8 @@ pub fn s3_error_of(error: &FsError) -> S3Error {
 pub enum S3Failure {
     #[error("{0}")]
     S3(S3Error),
+    #[error("{error}")]
+    S3Resource { error: S3Error, resource: String },
     #[error("{0}")]
     Fs(#[from] FsError),
     #[error("{0}")]
@@ -170,11 +172,29 @@ impl S3Failure {
         Self::S3(s3_error(code))
     }
 
+    pub fn with_resource(self, resource: impl Into<String>) -> Self {
+        let resource = resource.into();
+        match self {
+            Self::S3(error) | Self::S3Resource { error, .. } => {
+                Self::S3Resource { error, resource }
+            }
+            other => other,
+        }
+    }
+
     pub fn error(&self) -> S3Error {
         match self {
             Self::S3(error) => error.clone(),
+            Self::S3Resource { error, .. } => error.clone(),
             Self::Fs(error) => s3_error_of(error),
             Self::Internal(_) => s3_error("InternalError"),
+        }
+    }
+
+    pub fn resource(&self) -> Option<&str> {
+        match self {
+            Self::S3Resource { resource, .. } => Some(resource),
+            Self::S3(_) | Self::Fs(_) | Self::Internal(_) => None,
         }
     }
 }
@@ -458,8 +478,12 @@ fn unsupported_query(name: &str) -> bool {
     )
 }
 
-fn method_not_allowed() -> S3Failure {
-    S3Failure::s3("MethodNotAllowed")
+fn method_not_allowed(method: &str, resource: &str) -> S3Failure {
+    S3Failure::S3(error_with_message(
+        "MethodNotAllowed",
+        format!("The method {method} is not allowed against this resource."),
+    ))
+    .with_resource(resource)
 }
 
 fn staging_answer(method: &str) -> S3Result<Operation> {
@@ -523,7 +547,7 @@ pub fn route_request(
         return if method == "GET" {
             Ok(Operation::ListBuckets)
         } else {
-            Err(method_not_allowed())
+            Err(method_not_allowed(&method, &target.path))
         };
     }
     if !is_valid_bucket_name(bucket) {
@@ -538,11 +562,11 @@ pub fn route_request(
             return if method == "GET" {
                 Err(S3Failure::s3("NotImplemented"))
             } else {
-                Err(method_not_allowed())
+                Err(method_not_allowed(&method, &target.path))
             };
         }
         if upload_id.is_some() {
-            return Err(method_not_allowed());
+            return Err(method_not_allowed(&method, &target.path));
         }
         return match method.as_str() {
             "GET" => {
@@ -612,7 +636,7 @@ pub fn route_request(
             }),
             "POST" => Err(S3Failure::s3("NotImplemented")),
             "PUT" | "DELETE" => Err(S3Failure::s3("NotImplemented")),
-            _ => Err(method_not_allowed()),
+            _ => Err(method_not_allowed(&method, &target.path)),
         };
     }
     if is_staging_key(raw_key) {
@@ -620,7 +644,7 @@ pub fn route_request(
     }
     let destination = parse_object_key(bucket, raw_key)?;
     if delete && method == "POST" {
-        return Err(method_not_allowed());
+        return Err(method_not_allowed(&method, &target.path));
     }
     if uploads {
         return if method == "POST" {
@@ -678,7 +702,7 @@ pub fn route_request(
                     marker,
                 })
             }
-            _ => Err(method_not_allowed()),
+            _ => Err(method_not_allowed(&method, &target.path)),
         };
     }
     if (method == "GET" || method == "HEAD") && has_query(&target.query, "partNumber") {
@@ -714,7 +738,7 @@ pub fn route_request(
                 replace_metadata,
             })
         }
-        _ => Err(method_not_allowed()),
+        _ => Err(method_not_allowed(&method, &target.path)),
     }
 }
 
@@ -901,15 +925,15 @@ pub fn list_objects_xml(input: ListObjectsXml<'_>) -> String {
         xml_escape(bucket),
         xml_escape(&encode(prefix))
     ));
-    if let Some(delimiter) = delimiter {
-        xml.push_str(&format!(
-            "<Delimiter>{}</Delimiter>",
-            xml_escape(&encode(delimiter))
-        ));
-    }
     if let Some(value) = continuation {
         xml.push_str(&format!(
             "<ContinuationToken>{}</ContinuationToken>",
+            xml_escape(value)
+        ));
+    }
+    if let Some(value) = next {
+        xml.push_str(&format!(
+            "<NextContinuationToken>{}</NextContinuationToken>",
             xml_escape(value)
         ));
     }
@@ -922,19 +946,19 @@ pub fn list_objects_xml(input: ListObjectsXml<'_>) -> String {
     xml.push_str(&format!(
         "<KeyCount>{key_count}</KeyCount><MaxKeys>{max_keys}</MaxKeys>"
     ));
-    if let Some(value) = next {
+    if let Some(delimiter) = delimiter {
         xml.push_str(&format!(
-            "<NextContinuationToken>{}</NextContinuationToken>",
-            xml_escape(value)
+            "<Delimiter>{}</Delimiter>",
+            xml_escape(&encode(delimiter))
         ));
+    }
+    if encoding_url {
+        xml.push_str("<EncodingType>url</EncodingType>");
     }
     xml.push_str(&format!(
         "<IsTruncated>{}</IsTruncated>",
         if truncated { "true" } else { "false" }
     ));
-    if encoding_url {
-        xml.push_str("<EncodingType>url</EncodingType>");
-    }
     for object in objects {
         xml.push_str(&format!("<Contents><Key>{}</Key><LastModified>{}</LastModified><ETag>{}</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass>", xml_escape(&encode(&object.key)), xml_escape(&object.last_modified), xml_escape(&etag_header(&object.etag)), object.size));
         if object.owner {
@@ -957,10 +981,10 @@ pub fn list_objects_xml(input: ListObjectsXml<'_>) -> String {
 
 pub fn copy_object_xml(etag: &str, modified: &str) -> String {
     format!(
-        "{}<CopyObjectResult><ETag>{}</ETag><LastModified>{}</LastModified></CopyObjectResult>",
+        "{}<CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><LastModified>{}</LastModified><ETag>{}</ETag></CopyObjectResult>",
         xml_header(),
-        xml_escape(&etag_header(etag)),
-        xml_escape(modified)
+        xml_escape(modified),
+        xml_escape(&etag_header(etag))
     )
 }
 

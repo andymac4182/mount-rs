@@ -217,6 +217,7 @@ jobs:
       - name: Run the unmodified upstream driver conformance suite
         run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir tests/upstream test
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-kv-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-http-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-edge-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-flags-parity.mjs

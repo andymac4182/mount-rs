@@ -241,7 +241,6 @@ impl S3Session {
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request_id = format!("mountx-{request_id:016x}");
-        let resource = Some(head.target.as_str());
         let result = self.dispatch(&head, &body).await;
         let response = match result {
             Ok(mut response) => {
@@ -253,7 +252,7 @@ impl S3Session {
                 }
                 response
             }
-            Err(error) => error_response(&error.error(), &request_id, resource),
+            Err(error) => error_response(&error.error(), &request_id, error.resource()),
         };
         let mut stats = self.stats.lock().await;
         stats.replies += 1;
@@ -282,7 +281,6 @@ impl S3Session {
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request_id = format!("mountx-{request_id:016x}");
-        let resource = Some(head.target.as_str());
         let result = self.dispatch_stream(&head, body).await;
         let response = match result {
             Ok(mut response) => {
@@ -294,9 +292,11 @@ impl S3Session {
                 }
                 response
             }
-            Err(error) => {
-                S3StreamResponse::from(error_response(&error.error(), &request_id, resource))
-            }
+            Err(error) => S3StreamResponse::from(error_response(
+                &error.error(),
+                &request_id,
+                error.resource(),
+            )),
         };
         let mut stats = self.stats.lock().await;
         stats.replies += 1;
@@ -314,8 +314,11 @@ impl S3Session {
         mut body: S3RequestBody,
     ) -> S3Result<S3StreamResponse> {
         let target = parse_request_target(&head.target)?;
-        let verified = self.authorize_stream(head, &target)?;
-        let operation = protocol::route_request(&head.method, &target, &head.headers)?;
+        let verified = self
+            .authorize_stream(head, &target)
+            .map_err(|error| error.with_resource(target.path.clone()))?;
+        let operation = protocol::route_request(&head.method, &target, &head.headers)
+            .map_err(|error| error.with_resource(target.path.clone()))?;
         let streamable = matches!(
             &operation,
             Operation::GetObject(_)
@@ -336,7 +339,7 @@ impl S3Session {
         let driver = if let Some(bucket) = bucket_name {
             self.buckets
                 .get(bucket)
-                .ok_or_else(|| S3Failure::s3("NoSuchBucket"))?
+                .ok_or_else(|| S3Failure::s3("NoSuchBucket").with_resource(target.path.clone()))?
                 .clone()
         } else {
             self.buckets
@@ -383,8 +386,11 @@ impl S3Session {
             return Err(S3Failure::s3("EntityTooLarge"));
         }
         let target = parse_request_target(&head.target)?;
-        let verified = self.authorize(head, &target, body)?;
-        let operation = protocol::route_request(&head.method, &target, &head.headers)?;
+        let verified = self
+            .authorize(head, &target, body)
+            .map_err(|error| error.with_resource(target.path.clone()))?;
+        let operation = protocol::route_request(&head.method, &target, &head.headers)
+            .map_err(|error| error.with_resource(target.path.clone()))?;
         self.count_operation(operation_name(&operation)).await;
         if matches!(&operation, Operation::DeleteObject(target) if target.path.is_empty()) {
             return Ok(S3Response::empty(204));
@@ -393,7 +399,7 @@ impl S3Session {
         let driver = if let Some(bucket) = bucket_name {
             self.buckets
                 .get(bucket)
-                .ok_or_else(|| S3Failure::s3("NoSuchBucket"))?
+                .ok_or_else(|| S3Failure::s3("NoSuchBucket").with_resource(target.path.clone()))?
                 .clone()
         } else {
             self.buckets
@@ -601,7 +607,11 @@ impl S3Session {
         let etag = object_etag(&stats);
         if let Some(status) = evaluate_get_conditionals(&stats, &etag, &head.headers, &head.method)
         {
-            return Ok(S3Response::empty(status).header("etag", protocol::etag_header(&etag)));
+            let mut response = S3Response::empty(status);
+            response
+                .headers
+                .extend(object_conditional_headers(&etag, stats.mtime_ms));
+            return Ok(response);
         }
         let mut selected_range = None;
         if let Some(raw_range) = header_value(&head.headers, "range") {
@@ -657,7 +667,7 @@ impl S3Session {
         {
             return Ok(S3StreamResponse {
                 status,
-                headers: vec![("etag".to_owned(), protocol::etag_header(&etag))],
+                headers: object_conditional_headers(&etag, stats.mtime_ms),
                 body: None,
             });
         }
@@ -1502,6 +1512,20 @@ fn object_etag(stats: &Stats) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("{}-1", &hex[..32])
+}
+
+fn object_conditional_headers(etag: &str, mtime_ms: i64) -> Vec<(String, String)> {
+    vec![
+        ("etag".to_owned(), protocol::etag_header(etag)),
+        (
+            "last-modified".to_owned(),
+            protocol::format_http_date(mtime_ms),
+        ),
+        (
+            "x-amz-meta-mtime".to_owned(),
+            protocol::format_meta_mtime(mtime_ms),
+        ),
+    ]
 }
 
 fn upload_directory(upload_id: &str) -> String {

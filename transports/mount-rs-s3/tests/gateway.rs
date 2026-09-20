@@ -182,6 +182,15 @@ async fn oracle_refusal_boundaries_keep_their_protocol_reasons() {
             "{method} {target}: {document}"
         );
     }
+
+    let response = session
+        .handle(request("PATCH", "/mountx/object", [], &[]))
+        .await;
+    assert_eq!(response.status, 405);
+    let document = String::from_utf8_lossy(&response.body);
+    assert!(document.contains("<Code>MethodNotAllowed</Code>"));
+    assert!(document.contains("The method PATCH is not allowed against this resource."));
+    assert!(document.contains("<Resource>/mountx/object</Resource>"));
 }
 
 #[tokio::test]
@@ -452,6 +461,12 @@ async fn session_round_trip_lists_ranges_and_conditionals() {
         .await;
     assert_eq!(not_modified.status, 304);
     assert!(not_modified.body.is_empty());
+    assert_eq!(
+        header(&not_modified, "etag").as_deref(),
+        Some(etag.as_str())
+    );
+    assert!(header(&not_modified, "last-modified").is_some());
+    assert!(header(&not_modified, "x-amz-meta-mtime").is_some());
 
     let range = session
         .handle(request(
@@ -545,7 +560,13 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
         })
         .await;
     assert_eq!(copy.status, 200);
-    assert!(String::from_utf8_lossy(&copy.body).contains("<CopyObjectResult>"));
+    let copy_text = String::from_utf8_lossy(&copy.body);
+    assert!(
+        copy_text.contains(r#"<CopyObjectResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">"#)
+    );
+    assert!(copy_text.contains("<LastModified>"));
+    assert!(copy_text.contains("<ETag>"));
+    assert!(copy_text.contains("</ETag>"));
 
     let delete_body = b"<Delete><Object><Key>source.txt</Key></Object><Object><Key>ghost.txt</Key></Object></Delete>";
     let deleted = session

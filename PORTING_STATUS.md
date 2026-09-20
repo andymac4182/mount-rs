@@ -64,6 +64,19 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `c95e48b`: [native FUSE job 106012611132](https://github.com/andymac4182/mount-rs/actions/runs/35486085535/job/106012611132)
+  passed real SQLite DELETE/WAL hosting through all three PGlite/SQLite split
+  store compositions, including competing processes, killed-writer recovery,
+  and fresh-client remount checks of SQL integrity and exact rows. The mixed
+  PGlite test passed with zero ignored in 19.20s. This is not power-loss or
+  live R2 evidence. The separate disk-backed PGlite graceful-restart test
+  failed on Linux ARM at this revision; overall acceptance remains incomplete.
+- `dcbe3e3`: local unmodified upstream driver conformance passed 408 tests
+  with 18 upstream capability/privilege skips; upstream 9P conformance passed
+  140 with two skips. These suites now run in the four-platform Node CI matrix.
+- `ebe1a31`: local KV differential against the pinned upstream passed, along
+  with all 11 Rust KV tests. `6544e8d` adds the Node native-mount facade and
+  explicit PGlite connection shutdown; local Node baseline and Clippy passed.
 - `bee4bfa`: [native FUSE job 106009034930](https://github.com/andymac4182/mount-rs/actions/runs/35484776745/job/106009034930)
   passed actual SQLite 3.45.1 DELETE/WAL hosting, mount-service restart/SIGKILL,
   and eight backend-fault scenarios (four fault points in each journal mode).
