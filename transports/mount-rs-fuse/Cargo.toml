@@ -8,7 +8,7 @@ description = "FUSE protocol implementation for mount-rs"
 
 [dependencies]
 mount-rs-core = { path = "../.." }
-tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

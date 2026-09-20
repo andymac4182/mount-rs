@@ -9,6 +9,8 @@
 //! protocol, so [`mount`] returns [`MountError::UnsupportedPlatform`] there;
 //! the workspace's NFS transport is the portable native path.
 
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,6 +21,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::Duration;
+#[cfg(target_os = "linux")]
+use std::time::Instant;
 
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
@@ -194,10 +198,15 @@ impl FuseMount {
     /// device descriptor.
     pub async fn wait_closed(&self) {
         loop {
+            let notified = self.state.closed_notify.notified();
+            tokio::pin!(notified);
+            // Register before checking the state. `notify_waiters()` does not
+            // retain a permit for a future created after the notification.
+            notified.as_mut().enable();
             if self.state.closed.load(Ordering::Acquire) {
                 return;
             }
-            self.state.closed_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -205,8 +214,13 @@ impl FuseMount {
     /// operation; a failed graceful unmount leaves the mount live and permits
     /// a later retry.
     pub async fn unmount(&self) -> Result<(), MountError> {
-        self.start_unmount();
         loop {
+            let notified = self.state.unmount_notify.notified();
+            tokio::pin!(notified);
+            // Register before checking the result. `notify_waiters()` does not
+            // retain a permit for a future created after the notification.
+            notified.as_mut().enable();
+            self.start_unmount();
             if let Some(result) = self
                 .state
                 .unmount_result
@@ -216,7 +230,7 @@ impl FuseMount {
             {
                 return result.map_err(MountError::Lifecycle);
             }
-            self.state.unmount_notify.notified().await;
+            notified.await;
         }
     }
 
@@ -367,7 +381,7 @@ async fn mount_linux(
             let helper = helper
                 .as_deref()
                 .ok_or_else(|| MountError::Native("no fusermount helper was found".to_owned()))?;
-            mount_rootless(&target, &options, helper)?
+            mount_rootless(&target, &options, helper).await?
         }
         MountMode::Auto => unreachable!("choose_mode resolves Auto"),
     };
@@ -375,7 +389,7 @@ async fn mount_linux(
     let device = match FuseDevice::from_owned_fd(fd, options.max_frame) {
         Ok(device) => device,
         Err(error) => {
-            let _ = force_unmount(mode, &target, helper.as_deref());
+            force_unmount_async(mode, &target, helper.as_deref(), options.unmount_timeout).await;
             return Err(MountError::Io(error));
         }
     };
@@ -483,6 +497,11 @@ impl MountState {
 
     async fn wait_ready(&self) -> Result<(), String> {
         loop {
+            let notified = self.ready_notify.notified();
+            tokio::pin!(notified);
+            // The session can notify while the state is being checked. Enable
+            // the waiter first so that wakeup cannot be lost in that gap.
+            notified.as_mut().enable();
             if self.ready.load(Ordering::Acquire) {
                 return Ok(());
             }
@@ -494,36 +513,27 @@ impl MountState {
                     .clone()
                     .unwrap_or_else(|| "FUSE session closed before FUSE_INIT".to_owned()));
             }
-            self.ready_notify.notified().await;
+            notified.await;
         }
     }
 
     #[cfg(target_os = "linux")]
     async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
         let timeout = self.options.unmount_timeout;
-        let normal = tokio::time::timeout(timeout, run_unmount(&self)).await;
-        let result = match normal {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(_error)) if !mounted_at(&self.mountpoint) => Ok(()),
-            Ok(Err(error)) => {
-                self.unmount_started.store(false, Ordering::Release);
-                return Err(error);
-            }
-            Err(_) => {
-                let _ = tokio::time::timeout(
-                    timeout,
-                    tokio::task::spawn_blocking({
-                        let path = self.mountpoint.clone();
-                        let helper = self.helper.clone();
-                        let mode = self.mode;
-                        move || force_unmount(mode, &path, helper.as_deref())
-                    }),
-                )
-                .await;
+        let result = match attempt_unmount(&self, timeout).await {
+            UnmountAttempt::Done => Ok(()),
+            UnmountAttempt::TimedOut => {
+                force_unmount_async(self.mode, &self.mountpoint, self.helper.as_deref(), timeout)
+                    .await;
                 Err(MountError::Timeout {
                     operation: "unmount",
                     after: timeout,
                 })
+            }
+            UnmountAttempt::Failed(_error) if !mounted_at(&self.mountpoint) => Ok(()),
+            UnmountAttempt::Failed(error) => {
+                self.unmount_started.store(false, Ordering::Release);
+                return Err(error);
             }
         };
 
@@ -760,24 +770,28 @@ fn mount_privileged(
 }
 
 #[cfg(target_os = "linux")]
-fn mount_rootless(
+async fn mount_rootless(
     mountpoint: &Path,
     options: &MountOptions,
     helper: &Path,
 ) -> Result<std::os::fd::OwnedFd, MountError> {
     use std::os::fd::AsRawFd;
     use std::os::unix::process::CommandExt;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
 
     let (ours, theirs) = socket_pair().map_err(MountError::Io)?;
     let child_fd = theirs.as_raw_fd();
     let comm_fd = 3;
     let mount_options = mount_data(options, None).map_err(MountError::Io)?;
-    let mut command = Command::new(helper);
+    let mut command = tokio::process::Command::new(helper);
     command
         .args([
             "-o",
-            mount_options.as_c_str().to_str().unwrap_or_default(),
+            mount_options
+                .as_c_str()
+                .to_str()
+                .expect("mount options are UTF-8"),
             "--",
         ])
         .arg(mountpoint)
@@ -789,7 +803,7 @@ fn mount_rootless(
     // socketpair uses CLOEXEC, so dup2 is needed even when the original number
     // already happens to be three.
     unsafe {
-        command.pre_exec(move || {
+        command.as_std_mut().pre_exec(move || {
             if libc::dup2(child_fd, comm_fd) < 0 {
                 return Err(io::Error::last_os_error());
             }
@@ -802,13 +816,51 @@ fn mount_rootless(
             Ok(())
         });
     }
-    let output = command.output().map_err(|error| {
+    let mut child = command.spawn().map_err(|error| {
         MountError::Native(format!("could not run {}: {error}", helper.display()))
+    })?;
+    let mut stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = &mut stderr {
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        bytes
     });
+    let status = match tokio::time::timeout(options.init_timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            let _ = child.start_kill();
+            stderr_task.abort();
+            drop(ours);
+            drop(theirs);
+            return Err(MountError::Native(format!(
+                "{} wait failed: {error}",
+                helper.display()
+            )));
+        }
+        Err(_) => {
+            // A helper can be stuck in mount(2), so do not await its reaping
+            // here. Sending SIGKILL and dropping the child is bounded even
+            // when the helper is in an uninterruptible kernel wait.
+            let _ = child.start_kill();
+            stderr_task.abort();
+            drop(ours);
+            drop(theirs);
+            drop(child);
+            let _ = undo_rootless_mount(mountpoint, helper, options.init_timeout).await;
+            return Err(MountError::Timeout {
+                operation: "rootless FUSE mount helper",
+                after: options.init_timeout,
+            });
+        }
+    };
     drop(theirs);
-    let output = output?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr_task
+        .await
+        .map_err(|error| MountError::Lifecycle(format!("stderr worker failed: {error}")))?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr);
         return Err(MountError::Native(format!(
             "{} failed to mount '{}': {}",
             helper.display(),
@@ -816,16 +868,94 @@ fn mount_rootless(
             stderr.trim()
         )));
     }
-    let received = recv_fd(ours.as_raw_fd()).map_err(MountError::Io);
-    drop(ours);
-    match received {
+    match recv_fd_async(ours, options.init_timeout).await {
         Ok(fd) => Ok(fd),
         Err(error) => {
             // A helper can theoretically mount successfully and exit without
-            // sending its fd. Do not leave an unservable mount behind.
-            let _ = unmount_rootless(mountpoint, helper, true);
-            Err(error)
+            // sending its fd. Do not leave an unservable mount behind.  Use a
+            // normal unmount first: the mount has not been handed to a
+            // session, so this should quiesce immediately and gives the
+            // helper a definite answer.  A lazy detach is only a last resort
+            // for a genuinely stuck kernel teardown.
+            if let Some(cleanup) =
+                undo_rootless_mount(mountpoint, helper, options.init_timeout).await
+            {
+                return Err(MountError::Native(format!(
+                    "could not receive the FUSE device descriptor: {error}; {cleanup}"
+                )));
+            }
+            Err(MountError::Io(error))
         }
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn undo_rootless_mount(
+    mountpoint: &Path,
+    helper: &Path,
+    timeout: Duration,
+) -> Option<String> {
+    let normal = run_child(
+        helper.as_os_str(),
+        &[
+            PathBuf::from("-u"),
+            PathBuf::from("--"),
+            mountpoint.to_owned(),
+        ],
+        timeout,
+    )
+    .await;
+    if child_succeeded(&normal) {
+        return None;
+    }
+    let normal_detail = child_failure_detail(helper, &normal);
+    let lazy = run_child(
+        helper.as_os_str(),
+        &[
+            PathBuf::from("-u"),
+            PathBuf::from("-z"),
+            PathBuf::from("--"),
+            mountpoint.to_owned(),
+        ],
+        timeout,
+    )
+    .await;
+    if child_succeeded(&lazy) {
+        return None;
+    }
+    Some(format!(
+        "could not clean up the rootless mount at '{}'; normal unmount: {}; lazy unmount: {}",
+        mountpoint.display(),
+        normal_detail,
+        child_failure_detail(helper, &lazy)
+    ))
+}
+
+#[cfg(target_os = "linux")]
+fn child_succeeded(result: &Result<Option<ChildOutcome>, MountError>) -> bool {
+    matches!(result, Ok(Some(outcome)) if outcome.status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn child_failure_detail(
+    helper: &Path,
+    result: &Result<Option<ChildOutcome>, MountError>,
+) -> String {
+    match result {
+        Ok(None) => format!("{} timed out", helper.display()),
+        Ok(Some(outcome)) => {
+            if outcome.stderr.is_empty() {
+                format!("{} exited with status {}", helper.display(), outcome.status)
+            } else {
+                format!(
+                    "{} exited with status {}: {}",
+                    helper.display(),
+                    outcome.status,
+                    outcome.stderr
+                )
+            }
+        }
+        Err(error) => error.to_string(),
     }
 }
 
@@ -867,91 +997,158 @@ fn mount_data(
 }
 
 #[cfg(target_os = "linux")]
-async fn run_unmount(state: &MountState) -> Result<(), MountError> {
-    let mode = state.mode;
-    let path = state.mountpoint.clone();
-    let helper = state.helper.clone();
-    tokio::task::spawn_blocking(move || match mode {
-        MountMode::Privileged => unmount_privileged(&path, false).map_err(|error| {
-            MountError::Native(format!(
-                "umount(2) failed for '{}': {error}",
-                path.display()
-            ))
-        }),
-        MountMode::Rootless => {
-            let helper = helper.ok_or_else(|| {
-                MountError::Native("rootless mount helper path was lost".to_owned())
-            })?;
-            unmount_rootless(&path, &helper, false).map_err(|error| {
-                MountError::Native(format!(
-                    "{} failed to unmount '{}': {error}",
-                    helper.display(),
-                    path.display()
-                ))
-            })
-        }
-        MountMode::Auto => unreachable!("mounted mode is resolved before state creation"),
-    })
-    .await
-    .map_err(|error| MountError::Lifecycle(format!("unmount worker failed: {error}")))?
+enum UnmountAttempt {
+    Done,
+    TimedOut,
+    Failed(MountError),
 }
 
 #[cfg(target_os = "linux")]
-fn force_unmount(mode: MountMode, path: &Path, helper: Option<&Path>) -> io::Result<()> {
-    match mode {
-        MountMode::Privileged => {
-            let first = unmount_privileged(path, true);
-            if first.is_err() {
-                unmount_privileged(path, false).or(first)
-            } else {
-                Ok(())
-            }
-        }
-        MountMode::Rootless => {
-            let helper = helper.ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    "rootless mount helper path missing",
-                )
-            })?;
-            unmount_rootless(path, helper, true)
-        }
-        MountMode::Auto => unreachable!("mounted mode is resolved before teardown"),
-    }
+struct ChildOutcome {
+    status: std::process::ExitStatus,
+    stderr: String,
 }
 
 #[cfg(target_os = "linux")]
-fn unmount_privileged(path: &Path, detach: bool) -> io::Result<()> {
-    let path = path_to_cstring(path)?;
-    let flags = if detach { libc::MNT_DETACH } else { 0 };
-    let result = unsafe { libc::umount2(path.as_ptr(), flags) };
-    if result < 0 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
+async fn run_child(
+    program: &OsStr,
+    arguments: &[PathBuf],
+    timeout: Duration,
+) -> Result<Option<ChildOutcome>, MountError> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
 
-#[cfg(target_os = "linux")]
-fn unmount_rootless(path: &Path, helper: &Path, lazy: bool) -> io::Result<()> {
-    use std::process::{Command, Stdio};
-    let mut command = Command::new(helper);
+    let mut command = tokio::process::Command::new(program);
     command
-        .arg("-u")
-        .args(lazy.then_some("-z"))
-        .arg("--")
-        .arg(path)
+        .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-    let output = command.output()?;
-    if output.status.success() {
-        return Ok(());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| {
+        MountError::Native(format!(
+            "could not run {}: {error}",
+            program.to_string_lossy()
+        ))
+    })?;
+    let mut stderr = child.stderr.take();
+    let stderr_task = tokio::spawn(async move {
+        let mut bytes = Vec::new();
+        if let Some(stderr) = &mut stderr {
+            let _ = stderr.read_to_end(&mut bytes).await;
+        }
+        bytes
+    });
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            let _ = child.kill().await;
+            let _ = stderr_task.await;
+            return Err(MountError::Native(format!(
+                "{} wait failed: {error}",
+                program.to_string_lossy()
+            )));
+        }
+        Err(_) => {
+            // Do not await child reaping: a helper blocked in an uninterruptible
+            // kernel mount/umount syscall cannot be reaped on our deadline.
+            // `kill_on_drop` supplies the same SIGKILL backstop, while closing
+            // the stderr task's pipe ensures this process does not retain a
+            // child stream after the timeout.
+            let _ = child.start_kill();
+            stderr_task.abort();
+            return Ok(None);
+        }
+    };
+    let stderr = stderr_task
+        .await
+        .map_err(|error| MountError::Lifecycle(format!("stderr worker failed: {error}")))?;
+    Ok(Some(ChildOutcome {
+        status,
+        stderr: String::from_utf8_lossy(&stderr).trim().to_owned(),
+    }))
+}
+
+#[cfg(target_os = "linux")]
+async fn attempt_unmount(state: &MountState, timeout: Duration) -> UnmountAttempt {
+    let (program, arguments) = match state.mode {
+        MountMode::Privileged => (OsStr::new("umount"), vec![state.mountpoint.clone()]),
+        MountMode::Rootless => {
+            let Some(helper) = state.helper.as_deref() else {
+                return UnmountAttempt::Failed(MountError::Native(
+                    "rootless mount helper path was lost".to_owned(),
+                ));
+            };
+            (
+                helper.as_os_str(),
+                vec![
+                    PathBuf::from("-u"),
+                    PathBuf::from("--"),
+                    state.mountpoint.clone(),
+                ],
+            )
+        }
+        MountMode::Auto => unreachable!("mounted mode is resolved before state creation"),
+    };
+    match run_child(program, &arguments, timeout).await {
+        Ok(None) => UnmountAttempt::TimedOut,
+        Ok(Some(outcome)) if outcome.status.success() => UnmountAttempt::Done,
+        Ok(Some(outcome)) => UnmountAttempt::Failed(MountError::Native(format!(
+            "unmount of '{}' failed (status {}): {}",
+            state.mountpoint.display(),
+            outcome.status,
+            if outcome.stderr.is_empty() {
+                "no diagnostic output"
+            } else {
+                &outcome.stderr
+            }
+        ))),
+        Err(error) => UnmountAttempt::Failed(error),
     }
-    let detail = String::from_utf8_lossy(&output.stderr);
-    Err(io::Error::other(
-        detail.trim().trim_end_matches('\n').to_owned(),
-    ))
+}
+
+#[cfg(target_os = "linux")]
+async fn force_unmount_async(
+    mode: MountMode,
+    mountpoint: &Path,
+    helper: Option<&Path>,
+    timeout: Duration,
+) {
+    let deadline = Instant::now() + timeout;
+    match mode {
+        MountMode::Rootless => {
+            if let Some(helper) = helper {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                let _ = run_child(
+                    helper.as_os_str(),
+                    &[
+                        PathBuf::from("-u"),
+                        PathBuf::from("-z"),
+                        PathBuf::from("--"),
+                        mountpoint.to_owned(),
+                    ],
+                    remaining,
+                )
+                .await;
+            }
+        }
+        MountMode::Privileged => {
+            for arguments in [
+                vec![PathBuf::from("-f"), mountpoint.to_owned()],
+                vec![PathBuf::from("-l"), mountpoint.to_owned()],
+            ] {
+                if !mounted_at(mountpoint) {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+                let _ = run_child(OsStr::new("umount"), &arguments, remaining).await;
+            }
+        }
+        MountMode::Auto => unreachable!("mounted mode is resolved before state creation"),
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -975,6 +1172,50 @@ fn socket_pair() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
         unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) },
         unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) },
     ))
+}
+
+#[cfg(target_os = "linux")]
+async fn recv_fd_async(
+    socket: std::os::fd::OwnedFd,
+    timeout: Duration,
+) -> io::Result<std::os::fd::OwnedFd> {
+    use std::os::fd::AsRawFd;
+
+    set_nonblocking(socket.as_raw_fd())?;
+    let socket = tokio::io::unix::AsyncFd::new(socket)?;
+    let receive = async {
+        loop {
+            let mut ready = socket.readable().await?;
+            match ready.try_io(|inner| recv_fd(inner.get_ref().as_raw_fd())) {
+                Ok(Ok(fd)) => return Ok(fd),
+                Ok(Err(error))
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => {}
+                Ok(Err(error)) => return Err(error),
+                Err(_would_block) => {}
+            }
+        }
+    };
+    tokio::time::timeout(timeout, receive).await.map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::TimedOut,
+            "timed out waiting for fusermount to send the FUSE device",
+        )
+    })?
+}
+
+#[cfg(target_os = "linux")]
+fn set_nonblocking(fd: std::os::fd::RawFd) -> io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "linux")]
@@ -1094,6 +1335,121 @@ mod tests {
     #[test]
     fn mount_path_unescape_matches_proc_mounts() {
         assert_eq!(unescape_mount_path("/tmp/a\\040b\\134c"), "/tmp/a b\\c");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn child_timeout_returns_without_waiting_for_a_stuck_helper() {
+        let started = std::time::Instant::now();
+        let result = run_child(
+            OsStr::new("/bin/sh"),
+            &[PathBuf::from("-c"), PathBuf::from("while true; do :; done")],
+            Duration::from_millis(25),
+        )
+        .await
+        .expect("helper should spawn");
+        assert!(
+            result.is_none(),
+            "a timed-out helper must not look successful"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout path waited for helper reaping"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn child_failure_preserves_helper_diagnostic() {
+        let result = run_child(
+            OsStr::new("/bin/sh"),
+            &[
+                PathBuf::from("-c"),
+                PathBuf::from("printf helper-failure >&2; exit 7"),
+            ],
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("helper should spawn")
+        .expect("helper should finish before the deadline");
+        assert_eq!(result.status.code(), Some(7));
+        assert_eq!(result.stderr, "helper-failure");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn received_device_descriptor_is_close_on_exec_and_async_safe() {
+        use std::fs::File;
+        use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
+
+        let (ours, theirs) = socket_pair().expect("socketpair");
+        let source = File::open("/dev/null").expect("/dev/null");
+        let source_fd = source.as_raw_fd();
+        let sender = std::thread::spawn(move || {
+            send_fd(theirs.as_raw_fd(), source_fd).expect("send SCM_RIGHTS descriptor");
+            drop(theirs);
+            drop(source);
+        });
+        let received = recv_fd_async(ours, Duration::from_secs(1))
+            .await
+            .expect("receive SCM_RIGHTS descriptor");
+        sender.join().expect("sender thread");
+        let flags = unsafe { libc::fcntl(received.as_raw_fd(), libc::F_GETFD) };
+        assert!(flags >= 0 && flags & libc::FD_CLOEXEC != 0);
+        let _file = unsafe { File::from_raw_fd(received.into_raw_fd()) };
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn descriptor_receive_times_out_when_helper_sends_nothing() {
+        let (ours, _theirs) = socket_pair().expect("socketpair");
+        let error = recv_fd_async(ours, Duration::from_millis(20))
+            .await
+            .expect_err("descriptor receive must be bounded");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[cfg(target_os = "linux")]
+    fn send_fd(socket: std::os::fd::RawFd, fd: std::os::fd::RawFd) -> io::Result<()> {
+        use std::mem::{size_of, zeroed};
+        use std::ptr;
+
+        let mut byte = [0_u8; 1];
+        let mut iov = libc::iovec {
+            iov_base: byte.as_mut_ptr().cast::<libc::c_void>(),
+            iov_len: byte.len(),
+        };
+        let control_len =
+            unsafe { libc::CMSG_SPACE(size_of::<std::os::fd::RawFd>() as u32) as usize };
+        let mut control = vec![0_u8; control_len];
+        // SAFETY: msghdr/iovec are initialized before sendmsg, and the
+        // control buffer is large enough for one RawFd.
+        let mut message: libc::msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control.as_mut_ptr().cast::<libc::c_void>();
+        message.msg_controllen = control.len();
+        let header = unsafe { libc::CMSG_FIRSTHDR(&message) };
+        if header.is_null() {
+            return Err(io::Error::other("could not allocate an SCM_RIGHTS header"));
+        }
+        unsafe {
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = libc::CMSG_LEN(size_of::<std::os::fd::RawFd>() as u32) as usize;
+            ptr::write_unaligned(libc::CMSG_DATA(header).cast::<std::os::fd::RawFd>(), fd);
+        }
+        let sent = unsafe { libc::sendmsg(socket, &message, libc::MSG_NOSIGNAL) };
+        if sent < 0 {
+            Err(io::Error::last_os_error())
+        } else if sent == 1 {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "SCM_RIGHTS test message was not sent in full",
+            ))
+        }
     }
 
     #[cfg(not(target_os = "linux"))]

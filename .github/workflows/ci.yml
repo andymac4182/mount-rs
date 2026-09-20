@@ -5,6 +5,26 @@ on:
   pull_request:
 
 jobs:
+  native-fuse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Install and verify the kernel FUSE prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          test -c /dev/fuse
+          test -r /dev/fuse
+          test -w /dev/fuse
+          command -v fusermount3
+      - name: Exercise actual rootless kernel file operations
+        env:
+          MOUNT_RS_RUN_NATIVE_FUSE: '1'
+        run: timeout 180s cargo test --locked -p mount-rs-fuse --test native_mount -- --ignored --nocapture
+
   rust:
     strategy:
       fail-fast: false
