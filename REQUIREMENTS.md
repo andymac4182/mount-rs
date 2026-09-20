@@ -202,6 +202,27 @@ dependencies out of core crates.
   stops and verifies unmount/cleanup on macOS and Linux. Parser-only tests do
   not satisfy this mount integration requirement.
 
+## RustFS integration-test service
+
+Set up actual [RustFS](https://rustfs.com/) for reproducible local and CI
+integration tests. Pin the service release and container digest or binary
+checksum; document macOS/Linux setup, readiness, isolated test credentials,
+test-owned buckets/prefixes, persistent restart fixtures, and bounded cleanup.
+Do not touch pre-existing user buckets or expose the test service publicly.
+
+Exercise the S3-compatible block provider against RustFS with real requests:
+immutable publication, conditional operations, full/range reads, errors,
+concurrent access, reopen and service restart. Include split metadata/block
+compositions, Node factories, CLI configuration, and mounted tests where
+available. Wire the required service tests into CI; a mock or a skipped test
+does not satisfy this requirement. RustFS does not replace live Cloudflare R2
+verification: retain both service-specific acceptance gates.
+
+Use the pinned RustFS service as a common backend for mount-rs versus ZeroFS
+benchmarks where supported, with isolated namespaces and equivalent resource,
+cache, transport, and durability settings. Record setup failures and unsupported
+combinations instead of fabricating benchmark results.
+
 ## ZeroFS feature and benchmark comparison
 
 Include [Barre/ZeroFS](https://github.com/Barre/ZeroFS) as an additional

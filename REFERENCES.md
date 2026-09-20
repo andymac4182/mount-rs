@@ -53,6 +53,10 @@
 
 ## Benchmark alignment
 
+- [RustFS](https://rustfs.com/): required real S3-compatible integration-test
+  service and candidate shared backend for the ZeroFS comparison. Pin the
+  tested release/image and verify required semantics rather than inferring
+  compatibility from the product description.
 - [Barre/ZeroFS](https://github.com/Barre/ZeroFS): user-selected feature and
   benchmark comparison target for object-backed mounted filesystems. Review
   its configuration, NFS/9P access, durability and recovery tests, caching,
