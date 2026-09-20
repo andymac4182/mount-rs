@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::{
-    ErrorCode, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, Result as FsResult, S_IFBLK,
-    S_IFCHR, S_IFDIR, S_IFIFO, S_IFMT, S_IFSOCK,
+    ErrorCode, FileHandle, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags,
+    Result as FsResult, S_IFBLK, S_IFCHR, S_IFDIR, S_IFIFO, S_IFMT, S_IFSOCK,
 };
 
 use crate::constants::*;
@@ -176,6 +176,10 @@ pub struct Nfs3Session {
     snapshots: DirectorySnapshots,
     mounts: Arc<Mutex<Vec<MountRecord>>>,
     exclusive_creates: Arc<Mutex<ExclusiveCreates>>,
+    /// NFSv3 has no OPEN on the wire. Keep one backend read handle for every
+    /// regular filehandle we expose so an unlink can detach the namespace name
+    /// without destroying the object a client is still holding.
+    retained_handles: Arc<Mutex<HashMap<u64, Arc<dyn FileHandle>>>>,
     stats: SharedStats,
     destroyed: Arc<Mutex<bool>>,
     path_lock: Arc<tokio::sync::RwLock<()>>,
@@ -207,6 +211,7 @@ impl Nfs3Session {
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
             mounts: Arc::new(Mutex::new(Vec::new())),
             exclusive_creates: Arc::new(Mutex::new(ExclusiveCreates::default())),
+            retained_handles: Arc::new(Mutex::new(HashMap::new())),
             stats: SharedStats::default(),
             destroyed: Arc::new(Mutex::new(false)),
             path_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -232,6 +237,16 @@ impl Nfs3Session {
 
     pub async fn destroy(&self) {
         *self.destroyed.lock().expect("NFS destroyed lock") = true;
+        let retained: Vec<_> = self
+            .retained_handles
+            .lock()
+            .expect("NFS retained handle lock")
+            .drain()
+            .map(|(_, handle)| handle)
+            .collect();
+        for handle in retained {
+            let _ = handle.close().await;
+        }
         self.handles.clear();
         self.snapshots.clear();
         self.mounts.lock().expect("NFS mount lock").clear();
@@ -394,8 +409,54 @@ impl Nfs3Session {
     async fn attr_of(&self, path: &str) -> FsResult<(HandleEntry, Fattr3, mount_rs_core::Stats)> {
         let stats = self.stat_of(path).await?;
         let entry = self.handles.bind(path, &stats);
+        if stats.is_file() {
+            // Best effort: a lookup must still be able to report attributes for
+            // a read-only/special backend that cannot create a second handle.
+            // The normal regular-file path can retain a descriptor, which is
+            // what makes NFSv3's synthetic client-side OPEN survive unlink.
+            let _ = self.ensure_retained_handle(&entry, path).await;
+        }
         let attr = fattr_of(&stats, entry.fileid);
         Ok((entry, attr, stats))
+    }
+
+    fn retained_handle(&self, id: u64) -> Option<Arc<dyn FileHandle>> {
+        self.retained_handles
+            .lock()
+            .expect("NFS retained handle lock")
+            .get(&id)
+            .cloned()
+    }
+
+    async fn ensure_retained_handle(
+        &self,
+        entry: &HandleEntry,
+        path: &str,
+    ) -> FsResult<Arc<dyn FileHandle>> {
+        if let Some(handle) = self.retained_handle(entry.id) {
+            return Ok(handle);
+        }
+        let handle = self
+            .driver
+            .open_flags(path, OpenFlags::READ_ONLY, 0)
+            .await?;
+        let existing = {
+            let mut retained = self
+                .retained_handles
+                .lock()
+                .expect("NFS retained handle lock");
+            if let Some(existing) = retained.get(&entry.id).cloned() {
+                Some(existing)
+            } else {
+                retained.insert(entry.id, handle.clone());
+                None
+            }
+        };
+        if let Some(existing) = existing {
+            let _ = handle.close().await;
+            return Ok(existing);
+        }
+        Ok(handle)
     }
 
     async fn post_op(&self, path: Option<&str>) -> Option<Fattr3> {
@@ -487,14 +548,51 @@ impl Nfs3Session {
                 }
             },
             Err(error) => {
-                self.record_error();
-                write_getattr_res(
-                    writer,
-                    &Getattr3res {
-                        status: Self::status(&error),
-                        attributes: None,
-                    },
-                );
+                // A regular file can be unlinked while a client still holds
+                // its NFSv3 filehandle.  There is no OPEN state on the wire,
+                // so use the retained backend descriptor rather than turning
+                // the otherwise valid handle into ESTALE.
+                let orphan = self
+                    .handles
+                    .decode(&handle)
+                    .ok()
+                    .and_then(|entry| self.retained_handle(entry.id));
+                if let Some(orphan) = orphan {
+                    match orphan.stat().await {
+                        Ok(stats) => {
+                            let entry = self
+                                .handles
+                                .decode(&handle)
+                                .expect("retained handle was decoded above");
+                            write_getattr_res(
+                                writer,
+                                &Getattr3res {
+                                    status: NFS3_OK,
+                                    attributes: Some(fattr_of(&stats, entry.fileid)),
+                                },
+                            );
+                        }
+                        Err(error) => {
+                            self.record_error();
+                            write_getattr_res(
+                                writer,
+                                &Getattr3res {
+                                    status: Self::status(&error),
+                                    attributes: None,
+                                },
+                            );
+                        }
+                    }
+                } else {
+                    self.record_error();
+                    write_getattr_res(
+                        writer,
+                        &Getattr3res {
+                            status: Self::status(&error),
+                            attributes: None,
+                        },
+                    );
+                }
             }
         }
         Ok(())
@@ -794,32 +892,63 @@ impl Nfs3Session {
     ) -> Result<(), DispatchError> {
         let request = read_read_args(args)?;
         args.end("READ arguments")?;
-        let path = self.path_of(&request.file).ok();
-        let Some(path) = path else {
-            let error = FsError::new(ErrorCode::Estale);
-            self.record_error();
-            write_read_res(
-                writer,
-                &Read3res {
-                    status: Self::status(&error),
-                    attributes: None,
-                    count: 0,
-                    eof: false,
-                    data: Vec::new(),
-                },
-            );
-            return Ok(());
-        };
-        let count = (request.count as usize).min(self.options.rtmax);
-        let offset = match Self::offset(request.offset, "read") {
-            Ok(offset) => offset,
+        let entry = match self.handles.decode(&request.file) {
+            Ok(entry) => entry,
             Err(error) => {
                 self.record_error();
                 write_read_res(
                     writer,
                     &Read3res {
                         status: Self::status(&error),
-                        attributes: self.post_op(Some(&path)).await,
+                        attributes: None,
+                        count: 0,
+                        eof: false,
+                        data: Vec::new(),
+                    },
+                );
+                return Ok(());
+            }
+        };
+        let path = self.handles.path_of(&entry).ok();
+        let handle = match path.as_deref() {
+            Some(path) => self.ensure_retained_handle(&entry, path).await,
+            None => self.retained_handle(entry.id).ok_or_else(|| {
+                FsError::new(ErrorCode::Estale)
+                    .with_syscall("read")
+                    .with_message("ESTALE: unlinked file has no retained backend handle")
+            }),
+        };
+        let handle = match handle {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.record_error();
+                write_read_res(
+                    writer,
+                    &Read3res {
+                        status: Self::status(&error),
+                        attributes: None,
+                        count: 0,
+                        eof: false,
+                        data: Vec::new(),
+                    },
+                );
+                return Ok(());
+            }
+        };
+        let count = (request.count as usize).min(self.options.rtmax);
+        let offset = match Self::offset(request.offset, "read") {
+            Ok(offset) => offset,
+            Err(error) => {
+                self.record_error();
+                let attributes = match path.as_deref() {
+                    Some(path) => self.post_op(Some(path)).await,
+                    None => None,
+                };
+                write_read_res(
+                    writer,
+                    &Read3res {
+                        status: Self::status(&error),
+                        attributes,
                         count: 0,
                         eof: false,
                         data: Vec::new(),
@@ -829,21 +958,21 @@ impl Nfs3Session {
             }
         };
         let result = async {
-            let handle = self
-                .driver
-                .open_flags(&path, OpenFlags::READ_ONLY, 0)
-                .await?;
             let mut data = vec![0_u8; count];
             let read = handle.read(&mut data, Some(offset)).await;
-            let _ = handle.close().await;
             let read = read?;
             data.truncate(read);
-            Ok::<Vec<u8>, FsError>(data)
+            Ok::<(Vec<u8>, Option<mount_rs_core::Stats>), FsError>((data, handle.stat().await.ok()))
         }
         .await;
         match result {
-            Ok(data) => {
-                let attributes = self.post_op(Some(&path)).await;
+            Ok((data, retained_stats)) => {
+                let attributes = match path.as_deref() {
+                    Some(path) => self.post_op(Some(path)).await,
+                    None => retained_stats
+                        .as_ref()
+                        .map(|stats| fattr_of(stats, entry.fileid)),
+                };
                 let eof = attributes.as_ref().map_or(data.len() < count, |attr| {
                     request.offset.saturating_add(data.len() as u64) >= attr.size
                 });
@@ -860,11 +989,15 @@ impl Nfs3Session {
             }
             Err(error) => {
                 self.record_error();
+                let attributes = match path.as_deref() {
+                    Some(path) => self.post_op(Some(path)).await,
+                    None => None,
+                };
                 write_read_res(
                     writer,
                     &Read3res {
                         status: Self::status(&error),
-                        attributes: self.post_op(Some(&path)).await,
+                        attributes,
                         count: 0,
                         eof: false,
                         data: Vec::new(),
@@ -1443,12 +1576,27 @@ impl Nfs3Session {
             let path = Self::join_path(&parent, &request.name);
             dir = Some(parent.clone());
             before = self.pre_op(&parent).await;
+            let target = if directory {
+                None
+            } else {
+                self.stat_of(&path).await.ok()
+            };
+            if let Some(stats) = target.as_ref()
+                && stats.is_file()
+            {
+                let entry = self.handles.bind(&path, stats);
+                let _ = self.ensure_retained_handle(&entry, &path).await;
+            }
             if directory {
                 self.driver.rmdir(&path).await?;
             } else {
                 self.driver.unlink(&path).await?;
             }
-            self.handles.forget(&path);
+            if directory {
+                self.handles.forget(&path);
+            } else {
+                self.handles.orphan(&path);
+            }
             self.exclusive_creates
                 .lock()
                 .expect("NFS exclusive-create lock")
