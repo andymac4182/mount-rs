@@ -66,6 +66,49 @@ async function runCase(label, factory, cleanup = async () => {}) {
   }
 }
 
+async function runReopenCase(label, firstFactory, reopenedFactory, cleanup = async () => {}) {
+  let first;
+  let reopened;
+  let failure;
+  try {
+    first = await firstFactory();
+    await exercise(first);
+    await first.shutdown();
+    first = undefined;
+
+    reopened = await reopenedFactory();
+    assert.deepEqual(Buffer.from(await reopened.readFile("/provider-matrix/value")), PAYLOAD);
+    assert.equal(
+      (await reopened.stat("/provider-matrix/value")).size,
+      PAYLOAD.length,
+    );
+  } catch (error) {
+    failure = error;
+  }
+  try {
+    await first?.shutdown();
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await reopened?.shutdown();
+  } catch (error) {
+    failure ??= error;
+  }
+  try {
+    await cleanup();
+  } catch (error) {
+    failure ??= error;
+  }
+
+  if (failure) {
+    failures.push(label);
+    console.log("FAIL node-sdk case=" + label + " reason=" + errorCode(failure));
+  } else {
+    console.log("PASS node-sdk case=" + label);
+  }
+}
+
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -169,23 +212,26 @@ await runCase("chunked-sqlite/sqlite", () =>
 
 const pgliteUrl = process.env.PGLITE_DATABASE_URL;
 if (pgliteUrl) {
-  await runCase("chunked-pglite/pglite", () =>
-    createChunkedDriver({
-      metadata: {
-        kind: "pglite",
-        uri: pgliteUrl,
-        key: "provider-matrix-node-pglite-metadata-" + safeRunId(),
-        durable: false,
-      },
-      blocks: {
-        kind: "pglite",
-        uri: pgliteUrl,
-        key: "provider-matrix-node-pglite-blocks-" + safeRunId(),
-        durable: false,
-      },
-      chunkSize: 7,
-      owner: "provider-matrix-node-pglite",
-    }),
+  const pgliteOptions = (owner) => ({
+    metadata: {
+      kind: "pglite",
+      uri: pgliteUrl,
+      key: "provider-matrix-node-pglite-metadata-" + safeRunId(),
+      durable: false,
+    },
+    blocks: {
+      kind: "pglite",
+      uri: pgliteUrl,
+      key: "provider-matrix-node-pglite-blocks-" + safeRunId(),
+      durable: false,
+    },
+    chunkSize: 7,
+    owner,
+  });
+  await runReopenCase(
+    "chunked-pglite/pglite",
+    () => createChunkedDriver(pgliteOptions("provider-matrix-node-pglite-first")),
+    () => createChunkedDriver(pgliteOptions("provider-matrix-node-pglite-reopened")),
   );
 } else {
   console.log("SKIP node-sdk case=chunked-pglite/pglite gate=PGLITE_DATABASE_URL");
