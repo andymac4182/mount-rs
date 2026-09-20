@@ -182,6 +182,12 @@ modify Docker configuration. Set `MOUNT_RS_FOUNDATIONDB_KEEP=1` when
 diagnosing a failed run. The feature gate remains separate from the client-free
 workspace gate.
 
+When `R2_ENDPOINT` is set for the composed FoundationDB + RustFS lane, the
+script runs the composition client, restarts the owned FoundationDB container,
+and runs a fresh-client reopen/fencing check before reporting success. External
+FoundationDB mode is intentionally rejected for this lane because it cannot
+provide service-restart evidence owned by the harness.
+
 The normal script invocation owns its cluster file. If an existing cluster is
 supplied with `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE`, the script refuses it unless
 `MOUNT_RS_FOUNDATIONDB_ALLOW_EXTERNAL_CLUSTER=1` is also set. That explicit
