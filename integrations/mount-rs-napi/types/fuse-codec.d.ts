@@ -21,6 +21,8 @@ import type {
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseInterruptIn,
+  NativeFuseIoctlIn,
+  NativeFuseIoctlOut,
   NativeFuseListxattrIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
@@ -65,6 +67,8 @@ export type {
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseInterruptIn,
+  NativeFuseIoctlIn,
+  NativeFuseIoctlOut,
   NativeFuseListxattrIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
@@ -158,6 +162,7 @@ export declare const FUSE_GETATTR_FH: number
 export declare const FUSE_READLINK: number
 export declare const FUSE_STATFS: number
 export declare const FUSE_INTERRUPT: number
+export declare const FUSE_IOCTL: number
 export declare const FUSE_BATCH_FORGET: number
 export declare const FUSE_POLL: number
 export declare const FUSE_BMAP: number
@@ -268,6 +273,10 @@ export declare function decodeStatfsOut(body: Uint8Array, context?: NativeFusePr
 export declare function encodeStatfsOut(value: NativeFuseKstatfs, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeInterruptIn(body: Uint8Array): NativeFuseInterruptIn
 export declare function encodeInterruptIn(value: NativeFuseInterruptIn): Buffer
+export declare function decodeIoctlIn(body: Uint8Array): NativeFuseIoctlIn
+export declare function encodeIoctlIn(value: NativeFuseIoctlIn): Buffer
+export declare function decodeIoctlOut(body: Uint8Array): NativeFuseIoctlOut
+export declare function encodeIoctlOut(value: NativeFuseIoctlOut): Buffer
 export declare function decodePollIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFusePollIn
 export declare function encodePollIn(value: NativeFusePollIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodePollOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFusePollOut
