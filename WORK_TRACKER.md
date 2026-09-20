@@ -75,6 +75,29 @@ Windows oracle cases where runnable). These are focused local gates at
 `3042d09`; the current shell still lacks live R2 credentials and hosted
 Windows/macOS and privileged native-mount runs remain unqualified.
 
+Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
+
+- `ccaf8f5` + `4cdeb58` correct the Windows SQLite WAL shared-memory access mask
+  and add a Windows-only mapping regression test. The focused SQLite VFS gate
+  passed 5 unit, 16 engine and 16 storage-bridge tests, but hosted Windows
+  rerun is still required.
+- `7236e0a` + `4422cd0` add oracle-backed Unstorage capability, unsupported
+  operation, metadata and ownership-overlay parity. Direct and N-API tests
+  pass; the broader W01 ledger remains open.
+- `57632c6` + `e213856` add structural N-API adapter checks and an opt-in native
+  lifecycle test. The authorized macOS NFS run passed kernel read, callback
+  reachability, unmount and cleanup; native structural writes remain an explicit
+  `EIO`/unsupported boundary until decoded `open_flags` are exposed.
+- `1af1986` + `8ac77f3` + `9215ba3` + `a1ec0c5` retain NFSv3/v4 backend handles
+  across unlink/rename and classify the pinned TypeScript control separately.
+  Focused Rust tests passed 30 unit, 8 integration and 266 oracle cases with
+  18 capability-gated skips; privileged Linux/macOS NFS qualification remains
+  separate.
+
+These packets reduce the W01 queue but do not close W01.1-W01.4: the complete
+parity ledger, all classified skips, cross-backend seeded evidence, live R2,
+hosted Windows/macOS and privileged native transport gates remain required.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -144,7 +167,7 @@ complete.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Active simple-first; core harness, pinned trace evidence and skip inventory landed; full parity remains open | Main (packets integrated) |
+| W01 | Core and mountx parity | Active simple-first; four parallel sidecars integrated on 2026-09-21; full parity remains open | Main (packets integrated) |
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
@@ -259,6 +282,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Cargo execution, and records the next simple-first W01 closure queue. The
   pinned 56-step core trace and six-scenario concurrency trace still pass with
   zero mismatches; the listed lifecycle, capability and native gaps remain open.
+- [x] `7236e0a`, `4422cd0`, `57632c6`, `e213856`, `1af1986`, `8ac77f3`,
+  `9215ba3` and `a1ec0c5` integrate parallel W01 capability, structural native,
+  Windows SQLite and NFS held-handle sidecars. Their focused evidence is listed
+  above; these commits do not close the remaining end-to-end parity gates.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -448,6 +475,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   repeats passed. Earlier intermittent timeout cause is not established.
 - [x] Full local Node suite passed after fixes, excluding opt-in service/native
   lanes; opt-in skips are not acceptance evidence.
+- [x] `57632c6` + `e213856` add structural-driver adapter and opt-in native
+  lifecycle acceptance; read/callback/unmount cleanup passed on macOS NFS.
+  Structural native write support remains explicitly bounded by missing decoded
+  `open_flags`.
 - [x] `3042d09` exposes Rust-backed FUSE inode state through the N-API package;
   the Rust inode table, Node parity test, generated declarations and distribution
   checks passed locally.
@@ -460,6 +491,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 ## W10 — Filesystem and protocol transports
 
 - [x] Land FUSE, NFS, 9P, WebDAV and S3 transport implementations and tests.
+- [x] `1af1986` + `8ac77f3` + `9215ba3` retain held NFSv3/v4 backend handles
+  across unlink/rename; 266 pinned oracle cases passed through the supported
+  Vitest runner, with the TypeScript control's stateless handle limitation kept
+  explicit.
 - [x] Land HTTP early-rejection regression (`aa44413`).
 - [x] Land incremental S3 chunked codec helpers (`e218d18`); all 27 S3 tests and
   strict Clippy passed locally.
@@ -499,6 +534,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] `29337f7` adds direct Node SDK read/write self-test coverage and routes the
   Rust CLI through `mount-rs-sdk`; both CLI entry points are now usable examples
   of the public SDKs and are included in the provider/consumer matrix.
+- [x] `946a7cb` fixes the Windows Node CLI integration test to use the platform
+  temp directory; the local check passes and the hosted Windows rerun is queued.
 - [ ] W11.6 Run the same SDK-backed CLI flow against the configured metadata/
   block providers, including restart and cleanup, before treating the demo as a
   provider-integrated acceptance path.
@@ -859,6 +896,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   rooted absolute-target inference and metadata/lifecycle behavior. The local
   suite passed 14/14 where runnable; native `windows-latest` execution remains
   required.
+- [x] `ccaf8f5` + `4cdeb58` correct the Windows WAL shared-memory mapping mask
+  and add regression coverage; local focused tests pass, but `windows-latest`
+  must rerun before W27.1/W27.2 can be checked.
 
 ## W28 — Deterministic fault injection
 
