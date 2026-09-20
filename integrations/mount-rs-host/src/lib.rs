@@ -702,6 +702,26 @@ fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
     windows::open(path, flags, mode)
 }
 
+#[cfg(windows)]
+fn hard_link_host(existing: &Path, new_path: &Path) -> io::Result<()> {
+    windows::hard_link(existing, new_path)
+}
+
+#[cfg(not(windows))]
+fn hard_link_host(existing: &Path, new_path: &Path) -> io::Result<()> {
+    fs::hard_link(existing, new_path)
+}
+
+#[cfg(windows)]
+fn unlink_host(path: &Path) -> io::Result<()> {
+    windows::unlink(path)
+}
+
+#[cfg(not(windows))]
+fn unlink_host(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
 #[cfg(not(any(unix, windows)))]
 fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
     let mut options = OpenOptions::new();
@@ -1304,7 +1324,7 @@ impl FsDriver for HostFs {
         let real = self.secure(path, false, "unlink").await?;
         let error_path = real.clone();
         run_blocking(move || {
-            fs::remove_file(&real)
+            unlink_host(&real)
                 .map_err(|error| fs_error_from_io(error, "unlink", path_string(&error_path)))
         })
         .await
@@ -1332,7 +1352,7 @@ impl FsDriver for HostFs {
         let from_error = from.clone();
         let to_error = to.clone();
         run_blocking(move || {
-            fs::hard_link(&from, &to).map_err(|error| {
+            hard_link_host(&from, &to).map_err(|error| {
                 fs_error_from_io_with_dest(
                     error,
                     "link",
