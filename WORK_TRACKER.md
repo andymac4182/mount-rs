@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-21. Baseline: `d526c18`, plus explicitly identified uncommitted
+Updated: 2026-09-21. Baseline: `3042d09`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -57,6 +57,16 @@ Node suites, five-seed traces across memory/SQLite/object-store/chunked/PGlite
 backends, and the N-API distribution checks. The full root gate exited 0 with
 1,194 upstream tests passed and 40/40 seeded trace lanes passed; native mounts,
 hosted Windows/Linux runs and live R2 remain separate acceptance gates.
+
+Focused current-head acceptance after the follow-up packets: `mount-rs-sdk`
+unit tests passed (2/2), the Rust provider matrix passed memfs, memory/memory
+and SQLite/SQLite (3/3, with PGlite/R2 explicit skips), the Node SDK CLI direct
+driver self-test passed, the complete N-API suite passed, chunked tests passed
+(12/12 plus 7/7 concurrency), SQLite VFS tests passed (4/4 unit, 16/16 engine
+and 16/16 bridge), and local HostFs tests passed (14/14 including the Windows
+oracle cases where runnable). These are focused local gates at `3042d09`; the
+current shell still lacks live R2/PGlite credentials and hosted Windows/macOS
+and privileged native-mount runs remain unqualified.
 
 ## How to read and maintain this tracker
 
@@ -128,17 +138,17 @@ complete.
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
 | W01 | Core and mountx parity | Active simple-first; core harness, pinned trace evidence and skip inventory landed; full parity remains open | Main (packets integrated) |
-| W02 | Metadata/block split and chunking | Verifying | Main |
+| W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Live provider and configuration-driven CLI gates passed; broader benchmark/release evidence remains | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
-| W09 | Node / napi-rs and public API | Verifying; Rust-backed FUSE codec subpath and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
+| W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec subpath landed; native and cross-platform transport acceptance remains open | Main (packet integrated) |
-| W11 | Config-driven CLI | Rust CLI and Node SDK native macOS NFS demos passed; provider/remote/hosted gates remain | Main |
-| W12 | Safely hosting SQLite files | Local journal/WAL matrix and fail-closed gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
+| W11 | Config-driven CLI | Rust CLI now consumes the Rust SDK; Node CLI consumes the Node SDK; provider/remote/hosted gates remain | Main |
+| W12 | Safely hosting SQLite files | Local journal/WAL matrix, fail-closed bridge, and recovery gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
 | W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Rollback, process-local and host-local WAL gates landed; remote/Node/Windows acceptance pending | Peirce (checkpoint) / Main |
@@ -153,7 +163,7 @@ complete.
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
-| W27 | Native Windows support and CI | Runtime qualification pending | Main |
+| W27 | Native Windows support and CI | HostFs Windows packet landed; hosted runtime qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
 | W30 | OpenTelemetry traces, metrics and logs | Deferred for later | Unassigned |
@@ -234,12 +244,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   are 3/3, local Node rows are 4/4, and CLI config/runtime rows are 5/5; the
   PGlite lifecycle adds Rust and Node PGlite rows. R2 rows remain explicit
   skips without credentials and do not count as live-provider acceptance.
+- [x] `29337f7` makes the Rust CLI construct all local/provider drivers through
+  the public `mount-rs-sdk` facade and adds a public Node CLI SDK self-test. The
+  Rust SDK example, Rust CLI, Node CLI and provider matrix now exercise the same
+  SDK contract; native mount and live remote-provider acceptance remain separate.
 
 ## W02 — Independent metadata, blocks and chunking
 
 - [x] Land metadata/block contracts, fixed-size chunking, immutable blocks,
   fenced publication and ordered durability barriers.
 - [x] Exercise local mixed-provider compositions.
+- [x] `d6b80f4` persists chunker configuration/version metadata and covers partial
+  writes, truncation, close/reopen and stale publication in the chunked store;
+  the focused chunked suite passed 12/12 plus 7/7 concurrency cases locally.
 - [ ] W02.1 Complete live mixed-provider matrix, including Node and CLI paths.
 - [ ] W02.2 Verify stale writers, CAS conflicts, partial uploads, retry ambiguity,
   crash/reopen and provider capability failures across remote combinations.
@@ -416,6 +433,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   repeats passed. Earlier intermittent timeout cause is not established.
 - [x] Full local Node suite passed after fixes, excluding opt-in service/native
   lanes; opt-in skips are not acceptance evidence.
+- [x] `3042d09` exposes Rust-backed FUSE inode state through the N-API package;
+  the Rust inode table, Node parity test, generated declarations and distribution
+  checks passed locally.
 - [ ] W09.1 Close remaining public exports, factories and declaration parity gaps.
 - [ ] W09.2 Investigate any repeated server timeout using the new diagnostics.
 - [ ] W09.3 Expose new providers, versioning, VFS and HTTP through tested APIs.
@@ -461,6 +481,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   verification.
 - [x] `0dca1d1` adds the Node SDK CLI example and default mount-free checks;
   the opt-in macOS NFS self-test passed against the rebuilt local N-API addon.
+- [x] `29337f7` adds direct Node SDK read/write self-test coverage and routes the
+  Rust CLI through `mount-rs-sdk`; both CLI entry points are now usable examples
+  of the public SDKs and are included in the provider/consumer matrix.
 - [ ] W11.6 Run the same SDK-backed CLI flow against the configured metadata/
   block providers, including restart and cleanup, before treating the demo as a
   provider-integrated acceptance path.
@@ -489,6 +512,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   hosted CI. Implementation and bounded cleanup are added; main independently
   passed both shared macOS NFS lifecycle regressions, formatting and Clippy.
   Linux execution is not yet verified on this macOS host.
+- [x] `d6b80f4` adds local SQLite VFS fail-closed behavior after injected block or
+  metadata-publication failures, plus the focused unit/engine/bridge gates. This
+  is a local reliability boundary, not hosted cross-platform acceptance.
 
 ## W13 — FSKit
 
@@ -814,6 +840,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W27.5 Define and implement Windows mount support separately from Unix
   FUSE/NFS and macOS FSKit. Explicit unsupported operations are not proof of
   Windows mounting acceptance; retain capability and evidence matrices.
+- [x] `d6b80f4` adds the HostFs Windows packet for unprivileged symlink flags,
+  rooted absolute-target inference and metadata/lifecycle behavior. The local
+  suite passed 14/14 where runnable; native `windows-latest` execution remains
+  required.
 
 ## W28 — Deterministic fault injection
 
@@ -946,3 +976,6 @@ cross-drive isolation.
 | `0d7f1f4` | Rust CLI native end-to-end demo | Actual macOS NFS plus Rust/Node mounted-path I/O and cleanup passed |
 | `0dca1d1` | Node SDK CLI example and integration test | Argument checks plus opt-in actual macOS NFS SDK self-test passed |
 | `b6800f7` | W01 concurrency, provider/consumer and SQLite acceptance packets | Full root gate exit 0; PGlite rows passed; R2/live native and hosted platform gates remain open |
+| `29337f7` | Public Rust SDK facade, Rust CLI routing and Node SDK CLI self-test | SDK unit/example, Rust/Node/provider matrix and CLI self-tests passed locally; live remote/native/hosted lanes remain open |
+| `d6b80f4` | Chunked persistence, SQLite VFS failure handling and Windows HostFs acceptance packets | Focused local chunked, SQLite and HostFs gates passed; hosted Windows and remote-provider lanes remain open |
+| `3042d09` | Rust-backed FUSE inode state in napi-rs | Rust/Node inode parity, generated package checks and complete local N-API suite passed; native mount remains open |
