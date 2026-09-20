@@ -265,6 +265,21 @@ explicit `ENOSYS` boundary without mutating the session. The focused FUSE
 tests and strict scoped Clippy gate passed; publication and hosted/native
 acceptance remain separate gates.
 
+The W01 follow-up packets are now published sequentially. The N-API xattr
+packet is local `cf7a132` and finished at remote commit `4f484ad`; it adds
+pinned-oracle `SETXATTR`, `GETXATTR`, `LISTXATTR`, and `REMOVEXATTR` codecs,
+generated declarations/artifacts and malformed/truncated/trailing coverage.
+The Unstorage packet is local `e0e8195` and finished at remote commit
+`9b74c87`; its 14 capability-boundary rows passed with 5 supported results, 9
+explicit `ENOSYS` results, zero `ENOTSUP` mismatches and zero skips.
+
+The W04.3 PGlite packet was rebased onto remote `8ea3dc8` and published as a
+seven-file sequence ending at `90c33949`. It adds durable version metadata,
+real-server reconnect/version tests, mount-free SQLite VFS coverage and the
+configuration-driven PGlite gate. Focused versioning/VFS tests, locked
+compilation, formatting, Clippy and script checks passed; hosted reconnect
+acceptance remains open.
+
 ## How to read and maintain this tracker
 
 - **Landed:** committed implementation, not necessarily full acceptance.
@@ -326,7 +341,9 @@ patch):
 | Aquinas the 2nd | W01 Rust FUSE POLL session validation | `transports/mount-rs-fuse/{src/session.rs,tests/**}` | Integrated as `15026f2`; strict 24-byte framing, malformed/trailing rejection, explicit ENOSYS boundary, 50 package tests and strict scoped Clippy passed |
 | Euclid the 2nd | W01 napi-rs FUSE POLL request/reply codecs | `integrations/mount-rs-napi/**` | Integrated as `5b7f982`; generated artifacts/declarations, protocol-minor oracle differentials, malformed/truncated/trailing tests, build/typecheck and full N-API suite passed |
 | Dalton the 2nd | W01 Node SDK CLI native CI gate | `.github/workflows/ci.yml` | Integrated as `d28f31a`; opt-in Linux/macOS native gate with bounded timeouts and prerequisite probes; hosted results remain unverified |
-| Mendel the 2nd | W01 Rust FUSE advanced-operation validation | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated locally as `1a8b112`; strict FALLOCATE/RENAME2/LSEEK/COPY_FILE_RANGE framing, explicit EINVAL/ENOSYS boundaries, no-mutation/session-survival tests and strict Clippy passed; publication pending |
+| Mendel the 2nd | W01 Rust FUSE advanced-operation validation | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated as `1a8b112`; published through `7c6186f`; strict FALLOCATE/RENAME2/LSEEK/COPY_FILE_RANGE framing, explicit EINVAL/ENOSYS boundaries, no-mutation/session-survival tests and strict Clippy passed |
+| Ramanujan the 2nd | W01 napi-rs FUSE xattr codecs | `integrations/mount-rs-napi/**` | Integrated as `cf7a132`; published through `4f484ad`; SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR pinned-oracle differentials, generated artifacts/declarations, typecheck, build and full focused suite passed |
+| Zeno the 2nd | W01 Unstorage capability boundary parity | `tests/unstorage/**` | Integrated as `e0e8195`; published through `9b74c87`; 14 rows passed with 5 supported, 9 explicit ENOSYS, zero ENOTSUP mismatches and zero skips |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -656,7 +673,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Listener restoration preserves duplicate regular and once registrations;
   success and injected-detach-failure regressions cover that review finding.
   Hosted macOS/Linux confirmation remains open.
-- [ ] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
+- [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
+  The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
+  rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
+  version-history coverage, mount-free SQLite VFS tests and the PGlite gate;
+  it was published sequentially through remote `90c33949`. Hosted
+  macOS/Linux reconnect reruns remain the separate W04.2 gate.
 
 ## W05 — Cloudflare R2
 
