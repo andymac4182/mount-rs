@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import * as fuse from "../fuse.cjs";
 import {
+  decodeReadIn as namedDecodeReadIn,
+  encodeReadIn as namedEncodeReadIn,
+  decodeReadOut as namedDecodeReadOut,
+  encodeReadOut as namedEncodeReadOut,
   decodeWriteIn as namedDecodeWriteIn,
   encodeWriteIn as namedEncodeWriteIn,
   decodeWriteOut as namedDecodeWriteOut,
@@ -9,6 +13,10 @@ import {
 } from "../fuse.cjs";
 
 for (const [name, value] of [
+  ["decodeReadIn", namedDecodeReadIn],
+  ["encodeReadIn", namedEncodeReadIn],
+  ["decodeReadOut", namedDecodeReadOut],
+  ["encodeReadOut", namedEncodeReadOut],
   ["decodeWriteIn", namedDecodeWriteIn],
   ["encodeWriteIn", namedEncodeWriteIn],
   ["decodeWriteOut", namedDecodeWriteOut],
@@ -45,6 +53,22 @@ assert.deepEqual(fuse.decodeTranscript(transcript.encode()), [
 assert.equal(fuse.opcodeName(fuse.FUSE_GETATTR), "GETATTR");
 assert.equal(fuse.nameByteLength("é"), 2);
 assert.throws(() => fuse.decodeInHeader(Buffer.alloc(1)), fuse.ProtocolError);
+
+const readContext = { minor: 41, setxattrExt: false };
+const readInput = {
+  fh: 0x0102030405060708n,
+  offset: 0x1112131415161718n,
+  size: 7,
+  readFlags: 2,
+  lockOwner: 0x2122232425262728n,
+  flags: 0x241,
+};
+const readBody = fuse.encodeReadIn(readInput, readContext);
+assert.equal(readBody.length, fuse.readWriteInSize(readContext.minor));
+assert.deepEqual(fuse.decodeReadIn(readBody, readContext), readInput);
+const readReplyData = Uint8Array.from([0, 1, 2, 3, 254, 255, 9]);
+const readReply = fuse.encodeReadOut({ data: readReplyData });
+assert.deepEqual(fuse.decodeReadOut(readReply), { data: Buffer.from(readReplyData) });
 
 const writeContext = { minor: 41, setxattrExt: false };
 const writeInput = {
@@ -172,6 +196,45 @@ assert.deepEqual(fuse.unpackDirentsPlus(wrappedPlusPacked.buffer, plusContext), 
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
+  for (const ctx of [readContext, { minor: 8, setxattrExt: false }]) {
+    const oracleRead = oracle.encodeRequestBody(fuse.FUSE_READ, readInput, ctx);
+    const actualRead = fuse.encodeReadIn(readInput, ctx);
+    assert.deepEqual([...actualRead], [...oracleRead], `READ request bytes match oracle for minor ${ctx.minor}`);
+    const oracleDecoded = oracle.decodeRequestBody(fuse.FUSE_READ, oracleRead, ctx);
+    assert.deepEqual(
+      fuse.decodeReadIn(actualRead, ctx),
+      oracleDecoded,
+      `READ request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualRead.length; length++) {
+      const body = actualRead.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeReadIn(body, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_READ, body, ctx)),
+        `READ request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const trailing = Buffer.concat([actualRead, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeReadIn(trailing, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_READ, trailing, ctx)),
+      `READ request trailing-byte classification for minor ${ctx.minor}`,
+    );
+
+    const oracleReadReply = oracle.encodeReplyBody(fuse.FUSE_READ, { data: readReplyData }, ctx);
+    const actualReadReply = fuse.encodeReadOut({ data: readReplyData });
+    assert.deepEqual([...actualReadReply], [...oracleReadReply], "READ raw reply bytes match oracle");
+    assert.deepEqual(
+      [...fuse.decodeReadOut(actualReadReply).data],
+      [...oracle.decodeReplyBody(fuse.FUSE_READ, oracleReadReply, ctx).data],
+      "READ raw reply decode matches oracle",
+    );
+    for (const body of [Buffer.alloc(0), Buffer.from([1, 2, 3]), actualReadReply]) {
+      const decoded = fuse.decodeReadOut(body);
+      assert.deepEqual([...decoded.data], [...body], "READ raw reply preserves arbitrary bytes");
+    }
+  }
+
   for (const ctx of [writeContext, { minor: 8, setxattrExt: false }]) {
     const oracleWrite = oracle.encodeRequestBody(fuse.FUSE_WRITE, writeInput, ctx);
     const actualWrite = fuse.encodeWriteIn(writeInput, ctx);
@@ -272,10 +335,12 @@ if (source) {
   );
   console.log("mount-rs N-API FUSE READDIR body differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE READ request/raw-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE WRITE request/reply differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE READ request/raw-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE WRITE request/reply differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
