@@ -7,10 +7,11 @@ the auto facade.
 
 The command accepts one positional mountpoint:
 
-    mount-rs [mountpoint] [options]
-    mount-rs mount [mountpoint] [options]
-    mount-rs probe
-    mount-rs validate-config --config PATH
+mount-rs [mountpoint] [options]
+mount-rs mount [mountpoint] [options]
+mount-rs probe
+mount-rs validate-config --config PATH
+mount-rs sdk-self-test [--config PATH] [--reopen]
 
 --help, --version, and probe do not create a driver or a mount. The probe
 output describes the current host's FUSE, 9P, and NFS prerequisites and the
@@ -44,6 +45,24 @@ validate-config performs only JSON/schema and static option validation. It
 does not open SQLite or PGlite, resolve credential values, construct an R2
 client, or make a network request. Provider construction starts only after
 the mount command has resolved the config.
+
+`sdk-self-test` is the mount-free Rust CLI example and integration entry
+point. It constructs the selected filesystem through the public
+`mount-rs-sdk::Filesystem` facade, writes and reads a binary file through the
+shared `FsDriver` contract, synchronizes it, and cleans it up. With
+`--config PATH --reopen`, it shuts down the first SDK filesystem, opens the
+configured durable provider again, verifies the persisted bytes, and then
+removes the test file. The default command uses memfs; a structured SQLite
+split-store config is a portable durable example:
+
+```sh
+cargo run --locked -p mount-rs-cli -- sdk-self-test
+cargo run --locked -p mount-rs-cli -- \
+  sdk-self-test --config crates/mount-rs-cli/examples/config-splitstore.json --reopen
+```
+
+The Node counterpart is `examples/node-cli/index.mjs --sdk-self-test`; both
+commands are exercised by the CLI integration tests and provider matrix.
 
 The top-level version is currently 1. The driver object is discriminated and
 strict: memory accepts only kind; host accepts kind and root; sqlite accepts
