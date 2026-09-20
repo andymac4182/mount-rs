@@ -30,7 +30,7 @@ use std::ffi::CString;
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
-use std::os::unix::fs::{FileExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
@@ -383,9 +383,50 @@ fn file_type(file_type: std::fs::FileType) -> CoreFileType {
     }
 }
 
+#[cfg(unix)]
 fn timestamp_ms(seconds: i64, nanoseconds: i64) -> i64 {
     let milliseconds = i128::from(seconds) * 1_000 + i128::from(nanoseconds) / 1_000_000;
     milliseconds.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
+}
+
+#[cfg(unix)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.read_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn read_file_at(file: &File, buffer: &mut [u8], offset: u64) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_read(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn read_file_at(_file: &File, _buffer: &mut [u8], _offset: u64) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "positional host reads are unavailable on this platform",
+    ))
+}
+
+#[cfg(unix)]
+fn write_file_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<usize> {
+    use std::os::unix::fs::FileExt;
+    file.write_at(buffer, offset)
+}
+
+#[cfg(windows)]
+fn write_file_at(file: &File, buffer: &[u8], offset: u64) -> io::Result<usize> {
+    use std::os::windows::fs::FileExt;
+    file.seek_write(buffer, offset)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn write_file_at(_file: &File, _buffer: &[u8], _offset: u64) -> io::Result<usize> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "positional host writes are unavailable on this platform",
+    ))
 }
 
 #[cfg(unix)]
@@ -717,17 +758,8 @@ impl FileHandle for HostHandle {
             }
             let start = position.unwrap_or(state.position);
             let mut bytes = vec![0_u8; length];
-            #[cfg(unix)]
-            let count = file
-                .read_at(&mut bytes, start)
+            let count = read_file_at(file, &mut bytes, start)
                 .map_err(|error| fs_error_from_io(error, "read", path.clone()))?;
-            #[cfg(not(unix))]
-            let count = {
-                let _ = start;
-                return Err(FsError::new(ErrorCode::Enotsup)
-                    .with_syscall("read")
-                    .with_path(path));
-            };
             if position.is_none() {
                 state.position = start.saturating_add(count as u64);
             }
@@ -774,7 +806,6 @@ impl FileHandle for HostHandle {
                         .with_syscall("write")
                         .with_path(path.clone()));
                 }
-                #[cfg(unix)]
                 let count = if flags.append && position.is_none() {
                     // `pwrite(2)`/`FileExt::write_at` does not consistently honor
                     // O_APPEND across Unix platforms: on macOS it writes at the
@@ -786,15 +817,8 @@ impl FileHandle for HostHandle {
                     file.write(&bytes)
                         .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
                 } else {
-                    file.write_at(&bytes, start)
+                    write_file_at(file, &bytes, start)
                         .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
-                };
-                #[cfg(not(unix))]
-                let count = {
-                    let _ = start;
-                    return Err(FsError::new(ErrorCode::Enotsup)
-                        .with_syscall("write")
-                        .with_path(path));
                 };
                 let appended_position = if flags.append && position.is_none() {
                     Some(
