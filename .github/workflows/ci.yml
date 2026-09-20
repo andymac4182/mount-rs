@@ -237,6 +237,12 @@ jobs:
         run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - run: pnpm --dir integrations/mount-rs-napi build
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
+      - name: Verify real just-bash and Mastra consumers
+        timeout-minutes: 5
+        run: |
+          pnpm --dir integrations/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
+          pnpm --dir integrations/mount-rs-virtual-fs test
+          pnpm --dir integrations/mount-rs-virtual-fs typecheck
       - name: Verify storage benchmark harness and smoke workload
         timeout-minutes: 5
         run: |

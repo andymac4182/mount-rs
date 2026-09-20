@@ -41,7 +41,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W13 | macOS FSKit | Implementing | James |
 | W14 | Versioned filesystems | Implementing | Jason |
 | W15 | Mount-free SQLite VFS | Implementing | Hume |
-| W16 | just-bash / Mastra adapters | Implementing | Confucius |
+| W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Confucius / Main |
 | W17 | Multi-drive HTTP server | Implementing | Copernicus |
 | W18 | Benchmarks and dependency budget | Partial implementation | Main |
 | W19 | Compression | Design review recorded | Main |
@@ -274,19 +274,21 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W16 — Mount-independent consumer adapters
 
-- [ ] W16.1 Finish separate just-bash and Mastra adapters over mount-rs drives.
-- [ ] W16.2 Pin and execute actual consumer libraries, not just adapter mocks.
-  Main independently passed actual just-bash 3.4.2 and Mastra 1.67.0 tests plus
-  strict TypeScript checking for the uncommitted adapter checkpoint. Persistent
-  backend/shared-namespace coverage is being added before landing.
+- [x] W16.1 Implement separate just-bash and Mastra adapters over mount-rs drives.
+- [x] W16.2 Main independently passed actual just-bash 3.4.2 and Mastra 1.67.0
+  tests, strict TypeScript checking and package dry-run (11 intended files).
+  Memory and SQLite reopen/shared Node API visibility are covered. Wired into
+  test-all and four-platform Node CI; hosted results remain pending.
 - [ ] W16.3 Verify binary/path/error behavior, readonly/versioned views, shared
   namespace visibility, persistence and lifecycle in consumer integration tests.
 - [ ] W16.4 Reuse the drive abstraction with W17 without requiring OS mounts.
-- [ ] W16.5 Fix review findings before landing: reject recursive copy into a
+- [x] W16.5 Fix review findings before landing: reject recursive copy into a
   descendant (including symlink aliases), preserve source on same-object copy,
   and handle partial/zero-progress writes. Add targeted regressions.
-- [ ] W16.6 Specify close/cancellation honestly: waiting for admitted operations
-  does not establish bounded cleanup if a backend request never resolves.
+- [x] W16.6 Document that waiting for admitted operations does not establish
+  bounded cleanup if a backend request never resolves.
+- [ ] W16.7 Add explicit backend cancellation/timeout semantics and remote-store,
+  versioned-view and actual native-mount shared-visibility acceptance.
 
 ## W17 — Multi-drive HTTP server
 

@@ -1,0 +1,57 @@
+{
+  "name": "@andymac4182/mount-rs-virtual-fs",
+  "version": "0.1.0",
+  "description": "Mount-independent just-bash and Mastra filesystem adapters for mount-rs",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./src/index.mjs",
+      "default": "./src/index.mjs"
+    },
+    "./just-bash": {
+      "types": "./types/just-bash.d.ts",
+      "import": "./src/just-bash.mjs",
+      "default": "./src/just-bash.mjs"
+    },
+    "./mastra": {
+      "types": "./types/mastra.d.ts",
+      "import": "./src/mastra.mjs",
+      "default": "./src/mastra.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.d.ts",
+    "src",
+    "types",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node test/just-bash.mjs && node test/mastra.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@andymac4182/mount-rs": ">=0.1.0 <0.2.0",
+    "@mastra/core": ">=1.67.0 <2",
+    "just-bash": ">=3.4.2 <4"
+  },
+  "peerDependenciesMeta": {
+    "@mastra/core": {
+      "optional": true
+    },
+    "just-bash": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@andymac4182/mount-rs": "file:../mount-rs-napi",
+    "@mastra/core": "1.67.0",
+    "@types/node": "24.13.6",
+    "just-bash": "3.4.2",
+    "typescript": "6.0.3"
+  }
+}
