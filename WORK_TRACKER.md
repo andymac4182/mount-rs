@@ -203,7 +203,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   providers, transports or native mounts.
 - [x] `ae2f12d` adds the complete 88-row upstream skip inventory and a
   revision-checked trace-evidence runner. Five pinned seeds passed on the
-  memory backend; the required all-backend/platform matrix remains open.
+  memory backend, and the default six-backend lane passed seed 4182 with 621
+  operations per backend; the required all-seed/provider/platform matrix
+  remains open.
 - [x] `dd65770` adds the Rust-backed N-API FUSE codec subpath and declarations;
   it is mount-free protocol coverage, not native FUSE session acceptance.
 - [x] `0d7f1f4` proves the Rust CLI's real macOS NFS mount path with independent
