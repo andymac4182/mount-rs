@@ -37,7 +37,7 @@ export const NATIVE_TARGETS = Object.freeze([
   }),
 ]);
 
-const ROOT_FILES = ["index.js", "index.d.ts", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "package.json", "types"];
+const ROOT_FILES = ["index.js", "index.d.ts", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "nfs.cjs", "p9.cjs", "package.json", "types"];
 
 async function walkFiles(directory) {
   const files = [];

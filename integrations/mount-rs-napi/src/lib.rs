@@ -1,5 +1,8 @@
+pub mod js_driver;
 pub mod kv_binding;
 pub mod memory_factory;
+pub mod nfs_codec;
+pub mod p9_codec;
 pub mod servers;
 pub mod utilities;
 

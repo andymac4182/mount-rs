@@ -23,7 +23,9 @@ assert.deepEqual(packageJson.exports, {
     default: "./index.js",
   },
   "./package.json": "./package.json",
-  ...Object.fromEntries(["./drivers/node-fs", "./drivers/unstorage", "./auto", "./nfs", "./9p", "./s3", "./webdav"].map((path) => [path, {
+  "./nfs": { types: "./types/nfs-codec.d.ts", require: "./nfs.cjs", default: "./nfs.cjs" },
+  "./9p": { types: "./types/p9-codec.d.ts", require: "./p9.cjs", default: "./p9.cjs" },
+  ...Object.fromEntries(["./drivers/node-fs", "./drivers/unstorage", "./auto", "./s3", "./webdav"].map((path) => [path, {
     types: "./index.d.ts", require: "./index.js", default: "./index.js",
   }])),
 });
@@ -46,6 +48,9 @@ const { stdout } = await execFileAsync(
 const report = JSON.parse(stdout.trim());
 const files = new Set(report.files.map(({ path }) => path));
 for (const required of ["index.js", "index.d.ts", "package.json", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "types/memory.d.ts"]) {
+  assert.equal(files.has(required), true, `package is missing ${required}`);
+}
+for (const required of ["nfs.cjs", "p9.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "types/nfs-codec.d.ts", "types/p9-codec.d.ts"]) {
   assert.equal(files.has(required), true, `package is missing ${required}`);
 }
 assert.equal(

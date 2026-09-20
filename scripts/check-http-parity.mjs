@@ -333,8 +333,23 @@ function compare(label, left, right) {
   }
 }
 
-async function pair(label, tsRequest, rustRequest, { method } = {}) {
-  const [typescriptResponse, rustResponse] = await Promise.all([tsRequest(), rustRequest()]);
+async function requestWithContext(label, side, method, request) {
+  try {
+    return await request();
+  } catch (error) {
+    const cause = error?.cause ?? error;
+    const code = cause?.code ? ` (${cause.code})` : "";
+    throw new Error(`${label} ${side} ${method} request failed: ${cause?.message ?? cause}${code}`, {
+      cause: error,
+    });
+  }
+}
+
+async function pair(label, tsRequest, rustRequest, { method = "GET" } = {}) {
+  const [typescriptResponse, rustResponse] = await Promise.all([
+    requestWithContext(label, "TypeScript", method, tsRequest),
+    requestWithContext(label, "Rust", method, rustRequest),
+  ]);
   const [typescriptDetails, rustDetails] = await Promise.all([
     readResponseDetails(typescriptResponse, method),
     readResponseDetails(rustResponse, method),
@@ -522,11 +537,21 @@ function s3ChunkedRequest(base, method, pathAndQuery, payload, options = {}) {
 async function fetchS3Chunked(base, method, pathAndQuery, options = {}) {
   const request = s3ChunkedRequest(base, method, pathAndQuery, options.body ?? new Uint8Array(), options);
   const body = options.tamperChunkSignature ? tamperChunkSignature(request.body) : request.body;
+  // Negative signature cases are allowed to reject before the complete body
+  // is consumed. Buffer those exact bytes so Undici cannot race an early
+  // server response while it is still pulling a ReadableStream; successful
+  // chunked cases below remain fragmented and exercise the streaming path.
+  const requestBody = options.fragmented === false
+    ? body
+    : fragmentedBody(body, [1, 3, 7, 31, 113, 4096]);
   return fetch(request.url, {
     method,
-    headers: request.headers,
-    body: fragmentedBody(body, [1, 3, 7, 31, 113, 4096]),
-    duplex: "half",
+    headers: {
+      ...request.headers,
+      ...(options.closeConnection ? { connection: "close" } : {}),
+    },
+    body: requestBody,
+    ...(options.fragmented === false ? {} : { duplex: "half" }),
   });
 }
 
@@ -776,12 +801,16 @@ async function runS3Pair(tsBase, rustBase) {
         body: multipartPart,
         chunkSize: 64 * 1024,
         tamperChunkSignature: true,
+        fragmented: false,
+        closeConnection: true,
       }),
     () =>
       fetchS3Chunked(rustBase, "PUT", multipartPath(multipartKey, rustUploadId, "&partNumber=2"), {
         body: multipartPart,
         chunkSize: 64 * 1024,
         tamperChunkSignature: true,
+        fragmented: false,
+        closeConnection: true,
       }),
     { method: "PUT" },
   );

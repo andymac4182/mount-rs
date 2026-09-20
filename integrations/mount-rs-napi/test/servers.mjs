@@ -27,6 +27,18 @@ async function within(promise, label) {
   }
 }
 
+async function waitForTransportError(reports, label) {
+  const deadline = Date.now() + IO_TIMEOUT_MS;
+  while (reports.length === 0) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new Error(`${label} timed out`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 10)));
+  }
+  return reports[0];
+}
+
 function writeSocket(socket, bytes, label) {
   return within(
     new Promise((resolve, reject) => {
@@ -157,7 +169,16 @@ function nfsRecord(record) {
 
 async function exerciseNfs() {
   const filesystem = Filesystem.memory();
-  const server = createNfsServer(filesystem, { host: "127.0.0.1", port: 0 });
+  const reports = [];
+  const server = createNfsServer(filesystem, {
+    host: "127.0.0.1",
+    port: 0,
+    maxRecord: 64,
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+      throw new Error("NFS hook callback deliberately threw");
+    },
+  });
   let socket;
   let serverReader;
   let listening;
@@ -178,11 +199,35 @@ async function exerciseNfs() {
     assert.equal(reply.readUInt32BE(0), 41);
     assert.equal(reply.readUInt32BE(4), 1);
     assert.equal(reply.readUInt32BE(20), 0);
+
+    // A decodable RPC body that the protocol layer cannot dispatch is not a
+    // transport failure and must not reach onTransportError.
+    await writeSocket(socket, nfsRecord(Buffer.from([1, 2, 3])), "NFS bad RPC body");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(reports, []);
+
+    // EOF is an ordinary disconnect. The second connection below is reserved
+    // for the actual record-framing failure that should be reported.
+    await closeSocket(socket, "NFS orderly disconnect");
+    socket = undefined;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(reports, []);
+
+    ({ socket, reader: serverReader } = await connectLoopback(server.port));
+    const malformedMarker = Buffer.alloc(4);
+    malformedMarker.writeUInt32BE((0x8000_0000 | 65) >>> 0);
+    await writeSocket(socket, malformedMarker, "NFS oversized record marker");
+    const report = await waitForTransportError(reports, "NFS transport error");
+    assert.ok(report.error instanceof Error);
+    assert.match(report.error.message, /record|limit|maximum|larger/i);
+    assert.equal(report.peer, "127.0.0.1");
+    assert.equal(reports.length, 1);
   } finally {
     if (socket) {
       await closeSocket(socket, "NFS socket close");
     }
     await closeLifecycle(server, "NFS", listening);
+    assert.equal(reports.length, 1);
   }
 }
 
@@ -224,7 +269,15 @@ async function exerciseP9() {
   const filesystem = Filesystem.memory();
   const original = Buffer.from("before-9p");
   await filesystem.writeFile("/servers-9p.txt", original);
-  const server = createP9Server(filesystem, { host: "127.0.0.1", port: 0 });
+  const reports = [];
+  const server = createP9Server(filesystem, {
+    host: "127.0.0.1",
+    port: 0,
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+      throw new Error("9P hook callback deliberately threw");
+    },
+  });
   let socket;
   let serverReader;
   let connection;
@@ -254,6 +307,11 @@ async function exerciseP9() {
     assert.equal(session.version, "9P2000.L");
     assert.equal(session.destroyed, false);
     assert.ok(session.stats.requests >= 1);
+
+    // An unsupported message is a normal Rlerror protocol reply, not a
+    // transport failure.
+    await p9Request(socket, serverReader, 250, 7, Buffer.alloc(0), 7);
+    assert.deepEqual(reports, []);
 
     const attachBody = Buffer.alloc(12);
     attachBody.writeUInt32LE(1, 0);
@@ -308,6 +366,39 @@ async function exerciseP9() {
     const clunkBody = Buffer.alloc(4);
     clunkBody.writeUInt32LE(2, 0);
     await p9Request(socket, serverReader, 120, 6, clunkBody, 121);
+
+    // Orderly disconnects are deliberately silent. Reconnect for the bounded
+    // framing failure below so the two cases cannot race one another.
+    await closeSocket(socket, "9P orderly disconnect");
+    socket = undefined;
+    await within(connection.closed, "9P orderly connection closed");
+    assert.equal(connection.session.destroyed, true);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(reports, []);
+
+    ({ socket, reader: serverReader } = await connectLoopback(server.port));
+    await p9Request(
+      socket,
+      serverReader,
+      100,
+      0xffff,
+      Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+      101,
+    );
+    [connection] = server.clients();
+    assert.ok(connection);
+
+    // A size below the 7-byte 9P header cannot be resynchronized and is a
+    // transport framing failure. The callback's deliberate throw must be
+    // caught by the TSFN bridge rather than becoming an uncaught exception.
+    const malformedFrame = Buffer.alloc(7);
+    malformedFrame.writeUInt32LE(6, 0);
+    await writeSocket(socket, malformedFrame, "9P malformed frame");
+    const report = await waitForTransportError(reports, "9P transport error");
+    assert.ok(report.error instanceof Error);
+    assert.match(report.error.message, /header|frame|size|below/i);
+    assert.match(report.peer, /^127\.0\.0\.1:\d+$/);
+    assert.equal(reports.length, 1);
   } finally {
     if (socket) {
       await closeSocket(socket, "9P socket close");
@@ -317,6 +408,7 @@ async function exerciseP9() {
       assert.equal(connection.session.destroyed, true);
     }
     await closeLifecycle(server, "9P", listening);
+    assert.equal(reports.length, 1);
   }
 }
 

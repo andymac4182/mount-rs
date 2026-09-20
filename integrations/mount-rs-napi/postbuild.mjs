@@ -8,6 +8,7 @@ const facadeExportMarkers = [
   "module.exports.ERRNO_CODES = Object.freeze(nativeBinding.errnoCodes())",
   "module.exports.joinPath = (...parts) => nativeBinding.joinPathParts(parts)",
   "module.exports.createUnstorageDriver = nativeBinding.createUnstorageDriver",
+  "module.exports.createDriver = nativeBinding.createDriver",
   "module.exports.createNfsServer = nativeBinding.createNfsServer",
   "module.exports.createP9Server = nativeBinding.createP9Server",
   "module.exports.createS3Server = nativeBinding.createS3Server",
@@ -53,8 +54,17 @@ if (changed) await writeFile(loader, source)
 // callback values and error identity across its Promise<void> boundary.
 const declarations = new URL("./index.d.ts", import.meta.url)
 let types = await readFile(declarations, "utf8")
+// Codec buffers are Node Buffers in the native ABI. Import their type
+// explicitly rather than requiring consumers to enable ambient Node globals.
+const bufferType = 'import type { Buffer } from "node:buffer"'
+if (/\bBuffer\b/.test(types) && !types.includes(bufferType)) {
+  types = `${bufferType}\n${types}`
+}
 const disposableLib = '/// <reference lib="esnext.disposable" />'
-if (!types.includes(disposableLib)) types = `${disposableLib}\n${types}`
+const nodeTypes = '/// <reference types="node" />'
+// Triple-slash directives must precede imports; repeat generation safely.
+types = types.replaceAll(`${disposableLib}\n`, "").replaceAll(`${nodeTypes}\n`, "")
+types = `${disposableLib}\n${nodeTypes}\n${types}`
 types = types.replace(
   /\b(read|write)\(callback: \(\) => Promise<undefined>\): Promise<undefined>/g,
   "$1<T>(callback: () => T | Promise<T>): Promise<T>",

@@ -13,10 +13,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mount_rs_9p::{P9Server as TransportP9Server, P9ServerOptions as TransportP9ServerOptions};
+use mount_rs_9p::{
+    P9Server as TransportP9Server, P9ServerHooks as TransportP9ServerHooks,
+    P9ServerOptions as TransportP9ServerOptions, P9TransportError as TransportP9Error,
+    P9TransportErrorHook as TransportP9ErrorHook,
+};
 use mount_rs_core::{ErrorCode, FsDriver, FsError};
 use mount_rs_nfs::{
-    NfsServer as TransportNfsServer, NfsServerOptions as TransportNfsServerOptions,
+    NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
+    NfsServerOptions as TransportNfsServerOptions, NfsTransportError as TransportNfsError,
+    NfsTransportErrorHook as TransportNfsErrorHook,
 };
 use mount_rs_s3::{
     Credentials as TransportS3Credentials, S3Server as TransportS3Server,
@@ -25,13 +31,157 @@ use mount_rs_s3::{
 use mount_rs_webdav::{
     WebdavServer as TransportWebdavServer, WebdavServerOptions as TransportWebdavServerOptions,
 };
-use napi::bindgen_prelude::{Buffer, Either, JsObjectValue, Object, Reference};
-use napi::{Error, Status};
+use napi::bindgen_prelude::{
+    Buffer, Either, FnArgs, Function, JsObjectValue, Object, Reference, Unknown,
+};
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Error, Status, sys};
 use napi_derive::napi;
 
 use super::{Filesystem, MountDriver};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+
+type JsTransportErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type TransportErrorCall = FnArgs<(Error, Option<String>)>;
+type TransportErrorTsfn = ThreadsafeFunction<
+    TransportErrorEvent,
+    Unknown<'static>,
+    TransportErrorCall,
+    Status,
+    false,
+    false,
+>;
+
+#[derive(Clone)]
+struct TransportErrorEvent {
+    message: String,
+    peer: Option<String>,
+}
+
+impl From<TransportNfsError> for TransportErrorEvent {
+    fn from(error: TransportNfsError) -> Self {
+        let TransportNfsError { message, peer, .. } = error;
+        Self { message, peer }
+    }
+}
+
+impl From<TransportP9Error> for TransportErrorEvent {
+    fn from(error: TransportP9Error) -> Self {
+        let TransportP9Error { message, peer, .. } = error;
+        Self { message, peer }
+    }
+}
+
+/// Owns the JavaScript callback independently from the transport hook.
+///
+/// The Rust transports retain their hook closure until their server is dropped,
+/// so closing a Node server must explicitly abort and remove the TSFN rather
+/// than merely dropping the N-API wrapper. The closed flag also makes a hook
+/// callback racing with shutdown a no-op; the TSFN's aborted lock closes the
+/// remaining call-versus-release race.
+struct TransportErrorCallback {
+    callback: Mutex<Option<Arc<TransportErrorTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl TransportErrorCallback {
+    fn new(function: JsTransportErrorCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<TransportErrorEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| {
+                let event = context.value;
+                Ok(FnArgs::from((
+                    Error::new(Status::GenericFailure, event.message),
+                    event.peer,
+                )))
+            })?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn report(&self, event: TransportErrorEvent) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+
+        // This is a notification, not a transport operation that can carry a
+        // JavaScript rejection. `call_with_return_value` captures a synchronous
+        // throw so it cannot become an uncaught exception or abort the process;
+        // the transport event itself remains delivered exactly once.
+        let _ = callback.call_with_return_value(
+            event,
+            ThreadsafeFunctionCallMode::NonBlocking,
+            |result, _env| {
+                let _ = result;
+                Ok(())
+            },
+        );
+    }
+
+    fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for TransportErrorCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn nfs_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportNfsServerHooks {
+    TransportNfsServerHooks {
+        on_transport_error: callback.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(move |error: TransportNfsError| callback.report(error.into()))
+                as TransportNfsErrorHook
+        }),
+    }
+}
+
+fn p9_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportP9ServerHooks {
+    TransportP9ServerHooks {
+        on_transport_error: callback.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(move |error: TransportP9Error| callback.report(error.into()))
+                as TransportP9ErrorHook
+        }),
+    }
+}
 
 fn config_error(message: impl Into<String>) -> Error {
     super::to_js_error(
@@ -159,11 +309,21 @@ pub struct NfsServerOptions {
     pub dtpref: Option<f64>,
     pub snapshot_cache: Option<f64>,
     pub claim_ownership: Option<bool>,
+    #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
+    pub on_transport_error: Option<JsTransportErrorCallback>,
 }
 
 fn nfs_options(
     options: Option<NfsServerOptions>,
-) -> Result<(String, u16, TransportNfsServerOptions), Error> {
+) -> Result<
+    (
+        String,
+        u16,
+        TransportNfsServerOptions,
+        Option<JsTransportErrorCallback>,
+    ),
+    Error,
+> {
     let options = options.unwrap_or(NfsServerOptions {
         port: None,
         host: None,
@@ -177,7 +337,9 @@ fn nfs_options(
         dtpref: None,
         snapshot_cache: None,
         claim_ownership: None,
+        on_transport_error: None,
     });
+    let on_transport_error = options.on_transport_error;
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
     let mut output = TransportNfsServerOptions {
@@ -199,7 +361,7 @@ fn nfs_options(
         output.session.snapshot_cache,
     )?;
     output.session.claim_ownership = options.claim_ownership.unwrap_or(true);
-    Ok((host, port, output))
+    Ok((host, port, output, on_transport_error))
 }
 
 #[napi]
@@ -208,6 +370,7 @@ pub struct NfsServer {
     host: String,
     requested_port: u16,
     closed: AtomicBool,
+    transport_error: Option<Arc<TransportErrorCallback>>,
 }
 
 #[napi]
@@ -237,6 +400,9 @@ impl NfsServer {
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
         self.closed.store(true, Ordering::Release);
+        if let Some(callback) = &self.transport_error {
+            callback.release();
+        }
         self.inner
             .close()
             .await
@@ -249,13 +415,21 @@ pub fn create_nfs_server(
     driver: &Filesystem,
     options: Option<NfsServerOptions>,
 ) -> napi::Result<NfsServer> {
-    let (host, requested_port, options) = nfs_options(options)?;
-    let inner = TransportNfsServer::new(MountDriver(Arc::clone(&driver.driver)), options);
+    let (host, requested_port, options, on_transport_error) = nfs_options(options)?;
+    let transport_error = on_transport_error
+        .map(TransportErrorCallback::new)
+        .transpose()?;
+    let inner = TransportNfsServer::new_with_hooks(
+        MountDriver(Arc::clone(&driver.driver)),
+        options,
+        nfs_hooks(transport_error.as_ref()),
+    );
     Ok(NfsServer {
         inner: Arc::new(inner),
         host,
         requested_port,
         closed: AtomicBool::new(false),
+        transport_error,
     })
 }
 
@@ -273,11 +447,21 @@ pub struct P9ServerOptions {
     pub use_driver_ino: Option<bool>,
     pub read_only: Option<bool>,
     pub claim_ownership: Option<bool>,
+    #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
+    pub on_transport_error: Option<JsTransportErrorCallback>,
 }
 
 fn p9_options(
     options: Option<P9ServerOptions>,
-) -> Result<(String, u16, TransportP9ServerOptions), Error> {
+) -> Result<
+    (
+        String,
+        u16,
+        TransportP9ServerOptions,
+        Option<JsTransportErrorCallback>,
+    ),
+    Error,
+> {
     let options = options.unwrap_or(P9ServerOptions {
         port: None,
         host: None,
@@ -291,7 +475,9 @@ fn p9_options(
         use_driver_ino: None,
         read_only: None,
         claim_ownership: None,
+        on_transport_error: None,
     });
+    let on_transport_error = options.on_transport_error;
     if options.path.is_some() && (options.host.is_some() || options.port.is_some()) {
         return Err(config_error(
             "a 9P server uses either path or host/port, not both",
@@ -318,7 +504,7 @@ fn p9_options(
     output.use_driver_ino = options.use_driver_ino.unwrap_or(true);
     output.read_only = options.read_only.unwrap_or(false);
     output.claim_ownership = options.claim_ownership.unwrap_or(true);
-    Ok((host, port, output))
+    Ok((host, port, output, on_transport_error))
 }
 
 type P9ServeFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -446,6 +632,7 @@ pub struct P9Server {
     state: Mutex<P9State>,
     binding: AtomicBool,
     closed: AtomicBool,
+    transport_error: Option<Arc<TransportErrorCallback>>,
 }
 
 #[napi]
@@ -529,10 +716,14 @@ impl P9Server {
         {
             return Err(transport_error("9P listen", "server is already starting"));
         }
-        let result = TransportP9Server::bind_arc(Arc::clone(&self.driver), self.options.clone())
-            .await
-            .map(Arc::new)
-            .map_err(|error| transport_error("9P listen", error));
+        let result = TransportP9Server::bind_arc_with_hooks(
+            Arc::clone(&self.driver),
+            self.options.clone(),
+            p9_hooks(self.transport_error.as_ref()),
+        )
+        .await
+        .map(Arc::new)
+        .map_err(|error| transport_error("9P listen", error));
         let server = match result {
             Ok(server) => server,
             Err(error) => {
@@ -578,6 +769,9 @@ impl P9Server {
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
         self.closed.store(true, Ordering::Release);
+        if let Some(callback) = &self.transport_error {
+            callback.release();
+        }
         let (server, task) = {
             let mut state = self.state.lock().expect("9P state lock");
             (state.server.take(), state.serve_task.take())
@@ -600,7 +794,10 @@ pub fn create_p9_server(
     driver: &Filesystem,
     options: Option<P9ServerOptions>,
 ) -> napi::Result<P9Server> {
-    let (host, requested_port, options) = p9_options(options)?;
+    let (host, requested_port, options, on_transport_error) = p9_options(options)?;
+    let transport_error = on_transport_error
+        .map(TransportErrorCallback::new)
+        .transpose()?;
     Ok(P9Server {
         driver: Arc::clone(&driver.driver),
         options,
@@ -612,6 +809,7 @@ pub fn create_p9_server(
         }),
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
+        transport_error,
     })
 }
 
