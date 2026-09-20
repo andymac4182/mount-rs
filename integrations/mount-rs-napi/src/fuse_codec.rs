@@ -779,6 +779,82 @@ fn create_out(value: NativeFuseCreateOut) -> protocol::FuseCreateOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseReleaseIn {
+    pub fh: BigInt,
+    pub flags: u32,
+    #[napi(js_name = "releaseFlags")]
+    pub release_flags: u32,
+    #[napi(js_name = "lockOwner")]
+    pub lock_owner: BigInt,
+}
+
+impl From<protocol::FuseReleaseIn> for NativeFuseReleaseIn {
+    fn from(value: protocol::FuseReleaseIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            flags: value.flags,
+            release_flags: value.release_flags,
+            lock_owner: bigint(value.lock_owner),
+        }
+    }
+}
+
+fn release_in(value: NativeFuseReleaseIn) -> protocol::FuseReleaseIn {
+    protocol::FuseReleaseIn {
+        fh: u64_from_bigint(&value.fh),
+        flags: value.flags,
+        release_flags: value.release_flags,
+        lock_owner: u64_from_bigint(&value.lock_owner),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseFlushIn {
+    pub fh: BigInt,
+    #[napi(js_name = "lockOwner")]
+    pub lock_owner: BigInt,
+}
+
+impl From<protocol::FuseFlushIn> for NativeFuseFlushIn {
+    fn from(value: protocol::FuseFlushIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            lock_owner: bigint(value.lock_owner),
+        }
+    }
+}
+
+fn flush_in(value: NativeFuseFlushIn) -> protocol::FuseFlushIn {
+    protocol::FuseFlushIn {
+        fh: u64_from_bigint(&value.fh),
+        lock_owner: u64_from_bigint(&value.lock_owner),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseFsyncIn {
+    pub fh: BigInt,
+    #[napi(js_name = "fsyncFlags")]
+    pub fsync_flags: u32,
+}
+
+impl From<protocol::FuseFsyncIn> for NativeFuseFsyncIn {
+    fn from(value: protocol::FuseFsyncIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            fsync_flags: value.fsync_flags,
+        }
+    }
+}
+
+fn fsync_in(value: NativeFuseFsyncIn) -> protocol::FuseFsyncIn {
+    protocol::FuseFsyncIn {
+        fh: u64_from_bigint(&value.fh),
+        fsync_flags: value.fsync_flags,
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseReadIn {
     pub fh: BigInt,
     pub offset: BigInt,
@@ -1385,6 +1461,81 @@ pub fn fuse_encode_create_out(
         mount_rs_fuse::FUSE_CREATE,
         &protocol::FuseReplyBody::Create(create_out(value)),
         protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeReleaseIn")]
+pub fn fuse_decode_release_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseReleaseIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_RELEASE, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Release(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_RELEASE did not decode as a release request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeReleaseIn")]
+pub fn fuse_encode_release_in(value: NativeFuseReleaseIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_RELEASE,
+        &protocol::FuseRequestBody::Release(release_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeFlushIn")]
+pub fn fuse_decode_flush_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseFlushIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_FLUSH, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Flush(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_FLUSH did not decode as a flush request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeFlushIn")]
+pub fn fuse_encode_flush_in(value: NativeFuseFlushIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_FLUSH,
+        &protocol::FuseRequestBody::Flush(flush_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeFsyncIn")]
+pub fn fuse_decode_fsync_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseFsyncIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_FSYNC, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Fsync(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_FSYNC did not decode as an fsync request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeFsyncIn")]
+pub fn fuse_encode_fsync_in(value: NativeFuseFsyncIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_FSYNC,
+        &protocol::FuseRequestBody::Fsync(fsync_in(value)),
+        None,
     )
     .map(Buffer::from)
     .map_err(protocol_error)
