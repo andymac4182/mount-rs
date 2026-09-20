@@ -1,0 +1,26 @@
+[package]
+name = "mount-rs-fault-injection"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Opt-in deterministic fault-injection wrappers for mount-rs storage contracts"
+license = "Apache-2.0"
+
+[features]
+default = []
+# Delays are intentionally not part of the normal dependency graph. Enable
+# this only in bounded fault campaigns that need async timing faults.
+tokio-delay = ["dep:tokio"]
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+tokio = { version = "1", default-features = false, features = ["time"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+
+# This draft integration is independently checkable until the workspace owner
+# registers it in the root members list and merges its dependencies into the
+# root Cargo.lock.
+[workspace]

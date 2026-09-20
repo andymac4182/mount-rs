@@ -74,9 +74,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   existing Vercel Hobby plan. Verify registration, AWS account and DNS access;
   no duplicate purchase, paid upgrade or additional paid resources.
 - [x] **D06 — Rust crate publication authorization:** user authorized publication
-  from CI on `main` when ready. This is not release-readiness evidence and does
-  not authorize npm publication. Registry authentication and release gates remain
-  implementation tasks; do not publish incomplete or unverified packages.
+  from CI on `main` when ready. npm publication must use `@mount-rs`, with secure
+  release controls for both registries. Verify namespace ownership, OIDC trust,
+  protected main-only release jobs, provenance/package integrity and readiness
+  before publishing. This authorization is not release-readiness evidence.
 
 ## W01 — Core and mountx behavioral parity
 
@@ -476,6 +477,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W28 — Deterministic fault injection
 
+- [x] Land isolated storage-wrapper crate with explicit occurrence-based plans,
+  redacted pending/completed/cancelled traces and optional delays. Main passed
+  seven all-feature tests and strict Clippy locally. Seed labels evidence, not
+  randomized scheduling. Dedicated Linux/macOS/Windows CI added; hosted results
+  and root-workspace registration remain pending.
 - [ ] W28.1 Add a separate minimal-dependency fault-injection crate with explicit
   opt-in plans, operation/occurrence selectors, seeded replay and event evidence.
   Wrap metadata and block stores without changing production defaults.
