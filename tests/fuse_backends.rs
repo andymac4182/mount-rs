@@ -6,6 +6,96 @@ use object_store::memory::InMemory;
 use std::sync::Arc;
 
 struct StatOnlyDriver(MemoryFs);
+
+type TimestampCall = (String, i128, i128, bool);
+struct NanosecondDriver {
+    inner: StatOnlyDriver,
+    calls: std::sync::Mutex<Vec<TimestampCall>>,
+}
+#[async_trait::async_trait]
+impl FsDriver for NanosecondDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+    fn has_utimens(&self) -> bool {
+        true
+    }
+    async fn utimens(
+        &self,
+        path: &str,
+        atime: i128,
+        mtime: i128,
+        follow: bool,
+    ) -> mount_rs_core::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push((path.to_owned(), atime, mtime, follow));
+        Ok(())
+    }
+    async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+        self.inner.stat(path).await
+    }
+    async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+        self.inner.readdir(path).await
+    }
+    async fn open(
+        &self,
+        path: &str,
+        flags: &str,
+        mode: u32,
+    ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+}
+
+#[tokio::test]
+async fn fuse_delivers_full_signed_nanoseconds_to_optional_extension() {
+    let memory = MemoryFs::empty();
+    memory
+        .open("/file", "w", 0o644)
+        .await
+        .unwrap()
+        .close()
+        .await
+        .unwrap();
+    memory.utimes("/file", 1234, 5678).await.unwrap();
+    let driver = Arc::new(NanosecondDriver {
+        inner: StatOnlyDriver(memory),
+        calls: Default::default(),
+    });
+    let mut session = FuseSession::new(driver.clone());
+    let init: Vec<u8> = [7u32, 41, 65536, 0]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    call(&mut session, 26, 0, &init).await;
+    let entry = call(&mut session, 1, 1, b"file\0").await;
+    let node = u64::from_le_bytes(entry[..8].try_into().unwrap());
+    let mut body = vec![0; 88];
+    body[..4].copy_from_slice(&(16u32 | 32).to_le_bytes());
+    body[32..40].copy_from_slice(&(-1i64).to_le_bytes());
+    body[40..48].copy_from_slice(&i64::MAX.to_le_bytes());
+    body[56..60].copy_from_slice(&123u32.to_le_bytes());
+    body[60..64].copy_from_slice(&999_999_999u32.to_le_bytes());
+    call(&mut session, 4, node, &body).await;
+    body[..4].copy_from_slice(&16u32.to_le_bytes());
+    call(&mut session, 4, node, &body).await;
+    assert_eq!(
+        *driver.calls.lock().unwrap(),
+        vec![
+            (
+                "/file".into(),
+                -999_999_877,
+                i128::from(i64::MAX) * 1_000_000_000 + 999_999_999,
+                true
+            ),
+            ("/file".into(), -999_999_877, 5_678_000_000, true),
+        ]
+    );
+    assert!(!MemoryFs::empty().has_utimens());
+}
+
 #[async_trait::async_trait]
 impl FsDriver for StatOnlyDriver {
     fn capabilities(&self) -> mount_rs_core::Capabilities {

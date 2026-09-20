@@ -371,35 +371,48 @@ impl FuseSession {
                 }
                 if valid & (16 | 32 | 128 | 256) != 0 {
                     let path = self.inodes.require_path(r.header.nodeid)?;
-                    let current = stat_of(self.driver.as_ref(), path).await?;
+                    let current = if valid & (16 | 128) == 0 || valid & (32 | 256) == 0 {
+                        Some(stat_of(self.driver.as_ref(), path).await?)
+                    } else {
+                        None
+                    };
                     let now = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map_err(|_| FsError::new(ErrorCode::Eoverflow))?
-                        .as_millis() as i64;
-                    let time = |bit, now_bit, seconds_at, nanos_at, previous| -> Result<i64> {
-                        if valid & now_bit != 0 {
-                            return Ok(now);
+                        .as_millis() as i128
+                        * 1_000_000;
+                    let time =
+                        |bit, now_bit, seconds_at, nanos_at, previous: i64| -> Result<i128> {
+                            if valid & now_bit != 0 {
+                                return Ok(now);
+                            }
+                            if valid & bit == 0 {
+                                return Ok(i128::from(previous) * 1_000_000);
+                            }
+                            let seconds = u64_at(r.body, seconds_at)? as i64;
+                            let nanos = u32_at(r.body, nanos_at)?;
+                            if nanos >= 1_000_000_000 {
+                                return Err(FsError::new(ErrorCode::Einval));
+                            }
+                            Ok(i128::from(seconds) * 1_000_000_000 + i128::from(nanos))
+                        };
+                    let atime_ns =
+                        time(16, 128, 32, 56, current.as_ref().map_or(0, |s| s.atime_ms))?;
+                    let mtime_ns =
+                        time(32, 256, 40, 60, current.as_ref().map_or(0, |s| s.mtime_ms))?;
+                    if self.driver.has_utimens() {
+                        self.driver.utimens(path, atime_ns, mtime_ns, true).await?;
+                    } else {
+                        let atime = i64::try_from(atime_ns.div_euclid(1_000_000))
+                            .map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+                        let mtime = i64::try_from(mtime_ns.div_euclid(1_000_000))
+                            .map_err(|_| FsError::new(ErrorCode::Eoverflow))?;
+                        match self.driver.lutimes(path, atime, mtime).await {
+                            Err(error) if error.code == ErrorCode::Enosys => {
+                                self.driver.utimes(path, atime, mtime).await?
+                            }
+                            result => result?,
                         }
-                        if valid & bit == 0 {
-                            return Ok(previous);
-                        }
-                        let seconds = u64_at(r.body, seconds_at)? as i64;
-                        let nanos = u32_at(r.body, nanos_at)?;
-                        if nanos >= 1_000_000_000 {
-                            return Err(FsError::new(ErrorCode::Einval));
-                        }
-                        seconds
-                            .checked_mul(1000)
-                            .and_then(|ms| ms.checked_add(i64::from(nanos / 1_000_000)))
-                            .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))
-                    };
-                    let atime = time(16, 128, 32, 56, current.atime_ms)?;
-                    let mtime = time(32, 256, 40, 60, current.mtime_ms)?;
-                    match self.driver.lutimes(path, atime, mtime).await {
-                        Err(error) if error.code == ErrorCode::Enosys => {
-                            self.driver.utimes(path, atime, mtime).await?
-                        }
-                        result => result?,
                     }
                 }
                 let stats = if let Some(handle) = handle {

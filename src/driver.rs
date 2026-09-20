@@ -93,6 +93,21 @@ pub trait FsDriver: Send + Sync {
     async fn truncate(&self, _path: &str, _length: u64) -> Result<()> {
         Err(crate::error::FsError::enosys("truncate"))
     }
+    /// Whether the optional exact-nanosecond extension is implemented.
+    fn has_utimens(&self) -> bool {
+        false
+    }
+    /// Exact timestamps use i128 to cover the full signed 64-bit seconds
+    /// carried by filesystem wire protocols. Missing extensions return ENOSYS.
+    async fn utimens(
+        &self,
+        _path: &str,
+        _atime_ns: i128,
+        _mtime_ns: i128,
+        _follow_symlinks: bool,
+    ) -> Result<()> {
+        Err(crate::error::FsError::enosys("utimens"))
+    }
     async fn utimes(&self, _path: &str, _atime_ms: i64, _mtime_ms: i64) -> Result<()> {
         Err(crate::error::FsError::enosys("utime"))
     }
@@ -208,6 +223,18 @@ impl Loopback {
 
     pub async fn truncate(&self, path: &str, length: u64) -> Result<()> {
         self.driver.truncate(&normalize_path(path), length).await
+    }
+
+    pub async fn utimens(
+        &self,
+        path: &str,
+        atime_ns: i128,
+        mtime_ns: i128,
+        follow_symlinks: bool,
+    ) -> Result<()> {
+        self.driver
+            .utimens(&normalize_path(path), atime_ns, mtime_ns, follow_symlinks)
+            .await
     }
 
     pub async fn utimes(&self, path: &str, atime_ms: i64, mtime_ms: i64) -> Result<()> {
