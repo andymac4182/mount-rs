@@ -465,15 +465,32 @@ is deferred pending that discussion, not implemented or implicitly waived.
 - Keep this launch work tracked alongside engineering delivery. No domain has
   been registered and no marketing deployment is implied by this requirement.
 
-## Rust crate publication
+## Rust crate and npm publication
 
 The user authorized publishing Rust crates from CI on `main` once ready.
 Implement a main-branch-only release workflow with registry authentication,
 dependency-ordered publication, package-content/license checks, dry runs and
 revision-matched acceptance gates. Publish only eligible versions after the
 required tests pass; avoid duplicate publication and keep credentials out of
-source and logs. Authorization is not proof of readiness. npm publication
-requires separate authorization.
+source and logs. Authorization is not proof of readiness.
+
+npm packages must use the `@mount-rs` scope, with separate packages for the
+native core, integrations and platform binaries as appropriate. Migrate package
+names, imports, exports, generated loaders, optional/peer dependencies, lockfiles,
+examples and distribution tests consistently. Verify scope ownership before
+release; do not silently fall back to a personal namespace.
+
+For both registries, prefer short-lived OIDC trusted publishing bound to the
+exact repository/workflow and a protected release environment restricted to
+`main`. Grant publishing permissions only to the publish job, not PR builds;
+pin release actions to reviewed immutable revisions, use locked dependencies,
+and publish only verified artifacts from the tested commit. Enable npm
+provenance, validate package contents/licenses and native binaries, and verify
+published versions and integrity afterward. Require strong account/organization
+authentication and least-privilege ownership. Confirm registry-specific first-
+publication bootstrap requirements; do not introduce persistent publish tokens
+or weaken account controls as a silent fallback. Release security implementation
+and registry configuration remain acceptance tasks, not satisfied by this text.
 
 ## Deferred feature: user-configurable lifecycle hooks
 
