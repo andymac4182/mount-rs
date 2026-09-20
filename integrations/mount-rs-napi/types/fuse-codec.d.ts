@@ -4,6 +4,8 @@ import type { Buffer } from "node:buffer"
 import type {
   NativeFuseAttr,
   NativeFuseAttrOut,
+  NativeFuseCreateIn,
+  NativeFuseCreateOut,
   NativeFuseEntryOut,
   NativeFuseGetattrIn,
   NativeFuseGetxattrOut,
@@ -30,6 +32,8 @@ import type {
 export type {
   NativeFuseAttr,
   NativeFuseAttrOut,
+  NativeFuseCreateIn,
+  NativeFuseCreateOut,
   NativeFuseEntryOut,
   NativeFuseGetattrIn,
   NativeFuseGetxattrOut,
@@ -164,6 +168,10 @@ export declare function decodeOpenIn(body: Uint8Array, context?: NativeFuseProto
 export declare function encodeOpenIn(value: NativeFuseOpenIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseOpenOut
 export declare function encodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeCreateIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseCreateIn
+export declare function encodeCreateIn(value: NativeFuseCreateIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeCreateOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseCreateOut
+export declare function encodeCreateOut(value: NativeFuseCreateOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseReadIn
 export declare function encodeReadIn(value: NativeFuseReadIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeReadOut(body: Uint8Array): NativeFuseRawData
