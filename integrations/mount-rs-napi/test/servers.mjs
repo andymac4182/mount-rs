@@ -10,6 +10,26 @@ import {
 } from "../index.js";
 
 const IO_TIMEOUT_MS = 5_000;
+let activePhase = { label: "startup", startedAt: Date.now() };
+
+function phaseSummary() {
+  return `${activePhase.label} (+${Date.now() - activePhase.startedAt}ms)`;
+}
+
+async function runPhase(label, task) {
+  const previous = activePhase;
+  activePhase = { label, startedAt: Date.now() };
+  try {
+    return await task();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${label} failed after ${Date.now() - activePhase.startedAt}ms: ${message}`, {
+      cause: error,
+    });
+  } finally {
+    activePhase = previous;
+  }
+}
 
 async function within(promise, label) {
   let timer;
@@ -17,7 +37,15 @@ async function within(promise, label) {
     return await Promise.race([
       promise,
       new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${label} timed out`)), IO_TIMEOUT_MS);
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(
+                `${typeof label === "function" ? label() : label} timed out after ${IO_TIMEOUT_MS}ms`,
+              ),
+            ),
+          IO_TIMEOUT_MS,
+        );
       }),
     ]);
   } finally {
@@ -224,9 +252,11 @@ async function exerciseNfs() {
     assert.equal(reports.length, 1);
   } finally {
     if (socket) {
-      await closeSocket(socket, "NFS socket close");
+      await runPhase("NFS cleanup: socket close", () => closeSocket(socket, "NFS socket close"));
     }
-    await closeLifecycle(server, "NFS", listening);
+    await runPhase("NFS cleanup: server lifecycle", () =>
+      closeLifecycle(server, "NFS", listening),
+    );
     assert.equal(reports.length, 1);
   }
 }
@@ -401,13 +431,17 @@ async function exerciseP9() {
     assert.equal(reports.length, 1);
   } finally {
     if (socket) {
-      await closeSocket(socket, "9P socket close");
+      await runPhase("9P cleanup: socket close", () => closeSocket(socket, "9P socket close"));
     }
     if (connection) {
-      await within(connection.closed, "9P connection closed");
+      await runPhase("9P cleanup: connection close", () =>
+        within(connection.closed, "9P connection closed"),
+      );
       assert.equal(connection.session.destroyed, true);
     }
-    await closeLifecycle(server, "9P", listening);
+    await runPhase("9P cleanup: server lifecycle", () =>
+      closeLifecycle(server, "9P", listening),
+    );
     assert.equal(reports.length, 1);
   }
 }
@@ -461,7 +495,9 @@ async function exerciseS3() {
     assert.equal(isolated.response.status, 404);
     assert.deepEqual(await photos.readFile("/servers-s3.txt"), object);
   } finally {
-    await closeLifecycle(server, "S3", listening);
+    await runPhase("S3 cleanup: server lifecycle", () =>
+      closeLifecycle(server, "S3", listening),
+    );
   }
 }
 
@@ -490,18 +526,20 @@ async function exerciseWebdav() {
     assert.equal(get.response.status, 200);
     assert.deepEqual(get.body, object);
   } finally {
-    await closeLifecycle(server, "WebDAV", listening);
+    await runPhase("WebDAV cleanup: server lifecycle", () =>
+      closeLifecycle(server, "WebDAV", listening),
+    );
   }
 }
 
 await within(
   (async () => {
-    await exerciseNfs();
-    await exerciseP9();
-    await exerciseS3();
-    await exerciseWebdav();
+    await runPhase("NFS exercise", exerciseNfs);
+    await runPhase("9P exercise", exerciseP9);
+    await runPhase("S3 exercise", exerciseS3);
+    await runPhase("WebDAV exercise", exerciseWebdav);
   })(),
-  "N-API server integration",
+  () => `N-API server integration (${phaseSummary()})`,
 );
 
 console.log("mount-rs N-API server integration: PASS");
