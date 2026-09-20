@@ -14,6 +14,12 @@ import {
   encodeCreateIn as namedEncodeCreateIn,
   decodeCreateOut as namedDecodeCreateOut,
   encodeCreateOut as namedEncodeCreateOut,
+  decodeReleaseIn as namedDecodeReleaseIn,
+  encodeReleaseIn as namedEncodeReleaseIn,
+  decodeFlushIn as namedDecodeFlushIn,
+  encodeFlushIn as namedEncodeFlushIn,
+  decodeFsyncIn as namedDecodeFsyncIn,
+  encodeFsyncIn as namedEncodeFsyncIn,
   decodeReadIn as namedDecodeReadIn,
   encodeReadIn as namedEncodeReadIn,
   decodeReadOut as namedDecodeReadOut,
@@ -45,6 +51,12 @@ for (const [name, value] of [
   ["encodeCreateIn", namedEncodeCreateIn],
   ["decodeCreateOut", namedDecodeCreateOut],
   ["encodeCreateOut", namedEncodeCreateOut],
+  ["decodeReleaseIn", namedDecodeReleaseIn],
+  ["encodeReleaseIn", namedEncodeReleaseIn],
+  ["decodeFlushIn", namedDecodeFlushIn],
+  ["encodeFlushIn", namedEncodeFlushIn],
+  ["decodeFsyncIn", namedDecodeFsyncIn],
+  ["encodeFsyncIn", namedEncodeFsyncIn],
   ["decodeReadIn", namedDecodeReadIn],
   ["encodeReadIn", namedEncodeReadIn],
   ["decodeReadOut", namedDecodeReadOut],
@@ -320,6 +332,36 @@ for (const ctx of [lookupContext, { minor: 39, setxattrExt: false }, { minor: 8,
   assert.deepEqual(fuse.decodeLookupOut(reply, ctx), plusEntry);
 }
 
+const lifecycleInput = {
+  release: {
+    fh: 0x0102030405060708n,
+    flags: 0o2,
+    releaseFlags: fuse.FUSE_RELEASE_FLUSH | fuse.FUSE_RELEASE_FLOCK_UNLOCK,
+    lockOwner: 0x1112131415161718n,
+  },
+  flush: {
+    fh: 0x2122232425262728n,
+    lockOwner: 0x3132333435363738n,
+  },
+  fsync: {
+    fh: 0x4142434445464748n,
+    fsyncFlags: fuse.FUSE_FSYNC_FDATASYNC,
+  },
+};
+const lifecycleCases = [
+  ["RELEASE", fuse.FUSE_RELEASE, lifecycleInput.release, fuse.decodeReleaseIn, fuse.encodeReleaseIn, 24],
+  ["RELEASEDIR", fuse.FUSE_RELEASEDIR, lifecycleInput.release, fuse.decodeReleaseIn, fuse.encodeReleaseIn, 24],
+  ["FLUSH", fuse.FUSE_FLUSH, lifecycleInput.flush, fuse.decodeFlushIn, fuse.encodeFlushIn, 24],
+  ["FSYNC", fuse.FUSE_FSYNC, lifecycleInput.fsync, fuse.decodeFsyncIn, fuse.encodeFsyncIn, 16],
+  ["FSYNCDIR", fuse.FUSE_FSYNCDIR, lifecycleInput.fsync, fuse.decodeFsyncIn, fuse.encodeFsyncIn, 16],
+];
+for (const [name, , input, decodeIn, encodeIn, expectedLength] of lifecycleCases) {
+  const body = encodeIn(input);
+  assert.equal(body.length, expectedLength, `${name} request length`);
+  assert.deepEqual(decodeIn(body), input, `${name} request round trip`);
+}
+assert.equal(fuse.encodeReply(99n).length, fuse.FUSE_OUT_HEADER_SIZE);
+
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
@@ -523,6 +565,47 @@ if (source) {
     );
   }
 
+  const lifecycleContext = { minor: 41, setxattrExt: false };
+  for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases) {
+    const oracleRequest = oracle.encodeRequestBody(opcode, input, lifecycleContext);
+    const actualRequest = encodeIn(input);
+    assert.deepEqual(
+      [...actualRequest],
+      [...oracleRequest],
+      `${name} request bytes match oracle`,
+    );
+    assert.deepEqual(
+      decodeIn(actualRequest),
+      oracle.decodeRequestBody(opcode, oracleRequest, lifecycleContext),
+      `${name} request decode matches oracle`,
+    );
+    for (let length = 0; length < actualRequest.length; length++) {
+      const body = actualRequest.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => decodeIn(body)),
+        classifyProtocolError(() => oracle.decodeRequestBody(opcode, body, lifecycleContext)),
+        `${name} request truncation classification at ${length} bytes`,
+      );
+    }
+    const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => decodeIn(requestTrailing)),
+      classifyProtocolError(() => oracle.decodeRequestBody(opcode, requestTrailing, lifecycleContext)),
+      `${name} request trailing-byte classification`,
+    );
+
+    const oracleReplyBody = oracle.encodeReplyBody(opcode, {}, lifecycleContext);
+    assert.equal(oracleReplyBody.length, 0, `${name} oracle reply body is empty`);
+    const actualReply = fuse.encodeReply(99n);
+    const oracleReply = oracle.encodeReplyFor(99n, opcode, {}, lifecycleContext);
+    assert.deepEqual([...actualReply], [...oracleReply], `${name} empty reply framing matches oracle`);
+    assert.deepEqual(
+      oracle.decodeReplyBody(opcode, actualReply.subarray(fuse.FUSE_OUT_HEADER_SIZE), lifecycleContext),
+      {},
+      `${name} oracle accepts empty reply body`,
+    );
+  }
+
   const attrReply = {
     attrValid: 9n,
     attrValidNsec: 10,
@@ -706,6 +789,7 @@ if (source) {
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -716,6 +800,7 @@ if (source) {
   console.log("mount-rs N-API FUSE OPEN/OPENDIR request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE CREATE request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE LOOKUP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
 console.log("mount-rs N-API FUSE codec subpath: PASS");
