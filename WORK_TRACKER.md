@@ -128,9 +128,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   a server communication error. Copernicus owns the handshake-race investigation;
   the newer local pass does not close this intermittent hosted failure.
   Main's latest local regression run passed both Node cleanup suites and both
-  Rust bounded/shared-close tests. A review found duplicate close-listener
-  registrations can be collapsed during restoration; add regression coverage
-  and preserve listener multiplicity before landing the reconnect fix.
+  Rust bounded/shared-close tests after graceful half-close cleanup was added.
+  Listener restoration preserves duplicate regular and once registrations;
+  success and injected-detach-failure regressions cover that review finding.
+  Hosted macOS/Linux confirmation remains open.
 - [ ] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
 
 ## W05 — Cloudflare R2

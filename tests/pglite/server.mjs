@@ -45,6 +45,7 @@ process.once("unhandledRejection", (reason) => {
 const pendingDetaches = new Set();
 const pendingHandlerCloses = new Set();
 const handlerCloseTasks = new WeakMap();
+const handlerCloseListeners = new WeakMap();
 const cleanupFailures = new Set();
 let cleanupInstalled = false;
 
@@ -93,9 +94,9 @@ function addedListeners(before, after) {
  * the handler in PGLiteSocketServer.handlers after the peer socket is closed,
  * so a reconnect can be rejected by maxConnections before the old handler is
  * removed. Mark the handler inactive, detach it, and dispatch close only after
- * queue/transaction cleanup completes. The close event is the server-side
- * observation that the client socket is gone; no retry or elapsed-time wait is
- * needed.
+ * queue/transaction cleanup completes. A graceful peer half-close (`end`) and
+ * an abrupt socket close are both server-side observations; no retry or
+ * elapsed-time wait is needed.
  */
 export function installPgliteSocketCleanup() {
   if (cleanupInstalled) return;
@@ -129,7 +130,7 @@ export function installPgliteSocketCleanup() {
     return tracked;
   };
 
-  const closeHandler = (handler) => {
+  const closeHandler = (handler, closeSocket = false) => {
     const existing = handlerCloseTasks.get(handler);
     if (existing) return existing;
 
@@ -138,7 +139,50 @@ export function installPgliteSocketCleanup() {
       // Keep the server slot occupied until detach has cleared this handler's
       // queued work and rolled back its transaction, then dispatch close so
       // PGLiteSocketServer removes the handler from its bounded set.
-      await handler.detach(false);
+      const socket = handler.socket;
+      const shimCloseListener = handlerCloseListeners.get(handler);
+      const preservedCloseListeners =
+        closeSocket && socket
+          ? socket.rawListeners("close").flatMap((rawListener) => {
+              if (rawListener === shimCloseListener) return [];
+              const listener = rawListener.listener;
+              return [
+                {
+                  callback: typeof listener === "function" ? listener : rawListener,
+                  once: typeof listener === "function",
+                  raw: rawListener,
+                },
+              ];
+            })
+          : [];
+      try {
+        await handler.detach(closeSocket);
+      } finally {
+        // The pinned upstream detach removes all close listeners. Restore
+        // listeners owned by other layers before destroy() delivers close.
+        // Check first because a failed detach may have left them installed;
+        // the shim's listener is intentionally not restored.
+        const remainingCloseListeners = [...(socket?.rawListeners("close") ?? [])];
+        for (const preserved of preservedCloseListeners) {
+          const existingIndex = remainingCloseListeners.findIndex(
+            (rawListener) =>
+              rawListener === preserved.raw ||
+              (preserved.once && rawListener.listener === preserved.callback) ||
+              (!preserved.once && rawListener === preserved.callback),
+          );
+          if (existingIndex >= 0) {
+            // Consume one registration only. Identical callbacks may have
+            // been registered more than once and each occurrence matters.
+            remainingCloseListeners.splice(existingIndex, 1);
+            continue;
+          }
+          if (preserved.once) {
+            socket?.once("close", preserved.callback);
+          } else {
+            socket?.on("close", preserved.callback);
+          }
+        }
+      }
       handler.dispatchEvent(new CustomEvent("close"));
     })();
     let tracked;
@@ -184,8 +228,16 @@ export function installPgliteSocketCleanup() {
     for (const listener of upstreamCloseListeners) {
       socket.removeListener("close", listener);
     }
-    socket.on("close", () => {
+    const shimCloseListener = () => {
       void closeHandler(this);
+    };
+    handlerCloseListeners.set(this, shimCloseListener);
+    socket.on("close", shimCloseListener);
+    socket.on("end", () => {
+      // tokio-postgres half-closes after sending Terminate. On Node, the peer
+      // may emit `end` before `close`; detach here so the rollback and handler
+      // removal complete before the client can reconnect against the cap.
+      void closeHandler(this, true);
     });
     if (socket.destroyed || socket.readableEnded) {
       void closeHandler(this);

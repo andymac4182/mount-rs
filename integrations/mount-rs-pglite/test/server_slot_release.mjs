@@ -213,6 +213,14 @@ async function connectedWireClient(server) {
   return client;
 }
 
+async function gracefulWireClose(client) {
+  const closed = new Promise((resolve) => {
+    client.socket.once("close", resolve);
+  });
+  client.socket.end();
+  await withTimeout(closed, "graceful wire close");
+}
+
 function destroyServerHandlers(server) {
   const handlers = [...server.handlers];
   const socketRecords = handlers.map((handler) => ({
@@ -342,8 +350,45 @@ try {
     queuedQueries: 0,
   });
   assert.equal(handlers.every((handler) => !handler.isAttached), true);
-  reopenedFirst.destroy();
-  reopenedSecond.destroy();
+  const reopenedFirstHandler = [...server.handlers].find(
+    (handler) => handler.socket?.remotePort === reopenedFirst.socket.localPort,
+  );
+  assert.ok(reopenedFirstHandler, "reopened first handler was not tracked");
+  const reopenedFirstCloseInfo = closeMarkers.get(reopenedFirstHandler.socket);
+  assert.ok(reopenedFirstCloseInfo, "reopened close listener was not installed");
+  const reopenedFirstSocket = reopenedFirstHandler.socket;
+  let duplicateRegularCloseEvents = 0;
+  const duplicateRegularClose = () => {
+    duplicateRegularCloseEvents += 1;
+  };
+  reopenedFirstSocket.on("close", duplicateRegularClose);
+  reopenedFirstSocket.on("close", duplicateRegularClose);
+  let onceCloseEvents = 0;
+  const onceClose = () => {
+    onceCloseEvents += 1;
+  };
+  reopenedFirstSocket.once("close", onceClose);
+  reopenedFirstSocket.once("close", onceClose);
+
+  // A PostgreSQL client closes by half-closing after Terminate. The server
+  // must roll back/detach and release exactly one slot before this immediate
+  // replacement connection is admitted.
+  await gracefulWireClose(reopenedFirst);
+  assert.equal(server.getStats().activeConnections, 1);
+  assert.equal(reopenedFirstCloseInfo.marker.calls, 1);
+  assert.equal(duplicateRegularCloseEvents, 2);
+  assert.equal(onceCloseEvents, 2);
+  assert.equal(
+    reopenedFirstSocket
+      .rawListeners("close")
+      .some((listener) => listener === onceClose || listener.listener === onceClose),
+    false,
+  );
+  const gracefulReopen = await connectedWireClient(server);
+  assert.equal(server.getStats().activeConnections, 2);
+  await gracefulWireClose(reopenedSecond);
+  await gracefulWireClose(gracefulReopen);
+  assert.equal(server.getStats().activeConnections, 0);
 } finally {
   immediateGate?.restore();
   rawServer.removeListener("connection", unrelatedConnectionListener);

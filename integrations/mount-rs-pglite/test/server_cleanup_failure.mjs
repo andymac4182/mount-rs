@@ -82,6 +82,34 @@ try {
   });
   handler.detach = () => Promise.reject(injected);
 
+  // Exercise the graceful `end` path with listeners still installed. A
+  // rejected detach must not duplicate pre-existing listeners, and a once
+  // listener must remain a once listener.
+  let unrelatedCloseEvents = 0;
+  let unrelatedOnceCloseEvents = 0;
+  const unrelatedClose = () => {
+    unrelatedCloseEvents += 1;
+  };
+  const unrelatedOnceClose = () => {
+    unrelatedOnceCloseEvents += 1;
+  };
+  handler.socket.on("close", unrelatedClose);
+  handler.socket.on("close", unrelatedClose);
+  handler.socket.once("close", unrelatedOnceClose);
+  handler.socket.once("close", unrelatedOnceClose);
+  const closeListenersBeforeFailure = handler.socket.rawListeners("close");
+  handler.socket.emit("end");
+  await assert.rejects(
+    withTimeout(awaitHandlerDetaches(), "injected graceful cleanup observation"),
+    (error) => isInjectedCleanupFailure(error, injected),
+  );
+  assert.deepEqual(
+    handler.socket.rawListeners("close"),
+    closeListenersBeforeFailure,
+  );
+  assert.equal(unrelatedCloseEvents, 0);
+  assert.equal(unrelatedOnceCloseEvents, 0);
+
   const serverSocketClosed = new Promise((resolve) => {
     handler.socket.once("close", resolve);
     handler.socket.destroy();
