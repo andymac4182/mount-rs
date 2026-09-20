@@ -21,8 +21,23 @@ fi
 : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID must be exported for the Cloudflare R2 gate}"
 : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY must be exported for the Cloudflare R2 gate}"
 
+endpoint_without_slash=${R2_ENDPOINT%/}
+endpoint_host=${endpoint_without_slash#https://}
 case "$R2_ENDPOINT" in
-  https://*.r2.cloudflarestorage.com|https://*.r2.cloudflarestorage.com/*) ;;
+  https://*) ;;
+  *)
+    echo "Cloudflare R2 CLI test requires an https://<account>.r2.cloudflarestorage.com endpoint" >&2
+    exit 2
+    ;;
+esac
+case "$endpoint_host" in
+  ""|*/*|*\?*|*\#*|*:*)
+    echo "Cloudflare R2 CLI test endpoint must not contain a path, query, fragment, or port" >&2
+    exit 2
+    ;;
+esac
+case "$endpoint_host" in
+  *.r2.cloudflarestorage.com) ;;
   *)
     echo "Cloudflare R2 CLI test requires an https://<account>.r2.cloudflarestorage.com endpoint" >&2
     exit 2
@@ -33,6 +48,12 @@ prefix=${MOUNT_RS_CLI_REMOTE_PREFIX:-mount-rs/cli-cloudflare/$(date -u +%Y%m%dT%
 case "$prefix" in
   mount-rs/cli-cloudflare/*) ;;
   *)
+    echo "MOUNT_RS_CLI_REMOTE_PREFIX contains an unsafe path" >&2
+    exit 2
+    ;;
+esac
+case "$prefix" in
+  *//*|*/../*|*/..|*/./*|*/.)
     echo "MOUNT_RS_CLI_REMOTE_PREFIX contains an unsafe path" >&2
     exit 2
     ;;
@@ -52,10 +73,29 @@ cleanup_r2() {
   AWS_DEFAULT_REGION=auto \
   AWS_EC2_METADATA_DISABLED=true \
     aws s3 rm "s3://$R2_BUCKET/$MOUNT_RS_CLI_REMOTE_PREFIX/" \
-      --recursive --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1 || {
+      --recursive --endpoint-url "$endpoint_without_slash" >/dev/null 2>&1 || {
         echo "CLOUDFLARE_R2_CLEANUP_FAILED prefix=$MOUNT_RS_CLI_REMOTE_PREFIX" >&2
         return 1
       }
+  remaining=$(AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+    AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+    AWS_DEFAULT_REGION=auto \
+    AWS_EC2_METADATA_DISABLED=true \
+      aws s3api list-objects-v2 \
+        --bucket "$R2_BUCKET" \
+        --prefix "$MOUNT_RS_CLI_REMOTE_PREFIX/" \
+        --endpoint-url "$endpoint_without_slash" \
+        --query 'KeyCount' --output text) || {
+          echo "CLOUDFLARE_R2_CLEANUP_VERIFY_FAILED prefix=$MOUNT_RS_CLI_REMOTE_PREFIX" >&2
+          return 1
+        }
+  case "$remaining" in
+    0|None) ;;
+    *)
+      echo "CLOUDFLARE_R2_CLEANUP_INCOMPLETE prefix=$MOUNT_RS_CLI_REMOTE_PREFIX count=$remaining" >&2
+      return 1
+      ;;
+  esac
 }
 
 stop_server() {
@@ -126,7 +166,7 @@ for block_prefix in pglite-r2-blocks sqlite-r2-blocks; do
       aws s3api list-objects-v2 \
         --bucket "$R2_BUCKET" \
         --prefix "$MOUNT_RS_CLI_REMOTE_PREFIX/$block_prefix/" \
-        --endpoint-url "$R2_ENDPOINT" \
+        --endpoint-url "$endpoint_without_slash" \
         --query 'KeyCount' --output text)
   case "$object_count" in
     ''|0|None)
