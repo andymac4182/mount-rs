@@ -34,6 +34,55 @@ async fn implicit_append_write_uses_the_end_of_the_file() {
     assert_eq!(fs::read(root.path().join("file")).unwrap(), b"one-two");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn state_survives_a_fresh_driver_after_clean_close_and_sync() {
+    let root = TempDir::new();
+    {
+        let driver = HostFs::new(root.path());
+        driver
+            .mkdir(
+                "/state",
+                MkdirOptions {
+                    recursive: false,
+                    mode: Some(0o750),
+                },
+            )
+            .await
+            .expect("create state directory");
+        let handle = driver
+            .open("/state/payload", "w+", 0o600)
+            .await
+            .expect("open payload");
+        assert_eq!(handle.write(b"restart-state", Some(0)).await.unwrap(), 13);
+        handle.sync().await.expect("sync payload");
+        handle.close().await.expect("close payload");
+        driver
+            .rename("/state/payload", "/state/committed")
+            .await
+            .expect("commit payload");
+    }
+
+    let driver = HostFs::new(root.path());
+    let mut bytes = [0_u8; 32];
+    let handle = driver
+        .open("/state/committed", "r", 0)
+        .await
+        .expect("reopen committed payload");
+    let count = handle
+        .read(&mut bytes, Some(0))
+        .await
+        .expect("read committed payload");
+    handle.close().await.expect("close reopened payload");
+    assert_eq!(&bytes[..count], b"restart-state");
+    assert_eq!(driver.stat("/state/committed").await.unwrap().size, 13);
+    let entries = driver
+        .readdir("/state")
+        .await
+        .expect("list state directory");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].name, "committed");
+}
+
 impl TempDir {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
