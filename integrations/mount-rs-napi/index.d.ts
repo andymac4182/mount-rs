@@ -39,8 +39,10 @@ export declare class Filesystem {
   /** Compatibility alias for callers of the earlier Rust binding method. */
   getCapabilities(): JsCapabilities
   /**
-   * Release the chunked metadata writer lease immediately. Legacy
-   * snapshot factories have no lease and therefore resolve successfully.
+   * Complete provider shutdown and detach this filesystem's shared driver.
+   * Concurrent callers share an attempt; a failed attempt can be retried.
+   * Close independent handles and servers, and finish in-flight operations,
+   * before relying on shutdown to permit removal of backing files.
    */
   shutdown(): Promise<void>
   stat(path: string): Promise<JsStats>

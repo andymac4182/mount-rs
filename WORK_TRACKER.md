@@ -7,6 +7,15 @@ This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
 retain detailed results. A passing component test is not end-to-end acceptance.
 
+Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
+`73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
+credentials held outside the repository. The run passed the complete Rust and
+Node suites, memfs/SQLite/PGlite parity, live PGlite lifecycle and split-store
+gates, authenticated R2 contract and five-seed R2 differential traces, the
+configuration-driven R2 CLI (including both metadata-provider compositions),
+HTTP/remote reopen, and R2 cleanup. Native privileged mounts, FSKit signing and
+hosted Windows/macOS CI remain separate evidence boundaries.
+
 Latest hosted evidence: [CI run 35499717435](https://github.com/andymac4182/mount-rs/actions/runs/35499717435)
 at `37e9ba1` passed RustFS, Ozone, Linux Rust, Linux x64/arm64 Node,
 Windows Node, and Linux native FUSE/NFS/9P/WebDAV jobs. Windows Rust failed
@@ -242,7 +251,9 @@ complete.
   ComputeSDK-aligned smoke benchmark passed a 1 MiB fixed-64 KiB chunked
   PGlite/R2 run (write 2,902.11 ms, read 1,657.28 ms, 5.06 MiB/s, delete
   8.51 ms; one iteration, zero timeouts/failures). Native/hosted lanes and the
-  full benchmark matrix remain open.
+  full benchmark matrix remain open. The full `scripts/test-all.sh` rerun at
+  `73c33e0` also passed the live R2 lane end-to-end; this does not close the
+  native/hosted portions of this task.
 - [ ] W05.4 Record service identity and revision without recording credentials.
 - [x] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
   R2 endpoint with scoped S3 credentials. On 2026-09-20, the live gate passed
@@ -256,8 +267,9 @@ complete.
   PGlite metadata + R2 blocks, provider lifecycle/restart/fencing, Node chunked
   factories and userspace FUSE. Upstream: 1,194 passed, 88 skipped; eight seeded
   lanes × five seeds × 621 operations passed. The object-store trace lanes are
-  local, not live R2 traces. This is local dirty-worktree evidence, not hosted
-  platform or full release acceptance.
+  local, not live R2 traces. The subsequent full acceptance rerun passed with
+  live R2 and PGlite enabled, while native privileged mounts and hosted CI remain
+  separate evidence boundaries.
 
 ## W06 — RustFS integration service
 
@@ -836,3 +848,5 @@ listing a source does not mean it has been reviewed or its code can be reused.
 | `a5d1dd2` | Windows HostFs and FUSE protocol parity | Focused macOS tests/Clippy; hosted Windows qualification pending |
 | `7508a56` | Scoped Cloudflare R2 CLI gate and credential redaction | Runner added; object-count compatibility was fixed in `00e96ce` |
 | `00e96ce` | Cloudflare R2 CLI object-count compatibility | Live bucket-scoped CLI, N-API factory, parity and smoke benchmark passed; cleanup readback passed |
+| `ae7c4cb` | Isolate inherited PGlite URL from the preflight trace lane | Focused stale-URL regression passed; pushed to `origin/main` |
+| `73c33e0` | Isolate PGlite lifecycle from all preflight suites | Full macOS acceptance with live PGlite/R2 exited 0; native/hosted gates remain open |
