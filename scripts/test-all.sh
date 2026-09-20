@@ -11,6 +11,11 @@ fi
 
 cd "$repo_dir"
 
+# This script starts its own isolated PGlite server in the dedicated gate
+# below. A caller's inherited URL must not make earlier suites connect to a
+# stale or unrelated server before that lifecycle has been established.
+unset PGLITE_DATABASE_URL
+
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo test --workspace --all-targets --all-features --locked
