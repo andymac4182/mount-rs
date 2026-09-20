@@ -48,6 +48,10 @@ import {
   encodeStatfsOut as namedEncodeStatfsOut,
   decodeInterruptIn as namedDecodeInterruptIn,
   encodeInterruptIn as namedEncodeInterruptIn,
+  decodePollIn as namedDecodePollIn,
+  encodePollIn as namedEncodePollIn,
+  decodePollOut as namedDecodePollOut,
+  encodePollOut as namedEncodePollOut,
 } from "../fuse.cjs";
 
 for (const [name, value] of [
@@ -97,6 +101,10 @@ for (const [name, value] of [
   ["encodeStatfsOut", namedEncodeStatfsOut],
   ["decodeInterruptIn", namedDecodeInterruptIn],
   ["encodeInterruptIn", namedEncodeInterruptIn],
+  ["decodePollIn", namedDecodePollIn],
+  ["encodePollIn", namedEncodePollIn],
+  ["decodePollOut", namedDecodePollOut],
+  ["encodePollOut", namedEncodePollOut],
 ]) {
   assert.equal(value, fuse[name], `FUSE named export ${name}`);
 }
@@ -399,6 +407,36 @@ const interruptValue = { unique: 0x6162636465666768n };
 const interruptBody = fuse.encodeInterruptIn(interruptValue);
 assert.equal(interruptBody.length, 8);
 assert.deepEqual(fuse.decodeInterruptIn(interruptBody), interruptValue);
+
+const pollInput = {
+  fh: 0x0102030405060708n,
+  kh: 0x1112131415161718n,
+  flags: fuse.FUSE_POLL_SCHEDULE_NOTIFY,
+  events: 0x05,
+};
+const pollReplyValue = { revents: 0x04 };
+const pollContexts = [
+  { minor: 41, setxattrExt: false },
+  { minor: 39, setxattrExt: false },
+  { minor: 8, setxattrExt: false },
+  { minor: 3, setxattrExt: false },
+];
+for (const ctx of pollContexts) {
+  const pollBody = fuse.encodePollIn(pollInput, ctx);
+  assert.equal(pollBody.length, 24, `POLL request length for minor ${ctx.minor}`);
+  assert.deepEqual(
+    fuse.decodePollIn(pollBody, ctx),
+    pollInput,
+    `POLL request round trip for minor ${ctx.minor}`,
+  );
+  const pollReplyBody = fuse.encodePollOut(pollReplyValue, ctx);
+  assert.equal(pollReplyBody.length, 8, `POLL reply length for minor ${ctx.minor}`);
+  assert.deepEqual(
+    fuse.decodePollOut(pollReplyBody, ctx),
+    pollReplyValue,
+    `POLL reply round trip for minor ${ctx.minor}`,
+  );
+}
 
 const lifecycleInput = {
   release: {
@@ -786,6 +824,78 @@ if (source) {
     }
   }
 
+  for (const ctx of pollContexts) {
+    const oracleRequest = oracle.encodeRequestBody(fuse.FUSE_POLL, pollInput, ctx);
+    const actualRequest = fuse.encodePollIn(pollInput, ctx);
+    assert.deepEqual(
+      [...actualRequest],
+      [...oracleRequest],
+      `POLL request bytes match oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      fuse.decodePollIn(actualRequest, ctx),
+      oracle.decodeRequestBody(fuse.FUSE_POLL, oracleRequest, ctx),
+      `POLL request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualRequest.length; length++) {
+      const body = actualRequest.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodePollIn(body, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_POLL, body, ctx)),
+        `POLL request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodePollIn(requestTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_POLL, requestTrailing, ctx)),
+      `POLL request trailing-byte classification for minor ${ctx.minor}`,
+    );
+
+    const oracleReply = oracle.encodeReplyBody(fuse.FUSE_POLL, pollReplyValue, ctx);
+    const actualReply = fuse.encodePollOut(pollReplyValue, ctx);
+    assert.deepEqual(
+      [...actualReply],
+      [...oracleReply],
+      `POLL reply bytes match oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      fuse.decodePollOut(actualReply, ctx),
+      oracle.decodeReplyBody(fuse.FUSE_POLL, oracleReply, ctx),
+      `POLL typed reply decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualReply.length; length++) {
+      const body = actualReply.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodePollOut(body, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_POLL, body, ctx)),
+        `POLL reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const replyTrailing = Buffer.concat([actualReply, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodePollOut(replyTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_POLL, replyTrailing, ctx)),
+      `POLL reply trailing-byte classification for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodePollOut(Buffer.alloc(0), ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_POLL, Buffer.alloc(0), ctx)),
+      `POLL empty success-body classification for minor ${ctx.minor}`,
+    );
+
+    const actualError = fuse.encodeErrorReply(99n, "EIO");
+    const oracleError = oracle.encodeErrorReply(99n, "EIO");
+    assert.deepEqual(
+      [...actualError],
+      [...oracleError],
+      `POLL error reply framing matches oracle for minor ${ctx.minor}`,
+    );
+    const decodedError = oracle.decodeReply(actualError, fuse.FUSE_POLL, ctx);
+    assert.equal(decodedError.header.error, -5, `POLL error errno for minor ${ctx.minor}`);
+    assert.equal(decodedError.body, undefined, `POLL error body is empty for minor ${ctx.minor}`);
+  }
+
   const lifecycleContext = { minor: 41, setxattrExt: false };
   for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases) {
     const oracleRequest = oracle.encodeRequestBody(opcode, input, lifecycleContext);
@@ -1014,6 +1124,7 @@ if (source) {
   console.log("mount-rs N-API FUSE STATFS request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE POLL request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
@@ -1029,6 +1140,7 @@ if (source) {
   console.log("mount-rs N-API FUSE STATFS request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE POLL request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }
 
