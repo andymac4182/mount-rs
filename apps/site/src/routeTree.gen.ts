@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DocsRouteImport } from './routes/docs'
+import { Route as DownloadsRouteImport } from './routes/downloads'
 import { Route as DocsIndexRouteImport } from './routes/docs/index'
 import { Route as DocsNodeRouteImport } from './routes/docs/node'
 import { Route as DocsProvidersRouteImport } from './routes/docs/providers'
@@ -42,6 +43,11 @@ const IndexRoute = IndexRouteImport.update({
 const DocsRoute = DocsRouteImport.update({
   id: '/docs',
   path: '/docs',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const DownloadsRoute = DownloadsRouteImport.update({
+  id: '/downloads',
+  path: '/downloads',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DocsIndexRoute = DocsIndexRouteImport.update({
@@ -159,6 +165,7 @@ const DocsTransportsWebdavRoute = DocsTransportsWebdavRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/docs': typeof DocsRouteWithChildren
+  '/downloads': typeof DownloadsRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/providers': typeof DocsProvidersRouteWithChildren
   '/docs/rust': typeof DocsRustRoute
@@ -184,6 +191,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/downloads': typeof DownloadsRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/rust': typeof DocsRustRoute
   '/docs': typeof DocsIndexRoute
@@ -209,6 +217,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/docs': typeof DocsRouteWithChildren
+  '/downloads': typeof DownloadsRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/providers': typeof DocsProvidersRouteWithChildren
   '/docs/rust': typeof DocsRustRoute
@@ -237,6 +246,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/docs'
+    | '/downloads'
     | '/docs/node'
     | '/docs/providers'
     | '/docs/rust'
@@ -262,6 +272,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/downloads'
     | '/docs/node'
     | '/docs/rust'
     | '/docs'
@@ -286,6 +297,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/'
     | '/docs'
+    | '/downloads'
     | '/docs/node'
     | '/docs/providers'
     | '/docs/rust'
@@ -313,6 +325,7 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DocsRoute: typeof DocsRouteWithChildren
+  DownloadsRoute: typeof DownloadsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -329,6 +342,13 @@ declare module '@tanstack/react-router' {
       path: '/docs'
       fullPath: '/docs'
       preLoaderRoute: typeof DocsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/downloads': {
+      id: '/downloads'
+      path: '/downloads'
+      fullPath: '/downloads'
+      preLoaderRoute: typeof DownloadsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/docs/': {
@@ -563,6 +583,7 @@ const DocsRouteWithChildren = DocsRoute._addFileChildren(DocsRouteChildren)
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DocsRoute: DocsRouteWithChildren,
+  DownloadsRoute: DownloadsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -1,3 +1,5 @@
+import { Link } from '@tanstack/react-router'
+
 export function SiteFooter() {
   return (
     <footer className="site-footer">
@@ -13,6 +15,7 @@ export function SiteFooter() {
           <a href="https://github.com/andymac4182/mount-rs/blob/main/LICENSE">
             License
           </a>
+          <Link to="/downloads">Downloads</Link>
           <a href="https://github.com/andymac4182/mount-rs/blob/main/README.md">
             README
           </a>

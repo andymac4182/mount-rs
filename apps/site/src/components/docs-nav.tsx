@@ -19,6 +19,9 @@ export function DocsNav() {
       <Link to="/docs/transports" activeOptions={{ exact: false }}>
         Transports
       </Link>
+      <Link to="/downloads" activeOptions={{ exact: true }}>
+        CLI downloads
+      </Link>
       <p className="eyebrow">Project evidence</p>
       <a href="https://github.com/andymac4182/mount-rs/blob/main/ARCHITECTURE.md">
         Architecture in GitHub

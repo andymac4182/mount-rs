@@ -73,6 +73,7 @@ for (const path of [
   'functions/__server.func/index.mjs',
   'static/index.html',
   'static/docs/index.html',
+  'static/downloads/index.html',
   'static/docs/rust/index.html',
   'static/docs/node/index.html',
   'static/docs/providers/index.html',

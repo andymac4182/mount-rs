@@ -1,4 +1,5 @@
 import { Link, createFileRoute } from '@tanstack/react-router'
+import { cliRelease } from '../../content/cli-release'
 
 export const Route = createFileRoute('/docs/')({
   component: DocsOverview,
@@ -86,13 +87,13 @@ function DocsOverview() {
           </p>
         </div>
         <div className="cli-artifact-meta">
-          <div><span>Target</span><code>aarch64-apple-darwin</code></div>
-          <div><span>Artifact</span><code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code></div>
-          <div><span>SHA-256</span><code>437f9068bd1fe274abd3cafe42eb7eca7e7c71f15c7220dd2edd6c3c31a50f18</code></div>
-          <a className="button button-warm" href="https://github.com/andymac4182/mount-rs/releases/download/v0.1.0-cli-preview/mount-rs-0.1.0-aarch64-apple-darwin.tar.gz" target="_blank" rel="noreferrer">
-            Download from GitHub
-          </a>
-          <a className="cli-artifact-checksums" href="https://github.com/andymac4182/mount-rs/releases/tag/v0.1.0-cli-preview" target="_blank" rel="noreferrer">
+          <div><span>Target</span><code>{cliRelease.target}</code></div>
+          <div><span>Artifact</span><code>{cliRelease.artifact}</code></div>
+          <div><span>SHA-256</span><code>{cliRelease.sha256}</code></div>
+          <Link className="button button-warm" to="/downloads">
+            View downloads
+          </Link>
+          <a className="cli-artifact-checksums" href={cliRelease.releaseUrl} target="_blank" rel="noreferrer">
             GitHub Release + checksum manifest <span aria-hidden="true">↗</span>
           </a>
         </div>

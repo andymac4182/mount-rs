@@ -15,9 +15,16 @@ const routes = [
     path: '/docs',
     status: 200,
     contentType: 'text/html',
-    expected: ['The boundary is the product.', 'createChunkedDriver', 'GitHub Release', 'Download from GitHub', 'v0.1.0-cli-preview'],
+    expected: ['The boundary is the product.', 'createChunkedDriver', 'GitHub Release', 'View downloads', 'v0.1.0-cli-preview'],
   },
   { path: '/docs/', status: 307, redirectTo: '/docs' },
+  {
+    path: '/downloads',
+    status: 200,
+    contentType: 'text/html',
+    expected: ['Get the mount-rs CLI.', 'Current verified preview', 'v0.1.0-cli-preview', 'aarch64-apple-darwin', '437f9068bd1fe274abd3cafe42eb7eca7e7c71f15c7220dd2edd6c3c31a50f18', 'How release publication works'],
+  },
+  { path: '/downloads/', status: 307, redirectTo: '/downloads' },
   {
     path: '/docs/rust',
     status: 200,

@@ -1,0 +1,125 @@
+name: Publish CLI preview release
+
+on:
+  push:
+    tags:
+      - 'v*-cli-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'andymac4182/mount-rs'
+    runs-on: macos-14
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Test and package the CLI
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${GITHUB_REF_NAME}"
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | python3 -c 'import json, sys; print(next(package["version"] for package in json.load(sys.stdin)["packages"] if package["name"] == "mount-rs-cli"))')"
+
+          case "$release_tag" in
+            "v${package_version}"-cli-*) ;;
+            *)
+              echo "Release tag $release_tag does not match mount-rs-cli version $package_version" >&2
+              exit 1
+              ;;
+          esac
+
+          git fetch --no-tags origin main
+          release_commit="$(git rev-parse "${release_tag}^{commit}")"
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Refusing to publish: $release_tag is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          if [ "$target" != "aarch64-apple-darwin" ]; then
+            echo "Refusing to publish: expected the verified Apple Silicon target, got $target" >&2
+            exit 1
+          fi
+
+          cargo test --locked -p mount-rs-cli --all-targets
+          cargo build --locked --release -p mount-rs-cli
+
+          version_output="$(target/release/mount-rs --version)"
+          test "$version_output" = "mount-rs $package_version"
+
+          release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          mkdir -p "$release_dir"
+          artifact="mount-rs-${package_version}-${target}.tar.gz"
+          cp target/release/mount-rs "$release_dir/mount-rs"
+          chmod 755 "$release_dir/mount-rs"
+          COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" -C "$release_dir" mount-rs
+          (cd "$release_dir" && shasum -a 256 "$artifact" > SHA256SUMS)
+
+          echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${GITHUB_REF_NAME}"
+          release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          artifact="${{ steps.package.outputs.artifact }}"
+          package_version="${{ steps.package.outputs.package_version }}"
+          release_commit="${{ steps.package.outputs.release_commit }}"
+          target="${{ steps.package.outputs.target }}"
+          notes="CLI preview built from commit $release_commit.
+
+          Published target: $target
+          Published artifact: $artifact
+          Checksums: SHA256SUMS
+
+          This is a platform-specific CLI preview. It is not a complete platform matrix and does not imply overall project release readiness."
+
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$release_tag" \
+              "$release_dir/$artifact" \
+              "$release_dir/SHA256SUMS" \
+              --clobber \
+              --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$release_tag" \
+              "$release_dir/$artifact" \
+              "$release_dir/SHA256SUMS" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "mount-rs $package_version CLI preview" \
+              --notes "$notes" \
+              --prerelease \
+              --verify-tag
+          fi
+
+          verification_dir="$RUNNER_TEMP/mount-rs-cli-release-verify"
+          mkdir -p "$verification_dir"
+          gh release download "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "$artifact" \
+            --pattern SHA256SUMS \
+            --dir "$verification_dir" \
+            --clobber
+          (cd "$verification_dir" && shasum -a 256 -c SHA256SUMS)
+          tar -tzf "$verification_dir/$artifact" | grep -qx 'mount-rs'

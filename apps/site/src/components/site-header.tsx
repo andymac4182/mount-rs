@@ -18,6 +18,9 @@ export function SiteHeader() {
           <Link to="/docs" activeOptions={{ exact: false }}>
             Docs
           </Link>
+          <Link to="/downloads" activeOptions={{ exact: true }}>
+            Downloads
+          </Link>
           <a href="https://github.com/andymac4182/mount-rs">GitHub</a>
           <span className="status-chip">
             <span className="status-dot" aria-hidden="true" />

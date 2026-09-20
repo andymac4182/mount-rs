@@ -337,6 +337,30 @@ h3 { letter-spacing: -0.045em; line-height: 1.08; }
 .cli-artifact-meta .button { width: fit-content; margin-top: 8px; }
 .cli-artifact-checksums { color: #b9d9f1; font-size: 0.8rem; font-weight: 700; text-decoration: none; }
 .cli-artifact-checksums:hover { text-decoration: underline; text-underline-offset: 4px; }
+.downloads-shell { display: grid; grid-template-columns: minmax(0, 820px); justify-content: center; padding-top: 82px; padding-bottom: 120px; }
+.downloads-page h1 { max-width: 760px; }
+.download-release-card { margin-top: 52px; padding: 30px; color: #ecf3f8; background: #102136; box-shadow: 10px 10px 0 rgb(11 26 45 / 0.22); }
+.download-release-card .eyebrow { color: #96c9ee; }
+.download-release-card h2 { margin: 0 0 13px; color: #f5f7fa; font-size: clamp(1.75rem, 3vw, 2.45rem); }
+.download-release-card p { max-width: 700px; margin-bottom: 0; color: #bdcde0; font-size: 0.93rem; }
+.download-release-card p code { color: #f1cb78; }
+.download-release-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 0.8fr); gap: 30px; margin-top: 30px; padding-top: 24px; border-top: 1px solid rgb(189 201 214 / 0.24); }
+.download-facts { display: grid; gap: 13px; }
+.download-fact { display: grid; gap: 4px; }
+.download-fact span { color: #96b7d0; font: 0.65rem/1.2 "SFMono-Regular", Consolas, monospace; letter-spacing: 0.08em; text-transform: uppercase; }
+.download-fact code { color: #f1cb78; font-size: 0.76rem; overflow-wrap: anywhere; }
+.download-actions { display: flex; align-items: flex-start; flex-direction: column; gap: 13px; }
+.download-actions .button { width: fit-content; }
+.download-actions a:not(.button) { color: #b9d9f1; font-size: 0.8rem; font-weight: 700; text-decoration: none; }
+.download-actions a:not(.button):hover { text-decoration: underline; text-underline-offset: 4px; }
+.download-table-wrap { overflow-x: auto; margin-top: 27px; border: 1px solid var(--line); }
+.download-table { min-width: 720px; }
+.download-table td code { color: var(--ink); font-size: 0.75rem; overflow-wrap: anywhere; }
+.download-table a { color: var(--blue-strong); text-decoration: none; }
+.download-table a:hover { text-decoration: underline; text-underline-offset: 4px; }
+.download-steps { display: grid; gap: 14px; margin: 28px 0 0; padding-left: 22px; color: var(--ink-soft); }
+.download-steps li { padding-left: 5px; }
+.download-steps code { color: var(--blue-strong); }
 .source-note { display: flex; gap: 14px; align-items: flex-start; margin-top: 40px; padding: 17px 19px; border: 1px solid var(--line); background: #f0f4f5; }
 .source-note p { margin: 0; font-size: 0.85rem; }
 .source-note a, .inline-source a { color: var(--blue-strong); font-weight: 700; }
@@ -513,6 +537,8 @@ h3 { letter-spacing: -0.045em; line-height: 1.08; }
   .kv-prefix-banner { grid-template-columns: 1fr; gap: 8px; }
   .cli-artifact-card { grid-template-columns: 1fr; gap: 25px; }
   .cli-artifact-meta { padding-top: 22px; padding-left: 0; border-top: 1px solid rgb(189 201 214 / 0.24); border-left: 0; }
+  .downloads-shell { padding-top: 56px; }
+  .download-release-body { grid-template-columns: 1fr; }
   .storage-model-heading { align-items: flex-start; flex-direction: column; gap: 13px; }
   .node-factory-grid { grid-template-columns: 1fr; }
   .node-factory-card { min-height: auto; }
