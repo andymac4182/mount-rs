@@ -284,8 +284,8 @@ from the smallest contract boundary to the larger environment boundary:
    explicit unsupported results on platforms that cannot provide the mount.
 2. **Capability-limited Unstorage behavior (P1):** focused oracle-backed
    capability, unsupported-operation, ownership-overlay and timestamp metadata
-   checks now pass. The remaining inventory still identifies hardlinks (6 rows),
-   symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
+   checks now pass. The remaining inventory now identifies hardlinks (2 rows still open after
+   four exact unsupported rows), symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
    creation (16 rows), and root-only permission cases (18 rows). Each remaining
    row needs an explicit unsupported assertion or adapter implementation; a
    passing MemoryFs or ChunkedFs case cannot close an Unstorage row.
@@ -561,6 +561,11 @@ the closure items listed above.
   passed with 5 supported results, 9 exact `ENOSYS` classifications, zero
   `ENOTSUP` mismatches and zero skips; the packet was published through
   `9b74c87`.
+- **PASS** — `99c7d32` Unstorage hardlink capability packet: four pinned
+  rows passed with zero supported results, four exact `ENOSYS` classifications,
+  zero `ENOTSUP` mismatches and zero skips; every row retained errno `-38`,
+  syscall `link`, and null path/destination fields. The packet was published
+  through `2bce444`.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
