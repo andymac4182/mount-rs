@@ -578,6 +578,88 @@ fn attr_out(value: NativeFuseAttrOut) -> protocol::FuseAttrOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseGetattrIn {
+    #[napi(js_name = "getattrFlags")]
+    pub getattr_flags: u32,
+    pub fh: BigInt,
+}
+
+impl From<protocol::FuseGetattrIn> for NativeFuseGetattrIn {
+    fn from(value: protocol::FuseGetattrIn) -> Self {
+        Self {
+            getattr_flags: value.getattr_flags,
+            fh: bigint(value.fh),
+        }
+    }
+}
+
+fn getattr_in(value: NativeFuseGetattrIn) -> protocol::FuseGetattrIn {
+    protocol::FuseGetattrIn {
+        getattr_flags: value.getattr_flags,
+        fh: u64_from_bigint(&value.fh),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseSetattrIn {
+    pub valid: u32,
+    pub fh: BigInt,
+    pub size: BigInt,
+    #[napi(js_name = "lockOwner")]
+    pub lock_owner: BigInt,
+    pub atime: BigInt,
+    pub mtime: BigInt,
+    pub ctime: BigInt,
+    #[napi(js_name = "atimensec")]
+    pub atime_nsec: u32,
+    #[napi(js_name = "mtimensec")]
+    pub mtime_nsec: u32,
+    #[napi(js_name = "ctimensec")]
+    pub ctime_nsec: u32,
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+}
+
+impl From<protocol::FuseSetattrIn> for NativeFuseSetattrIn {
+    fn from(value: protocol::FuseSetattrIn) -> Self {
+        Self {
+            valid: value.valid,
+            fh: bigint(value.fh),
+            size: bigint(value.size),
+            lock_owner: bigint(value.lock_owner),
+            atime: bigint(value.atime),
+            mtime: bigint(value.mtime),
+            ctime: bigint(value.ctime),
+            atime_nsec: value.atime_nsec,
+            mtime_nsec: value.mtime_nsec,
+            ctime_nsec: value.ctime_nsec,
+            mode: value.mode,
+            uid: value.uid,
+            gid: value.gid,
+        }
+    }
+}
+
+fn setattr_in(value: NativeFuseSetattrIn) -> protocol::FuseSetattrIn {
+    protocol::FuseSetattrIn {
+        valid: value.valid,
+        fh: u64_from_bigint(&value.fh),
+        size: u64_from_bigint(&value.size),
+        lock_owner: u64_from_bigint(&value.lock_owner),
+        atime: u64_from_bigint(&value.atime),
+        mtime: u64_from_bigint(&value.mtime),
+        ctime: u64_from_bigint(&value.ctime),
+        atime_nsec: value.atime_nsec,
+        mtime_nsec: value.mtime_nsec,
+        ctime_nsec: value.ctime_nsec,
+        mode: value.mode,
+        uid: value.uid,
+        gid: value.gid,
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseOpenOut {
     pub fh: BigInt,
     #[napi(js_name = "openFlags")]
@@ -896,6 +978,138 @@ pub fn fuse_encode_attr_out(
         &attr_out(value),
         protocol_context(context),
     ))
+}
+
+#[napi(js_name = "fuseDecodeGetattrIn")]
+pub fn fuse_decode_getattr_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseGetattrIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_GETATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Getattr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_GETATTR did not decode as a getattr request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeGetattrIn")]
+pub fn fuse_encode_getattr_in(
+    value: NativeFuseGetattrIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_GETATTR,
+        &protocol::FuseRequestBody::Getattr(getattr_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeGetattrOut")]
+pub fn fuse_decode_getattr_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseAttrOut> {
+    match protocol::decode_reply_body(
+        mount_rs_fuse::FUSE_GETATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Attr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_GETATTR did not decode as an attribute reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeGetattrOut")]
+pub fn fuse_encode_getattr_out(
+    value: NativeFuseAttrOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_GETATTR,
+        &protocol::FuseReplyBody::Attr(attr_out(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeSetattrIn")]
+pub fn fuse_decode_setattr_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseSetattrIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_SETATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Setattr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_SETATTR did not decode as a setattr request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeSetattrIn")]
+pub fn fuse_encode_setattr_in(
+    value: NativeFuseSetattrIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_SETATTR,
+        &protocol::FuseRequestBody::Setattr(setattr_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeSetattrOut")]
+pub fn fuse_decode_setattr_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseAttrOut> {
+    match protocol::decode_reply_body(
+        mount_rs_fuse::FUSE_SETATTR,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Attr(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_SETATTR did not decode as an attribute reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeSetattrOut")]
+pub fn fuse_encode_setattr_out(
+    value: NativeFuseAttrOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_SETATTR,
+        &protocol::FuseReplyBody::Attr(attr_out(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeOpenOut")]
