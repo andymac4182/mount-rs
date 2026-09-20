@@ -174,6 +174,13 @@ or clones into current scope; those remain the separate future requirement.
 
 ### SQLite hosting acceptance
 
+The required configuration/failure matrix is specified in
+[SQLite reliability and fault injection](docs/sqlite-reliability-matrix.md).
+It includes rollback journals, WAL, no-journal/volatile configurations, sync
+levels, checkpoint/locking behavior, and deterministic injected failures. Track
+every cell as passed, failed, unsupported or untested; never count omission as
+success. Fault injection is a reusable opt-in feature, not only ad hoc tests.
+
 Run the real SQLite engine against paths inside actual mounts, with evidence
 for every supported platform/transport/backend combination. Record the tested
 SQLite version, journal mode, synchronous setting, and storage configuration.

@@ -53,6 +53,7 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 | W25 | Actual AWS S3 integration | AWS MCP access needed | Main |
 | W26 | Apache Ozone S3 backend | Planned; unverified | Unassigned |
 | W27 | Native Windows support and CI | CI added; qualification pending | Main |
+| W28 | Deterministic fault injection | Implementing | Arendt |
 
 ## Decisions and external prerequisites
 
@@ -242,6 +243,8 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [x] Record prior Linux FUSE DELETE/WAL and macOS NFS single-host DELETE
   evidence; those configurations alone do not establish universal safety.
 - [ ] W12.1 Define and test supported journal/locking modes per transport.
+  Required matrix: [SQLite reliability](docs/sqlite-reliability-matrix.md),
+  including DELETE/TRUNCATE/PERSIST/WAL/MEMORY/OFF and all sync levels.
 - [ ] W12.2 Prevent silent WAL fallback from being reported as WAL success.
 - [ ] W12.3 Exercise multiple connections/processes, readers/writers, locks,
   sync barriers, rename/unlink, disk-full errors and crash/restart integrity.
@@ -456,6 +459,25 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W27.5 Define and implement Windows mount support separately from Unix
   FUSE/NFS and macOS FSKit. Explicit unsupported operations are not proof of
   Windows mounting acceptance; retain capability and evidence matrices.
+
+## W28 — Deterministic fault injection
+
+- [ ] W28.1 Add a separate minimal-dependency fault-injection crate with explicit
+  opt-in plans, operation/occurrence selectors, seeded replay and event evidence.
+  Wrap metadata and block stores without changing production defaults.
+- [ ] W28.2 Cover before/after-operation failures, lost acknowledgments, IO/full/
+  permission errors, delays/timeouts, missing/corrupt/torn blocks, lease expiry,
+  stale fencing, CAS conflicts and failed sync barriers. Record unsupported
+  hooks and add transport/process controls rather than pretending wrappers
+  simulate kernel, network or power-loss behavior.
+- [ ] W28.3 Wire plans through test CLI/Node/VFS/HTTP entry points; isolate test
+  resources, redact data/credentials, bound execution and verify cleanup.
+- [ ] W28.4 Sweep defined fault points in the SQLite reliability matrix, retain
+  seed/plan and minimized failing trace, check integrity plus exact transaction
+  history and acknowledged-commit durability for the selected configuration.
+- [ ] W28.5 Require bounded PR fault suites and broader scheduled matrices on
+  Linux/macOS/Windows; publish coverage and remaining gaps, not an unbounded
+  claim that every possible fault has been tested.
 
 ## Recent landed chunks
 
