@@ -52,6 +52,28 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 - Commit and push validated chunks to `origin/main`; do not call a workstream
   complete until its integration and platform acceptance gates pass.
 
+### Delegated execution and rotation
+
+`Main` in the dashboard means the coordinator owns cross-stream integration,
+acceptance evidence, tracker updates and commit/push; it does not mean that
+every implementation task is being done serially. Workers receive disjoint
+write scopes, return exact paths and test evidence, and are closed after their
+patch is integrated. A completed worker is then rotated into the next open,
+non-overlapping packet. The current five-packet allocation is:
+
+| Worker | Packet | Write scope | Handoff state |
+| --- | --- | --- | --- |
+| Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Implementing |
+| Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Implementing |
+| Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Implementing |
+| Meitner | W24 TanStack Start marketing/docs site | `apps/site/**` | Implementing |
+| Ohm | W18.6 storage-dispatch draft review | `benchmarks/storage/dispatch/**` | Implementing |
+
+Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
+(Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
+design review), and Raman (scoped napi-rs package distribution). Main rotates
+those slots rather than assigning multiple workers to the same files.
+
 ## Workstream dashboard
 
 | ID | Stream | Status | Current owner |
@@ -61,25 +83,25 @@ and native-mount opt-ins were skipped in this run and remain separate gates.
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Live provider tests passed; CLI gate added, credentialed execution pending | Main |
-| W06 | RustFS integration service | Landed; extending | Main |
-| W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Main |
+| W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Real harness repair and qualification | Mill / Main |
-| W09 | Node / napi-rs and public API | Verifying | Main / Lagrange |
-| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel / Main |
-| W11 | Config-driven CLI | HTTP landed; RustFS remote gate passed, Cloudflare gate pending | Main |
+| W09 | Node / napi-rs and public API | Verifying | Raman (complete slice) / Main |
+| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
+| W11 | Config-driven CLI | HTTP landed; RustFS remote gate passed, Cloudflare gate pending | Epicurus (complete slice) / Main |
 | W12 | Safely hosting SQLite files | Partial evidence | Main |
-| W13 | macOS FSKit | Unsigned draft awaiting integration | Main |
+| W13 | macOS FSKit | Unsigned draft awaiting integration | Aristotle / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
 | W15 | Mount-free SQLite VFS | Rollback/lifetime landed; WAL design starting | Peirce / Main |
 | W16 | just-bash / Mastra adapters | Landed locally; hosted verification pending | Main |
 | W17 | Multi-drive HTTP server | Server/CLI landed; RustFS remote passed, Cloudflare acceptance pending | Main |
-| W18 | Benchmarks and dependency budget | Partial implementation | Main |
+| W18 | Benchmarks and dependency budget | Partial implementation | Ohm / Main |
 | W19 | Compression | Design review recorded | Main |
 | W20 | CI, packaging and final acceptance | Verifying | Main |
 | W21 | Reference review and learnings | Ongoing | Main |
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
-| W24 | Domain and marketing site | Site draft ready; deployment pending | Main |
+| W24 | Domain and marketing site | Site draft ready; deployment pending | Meitner / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
 | W27 | Native Windows support and CI | Runtime qualification pending | Main |
