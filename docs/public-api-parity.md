@@ -389,12 +389,16 @@ shown to exercise and verify one of the APIs above.
   the deterministic Rust/TypeScript trace matched at the pinned oracle
   revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
 - **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-parity-target node tests/core_parity/check.mjs`:
-  56 steps, 35 successful results, 21 stable expected errors, and zero
-  mismatches.
+  101 steps, 79 successful results, 22 stable expected errors, and zero
+  mismatches or skips. The trace includes the `lchown` symlink lifecycle row.
 - **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-parity-target node tests/core_concurrency/check.mjs`:
   six scenarios and zero mismatches; five unsupported scope classifications
   remain explicit.
 - **PASS** — `git diff --check -- docs/public-api-parity.md scripts/check-parity.mjs`.
+
+- **PASS** — the latest W01 packet checks add 14 explicit remaining Unstorage
+  rows (4 PASS, 10 ENOSYS, zero ENOTSUP/skips) and Rust-backed FUSE `CREATE`
+  request/reply differential coverage for protocol 7.41/7.39/7.12/7.8.
 
 The deterministic checker now rejects a configured but non-pinned
 `MOUNTX_SOURCE` and uses Cargo's locked mode. These checks still do not claim
