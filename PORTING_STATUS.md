@@ -28,7 +28,7 @@ cases still require audit.
   without a kernel mount; native lifecycle work is in progress.
 - Workspace-integrated 9P2000.L, NFSv3, WebDAV, and S3 gateway crates with
   userspace protocol and loopback network tests.
-- Seeded differential traces: five seeds, each with 557 operations against the TypeScript memory
+- Seeded differential traces: five seeds, each with 621 operations against the TypeScript memory
   oracle for Rust memory, SQLite, local object-store, and real local PGlite.
   This caught and fixed PGlite named prepared-statement collisions across
   reconnecting clients; the adapter now uses typed unnamed statements.

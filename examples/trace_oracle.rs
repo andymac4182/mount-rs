@@ -33,6 +33,12 @@ async fn execute(fs: &Loopback, command: &Value) -> Result<Value> {
         "rename" => fs.rename(path, other).await?,
         "link" => fs.link(path, other).await?,
         "symlink" => fs.symlink(path, other).await?,
+        "readlink" => return Ok(json!(fs.readlink(path).await?)),
+        "chmod" => fs.chmod(path, command[2].as_u64().unwrap() as u32).await?,
+        "chown" => {
+            fs.chown(path, command[2].as_u64().unwrap() as u32, 5678)
+                .await?
+        }
         "unlink" => fs.unlink(path).await?,
         "rmdir" => fs.rmdir(path).await?,
         "truncate" => fs.truncate(path, command[2].as_u64().unwrap()).await?,
@@ -52,7 +58,13 @@ async fn execute(fs: &Loopback, command: &Value) -> Result<Value> {
             } else {
                 fs.lstat(path).await?
             };
-            return Ok(json!([stats.mode, stats.size, stats.nlink]));
+            return Ok(json!([
+                stats.mode,
+                stats.size,
+                stats.nlink,
+                stats.uid,
+                stats.gid
+            ]));
         }
         _ => panic!("unknown operation"),
     }
