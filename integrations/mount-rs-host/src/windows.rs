@@ -15,9 +15,13 @@ const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const SYMBOLIC_LINK_FLAG_DIRECTORY: u32 = 0x1;
 const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: u32 = 0x2;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const READ_ATTRIBUTES: u32 = 0x80;
+const WRITE_DATA: u32 = 0x2;
+const APPEND_DATA: u32 = 0x4;
 const WRITE_ATTRIBUTES: u32 = 0x100;
 const READONLY: u32 = 1;
+const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 const EPOCH_TICKS: i128 = 116_444_736_000_000_000;
 
 #[repr(C)]
@@ -95,7 +99,14 @@ unsafe extern "system" {
         attributes: u32,
         template: Handle,
     ) -> Handle;
+    fn CreateHardLinkW(
+        new_path: *const u16,
+        existing_path: *const u16,
+        security: *const c_void,
+    ) -> i32;
     fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> i32;
+    fn DeleteFileW(path: *const u16) -> i32;
+    fn GetFileAttributesW(path: *const u16) -> u32;
     fn GetFileInformationByHandle(handle: Handle, info: *mut HandleInfo) -> i32;
     fn GetFileInformationByHandleEx(
         handle: Handle,
@@ -109,6 +120,7 @@ unsafe extern "system" {
         access: *const FileTime,
         write: *const FileTime,
     ) -> i32;
+    fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
 }
 #[link(name = "ntdll")]
 unsafe extern "system" {
@@ -263,7 +275,9 @@ pub(super) fn open(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File>
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
     if flags.append {
-        access = (access & !2) | 4;
+        // FILE_APPEND_DATA is permitted without FILE_WRITE_DATA. This is the
+        // same access transformation used by libuv's win/fs.c open path.
+        access = (access & !WRITE_DATA) | APPEND_DATA;
     }
     let disposition = match (flags.create, flags.exclusive, flags.truncate) {
         (true, true, _) => 1,      // CREATE_NEW
@@ -272,7 +286,7 @@ pub(super) fn open(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File>
         (true, false, false) => 4, // OPEN_ALWAYS
         (false, _, true) => 5,     // TRUNCATE_EXISTING
     };
-    let attributes = 0x80
+    let attributes = FILE_ATTRIBUTE_NORMAL
         | if flags.create && mode & 0o200 == 0 {
             READONLY
         } else {
@@ -293,6 +307,60 @@ pub(super) fn open(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File>
             error
         }
     })
+}
+
+pub(super) fn hard_link(existing: &Path, new_path: &Path) -> io::Result<()> {
+    let existing = wide_host_path(existing)?;
+    let new_path = wide_host_path(new_path)?;
+    // SAFETY: both paths are NUL-terminated UTF-16 buffers alive for the
+    // synchronous CreateHardLinkW call. A null security descriptor requests
+    // the default security attributes, matching libuv.
+    if unsafe { CreateHardLinkW(new_path.as_ptr(), existing.as_ptr(), std::ptr::null()) } == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) fn unlink(path: &Path) -> io::Result<()> {
+    let wide = wide_host_path(path)?;
+    // DeleteFileW is deliberately used instead of std::fs::remove_file so
+    // long Win32 paths and open handles with FILE_SHARE_DELETE follow the same
+    // path as libuv. The first attempt also preserves ordinary error codes.
+    // SAFETY: `wide` is a live NUL-terminated UTF-16 path buffer.
+    if unsafe { DeleteFileW(wide.as_ptr()) } != 0 {
+        return Ok(());
+    }
+    let initial_error = io::Error::last_os_error();
+    if initial_error.raw_os_error() != Some(5) {
+        return Err(initial_error);
+    }
+
+    // libuv's Windows unlink path uses FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.
+    // DeleteFileW has no equivalent flag, so mirror that behavior for the
+    // fallback by clearing only the readonly bit, then restore it if deletion
+    // still fails. This matters for files created with O_RDONLY|O_CREAT and a
+    // mode without the owner-write bit.
+    // SAFETY: the path buffer remains valid for both synchronous Win32 calls.
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES || attributes & READONLY == 0 {
+        return Err(initial_error);
+    }
+    let writable_attributes = match attributes & !READONLY {
+        0 => FILE_ATTRIBUTE_NORMAL,
+        attributes => attributes,
+    };
+    if unsafe { SetFileAttributesW(wide.as_ptr(), writable_attributes) } == 0 {
+        return Err(initial_error);
+    }
+    if unsafe { DeleteFileW(wide.as_ptr()) } != 0 {
+        return Ok(());
+    }
+    let delete_error = io::Error::last_os_error();
+    // Best-effort restoration avoids changing the host entry when the delete
+    // failed for a reason unrelated to readonly protection.
+    let _ = unsafe { SetFileAttributesW(wide.as_ptr(), attributes) };
+    Err(delete_error)
 }
 
 pub(super) fn stat(path: &Path, follow: bool) -> io::Result<Stats> {
