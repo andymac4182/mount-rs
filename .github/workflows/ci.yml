@@ -244,10 +244,15 @@ jobs:
 
   windows-node:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v4
+        with:
+          repository: pithings/mountx
+          ref: 85361a8212ff9bff8e69f62fa8993ef2c2ec51e8
+          path: mountx-source
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -256,7 +261,13 @@ jobs:
           version: 11
       - uses: Swatinem/rust-cache@v2
       - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - name: Install pinned oracle dependencies without lifecycle scripts
+        run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - run: pnpm --dir integrations/mount-rs-napi build
+      - name: Verify portable Windows N-API parity against the pinned oracle
+        env:
+          MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
+        run: pnpm --dir integrations/mount-rs-napi test
       - name: Verify native Windows Node factories and chunked storage
         run: |
           node integrations/mount-rs-napi/test/factories.mjs

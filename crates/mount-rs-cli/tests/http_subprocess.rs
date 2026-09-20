@@ -12,7 +12,17 @@ use std::time::Instant;
 
 struct HttpResponse {
     status: u16,
+    headers: Vec<(String, String)>,
     body: Vec<u8>,
+}
+
+impl HttpResponse {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(key, _value)| key.eq_ignore_ascii_case(name))
+            .map(|(_key, value)| value.as_str())
+    }
 }
 
 struct HttpChild {
@@ -147,19 +157,61 @@ fn request(
     token: &str,
     body: &[u8],
 ) -> HttpResponse {
+    request_streaming(address, method, path, token, body, None, body.len().max(1))
+}
+
+fn request_with_range(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: &[u8],
+    range: &str,
+) -> HttpResponse {
+    request_streaming(
+        address,
+        method,
+        path,
+        token,
+        body,
+        Some(range),
+        body.len().max(1),
+    )
+}
+
+fn request_streaming(
+    address: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: &[u8],
+    range: Option<&str>,
+    write_chunk_bytes: usize,
+) -> HttpResponse {
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
         .expect("connect HTTP subprocess");
     stream
         .set_read_timeout(Some(Duration::from_secs(2)))
         .expect("set HTTP response timeout");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set HTTP request timeout");
+    let range_header = range
+        .map(|value| format!("Range: {value}\r\n"))
+        .unwrap_or_default();
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        "{method} {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: {}\r\n{range_header}\r\n",
         body.len()
     );
     stream
         .write_all(request.as_bytes())
         .expect("write HTTP request headers");
-    stream.write_all(body).expect("write HTTP request body");
+    for chunk in body.chunks(write_chunk_bytes.max(1)) {
+        stream
+            .write_all(chunk)
+            .expect("write HTTP request body chunk");
+        thread::yield_now();
+    }
 
     let mut bytes = Vec::new();
     stream.read_to_end(&mut bytes).expect("read HTTP response");
@@ -174,8 +226,15 @@ fn request(
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse().ok())
         .expect("HTTP response status");
+    let headers = headers
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
     HttpResponse {
         status,
+        headers,
         body: bytes[header_end + 4..].to_vec(),
     }
 }
@@ -281,6 +340,35 @@ fn write_http_config(root: &Path) -> PathBuf {
     config_path
 }
 
+fn abort_streaming_write(address: SocketAddr, path: &str, token: &str) {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))
+        .expect("connect HTTP subprocess for aborted write");
+    stream
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .expect("set aborted-write timeout");
+    let request = format!(
+        "PUT {path} HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\nContent-Length: 512\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .expect("write aborted HTTP request headers");
+    stream
+        .write_all(b"incomplete body")
+        .expect("write aborted HTTP request body");
+    // Dropping before Content-Length bytes arrive forces the server down its
+    // request-error path, which must still close the splitstore handle.
+}
+
+fn assert_listener_closed(address: SocketAddr) {
+    for _ in 0..20 {
+        if TcpStream::connect_timeout(&address, Duration::from_millis(100)).is_err() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("HTTP listener remained reachable after its child exited: {address}");
+}
+
 #[test]
 fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
     let root = temporary_root();
@@ -301,14 +389,22 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
     assert!(sqlite_discovery.contains("\"id\":\"sqlite\""));
     assert!(!sqlite_discovery.contains("memory"));
 
-    let memory_write = request(
+    let memory_payload: Vec<u8> = (0..777)
+        .map(|index| ((index * 37 + 11) % 251) as u8)
+        .collect();
+    let memory_write = request_streaming(
         address,
         "PUT",
         "/v1/drives/memory/fs/memory-only",
         "memory-test-token",
-        b"memory bytes",
+        &memory_payload,
+        None,
+        17,
     );
     assert!((200..300).contains(&memory_write.status));
+    let memory_write_payload: serde_json::Value =
+        serde_json::from_slice(&memory_write.body).expect("memory PUT JSON");
+    assert_eq!(memory_write_payload["bytes"].as_u64(), Some(777));
     let sqlite_write = request(
         address,
         "PUT",
@@ -326,7 +422,80 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
         &[],
     );
     assert_eq!(memory_read.status, 200);
-    assert_eq!(memory_read.body, b"memory bytes");
+    assert_eq!(memory_read.body, memory_payload);
+    let ranged_memory = request_with_range(
+        address,
+        "GET",
+        "/v1/drives/memory/fs/memory-only",
+        "memory-test-token",
+        &[],
+        "bytes=123-456",
+    );
+    assert_eq!(ranged_memory.status, 206);
+    assert_eq!(
+        ranged_memory.header("content-range"),
+        Some("bytes 123-456/777")
+    );
+    assert_eq!(ranged_memory.header("content-length"), Some("334"));
+    assert_eq!(ranged_memory.body, memory_payload[123..=456]);
+
+    let truncate_body = serde_json::to_vec(&serde_json::json!({
+        "path": "/memory-only",
+        "length": 321,
+    }))
+    .expect("serialize truncate request");
+    let truncated = request(
+        address,
+        "POST",
+        "/v1/drives/memory/ops/truncate",
+        "memory-test-token",
+        &truncate_body,
+    );
+    assert_eq!(truncated.status, 200);
+    let truncated_read = request(
+        address,
+        "GET",
+        "/v1/drives/memory/fs/memory-only",
+        "memory-test-token",
+        &[],
+    );
+    assert_eq!(truncated_read.status, 200);
+    assert_eq!(truncated_read.body, memory_payload[..321]);
+
+    let concurrent_a = std::thread::spawn(move || {
+        request(
+            address,
+            "PUT",
+            "/v1/drives/memory/fs/concurrent-a",
+            "memory-test-token",
+            b"concurrent A",
+        )
+    });
+    let concurrent_b = std::thread::spawn(move || {
+        request(
+            address,
+            "PUT",
+            "/v1/drives/memory/fs/concurrent-b",
+            "memory-test-token",
+            b"concurrent B",
+        )
+    });
+    assert_eq!(concurrent_a.join().expect("concurrent PUT A").status, 200);
+    assert_eq!(concurrent_b.join().expect("concurrent PUT B").status, 200);
+    for (path, expected) in [
+        (
+            "/v1/drives/memory/fs/concurrent-a",
+            b"concurrent A".as_slice(),
+        ),
+        (
+            "/v1/drives/memory/fs/concurrent-b",
+            b"concurrent B".as_slice(),
+        ),
+    ] {
+        let response = request(address, "GET", path, "memory-test-token", &[]);
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected);
+    }
     let sqlite_read = request(
         address,
         "GET",
@@ -372,7 +541,33 @@ fn config_driven_http_subprocess_isolates_drives_and_reopens_sqlite() {
     );
     assert_eq!(cross_token.status, 401);
 
+    abort_streaming_write(
+        address,
+        "/v1/drives/splitstore/fs/aborted-write",
+        "splitstore-test-token",
+    );
+    let recovered_write = (0..20).find_map(|_| {
+        let response = request(
+            address,
+            "PUT",
+            "/v1/drives/splitstore/fs/aborted-write",
+            "splitstore-test-token",
+            b"recovered after aborted write",
+        );
+        if response.status == 200 {
+            Some(response)
+        } else {
+            thread::sleep(Duration::from_millis(10));
+            None
+        }
+    });
+    assert!(
+        recovered_write.is_some(),
+        "splitstore handle was not cleaned up"
+    );
+
     let _forced_status = child.kill_owned();
+    assert_listener_closed(address);
     let mut reopened = HttpChild::start(&config_path, root.clone());
     let (reopened_address, reopened_line) = reopened.ready();
     assert!(reopened_line.contains("drives: memory, sqlite, splitstore"));
