@@ -60,6 +60,16 @@ jobs:
             MOUNT_RS_NFS_NATIVE_TEST=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=240)' "$native_test"
           fi
 
+      - name: Verify SQLite hosting and journal support through native NFS
+        run: |
+          sqlite_test=$(cargo test --locked -p mount-rs-core --test native_nfs_sqlite --no-run --message-format=json | python3 -c 'import json,sys; print([x["executable"] for line in sys.stdin if (x:=json.loads(line)).get("executable")][0])')
+          test -x "$sqlite_test"
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo env MOUNT_RS_RUN_NATIVE_NFS_SQLITE=1 timeout 300s "$sqlite_test" --ignored --nocapture
+          else
+            MOUNT_RS_RUN_NATIVE_NFS_SQLITE=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=300)' "$sqlite_test"
+          fi
+
   native-9p:
     runs-on: ubuntu-latest
     timeout-minutes: 10

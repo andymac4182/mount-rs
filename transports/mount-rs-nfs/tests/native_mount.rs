@@ -14,7 +14,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mount_rs_core::{MemoryFs, MemoryOptions};
 use mount_rs_nfs::{NativeNfsMount, NfsMountOptions, NfsVersion, mount_nfs, nfs_client_probe};
 
-const TEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+// The expanded Linux v4.1 case deliberately exercises many kernel RPCs, but
+// the client deadline remains bounded.  A timed-out blocking syscall cannot be
+// cancelled by Tokio, so cleanup must not wait for its JoinHandle indefinitely.
+const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 #[cfg(target_os = "linux")]
 const V4_PAGED_ENTRY_COUNT: usize = 256;
 
@@ -58,7 +63,7 @@ impl NativeMountGuard {
         let Some(mount) = self.mount.clone() else {
             return Ok(());
         };
-        let unmount = match tokio::time::timeout(TEST_TIMEOUT, mount.unmount()).await {
+        let unmount = match tokio::time::timeout(CLEANUP_TIMEOUT, mount.unmount()).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(format!("native NFS unmount failed: {error}")),
             Err(_) => Err("native NFS unmount timed out".to_owned()),
@@ -68,7 +73,7 @@ impl NativeMountGuard {
         }
         let mountpoint = self.mountpoint.clone();
         let remove = match tokio::time::timeout(
-            TEST_TIMEOUT,
+            CLEANUP_TIMEOUT,
             tokio::task::spawn_blocking(move || fs::remove_dir(&mountpoint)),
         )
         .await
@@ -103,9 +108,9 @@ impl Drop for NativeMountGuard {
                     return;
                 };
                 runtime.block_on(async {
-                    let _ = tokio::time::timeout(TEST_TIMEOUT, mount.unmount()).await;
+                    let _ = tokio::time::timeout(CLEANUP_TIMEOUT, mount.unmount()).await;
                     let _ = tokio::time::timeout(
-                        TEST_TIMEOUT,
+                        CLEANUP_TIMEOUT,
                         tokio::task::spawn_blocking(move || fs::remove_dir(mountpoint)),
                     )
                     .await;
@@ -256,7 +261,7 @@ async fn run_native_case(version: NfsVersion, opt_in: &str) -> NativeChecks {
         ..NfsMountOptions::default()
     };
     let mount =
-        match tokio::time::timeout(TEST_TIMEOUT, mount_nfs(driver, &mountpoint, options)).await {
+        match tokio::time::timeout(MOUNT_TIMEOUT, mount_nfs(driver, &mountpoint, options)).await {
             Ok(Ok(mount)) => mount,
             Ok(Err(error)) => {
                 let _ = tokio::task::spawn_blocking({
@@ -272,42 +277,67 @@ async fn run_native_case(version: NfsVersion, opt_in: &str) -> NativeChecks {
                     move || fs::remove_dir(mountpoint)
                 })
                 .await;
-                panic!("native NFS {version:?} mount timed out after {TEST_TIMEOUT:?}");
+                panic!("native NFS {version:?} mount timed out after {MOUNT_TIMEOUT:?}");
             }
         };
     let mut guard = NativeMountGuard::new(mount, mountpoint.clone());
-    let io_result = tokio::time::timeout(
-        TEST_TIMEOUT,
-        tokio::task::spawn_blocking({
-            let mountpoint = mountpoint.clone();
-            move || {
-                #[cfg(target_os = "linux")]
-                {
-                    match version {
-                        NfsVersion::V3 => exercise_namespace(&mountpoint),
-                        NfsVersion::V4_1 => exercise_v4_namespace(&mountpoint),
-                    }
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    debug_assert_eq!(version, NfsVersion::V3);
-                    exercise_namespace(&mountpoint)
+    let mut io_task = tokio::task::spawn_blocking({
+        let mountpoint = mountpoint.clone();
+        move || {
+            #[cfg(target_os = "linux")]
+            {
+                match version {
+                    NfsVersion::V3 => exercise_namespace(&mountpoint),
+                    NfsVersion::V4_1 => exercise_v4_namespace(&mountpoint),
                 }
             }
-        }),
-    )
-    .await;
+            #[cfg(not(target_os = "linux"))]
+            {
+                debug_assert_eq!(version, NfsVersion::V3);
+                exercise_namespace(&mountpoint)
+            }
+        }
+    });
+    // `spawn_blocking` cannot cancel a thread already in a synchronous NFS
+    // syscall.  Abort the task and make only a bounded reap attempt; the
+    // cleanup deadline must remain effective even when the kernel client is
+    // stuck.
+    let (io_timed_out, io_result) = match tokio::time::timeout(IO_TIMEOUT, &mut io_task).await {
+        Ok(result) => (false, Some(result)),
+        Err(_) => {
+            eprintln!(
+                "native NFS {version:?} I/O exceeded {IO_TIMEOUT:?}; aborting blocking client and attempting bounded reap"
+            );
+            io_task.abort();
+            if tokio::time::timeout(CLEANUP_TIMEOUT, io_task)
+                .await
+                .is_err()
+            {
+                eprintln!(
+                    "native NFS {version:?} blocking client was not reaped within {CLEANUP_TIMEOUT:?}"
+                );
+            }
+            (true, None)
+        }
+    };
     let cleanup = guard.cleanup().await;
     if let Err(error) = cleanup {
+        if io_timed_out {
+            panic!(
+                "native NFS {version:?} operations exceeded {IO_TIMEOUT:?}; bounded blocking-client reap attempted; mount cleanup failed: {error}"
+            );
+        }
         panic!("native NFS {version:?} mount cleanup failed: {error}");
     }
-    match io_result {
-        Ok(Ok(Ok(checks))) => checks,
-        Ok(Ok(Err(error))) => {
-            panic!("native NFS {version:?} filesystem operations failed: {error}")
-        }
-        Ok(Err(error)) => panic!("native NFS {version:?} operation task failed: {error}"),
-        Err(_) => panic!("native NFS {version:?} operations timed out after {TEST_TIMEOUT:?}"),
+    if io_timed_out {
+        panic!(
+            "native NFS {version:?} operations exceeded {IO_TIMEOUT:?}; bounded blocking-client reap attempted"
+        );
+    }
+    match io_result.expect("non-timeout native NFS I/O result") {
+        Ok(Ok(checks)) => checks,
+        Ok(Err(error)) => panic!("native NFS {version:?} filesystem operations failed: {error}"),
+        Err(error) => panic!("native NFS {version:?} operation task failed: {error}"),
     }
 }
 
