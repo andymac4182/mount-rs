@@ -115,7 +115,7 @@ complete.
 
 | ID | Stream | Status | Current owner |
 | --- | --- | --- | --- |
-| W01 | Core and mountx parity | Active simple-first parallel slices; not complete | Jason/Sartre/Carver/Gauss / Main |
+| W01 | Core and mountx parity | Active simple-first; core harness, pinned trace evidence and skip inventory landed; full parity remains open | Main (packets integrated) |
 | W02 | Metadata/block split and chunking | Verifying | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
@@ -123,9 +123,9 @@ complete.
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; durable topology capacity-gated; RustFS composition pending | Mill (checkpoint) / Main |
-| W09 | Node / napi-rs and public API | Verifying | Raman (complete slice) / Main |
-| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec oracle coverage expanding | Mendel (complete slice) / Main |
-| W11 | Config-driven CLI | HTTP edge coverage landed; local demo passed; RustFS remote gate passed, Cloudflare gate pending | Russell (complete slice) / Main |
+| W09 | Node / napi-rs and public API | Verifying; Rust-backed FUSE codec subpath and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
+| W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec subpath landed; native and cross-platform transport acceptance remains open | Main (packet integrated) |
+| W11 | Config-driven CLI | Rust CLI and Node SDK native macOS NFS demos passed; provider/remote/hosted gates remain | Main |
 | W12 | Safely hosting SQLite files | Local journal/WAL matrix and fail-closed gates landed; hosted/Windows gates pending | Peirce (checkpoint) / Main |
 | W13 | macOS FSKit | Unsigned bridge checkpoint passed; activation/signing pending | Aristotle (checkpoint) / Main |
 | W14 | Versioned filesystems | Local foundation landed; integration pending | Main |
@@ -194,6 +194,22 @@ the applicable oracle-backed cases are covered.
   seeds and revision-matched results for every required backend.
 - [ ] W01.4 Verify errors, paths, binary data, links, timestamps, handles,
   concurrency and lifecycle on supported macOS and Linux configurations.
+
+Evidence landed without closing the remaining W01 acceptance gates:
+
+- [x] `0de1832` adds a mount-free core parity harness: 56 operations, 35
+  successful results, 21 stable expected errors and zero mismatches against the
+  pinned oracle. It intentionally does not claim concurrency, persistence,
+  providers, transports or native mounts.
+- [x] `ae2f12d` adds the complete 88-row upstream skip inventory and a
+  revision-checked trace-evidence runner. Five pinned seeds passed on the
+  memory backend; the required all-backend/platform matrix remains open.
+- [x] `dd65770` adds the Rust-backed N-API FUSE codec subpath and declarations;
+  it is mount-free protocol coverage, not native FUSE session acceptance.
+- [x] `0d7f1f4` proves the Rust CLI's real macOS NFS mount path with independent
+  Rust and Node filesystem clients; `0dca1d1` adds a separate Node SDK CLI and
+  its opt-in real macOS NFS self-test. Linux and provider-backed SDK matrices
+  remain unverified here.
 
 ## W02 — Independent metadata, blocks and chunking
 
@@ -408,6 +424,14 @@ the applicable oracle-backed cases are covered.
 - [x] `d526c18` extends the HTTP subprocess contract with streamed writes,
   ranges, truncate, concurrent writes, aborted-write recovery and listener
   cleanup; the focused CLI/HTTP tests and strict Clippy passed locally.
+- [x] `0d7f1f4` adds a bounded native demo using the Rust CLI, independent Rust
+  and Node clients, real macOS NFS, SIGINT unmount and durable backing-byte
+  verification.
+- [x] `0dca1d1` adds the Node SDK CLI example and default mount-free checks;
+  the opt-in macOS NFS self-test passed against the rebuilt local N-API addon.
+- [ ] W11.6 Run the same SDK-backed CLI flow against the configured metadata/
+  block providers, including restart and cleanup, before treating the demo as a
+  provider-integrated acceptance path.
 
 ## W12 — Safely host SQLite database files
 
@@ -884,3 +908,8 @@ cross-drive isolation.
 | `00e96ce` | Cloudflare R2 CLI object-count compatibility | Live bucket-scoped CLI, N-API factory, parity and smoke benchmark passed; cleanup readback passed |
 | `ae7c4cb` | Isolate inherited PGlite URL from the preflight trace lane | Focused stale-URL regression passed; pushed to `origin/main` |
 | `73c33e0` | Isolate PGlite lifecycle from all preflight suites | Full macOS acceptance with live PGlite/R2 exited 0; native/hosted gates remain open |
+| `0de1832` | W01 core in-memory parity harness | 56-step pinned-oracle trace passed; later/provider/concurrency behavior remains open |
+| `ae2f12d` | W01 skip inventory and deterministic trace evidence | 88 skips classified; five memory seeds passed; full matrix remains open |
+| `dd65770` | Rust-backed N-API FUSE codec subpath | Rebuilt-addon smoke, TypeScript declarations and codec test passed; native session remains open |
+| `0d7f1f4` | Rust CLI native end-to-end demo | Actual macOS NFS plus Rust/Node mounted-path I/O and cleanup passed |
+| `0dca1d1` | Node SDK CLI example and integration test | Argument checks plus opt-in actual macOS NFS SDK self-test passed |
