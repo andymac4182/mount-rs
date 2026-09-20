@@ -1,0 +1,13 @@
+[package]
+name = "mount-rs-sqlite"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "SQLite integration for mount-rs"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }
+mount-rs-persist = { path = "../mount-rs-persist" }
+rusqlite = { version = "0.32", features = ["bundled"] }

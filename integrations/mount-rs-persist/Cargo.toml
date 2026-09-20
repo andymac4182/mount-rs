@@ -1,0 +1,11 @@
+[package]
+name = "mount-rs-persist"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Shared persisted filesystem adapter for mount-rs integrations"
+license = "MIT"
+
+[dependencies]
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }

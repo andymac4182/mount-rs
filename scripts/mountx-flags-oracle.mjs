@@ -1,0 +1,22 @@
+import { constants } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const source = process.env.MOUNTX_SOURCE;
+if (!source) throw new Error('MOUNTX_SOURCE is required');
+const {createMemoryDriver} = await import(pathToFileURL(`${source}/src/drivers/memory.ts`));
+const {createLoopback} = await import(pathToFileURL(`${source}/src/harness.ts`));
+const fs = createLoopback(createMemoryDriver());
+await fs.writeFile('/file', 'abcdef');
+const h = await fs.open('/file', constants.O_RDWR | constants.O_CREAT, 0o640);
+await h.write(Buffer.from('XY'), 0, 2, 1);
+await h.write(Buffer.alloc(0), 0, 0, 0);
+const cursor = Buffer.alloc(2);
+await h.read(cursor, 0, 2, null);
+await h.close();
+const readonly = await fs.open('/new', constants.O_RDONLY | constants.O_CREAT, 0o640);
+let denied;
+try { await readonly.write(Buffer.from('x')); } catch (error) { denied = error.code; }
+await readonly.close();
+await fs.chown('/file', 123, 456);
+await fs.chown('/file', -1, 789);
+const stat = await fs.stat('/file');
+console.log(JSON.stringify({data: [...await fs.readFile('/file')], cursor: [...cursor], new_mode: (await fs.stat('/new')).mode & 0o777, denied, owner: [stat.uid,stat.gid]}));

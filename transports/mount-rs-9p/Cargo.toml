@@ -1,0 +1,14 @@
+[package]
+name = "mount-rs-9p"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "9P2000.L transport for mount-rs"
+license = "MIT"
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+tokio = { version = "1", default-features = false, features = ["time"] }

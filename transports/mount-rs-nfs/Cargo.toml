@@ -1,0 +1,11 @@
+[package]
+name = "mount-rs-nfs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "NFSv3 and MOUNTv3 transport for mount-rs"
+license = "MIT"
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }

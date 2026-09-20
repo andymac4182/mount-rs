@@ -1,0 +1,27 @@
+[package]
+name = "mount-rs-webdav"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Portable WebDAV transport for mount-rs filesystem drivers"
+license = "MIT"
+repository = "https://github.com/andymac4182/mount-rs"
+
+[dependencies]
+base64 = "0.22"
+bytes = "1"
+http-body-util = { version = "0.1", features = ["channel"] }
+httpdate = "1"
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["server", "tokio"] }
+mount-rs-core = { path = "../.." }
+percent-encoding = "2"
+quick-xml = "0.38"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+tokio = { version = "1", features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

@@ -1,0 +1,24 @@
+import {execFileSync} from 'node:child_process';
+import {pathToFileURL, fileURLToPath} from 'node:url';
+import assert from 'node:assert/strict';
+const source = process.env.MOUNTX_SOURCE;
+if (!source) throw new Error('MOUNTX_SOURCE is required');
+const {InodeTable} = await import(pathToFileURL(`${source}/src/fuse/inodes.ts`));
+const t = new InodeTable();
+const a = t.bind('/old/file', {dev: 0, ino: 2});
+t.acquire(a);
+const hard = t.bind('/hard', {dev: 0, ino: 2});
+const victim = t.bind('/new/file', {dev: 0, ino: 3});
+t.remap('/old', '/new');
+let code;
+try { t.requirePath(victim.nodeid); } catch (e) { code = e.code; }
+const lines = [`${a.nodeid} ${hard.nodeid} ${t.requirePath(a.nodeid)} ${code}`];
+t.unbind('/hard');
+lines.push(t.requirePath(a.nodeid));
+t.unbind('/new/file');
+const reused = t.bind('/reused', {dev: 0, ino: 2});
+lines.push(`${reused.nodeid} ${t.forget(a.nodeid, 1n)}`);
+lines.push(`${t.bind('/alias', {dev: 0, ino: 2}).nodeid} ${t.forget(1n, 100000n)}`);
+const actual = execFileSync('cargo', ['run','--quiet','--locked','-p','mount-rs-fuse','--example','inode_oracle'], {cwd: fileURLToPath(new URL('..', import.meta.url)), encoding:'utf8'}).trim();
+assert.equal(actual, lines.join('\n'));
+console.log('FUSE inode table TypeScript parity: PASS');

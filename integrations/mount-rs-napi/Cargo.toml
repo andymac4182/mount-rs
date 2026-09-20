@@ -1,0 +1,21 @@
+[package]
+name = "mount-rs-napi"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Node.js N-API bindings for mount-rs"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+mount-rs-pglite = { path = "../mount-rs-pglite" }
+mount-rs-r2 = { path = "../mount-rs-r2" }
+mount-rs-sqlite = { path = "../mount-rs-sqlite" }
+napi = { version = "3", default-features = false, features = ["napi8", "async", "dyn-symbols"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"

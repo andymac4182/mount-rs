@@ -1,0 +1,26 @@
+{
+  "name": "@andymac4182/mount-rs",
+  "version": "0.1.0",
+  "description": "Node.js bindings for mount-rs",
+  "license": "MIT",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "postlude.cjs",
+    "*.node",
+    "npm/*"
+  ],
+  "scripts": {
+    "build": "napi build --platform --release && node postbuild.mjs",
+    "build:debug": "napi build --platform && node postbuild.mjs",
+    "test": "node test/smoke.mjs && node test/contract.mjs && node test/factories.mjs && node test/differential.mjs"
+  },
+  "napi": {
+    "binaryName": "mount-rs"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.5.0"
+  }
+}

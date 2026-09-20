@@ -1,0 +1,41 @@
+[workspace]
+members = [
+    ".",
+    "integrations/mount-rs-persist",
+    "integrations/mount-rs-sqlite",
+    "integrations/mount-rs-r2",
+    "integrations/mount-rs-pglite",
+    "integrations/mount-rs-napi",
+    "transports/mount-rs-fuse",
+    "transports/mount-rs-9p",
+    "transports/mount-rs-nfs",
+    "transports/mount-rs-webdav",
+    "transports/mount-rs-s3",
+]
+resolver = "3"
+
+[package]
+name = "mount-rs-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Core Rust filesystem driver contract and memory filesystem for mountx"
+license = "MIT"
+repository = "https://github.com/andymac4182/mount-rs"
+readme = "README.md"
+keywords = ["filesystem", "mount", "memfs", "r2", "pglite"]
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+mount-rs-fuse = { path = "transports/mount-rs-fuse" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+mount-rs-r2 = { path = "integrations/mount-rs-r2" }
+mount-rs-pglite = { path = "integrations/mount-rs-pglite" }
+mount-rs-persist = { path = "integrations/mount-rs-persist" }
+mount-rs-sqlite = { path = "integrations/mount-rs-sqlite" }
+object_store = { version = "0.12", features = ["aws"] }
+tempfile = "3"

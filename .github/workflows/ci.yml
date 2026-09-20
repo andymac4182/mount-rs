@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --all-features --locked
+
+  node:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/checkout@v4
+        with:
+          repository: pithings/mountx
+          ref: 85361a8212ff9bff8e69f62fa8993ef2c2ec51e8
+          path: mountx-source
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - run: pnpm --dir integrations/mount-rs-napi build
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-edge-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-flags-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-trace-parity.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-inodes.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-init.mjs
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-fuse-session.mjs
+      - run: pnpm --dir tests/pglite install --frozen-lockfile
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" ./scripts/test-pglite.sh

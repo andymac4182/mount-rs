@@ -1,0 +1,17 @@
+[package]
+name = "mount-rs-fuse"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "FUSE protocol implementation for mount-rs"
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "rt", "signal", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
