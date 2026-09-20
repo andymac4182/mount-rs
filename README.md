@@ -1,5 +1,8 @@
 # mount-rs
 
+**Delivery progress:** [Workstream and task tracker](WORK_TRACKER.md) — landed
+work, active implementation, remaining acceptance tests and blockers.
+
 Rust port of the filesystem driver contract behind
 [pithings/mountx](https://github.com/pithings/mountx).
 

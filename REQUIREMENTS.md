@@ -2,6 +2,7 @@
 
 This file supplements the active porting goal and preserves subsequent user
 requirements. `PORTING_STATUS.md` records evidence, not a reduction of scope.
+Current workstreams and actionable tasks are tracked in [WORK_TRACKER.md](WORK_TRACKER.md).
 User-selected architectural inspiration is tracked in [REFERENCES.md](REFERENCES.md),
 including agentfs, Archil, and Tensorlake; mountx remains the compatibility oracle.
 
@@ -202,7 +203,7 @@ dependencies out of core crates.
   stops and verifies unmount/cleanup on macOS and Linux. Parser-only tests do
   not satisfy this mount integration requirement.
 
-## RustFS integration-test service
+## Compression evaluation
 
 Compression evaluation is tracked in [the compression review](docs/compression-design.md).
 Review independent per-chunk compression versus pre-chunk streaming, zstd and
@@ -210,6 +211,8 @@ alternative codecs, logical/physical identities, dictionary retention, provider
 limits and random-I/O costs. Select defaults from reproducible macOS/Linux
 benchmarks and preserve SQLite durability, version readability and separate
 metadata/block-store composition. The review is not implementation acceptance.
+
+## RustFS integration-test service
 
 Set up actual [RustFS](https://rustfs.com/) for reproducible local and CI
 integration tests. Pin the service release and container digest or binary
