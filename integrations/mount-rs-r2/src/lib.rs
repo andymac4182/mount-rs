@@ -29,6 +29,17 @@ pub struct R2Config {
     pub state_key: String,
 }
 
+/// The non-secret identity of the configured object-store service.
+///
+/// This is suitable for acceptance logs. It deliberately contains neither
+/// access-key material nor the full endpoint URL, because an endpoint may
+/// include a path that is only meaningful to the client configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct R2ServiceIdentity {
+    pub endpoint_authority: String,
+    pub bucket: String,
+}
+
 impl fmt::Debug for R2Config {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -79,6 +90,16 @@ impl R2Config {
         Ok(())
     }
 
+    /// Return only the service identity that is safe to include in evidence.
+    pub fn service_identity(&self) -> Result<R2ServiceIdentity> {
+        self.validate()?;
+        let endpoint_authority = endpoint_authority(&self.endpoint)?;
+        Ok(R2ServiceIdentity {
+            endpoint_authority: endpoint_authority.to_owned(),
+            bucket: self.bucket.clone(),
+        })
+    }
+
     pub fn build_store(&self) -> Result<Arc<dyn ObjectStore>> {
         self.validate()?;
         // `with_url` is a URL *parser* for a small set of AWS/R2 URL shapes;
@@ -107,25 +128,41 @@ impl R2Config {
 }
 
 fn validate_endpoint(endpoint: &str) -> Result<()> {
-    let Some((scheme, authority)) = endpoint.split_once("://") else {
+    let Some((scheme, remainder)) = endpoint.split_once("://") else {
         return Err(invalid_config("endpoint", "must use http:// or https://"));
     };
     if !matches!(scheme, "http" | "https")
-        || authority.is_empty()
-        || authority.starts_with('/')
         || endpoint.chars().any(|character| {
             character == '\0'
                 || character.is_ascii_whitespace()
                 || character == '?'
                 || character == '#'
         })
+        || endpoint_authority(endpoint)
+            .ok()
+            .is_none_or(|authority| authority.is_empty() || authority.contains('@'))
     {
         return Err(invalid_config(
             "endpoint",
-            "must be an absolute HTTP(S) endpoint without query or fragment",
+            "must be an absolute HTTP(S) endpoint without credentials, query, or fragment",
+        ));
+    }
+    // Keep this check separate from the authority extraction above so a
+    // malformed endpoint cannot be accepted merely because it has a path.
+    if remainder.starts_with('/') || remainder.starts_with('@') {
+        return Err(invalid_config(
+            "endpoint",
+            "must include a host authority before any path",
         ));
     }
     Ok(())
+}
+
+fn endpoint_authority(endpoint: &str) -> Result<&str> {
+    let Some((_, remainder)) = endpoint.split_once("://") else {
+        return Err(invalid_config("endpoint", "must use http:// or https://"));
+    };
+    Ok(remainder.split('/').next().unwrap_or_default())
 }
 
 fn validate_bucket(bucket: &str) -> Result<()> {
@@ -425,6 +462,39 @@ mod tests {
         assert!(!debug.contains("access-key-sentinel"));
         assert!(!debug.contains("secret-key-sentinel"));
         assert!(debug.contains("<redacted>"));
+    }
+
+    #[test]
+    fn service_identity_is_safe_for_acceptance_evidence() {
+        let config = R2Config {
+            endpoint: "https://account-id.r2.cloudflarestorage.com/mount-rs-tests".to_owned(),
+            bucket: "mount-rs-tests".to_owned(),
+            access_key_id: "access-key-sentinel".to_owned(),
+            secret_access_key: "secret-key-sentinel".to_owned(),
+            state_key: "state.json".to_owned(),
+        };
+        let identity = config.service_identity().unwrap();
+        assert_eq!(
+            identity.endpoint_authority,
+            "account-id.r2.cloudflarestorage.com"
+        );
+        assert_eq!(identity.bucket, "mount-rs-tests");
+        let evidence = format!("{identity:?}");
+        assert!(!evidence.contains("access-key-sentinel"));
+        assert!(!evidence.contains("secret-key-sentinel"));
+    }
+
+    #[test]
+    fn endpoint_embedded_credentials_are_rejected() {
+        let config = R2Config {
+            endpoint: "https://user:password@account-id.r2.cloudflarestorage.com".to_owned(),
+            bucket: "mount-rs-tests".to_owned(),
+            access_key_id: "access-key".to_owned(),
+            secret_access_key: "secret-key".to_owned(),
+            state_key: "state.json".to_owned(),
+        };
+        assert!(config.validate().is_err());
+        assert!(config.build_store().is_err());
     }
 
     #[test]

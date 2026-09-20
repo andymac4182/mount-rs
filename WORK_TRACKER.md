@@ -665,6 +665,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `73c33e0` also passed the live R2 lane end-to-end; this does not close the
   native/hosted portions of this task.
 - [ ] W05.4 Record service identity and revision without recording credentials.
+  `scripts/r2-service-evidence.sh` now provides the credential-safe, read-only
+  bucket probe and revision/dirty-state record; live evidence remains open until
+  the command is run against the dedicated service.
 - [x] W05.6 Run the configuration-driven CLI gate against the canonical Cloudflare
   R2 endpoint with scoped S3 credentials. On 2026-09-20, the live gate passed
   both PGlite-metadata/R2-block and SQLite-metadata/R2-block drives, ranged

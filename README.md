@@ -147,3 +147,9 @@ PGLITE_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres \
 Live checks are explicitly ignored in ordinary Cargo runs, never counted as
 passing without executing. `sh scripts/test-acceptance.sh` requires R2
 configuration up front and runs the full local backend gate.
+
+To record credential-safe live service evidence for a review, run
+`sh scripts/r2-service-evidence.sh` with the four `R2_*` variables supplied by
+the caller's environment or local Keychain-backed wrapper. It performs only a
+read-only bucket probe and prints the R2 endpoint authority, bucket, repository
+revision, and dirty-entry count; it never prints credential values.
