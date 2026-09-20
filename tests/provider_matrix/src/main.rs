@@ -16,6 +16,10 @@ use std::path::{Path, PathBuf};
 
 const PAYLOAD: &[u8] = b"mount-rs\0provider\xff";
 const CHUNK_SIZE: usize = 7;
+const SEEDED_PAYLOAD: &[u8] = b"seeded\0cross-backend-payload";
+const SEEDED_PATCH: &[u8] = b"R2!";
+const SEEDED_PATCH_OFFSET: usize = 7;
+const SEEDED_FINAL_LENGTH: usize = 20;
 
 type MatrixResult<T> = Result<T, String>;
 
@@ -255,6 +259,136 @@ async fn exercise_sdk_split_reopen(
     }
 }
 
+fn seeded_expected() -> Vec<u8> {
+    let mut expected = SEEDED_PAYLOAD.to_vec();
+    expected[SEEDED_PATCH_OFFSET..SEEDED_PATCH_OFFSET + SEEDED_PATCH.len()]
+        .copy_from_slice(SEEDED_PATCH);
+    expected.truncate(SEEDED_FINAL_LENGTH);
+    expected
+}
+
+async fn assert_seeded_state(view: &Loopback) -> MatrixResult<()> {
+    let expected = seeded_expected();
+    let actual = view
+        .read_file("/provider-matrix/seeded")
+        .await
+        .map_err(fs_code)?;
+    if actual != expected {
+        return Err("seeded-readback-mismatch".to_owned());
+    }
+    let stat = view
+        .stat("/provider-matrix/seeded")
+        .await
+        .map_err(fs_code)?;
+    if stat.size != expected.len() as u64 {
+        return Err("seeded-size-mismatch".to_owned());
+    }
+    Ok(())
+}
+
+async fn exercise_sdk_split_seeded_reopen(
+    metadata: StoreConfig,
+    blocks: StoreConfig,
+    label: &str,
+) -> MatrixResult<()> {
+    let first = open_sdk_split(
+        metadata.clone(),
+        blocks.clone(),
+        format!("provider-matrix-sdk-{label}-first"),
+    )
+    .await?;
+    let first_view = Loopback::from_arc(first.driver());
+    let first_result = async {
+        first_view
+            .mkdir(
+                "/provider-matrix",
+                MkdirOptions {
+                    recursive: true,
+                    mode: Some(0o755),
+                },
+            )
+            .await
+            .map_err(fs_code)?;
+        first_view
+            .write_file("/provider-matrix/seeded", SEEDED_PAYLOAD)
+            .await
+            .map_err(fs_code)?;
+
+        let handle = first_view
+            .open("/provider-matrix/seeded", "r+", 0)
+            .await
+            .map_err(fs_code)?;
+        let written = handle
+            .write(SEEDED_PATCH, Some(SEEDED_PATCH_OFFSET as u64))
+            .await
+            .map_err(fs_code)?;
+        if written != SEEDED_PATCH.len() {
+            return Err("seeded-partial-write-count".to_owned());
+        }
+        handle.sync().await.map_err(fs_code)?;
+        handle.close().await.map_err(fs_code)?;
+
+        first_view
+            .truncate("/provider-matrix/seeded", SEEDED_FINAL_LENGTH as u64)
+            .await
+            .map_err(fs_code)?;
+        assert_seeded_state(&first_view).await?;
+        first_view.syncfs().await.map_err(fs_code)
+    }
+    .await;
+    let first_shutdown = first.shutdown().await.map_err(fs_code);
+    match (first_result, first_shutdown) {
+        (Ok(()), Ok(())) => {}
+        (Err(error), Ok(())) => return Err(error),
+        (Ok(()), Err(error)) => return Err(format!("shutdown-{error}")),
+        (Err(error), Err(shutdown_error)) => {
+            return Err(format!("{error};shutdown-{shutdown_error}"));
+        }
+    }
+
+    let reopened = open_sdk_split(
+        metadata,
+        blocks,
+        format!("provider-matrix-sdk-{label}-reopened"),
+    )
+    .await?;
+    let reopened_view = Loopback::from_arc(reopened.driver());
+    let reopened_result = async {
+        assert_seeded_state(&reopened_view).await?;
+        reopened_view.syncfs().await.map_err(fs_code)
+    }
+    .await;
+    let reopened_shutdown = reopened.shutdown().await.map_err(fs_code);
+    match (reopened_result, reopened_shutdown) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(()), Err(error)) => Err(format!("reopen-shutdown-{error}")),
+        (Err(error), Err(shutdown_error)) => {
+            Err(format!("{error};reopen-shutdown-{shutdown_error}"))
+        }
+    }
+}
+
+async fn run_sqlite_seeded_split(label: &str) -> MatrixResult<()> {
+    let paths = sqlite_paths(label);
+    let result = exercise_sdk_split_seeded_reopen(
+        StoreConfig::Sqlite {
+            path: paths.0.clone(),
+        },
+        StoreConfig::Sqlite {
+            path: paths.1.clone(),
+        },
+        label,
+    )
+    .await;
+    let cleanup = cleanup_sqlite_paths(&paths);
+    match (result, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(format!("{error};{cleanup_error}")),
+    }
+}
+
 fn r2_blocks_config(config: &R2Config, prefix: String) -> StoreConfig {
     StoreConfig::R2 {
         endpoint: config.endpoint.clone(),
@@ -453,6 +587,12 @@ async fn main() {
     report.case("sqlite", run_sqlite_direct()).await;
     report
         .case("sqlite/sqlite", run_sqlite_split("sqlite-sqlite"))
+        .await;
+    report
+        .case(
+            "sqlite/sqlite-seeded-reopen",
+            run_sqlite_seeded_split("sqlite-sqlite-seeded-reopen"),
+        )
         .await;
 
     let pglite_url = ["PGLITE_DATABASE_URL", "MOUNT_RS_PGLITE_URL"]
