@@ -551,6 +551,21 @@ fn entry_out(value: NativeFuseEntryOut) -> protocol::FuseEntryOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseNameIn {
+    pub name: String,
+}
+
+impl From<protocol::FuseNameIn> for NativeFuseNameIn {
+    fn from(value: protocol::FuseNameIn) -> Self {
+        Self { name: value.name }
+    }
+}
+
+fn name_in(value: NativeFuseNameIn) -> protocol::FuseNameIn {
+    protocol::FuseNameIn { name: value.name }
+}
+
+#[napi(object)]
 pub struct NativeFuseAttrOut {
     #[napi(js_name = "attrValid")]
     pub attr_valid: BigInt,
@@ -1067,6 +1082,72 @@ pub fn fuse_encode_entry_out(
         &entry_out(value),
         protocol_context(context),
     ))
+}
+
+#[napi(js_name = "fuseDecodeLookupIn")]
+pub fn fuse_decode_lookup_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseNameIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_LOOKUP,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Name(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_LOOKUP did not decode as a name request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLookupIn")]
+pub fn fuse_encode_lookup_in(
+    value: NativeFuseNameIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_LOOKUP,
+        &protocol::FuseRequestBody::Name(name_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLookupOut")]
+pub fn fuse_decode_lookup_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseEntryOut> {
+    match protocol::decode_reply_body(
+        mount_rs_fuse::FUSE_LOOKUP,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Entry(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_LOOKUP did not decode as an entry reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLookupOut")]
+pub fn fuse_encode_lookup_out(
+    value: NativeFuseEntryOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_LOOKUP,
+        &protocol::FuseReplyBody::Entry(entry_out(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeAttrOut")]
