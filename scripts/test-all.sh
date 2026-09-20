@@ -36,6 +36,7 @@ if [ -n "${R2_ENDPOINT:-}" ] && \
   [ -n "${R2_SECRET_ACCESS_KEY:-}" ]; then
   MOUNT_RS_REQUIRE_R2=1 \
     cargo test --locked -p mount-rs-core --test backend_parity cloudflare_r2_matches_the_same_contract_when_configured -- --ignored --nocapture
+  cargo test --locked -p mount-rs-core --test split_store live_r2_blocks_with_independent_sqlite_metadata -- --ignored --nocapture
   MOUNT_RS_TRACE_R2=1 MOUNTX_SOURCE="$mountx_source" node scripts/check-trace-parity.mjs
 else
   echo "Skipping live Cloudflare R2 parity: R2 credentials are not configured."

@@ -81,6 +81,86 @@ async fn memory_metadata_with_memory_blocks() {
     exercise(MemoryMetadataStore::new(), MemoryBlockStore::new()).await;
 }
 
+/// Records only IDs successfully created by this test, never lists/deletes a
+/// bucket or a pre-existing prefix. Cleanup runs only after the driver closes.
+#[derive(Clone)]
+struct TrackedR2Blocks {
+    inner: mount_rs_r2::R2BlockStore,
+    created: std::sync::Arc<std::sync::Mutex<Vec<mount_rs_core::storage::BlockId>>>,
+}
+
+#[async_trait::async_trait]
+impl BlockStore for TrackedR2Blocks {
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
+    async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<mount_rs_core::storage::BlockId> {
+        let id = self.inner.put(bytes).await?;
+        self.created.lock().unwrap().push(id.clone());
+        Ok(id)
+    }
+    async fn get(&self, id: &mount_rs_core::storage::BlockId) -> mount_rs_core::Result<Vec<u8>> {
+        self.inner.get(id).await
+    }
+    async fn flush(&self) -> mount_rs_core::Result<()> {
+        self.inner.flush().await
+    }
+    async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> mount_rs_core::Result<()> {
+        self.inner.delete(id).await
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires dedicated live Cloudflare R2 test credentials; local object storage is not evidence"]
+async fn live_r2_blocks_with_independent_sqlite_metadata() {
+    let config =
+        mount_rs_r2::R2Config::from_env().expect("dedicated R2 test configuration required");
+    let prefix = format!(
+        "mount-rs-tests/split-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let blocks = TrackedR2Blocks {
+        inner: mount_rs_r2::R2BlockStore::from_config(&config, prefix.clone()).unwrap(),
+        created: Default::default(),
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let metadata_path = directory.path().join("metadata.sqlite");
+    exercise(
+        SqliteMetadataStore::open(&metadata_path).unwrap(),
+        blocks.clone(),
+    )
+    .await;
+    // Fresh metadata connection and fresh authenticated R2 client, rather than
+    // merely retaining the original driver's in-process handles.
+    let reopened = ChunkedFs::open(
+        SqliteMetadataStore::open(&metadata_path).unwrap(),
+        mount_rs_r2::R2BlockStore::from_config(&config, prefix).unwrap(),
+        ChunkedOptions::fixed("live-r2-reopen", 4096).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+    expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
+    expected.resize(84, 0);
+    expected[82..].copy_from_slice(&[99, 98]);
+    assert_eq!(
+        Loopback::new(reopened.clone())
+            .read_file("/alias")
+            .await
+            .unwrap(),
+        expected
+    );
+    reopened.shutdown().await.unwrap();
+    let created = blocks.created.lock().unwrap().clone();
+    for id in created {
+        blocks.delete(&id).await.unwrap();
+    }
+}
+
 #[tokio::test]
 #[ignore = "requires the isolated real PGlite server from scripts/test-pglite.sh"]
 async fn pglite_metadata_and_blocks_compose_independently() {
