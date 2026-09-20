@@ -722,6 +722,8 @@ function install(binding) {
     ["decodeInterruptIn", "fuseDecodeInterruptIn"], ["encodeInterruptIn", "fuseEncodeInterruptIn"],
     ["decodePollIn", "fuseDecodePollIn"], ["encodePollIn", "fuseEncodePollIn"],
     ["decodePollOut", "fuseDecodePollOut"], ["encodePollOut", "fuseEncodePollOut"],
+    ["decodeBmapIn", "fuseDecodeBmapIn"], ["encodeBmapIn", "fuseEncodeBmapIn"],
+    ["decodeBmapOut", "fuseDecodeBmapOut"], ["encodeBmapOut", "fuseEncodeBmapOut"],
     ["decodeSetxattrIn", "fuseDecodeSetxattrIn"], ["encodeSetxattrIn", "fuseEncodeSetxattrIn"],
     ["decodeGetxattrIn", "fuseDecodeGetxattrIn"], ["encodeGetxattrIn", "fuseEncodeGetxattrIn"],
     ["decodeListxattrIn", "fuseDecodeListxattrIn"], ["encodeListxattrIn", "fuseEncodeListxattrIn"],

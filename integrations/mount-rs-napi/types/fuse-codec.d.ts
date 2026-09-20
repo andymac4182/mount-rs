@@ -4,6 +4,8 @@ import type { Buffer } from "node:buffer"
 import type {
   NativeFuseAttr,
   NativeFuseAttrOut,
+  NativeFuseBmapIn,
+  NativeFuseBmapOut,
   NativeFuseBatchForgetIn,
   NativeFuseCreateIn,
   NativeFuseCreateOut,
@@ -46,6 +48,8 @@ import type {
 export type {
   NativeFuseAttr,
   NativeFuseAttrOut,
+  NativeFuseBmapIn,
+  NativeFuseBmapOut,
   NativeFuseBatchForgetIn,
   NativeFuseCreateIn,
   NativeFuseCreateOut,
@@ -156,6 +160,7 @@ export declare const FUSE_STATFS: number
 export declare const FUSE_INTERRUPT: number
 export declare const FUSE_BATCH_FORGET: number
 export declare const FUSE_POLL: number
+export declare const FUSE_BMAP: number
 export declare const FUSE_SETXATTR: number
 export declare const FUSE_GETXATTR: number
 export declare const FUSE_LISTXATTR: number
@@ -267,6 +272,10 @@ export declare function decodePollIn(body: Uint8Array, context?: NativeFuseProto
 export declare function encodePollIn(value: NativeFusePollIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodePollOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFusePollOut
 export declare function encodePollOut(value: NativeFusePollOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeBmapIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseBmapIn
+export declare function encodeBmapIn(value: NativeFuseBmapIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeBmapOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseBmapOut
+export declare function encodeBmapOut(value: NativeFuseBmapOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetxattrOut(body: Uint8Array): NativeFuseGetxattrOut
 export declare function encodeGetxattrOut(value: NativeFuseGetxattrOut): Buffer
 export declare function encodeXattrNames(names: Array<string>): Buffer

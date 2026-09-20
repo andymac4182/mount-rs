@@ -673,6 +673,47 @@ fn poll_out(value: NativeFusePollOut) -> protocol::FusePollOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseBmapIn {
+    pub block: BigInt,
+    pub blocksize: u32,
+}
+
+impl From<protocol::FuseBmapIn> for NativeFuseBmapIn {
+    fn from(value: protocol::FuseBmapIn) -> Self {
+        Self {
+            block: bigint(value.block),
+            blocksize: value.blocksize,
+        }
+    }
+}
+
+fn bmap_in(value: NativeFuseBmapIn) -> protocol::FuseBmapIn {
+    protocol::FuseBmapIn {
+        block: u64_from_bigint(&value.block),
+        blocksize: value.blocksize,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseBmapOut {
+    pub block: BigInt,
+}
+
+impl From<protocol::FuseBmapOut> for NativeFuseBmapOut {
+    fn from(value: protocol::FuseBmapOut) -> Self {
+        Self {
+            block: bigint(value.block),
+        }
+    }
+}
+
+fn bmap_out(value: NativeFuseBmapOut) -> protocol::FuseBmapOut {
+    protocol::FuseBmapOut {
+        block: u64_from_bigint(&value.block),
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseEmpty {}
 
 #[napi(object)]
@@ -2217,6 +2258,72 @@ pub fn fuse_encode_poll_out(
     protocol::encode_reply_body(
         mount_rs_fuse::FUSE_POLL,
         &protocol::FuseReplyBody::Poll(poll_out(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeBmapIn")]
+pub fn fuse_decode_bmap_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseBmapIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_BMAP,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Bmap(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_BMAP did not decode as a bmap request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeBmapIn")]
+pub fn fuse_encode_bmap_in(
+    value: NativeFuseBmapIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_BMAP,
+        &protocol::FuseRequestBody::Bmap(bmap_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeBmapOut")]
+pub fn fuse_decode_bmap_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseBmapOut> {
+    match protocol::decode_reply_body(
+        mount_rs_fuse::FUSE_BMAP,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Bmap(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_BMAP did not decode as a bmap reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeBmapOut")]
+pub fn fuse_encode_bmap_out(
+    value: NativeFuseBmapOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_BMAP,
+        &protocol::FuseReplyBody::Bmap(bmap_out(value)),
         protocol_context(context),
     )
     .map(Buffer::from)

@@ -496,6 +496,10 @@ export declare function fuseDecodeAttrOut(body: Uint8Array, context?: NativeFuse
 
 export declare function fuseDecodeBatchForgetIn(body: Uint8Array): NativeFuseBatchForgetIn
 
+export declare function fuseDecodeBmapIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseBmapIn
+
+export declare function fuseDecodeBmapOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseBmapOut
+
 export declare function fuseDecodeCreateIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseCreateIn
 
 export declare function fuseDecodeCreateOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseCreateOut
@@ -585,6 +589,10 @@ export declare function fuseDirentType(mode: number): number
 export declare function fuseEncodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeBatchForgetIn(value: NativeFuseBatchForgetIn): Buffer
+
+export declare function fuseEncodeBmapIn(value: NativeFuseBmapIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeBmapOut(value: NativeFuseBmapOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeCreateIn(value: NativeFuseCreateIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -918,6 +926,15 @@ export interface NativeFuseAttrOut {
 
 export interface NativeFuseBatchForgetIn {
   forgets: Array<NativeFuseForgetOne>
+}
+
+export interface NativeFuseBmapIn {
+  block: bigint
+  blocksize: number
+}
+
+export interface NativeFuseBmapOut {
+  block: bigint
 }
 
 export interface NativeFuseCreateIn {

@@ -52,6 +52,10 @@ import {
   encodePollIn as namedEncodePollIn,
   decodePollOut as namedDecodePollOut,
   encodePollOut as namedEncodePollOut,
+  decodeBmapIn as namedDecodeBmapIn,
+  encodeBmapIn as namedEncodeBmapIn,
+  decodeBmapOut as namedDecodeBmapOut,
+  encodeBmapOut as namedEncodeBmapOut,
   decodeSetxattrIn as namedDecodeSetxattrIn,
   encodeSetxattrIn as namedEncodeSetxattrIn,
   decodeGetxattrIn as namedDecodeGetxattrIn,
@@ -113,6 +117,10 @@ for (const [name, value] of [
   ["encodePollIn", namedEncodePollIn],
   ["decodePollOut", namedDecodePollOut],
   ["encodePollOut", namedEncodePollOut],
+  ["decodeBmapIn", namedDecodeBmapIn],
+  ["encodeBmapIn", namedEncodeBmapIn],
+  ["decodeBmapOut", namedDecodeBmapOut],
+  ["encodeBmapOut", namedEncodeBmapOut],
   ["decodeSetxattrIn", namedDecodeSetxattrIn],
   ["encodeSetxattrIn", namedEncodeSetxattrIn],
   ["decodeGetxattrIn", namedDecodeGetxattrIn],
@@ -468,6 +476,34 @@ for (const ctx of pollContexts) {
     fuse.decodePollOut(pollReplyBody, ctx),
     pollReplyValue,
     `POLL reply round trip for minor ${ctx.minor}`,
+  );
+}
+
+const bmapInput = {
+  block: 0x0102030405060708n,
+  blocksize: 0x10203040,
+};
+const bmapReplyValue = { block: 0x1112131415161718n };
+const bmapContexts = [
+  { minor: 41, setxattrExt: false },
+  { minor: 39, setxattrExt: false },
+  { minor: 8, setxattrExt: false },
+  { minor: 3, setxattrExt: false },
+];
+for (const ctx of bmapContexts) {
+  const bmapBody = fuse.encodeBmapIn(bmapInput, ctx);
+  assert.equal(bmapBody.length, 16, `BMAP request length for minor ${ctx.minor}`);
+  assert.deepEqual(
+    fuse.decodeBmapIn(bmapBody, ctx),
+    bmapInput,
+    `BMAP request round trip for minor ${ctx.minor}`,
+  );
+  const bmapReplyBody = fuse.encodeBmapOut(bmapReplyValue, ctx);
+  assert.equal(bmapReplyBody.length, 8, `BMAP reply length for minor ${ctx.minor}`);
+  assert.deepEqual(
+    fuse.decodeBmapOut(bmapReplyBody, ctx),
+    bmapReplyValue,
+    `BMAP reply round trip for minor ${ctx.minor}`,
   );
 }
 
@@ -963,6 +999,75 @@ if (source) {
     assert.equal(decodedError.body, undefined, `POLL error body is empty for minor ${ctx.minor}`);
   }
 
+  for (const ctx of bmapContexts) {
+    const oracleRequest = oracle.encodeRequestBody(fuse.FUSE_BMAP, bmapInput, ctx);
+    const actualRequest = fuse.encodeBmapIn(bmapInput, ctx);
+    assert.deepEqual(
+      [...actualRequest],
+      [...oracleRequest],
+      `BMAP request bytes match oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      fuse.decodeBmapIn(actualRequest, ctx),
+      oracle.decodeRequestBody(fuse.FUSE_BMAP, oracleRequest, ctx),
+      `BMAP request decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualRequest.length; length++) {
+      const body = actualRequest.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeBmapIn(body, ctx)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_BMAP, body, ctx)),
+        `BMAP request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeBmapIn(requestTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_BMAP, requestTrailing, ctx)),
+      `BMAP request trailing-byte classification for minor ${ctx.minor}`,
+    );
+
+    const oracleReply = oracle.encodeReplyBody(fuse.FUSE_BMAP, bmapReplyValue, ctx);
+    const actualReply = fuse.encodeBmapOut(bmapReplyValue, ctx);
+    assert.deepEqual(
+      [...actualReply],
+      [...oracleReply],
+      `BMAP reply bytes match oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      fuse.decodeBmapOut(actualReply, ctx),
+      oracle.decodeReplyBody(fuse.FUSE_BMAP, oracleReply, ctx),
+      `BMAP reply decode matches oracle for minor ${ctx.minor}`,
+    );
+    for (let length = 0; length < actualReply.length; length++) {
+      const body = actualReply.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeBmapOut(body, ctx)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_BMAP, body, ctx)),
+        `BMAP reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+      );
+    }
+    const replyTrailing = Buffer.concat([actualReply, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeBmapOut(replyTrailing, ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_BMAP, replyTrailing, ctx)),
+      `BMAP reply trailing-byte classification for minor ${ctx.minor}`,
+    );
+
+    // A request body and a reply body have different fixed wire shapes. Keep
+    // both wrong-shape directions pinned to the oracle's protocol error.
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeBmapIn(actualReply, ctx)),
+      classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_BMAP, actualReply, ctx)),
+      `BMAP request wrong-shape classification for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeBmapOut(actualRequest, ctx)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_BMAP, actualRequest, ctx)),
+      `BMAP reply wrong-shape classification for minor ${ctx.minor}`,
+    );
+  }
+
   const xattrRequestCases = [
     ["SETXATTR", fuse.FUSE_SETXATTR, setxattrInput, fuse.decodeSetxattrIn, fuse.encodeSetxattrIn, (value) => ({ ...value, value: [...value.value] })],
     ["GETXATTR", fuse.FUSE_GETXATTR, getxattrInput, fuse.decodeGetxattrIn, fuse.encodeGetxattrIn, (value) => value],
@@ -1259,6 +1364,7 @@ if (source) {
   console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE POLL request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE BMAP request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
@@ -1276,6 +1382,7 @@ if (source) {
   console.log("mount-rs N-API FUSE BATCH_FORGET request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE POLL request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE BMAP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }
