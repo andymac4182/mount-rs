@@ -58,7 +58,11 @@ for the production writer lease to expire before restarting.
 This evidence does not establish power-loss behavior, distributed multi-host
 locking, native macOS SQLite hosting, SQLite safety over every transport, or
 live R2 hosting. Do not infer those guarantees from userspace driver tests.
-Backend fault-injection acceptance remains tracked in `PORTING_STATUS.md`.
+Linux FUSE also passes injected block-write, block-barrier, metadata-publication
+and metadata-barrier failures in both journal modes: SQLite receives an error,
+and fresh mounts recover valid database contents. These controlled provider
+faults do not simulate host power loss. Further platform/provider acceptance
+remains tracked in `PORTING_STATUS.md`.
 Tests and their exact CI revisions are recorded there; the project goal remains
 active until the full required acceptance matrix is satisfied.
 

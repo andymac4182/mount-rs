@@ -45,7 +45,8 @@ cases still require audit.
   composed chunked driver now passes seven mixed-store/fault/sparse integration
   tests and all five 621-operation TypeScript oracle seeds across memory,
   SQLite and local object-store block combinations. Actual SQLite hosting on
-  the split stores is newly wired into Linux CI, not yet verified there.
+  the split stores has passed Linux FUSE CI, including service crashes and
+  injected backend failures at the checkpoints below.
   Legacy Node factories retain transitional snapshot persistence; the new
   `createChunkedDriver` factory independently selects providers and has local
   Node integration coverage including real PGlite.
@@ -63,6 +64,20 @@ cases still require audit.
 
 ## Revision-specific verification checkpoints
 
+- `bee4bfa`: [native FUSE job 106009034930](https://github.com/andymac4182/mount-rs/actions/runs/35484776745/job/106009034930)
+  passed actual SQLite 3.45.1 DELETE/WAL hosting, mount-service restart/SIGKILL,
+  and eight backend-fault scenarios (four fault points in each journal mode).
+  Every armed fault was hit, SQLite reported a commit error, and the reopened
+  database passed integrity/payload checks. The fault test passed with zero
+  ignored in 5.15s. Five ordinary concurrency tests also cover atomic append,
+  linked/unlinked handles, independent-connection fencing, in-flight shutdown,
+  and cancellation. This is not power-loss or live R2 evidence.
+- `cd3e7cc`: native WebDAV passed on both
+  [Linux](https://github.com/andymac4182/mount-rs/actions/runs/35484706529/job/106008842827)
+  and [macOS](https://github.com/andymac4182/mount-rs/actions/runs/35484706529/job/106008842904).
+  The Linux NFSv4 client now negotiates a session and performs I/O, but the
+  expanded test still fails with repeated delays and a busy unmount after its
+  I/O deadline. This revision is not an overall green acceptance checkpoint.
 - `a19f297`: [native macOS NFS job 106006016122](https://github.com/andymac4182/mount-rs/actions/runs/35483700074/job/106006016122)
   passed the expanded real NFSv3 namespace/handle test (one passed, zero
   ignored). The same revision's Linux NFSv4.1 mount timed out before I/O;

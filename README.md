@@ -37,8 +37,8 @@ goal.
 Additional delivery requirements are tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
 Safe hosting of SQLite database files on mounts is required. Linux FUSE tests
 have passed actual DELETE/WAL transactions, competing processes, killed SQLite
-writers and reopen on split SQLite stores; mount-service crash tests and other
-platform/backend combinations remain acceptance work. See the revision-specific
+writers, reopen, mount-service crashes and injected backend failures on split
+SQLite stores; other platform/backend combinations remain acceptance work. See the revision-specific
 evidence in `PORTING_STATUS.md`, not a blanket production-safety claim.
 Copy-on-write and additional chunking algorithms are future work. The older
 `SqliteFs`, `R2Fs` and `PgliteFs` factories retain transitional snapshot storage.

@@ -19,10 +19,9 @@ await server.start();
 console.log(`PGLITE_READY ${port ? `127.0.0.1:${port}` : socketPath}`);
 process.stdout.flush?.();
 
-const shutdown = async () => {
-  await server.stop();
-  await database.close();
-};
-process.on("SIGINT", shutdown);
-process.on("SIGTERM", shutdown);
-await new Promise(() => {});
+await new Promise((resolve) => {
+  process.once("SIGINT", resolve);
+  process.once("SIGTERM", resolve);
+});
+await server.stop();
+await database.close();
