@@ -1339,6 +1339,108 @@ fn malformed_inputs_return_protocol_errors_without_unbounded_allocations() {
 }
 
 #[test]
+fn readlink_and_statfs_wire_edges_match_empty_and_legacy_layouts() {
+    let contexts = [
+        ProtocolContext {
+            minor: 3,
+            setxattr_ext: false,
+        },
+        ProtocolContext {
+            minor: 41,
+            setxattr_ext: false,
+        },
+    ];
+
+    for context in contexts {
+        for opcode in [FUSE_READLINK, FUSE_STATFS] {
+            let request = encode_request(
+                &EncodeRequest {
+                    opcode,
+                    unique: 7,
+                    nodeid: FUSE_ROOT_ID,
+                    body: Some(FuseRequestBody::Empty),
+                    ..EncodeRequest::default()
+                },
+                Some(context),
+            )
+            .unwrap();
+            assert_eq!(request.len(), mount_rs_fuse::IN_HEADER_SIZE);
+            assert_eq!(
+                decode_request(&request, Some(context)).unwrap().body,
+                Some(FuseRequestBody::Empty)
+            );
+            assert_eq!(
+                decode_request_body(opcode, &[], Some(context)).unwrap(),
+                FuseRequestBody::Empty
+            );
+            assert!(decode_request_body(opcode, &[0], Some(context)).is_err());
+        }
+    }
+
+    for target in ["", "target/λ"] {
+        let body = FuseReplyBody::Readlink(FuseReadlinkOut {
+            target: target.to_owned(),
+        });
+        for context in contexts {
+            let wire = encode_reply_body(FUSE_READLINK, &body, Some(context)).unwrap();
+            assert_eq!(wire, target.as_bytes());
+            assert_eq!(
+                decode_reply_body(FUSE_READLINK, &wire, Some(context)).unwrap(),
+                body
+            );
+        }
+    }
+    assert!(
+        encode_reply_body(
+            FUSE_READLINK,
+            &FuseReplyBody::Readlink(FuseReadlinkOut {
+                target: "target\0tail".to_owned(),
+            }),
+            None,
+        )
+        .is_err()
+    );
+
+    let statfs = FuseKstatfs {
+        blocks: 0x0102_0304_0506_0708,
+        bfree: 0x1112_1314_1516_1718,
+        bavail: 0x2122_2324_2526_2728,
+        files: 0x3132_3334_3536_3738,
+        ffree: 0x4142_4344_4546_4748,
+        bsize: 4096,
+        namelen: 255,
+        frsize: 8192,
+    };
+    for context in contexts {
+        let wire = encode_reply_body(
+            FUSE_STATFS,
+            &FuseReplyBody::Statfs(statfs.clone()),
+            Some(context),
+        )
+        .unwrap();
+        assert_eq!(wire.len(), kstatfs_size(context.minor));
+        let expected = FuseKstatfs {
+            frsize: if context.minor >= 4 { statfs.frsize } else { 0 },
+            ..statfs.clone()
+        };
+        assert_eq!(
+            decode_reply_body(FUSE_STATFS, &wire, Some(context)).unwrap(),
+            FuseReplyBody::Statfs(expected)
+        );
+        for length in 0..wire.len() {
+            assert!(
+                decode_reply_body(FUSE_STATFS, &wire[..length], Some(context)).is_err(),
+                "truncated STATFS body at {length} bytes for minor {}",
+                context.minor
+            );
+        }
+        let mut trailing = wire;
+        trailing.push(0);
+        assert!(decode_reply_body(FUSE_STATFS, &trailing, Some(context)).is_err());
+    }
+}
+
+#[test]
 fn framing_extensions_and_compatibility_layouts_are_bounded() {
     let request = encode_request(
         &EncodeRequest {
