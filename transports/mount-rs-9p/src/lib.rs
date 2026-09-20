@@ -33,6 +33,9 @@ pub use mount::{
     socket_path_refusal, tcp_source_refusal,
 };
 pub use protocol::*;
-pub use server::{P9AttachOptions, P9Connection, P9Server, P9ServerOptions};
+pub use server::{
+    P9AttachOptions, P9Connection, P9Server, P9ServerHooks, P9ServerOptions, P9TransportError,
+    P9TransportErrorHook, P9TransportErrorKind,
+};
 pub use session::{P9Session, P9SessionOptions, P9SessionStats, P9User};
 pub use wire::{P9Error, P9Qid, P9Reader, P9Writer};

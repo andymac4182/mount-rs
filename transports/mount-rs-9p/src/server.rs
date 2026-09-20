@@ -29,6 +29,58 @@ pub const DEFAULT_P9_PORT: u16 = 564;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
 pub const DEFAULT_SOCKET_MODE: u32 = 0o600;
 
+/// The transport phase that terminated a 9P connection or listener.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum P9TransportErrorKind {
+    Accept,
+    PeerRefused,
+    Read,
+    Frame,
+    Write,
+}
+
+/// A transport failure reported to an embedding server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct P9TransportError {
+    pub kind: P9TransportErrorKind,
+    pub peer: Option<String>,
+    pub message: String,
+    pub raw_os_error: Option<i32>,
+}
+
+/// Synchronous callback used by the transport task to report one terminal
+/// failure. The callback receives an owned value so it can cross an embedding
+/// boundary without borrowing the Tokio task or its socket.
+pub type P9TransportErrorHook = Arc<dyn Fn(P9TransportError) + Send + Sync + 'static>;
+
+/// Optional hooks for a [`P9Server`]. Kept separate from
+/// [`P9ServerOptions`] so existing struct literals remain source and ABI
+/// compatible.
+#[derive(Clone, Default)]
+pub struct P9ServerHooks {
+    pub on_transport_error: Option<P9TransportErrorHook>,
+}
+
+impl P9TransportError {
+    fn from_io(kind: P9TransportErrorKind, peer: Option<String>, error: &io::Error) -> Self {
+        Self {
+            kind,
+            peer,
+            message: error.to_string(),
+            raw_os_error: error.raw_os_error(),
+        }
+    }
+
+    fn from_message(kind: P9TransportErrorKind, peer: Option<String>, message: String) -> Self {
+        Self {
+            kind,
+            peer,
+            message,
+            raw_os_error: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct P9ServerOptions {
     pub host: String,
@@ -182,6 +234,7 @@ pub struct P9Server {
     listener: Arc<Mutex<Option<P9Listener>>>,
     driver: Arc<dyn FsDriver>,
     options: P9ServerOptions,
+    hooks: P9ServerHooks,
     locks: P9LockTable,
     shutdown: Arc<Notify>,
     closed: AtomicBool,
@@ -200,10 +253,26 @@ impl P9Server {
     where
         D: FsDriver + 'static,
     {
-        Self::new_arc(Arc::new(driver), options)
+        Self::new_with_hooks(driver, options, P9ServerHooks::default())
     }
 
     pub fn new_arc(driver: Arc<dyn FsDriver>, options: P9ServerOptions) -> Self {
+        Self::new_arc_with_hooks(driver, options, P9ServerHooks::default())
+    }
+
+    /// Construct an attach-only server with transport failure reporting.
+    pub fn new_with_hooks<D>(driver: D, options: P9ServerOptions, hooks: P9ServerHooks) -> Self
+    where
+        D: FsDriver + 'static,
+    {
+        Self::new_arc_with_hooks(Arc::new(driver), options, hooks)
+    }
+
+    pub fn new_arc_with_hooks(
+        driver: Arc<dyn FsDriver>,
+        options: P9ServerOptions,
+        hooks: P9ServerHooks,
+    ) -> Self {
         let locks = options
             .locks
             .clone()
@@ -212,6 +281,7 @@ impl P9Server {
             listener: Arc::new(Mutex::new(None)),
             driver,
             options,
+            hooks,
             locks,
             shutdown: Arc::new(Notify::new()),
             closed: AtomicBool::new(false),
@@ -228,11 +298,30 @@ impl P9Server {
     where
         D: FsDriver + 'static,
     {
-        Self::bind_arc(Arc::new(driver), options).await
+        Self::bind_with_hooks(driver, options, P9ServerHooks::default()).await
     }
 
     pub async fn bind_arc(driver: Arc<dyn FsDriver>, options: P9ServerOptions) -> io::Result<Self> {
-        let server = Self::new_arc(driver, options.clone());
+        Self::bind_arc_with_hooks(driver, options, P9ServerHooks::default()).await
+    }
+
+    pub async fn bind_with_hooks<D>(
+        driver: D,
+        options: P9ServerOptions,
+        hooks: P9ServerHooks,
+    ) -> io::Result<Self>
+    where
+        D: FsDriver + 'static,
+    {
+        Self::bind_arc_with_hooks(Arc::new(driver), options, hooks).await
+    }
+
+    pub async fn bind_arc_with_hooks(
+        driver: Arc<dyn FsDriver>,
+        options: P9ServerOptions,
+        hooks: P9ServerHooks,
+    ) -> io::Result<Self> {
+        let server = Self::new_arc_with_hooks(driver, options.clone(), hooks);
         if let Some(path) = options.path {
             #[cfg(unix)]
             {
@@ -256,30 +345,53 @@ impl P9Server {
     /// (0700 and owned by the current uid) unless `allow_shared_directory` is
     /// explicitly set, because 9P2000.L has no authentication exchange.
     #[cfg(unix)]
-    pub async fn bind_unix<D, P>(
+    pub async fn bind_unix<D, P>(driver: D, path: P, options: P9ServerOptions) -> io::Result<Self>
+    where
+        D: FsDriver + 'static,
+        P: AsRef<Path>,
+    {
+        Self::bind_unix_with_hooks(driver, path, options, P9ServerHooks::default()).await
+    }
+
+    #[cfg(unix)]
+    pub async fn bind_unix_with_hooks<D, P>(
         driver: D,
         path: P,
         mut options: P9ServerOptions,
+        hooks: P9ServerHooks,
     ) -> io::Result<Self>
     where
         D: FsDriver + 'static,
         P: AsRef<Path>,
     {
         options.path = Some(path.as_ref().to_path_buf());
-        Self::bind_unix_arc(Arc::new(driver), path, options).await
+        Self::bind_unix_arc_with_hooks(Arc::new(driver), path, options, hooks).await
     }
 
     #[cfg(unix)]
     pub async fn bind_unix_arc<P>(
         driver: Arc<dyn FsDriver>,
         path: P,
+        options: P9ServerOptions,
+    ) -> io::Result<Self>
+    where
+        P: AsRef<Path>,
+    {
+        Self::bind_unix_arc_with_hooks(driver, path, options, P9ServerHooks::default()).await
+    }
+
+    #[cfg(unix)]
+    pub async fn bind_unix_arc_with_hooks<P>(
+        driver: Arc<dyn FsDriver>,
+        path: P,
         mut options: P9ServerOptions,
+        hooks: P9ServerHooks,
     ) -> io::Result<Self>
     where
         P: AsRef<Path>,
     {
         options.path = Some(path.as_ref().to_path_buf());
-        let server = Self::new_arc(driver, options);
+        let server = Self::new_arc_with_hooks(driver, options, hooks);
         server
             .bind_unix_listener(path.as_ref().to_path_buf())
             .await?;
@@ -461,14 +573,35 @@ impl P9Server {
             tokio::select! {
                 _ = self.shutdown.notified() => return Ok(()),
                 accepted = listener.accept() => {
-                    let (stream, peer) = accepted?;
+                    let (stream, peer) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            self.report(P9TransportError::from_io(
+                                P9TransportErrorKind::Accept,
+                                None,
+                                &error,
+                            ));
+                            return Err(error);
+                        }
+                    };
                     if !self.options.allow_remote && !is_loopback(peer.ip()) {
+                        self.report(P9TransportError::from_message(
+                            P9TransportErrorKind::PeerRefused,
+                            Some(peer.to_string()),
+                            "remote 9P peer is not allowed".to_owned(),
+                        ));
                         continue;
                     }
-                    self.attach_boxed(
+                    if let Err(error) = self.attach_boxed(
                         Box::new(stream),
                         P9AttachOptions { peer: Some(peer.to_string()), own: true },
-                    )?;
+                    ) {
+                        self.report(P9TransportError::from_io(
+                            P9TransportErrorKind::Accept,
+                            Some(peer.to_string()),
+                            &error,
+                        ));
+                    }
                 }
             }
         }
@@ -480,14 +613,30 @@ impl P9Server {
             tokio::select! {
                 _ = self.shutdown.notified() => return Ok(()),
                 accepted = listener.accept() => {
-                    let (stream, _) = accepted?;
-                    self.attach_boxed(
+                    let (stream, _) = match accepted {
+                        Ok(accepted) => accepted,
+                        Err(error) => {
+                            self.report(P9TransportError::from_io(
+                                P9TransportErrorKind::Accept,
+                                self.unix_path().map(|path| path.display().to_string()),
+                                &error,
+                            ));
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = self.attach_boxed(
                         Box::new(stream),
                         P9AttachOptions {
                             peer: self.unix_path().map(|path| path.display().to_string()),
                             own: true,
                         },
-                    )?;
+                    ) {
+                        self.report(P9TransportError::from_io(
+                            P9TransportErrorKind::Accept,
+                            self.unix_path().map(|path| path.display().to_string()),
+                            &error,
+                        ));
+                    }
                 }
             }
         }
@@ -499,6 +648,12 @@ impl P9Server {
         // server must observe the same byte-range lock table.
         options.locks = Some(self.locks.clone());
         options
+    }
+
+    fn report(&self, error: P9TransportError) {
+        if let Some(hook) = &self.hooks.on_transport_error {
+            hook(error);
+        }
     }
 
     fn attach_boxed(
@@ -526,6 +681,8 @@ impl P9Server {
             .insert(id, connection.clone());
         let server_shutdown = Arc::clone(&self.shutdown);
         let connections = Arc::clone(&self.connections);
+        let hooks = self.hooks.clone();
+        let reported = Arc::new(AtomicBool::new(false));
         let max_frame = self.options.max_frame;
         let max_in_flight = self.options.max_in_flight.max(1);
         tokio::spawn(async move {
@@ -535,6 +692,8 @@ impl P9Server {
                 control,
                 server_shutdown,
                 connections,
+                hooks,
+                reported,
                 own: attach.own,
                 max_frame,
                 max_in_flight,
@@ -557,6 +716,8 @@ struct ConnectionRuntime {
     control: Arc<ConnectionControl>,
     server_shutdown: Arc<Notify>,
     connections: Arc<StdMutex<HashMap<u64, P9Connection>>>,
+    hooks: P9ServerHooks,
+    reported: Arc<AtomicBool>,
     own: bool,
     max_frame: usize,
     max_in_flight: usize,
@@ -569,6 +730,8 @@ async fn run_connection(runtime: ConnectionRuntime) {
         control,
         server_shutdown,
         connections,
+        hooks,
+        reported,
         own,
         max_frame,
         max_in_flight,
@@ -579,7 +742,16 @@ async fn run_connection(runtime: ConnectionRuntime) {
     let permits = Arc::new(Semaphore::new(max_in_flight));
     let mut assembler = match P9FrameAssembler::new(max_frame.max(P9_HDRSZ)) {
         Ok(assembler) => assembler,
-        Err(_) => {
+        Err(error) => {
+            report_once(
+                &hooks,
+                &reported,
+                P9TransportError::from_message(
+                    P9TransportErrorKind::Frame,
+                    connection.peer.clone(),
+                    error.to_string(),
+                ),
+            );
             connections
                 .lock()
                 .ok()
@@ -598,20 +770,52 @@ async fn run_connection(runtime: ConnectionRuntime) {
             read = reader.read(&mut buffer) => {
                 let count = match read {
                     Ok(count) => count,
-                    Err(_) => break,
+                    Err(error) => {
+                        if !is_expected_disconnect(&error) {
+                            report_once(
+                                &hooks,
+                                &reported,
+                                P9TransportError::from_io(
+                                    P9TransportErrorKind::Read,
+                                    connection.peer.clone(),
+                                    &error,
+                                ),
+                            );
+                        }
+                        break;
+                    }
                 };
                 if count == 0 {
                     break;
                 }
-                if session
-                    .msize()
-                    .is_some_and(|msize| assembler.set_limit(msize as usize).is_err())
+                if let Some(msize) = session.msize()
+                    && let Err(error) = assembler.set_limit(msize as usize)
                 {
+                    report_once(
+                        &hooks,
+                        &reported,
+                        P9TransportError::from_message(
+                            P9TransportErrorKind::Frame,
+                            connection.peer.clone(),
+                            error.to_string(),
+                        ),
+                    );
                     break;
                 }
                 let frames = match assembler.push(&buffer[..count]) {
                     Ok(frames) => frames,
-                    Err(_) => break,
+                    Err(error) => {
+                        report_once(
+                            &hooks,
+                            &reported,
+                            P9TransportError::from_message(
+                                P9TransportErrorKind::Frame,
+                                connection.peer.clone(),
+                                error.to_string(),
+                            ),
+                        );
+                        break;
+                    }
                 };
                 for frame in frames {
                     let permit = match permits.clone().acquire_owned().await {
@@ -621,13 +825,29 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     let session = session.clone();
                     let writer = Arc::clone(&writer);
                     let control = Arc::clone(&control);
+                    let hooks = hooks.clone();
+                    let reported = Arc::clone(&reported);
+                    let peer = connection.peer.clone();
                     tasks.spawn(async move {
                         let reply = session.handle_call(&frame).await;
                         if let Some(reply) = reply {
                             let mut writer = writer.lock().await;
-                            if writer.write_all(&reply).await.is_err()
-                                || writer.flush().await.is_err()
-                            {
+                            let result = match writer.write_all(&reply).await {
+                                Ok(()) => writer.flush().await,
+                                Err(error) => Err(error),
+                            };
+                            if let Err(error) = result {
+                                if !is_expected_disconnect(&error) {
+                                    report_once(
+                                        &hooks,
+                                        &reported,
+                                        P9TransportError::from_io(
+                                            P9TransportErrorKind::Write,
+                                            peer,
+                                            &error,
+                                        ),
+                                    );
+                                }
                                 control.stop();
                             }
                         }
@@ -648,6 +868,23 @@ async fn run_connection(runtime: ConnectionRuntime) {
         .ok()
         .map(|mut map| map.remove(&connection.id));
     control.finish();
+}
+
+fn report_once(hooks: &P9ServerHooks, reported: &AtomicBool, error: P9TransportError) {
+    if reported
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+        && let Some(hook) = &hooks.on_transport_error
+    {
+        hook(error);
+    }
+}
+
+fn is_expected_disconnect(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+    )
 }
 
 #[cfg(unix)]
