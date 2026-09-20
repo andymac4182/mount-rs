@@ -16,6 +16,8 @@ including agentfs, Archil, and Tensorlake; mountx remains the compatibility orac
   integration crates, including the end-to-end acceptance below.
 - Verify supported macOS and Linux configurations, including native operations
   and the Node package. Commit and push validated work chunks to `origin/main`.
+- Deliver native macOS FSKit support as an explicit required transport, not
+  merely FUSE/NFS fallback or a future optional investigation; see below.
 - **Safely host SQLite database files on mount-rs filesystems.** This is distinct
   from using SQLite as mount-rs's persistence backend. It is a required delivery
   gate, not established by backend tests or ordinary file round trips.
@@ -224,6 +226,28 @@ for the pinned mountx behavioral oracle.
 - Preserve minimal dependencies and inspect licensing before any code reuse.
   Additional systems such as NBD or HA require an explicit scope decision;
   copy-on-write remains the future requirement below.
+
+## Native macOS FSKit acceptance
+
+- Implement an FSKit transport/integration separately from platform-neutral
+  core crates. Share the existing filesystem and independently selectable
+  metadata/block providers rather than introducing another filesystem engine.
+- Document supported macOS versions/architectures, SDK and build requirements,
+  extension packaging, signing/entitlements, installation, activation, and
+  cleanup. Obtain any required user approval for host extension installation
+  or activation; do not bypass macOS protection mechanisms.
+- Expose explicit FSKit selection through the CLI/config and Node mount APIs,
+  with capability detection and actionable unsupported-platform/setup errors.
+  Never silently substitute FUSE or NFS when FSKit was explicitly requested.
+- Verify actual FSKit-mounted I/O, metadata, namespace operations, concurrency,
+  read-only behavior, shutdown/unmount, and recovery against the shared
+  contract and relevant mountx behavior. Test persistent and mixed backends.
+- Run actual SQLite-hosting transaction, locking, synchronization, and recovery
+  tests on FSKit mounts; document journal-mode and platform limits honestly.
+- Include version-pinned views when versioning is available, and mounted-path
+  benchmark coverage. Unit tests, compilation, mocks, or another transport's
+  green results do not satisfy native FSKit acceptance. If CI cannot activate
+  the extension, record the remaining real-macOS verification gate explicitly.
 
 ## Versioned-filesystem acceptance
 
