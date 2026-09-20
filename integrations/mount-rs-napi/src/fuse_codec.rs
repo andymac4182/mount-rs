@@ -710,6 +710,60 @@ fn open_out(value: NativeFuseOpenOut) -> protocol::FuseOpenOut {
 }
 
 #[napi(object)]
+pub struct NativeFuseCreateIn {
+    pub flags: u32,
+    pub mode: u32,
+    pub umask: u32,
+    #[napi(js_name = "openFlags")]
+    pub open_flags: u32,
+    pub name: String,
+}
+
+impl From<protocol::FuseCreateIn> for NativeFuseCreateIn {
+    fn from(value: protocol::FuseCreateIn) -> Self {
+        Self {
+            flags: value.flags,
+            mode: value.mode,
+            umask: value.umask,
+            open_flags: value.open_flags,
+            name: value.name,
+        }
+    }
+}
+
+fn create_in(value: NativeFuseCreateIn) -> protocol::FuseCreateIn {
+    protocol::FuseCreateIn {
+        flags: value.flags,
+        mode: value.mode,
+        umask: value.umask,
+        open_flags: value.open_flags,
+        name: value.name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseCreateOut {
+    pub entry: NativeFuseEntryOut,
+    pub open: NativeFuseOpenOut,
+}
+
+impl From<protocol::FuseCreateOut> for NativeFuseCreateOut {
+    fn from(value: protocol::FuseCreateOut) -> Self {
+        Self {
+            entry: value.entry.into(),
+            open: value.open.into(),
+        }
+    }
+}
+
+fn create_out(value: NativeFuseCreateOut) -> protocol::FuseCreateOut {
+    protocol::FuseCreateOut {
+        entry: entry_out(value.entry),
+        open: open_out(value.open),
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseReadIn {
     pub fh: BigInt,
     pub offset: BigInt,
@@ -1187,6 +1241,72 @@ pub fn fuse_encode_open_out(
         &open_out(value),
         protocol_context(context),
     ))
+}
+
+#[napi(js_name = "fuseDecodeCreateIn")]
+pub fn fuse_decode_create_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseCreateIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_CREATE,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Create(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_CREATE did not decode as a create request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeCreateIn")]
+pub fn fuse_encode_create_in(
+    value: NativeFuseCreateIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_CREATE,
+        &protocol::FuseRequestBody::Create(create_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeCreateOut")]
+pub fn fuse_decode_create_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseCreateOut> {
+    match protocol::decode_reply_body(
+        mount_rs_fuse::FUSE_CREATE,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Create(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_CREATE did not decode as a create reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeCreateOut")]
+pub fn fuse_encode_create_out(
+    value: NativeFuseCreateOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_CREATE,
+        &protocol::FuseReplyBody::Create(create_out(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
 }
 
 #[napi(js_name = "fuseDecodeReadIn")]
