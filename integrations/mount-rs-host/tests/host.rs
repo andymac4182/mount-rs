@@ -22,6 +22,18 @@ async fn positional_append_write_does_not_advance_read_cursor() {
     handle.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn implicit_append_write_uses_the_end_of_the_file() {
+    let root = TempDir::new();
+    fs::write(root.path().join("file"), b"one").unwrap();
+    let driver = HostFs::new(root.path());
+    let handle = driver.open("/file", "a", 0o600).await.unwrap();
+
+    assert_eq!(handle.write(b"-two", None).await.unwrap(), 4);
+    handle.close().await.unwrap();
+    assert_eq!(fs::read(root.path().join("file")).unwrap(), b"one-two");
+}
+
 impl TempDir {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);

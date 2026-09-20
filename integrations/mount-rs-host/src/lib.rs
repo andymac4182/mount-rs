@@ -746,43 +746,69 @@ impl FileHandle for HostHandle {
             let mut state = state
                 .lock()
                 .map_err(|_| FsError::new(ErrorCode::Eio).with_syscall("write"))?;
-            let file = state.file.as_ref().ok_or_else(|| {
-                FsError::new(ErrorCode::Ebadf)
+            let flags = state.flags;
+            if state.file.is_none() {
+                return Err(FsError::new(ErrorCode::Ebadf)
                     .with_syscall("write")
-                    .with_path(path.clone())
-            })?;
-            if !state.flags.write {
+                    .with_path(path.clone()));
+            }
+            if !flags.write {
                 // Node's FileHandle.write() reports EBADF with its syscall,
                 // but does not attach the handle's path. Keep path context
                 // for closed handles and backend failures below.
                 return Err(FsError::new(ErrorCode::Ebadf).with_syscall("write"));
             }
-            if file
-                .metadata()
-                .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
-                .is_dir()
-            {
-                return Err(FsError::new(ErrorCode::Eisdir)
-                    .with_syscall("write")
-                    .with_path(path.clone()));
-            }
             let start = position.unwrap_or(state.position);
-            #[cfg(unix)]
-            let count = file
-                .write_at(&bytes, start)
-                .map_err(|error| fs_error_from_io(error, "write", path.clone()))?;
-            #[cfg(not(unix))]
-            let count = {
-                let _ = start;
-                return Err(FsError::new(ErrorCode::Enotsup)
-                    .with_syscall("write")
-                    .with_path(path));
-            };
-            if state.flags.append && position.is_none() {
-                state.position = file
+            let (count, appended_position) = {
+                let file = state.file.as_mut().ok_or_else(|| {
+                    FsError::new(ErrorCode::Ebadf)
+                        .with_syscall("write")
+                        .with_path(path.clone())
+                })?;
+                if file
                     .metadata()
                     .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
-                    .len();
+                    .is_dir()
+                {
+                    return Err(FsError::new(ErrorCode::Eisdir)
+                        .with_syscall("write")
+                        .with_path(path.clone()));
+                }
+                #[cfg(unix)]
+                let count = if flags.append && position.is_none() {
+                    // `pwrite(2)`/`FileExt::write_at` does not consistently honor
+                    // O_APPEND across Unix platforms: on macOS it writes at the
+                    // supplied offset. Use the descriptor's ordinary write path
+                    // for the implicit-position form so the kernel performs the
+                    // append atomically on both macOS and Linux. An explicit
+                    // position remains positional, matching node:fs.
+                    use std::io::Write as _;
+                    file.write(&bytes)
+                        .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
+                } else {
+                    file.write_at(&bytes, start)
+                        .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
+                };
+                #[cfg(not(unix))]
+                let count = {
+                    let _ = start;
+                    return Err(FsError::new(ErrorCode::Enotsup)
+                        .with_syscall("write")
+                        .with_path(path));
+                };
+                let appended_position = if flags.append && position.is_none() {
+                    Some(
+                        file.metadata()
+                            .map_err(|error| fs_error_from_io(error, "write", path.clone()))?
+                            .len(),
+                    )
+                } else {
+                    None
+                };
+                (count, appended_position)
+            };
+            if let Some(position) = appended_position {
+                state.position = position;
             } else if position.is_none() {
                 state.position = start.saturating_add(count as u64);
             }
