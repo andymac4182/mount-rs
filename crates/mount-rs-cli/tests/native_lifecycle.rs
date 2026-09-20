@@ -12,6 +12,7 @@ use std::io::Read;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -23,6 +24,7 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
     require_opt_in("MOUNT_RS_CLI_NATIVE_FUSE");
 
     let mountpoint = unique_mountpoint();
+    let artifacts = NativeArtifacts::new(mountpoint.clone(), "fuse");
     fs::create_dir(&mountpoint).expect("create disposable native mountpoint");
     let child = Command::new(env!("CARGO_BIN_EXE_mount-rs"))
         .args([
@@ -91,7 +93,7 @@ fn cli_fuse_subprocess_mounts_and_unmounts_on_sigint() {
         "mountpoint remained mounted after CLI exit; stdout={output:?}, stderr={stderr_lines:?}"
     );
     child_guard.disarm();
-    fs::remove_dir(&mountpoint).expect("remove disposable native mountpoint");
+    artifacts.finish();
 }
 
 #[test]
@@ -102,6 +104,8 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
 
     let mountpoint = unique_mountpoint();
     let config_path = mountpoint.with_extension("json");
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "fuse");
+    artifacts.file(config_path.clone());
     fs::create_dir(&mountpoint).expect("create disposable native mountpoint");
     fs::write(
         &config_path,
@@ -198,8 +202,7 @@ fn cli_fuse_config_file_binary_mounts_and_round_trips_io() {
         "config-backed mount remained mounted; stdout={output:?}, stderr={stderr_lines:?}"
     );
     child_guard.disarm();
-    fs::remove_dir(&mountpoint).expect("remove disposable native mountpoint");
-    fs::remove_file(&config_path).expect("remove disposable native config");
+    artifacts.finish();
 }
 
 #[test]
@@ -212,6 +215,14 @@ fn cli_fuse_sqlite_config_recovers_after_mount_service_crash() {
     let config_path = mountpoint.with_extension("sqlite-config.json");
     let database_path = mountpoint.with_extension("sqlite-backend.db");
     let (uid, gid) = effective_test_identity();
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "fuse");
+    artifacts.file(config_path.clone());
+    artifacts.file(database_path.clone());
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut sidecar = database_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        artifacts.file(PathBuf::from(sidecar));
+    }
     fs::create_dir(&mountpoint).expect("create disposable SQLite FUSE mountpoint");
     fs::write(
         &config_path,
@@ -319,9 +330,7 @@ fn cli_fuse_sqlite_config_recovers_after_mount_service_crash() {
     // service crash. This cycle uses normal SIGINT cleanup.
     run_configured_mount_cycle(&config_path, &mountpoint, "fuse", verify_sqlite_reopen);
 
-    fs::remove_dir(&mountpoint).expect("remove disposable SQLite FUSE mountpoint");
-    fs::remove_file(&config_path).expect("remove disposable SQLite FUSE config");
-    fs::remove_file(&database_path).expect("remove disposable SQLite backend");
+    artifacts.finish();
 }
 
 #[test]
@@ -337,6 +346,9 @@ fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
         .to_string_lossy();
     let config_path = std::env::temp_dir().join(format!("{stem}-config"));
     let backing_path = std::env::temp_dir().join(format!("{stem}-backing"));
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "nfs");
+    artifacts.file(config_path.clone());
+    artifacts.directory(backing_path.clone());
     fs::create_dir(&mountpoint).expect("create disposable macOS NFS mountpoint");
     fs::create_dir(&backing_path).expect("create disposable host-driver backing directory");
     fs::write(
@@ -388,9 +400,7 @@ fn cli_nfs_config_binary_persists_bytes_and_cleans_up_on_sigint() {
         fs::remove_file(path)
     });
 
-    fs::remove_dir(&mountpoint).expect("remove disposable macOS NFS mountpoint");
-    fs::remove_file(&config_path).expect("remove disposable macOS NFS config");
-    fs::remove_dir(&backing_path).expect("remove disposable host-driver backing directory");
+    artifacts.finish();
 }
 
 #[test]
@@ -407,6 +417,14 @@ fn cli_nfs_sqlite_config_binary_hosts_sqlite_and_reopens() {
     let config_path = std::env::temp_dir().join(format!("{stem}-sqlite-config"));
     let database_path = std::env::temp_dir().join(format!("{stem}-sqlite-backend.db"));
     let (uid, gid) = effective_test_identity();
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "nfs");
+    artifacts.file(config_path.clone());
+    artifacts.file(database_path.clone());
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut sidecar = database_path.as_os_str().to_os_string();
+        sidecar.push(suffix);
+        artifacts.file(PathBuf::from(sidecar));
+    }
     fs::create_dir(&mountpoint).expect("create disposable SQLite NFS mountpoint");
     fs::write(
         &config_path,
@@ -436,9 +454,7 @@ fn cli_nfs_sqlite_config_binary_hosts_sqlite_and_reopens() {
     });
     run_configured_mount_cycle(&config_path, &mountpoint, "nfs", verify_sqlite_reopen);
 
-    fs::remove_dir(&mountpoint).expect("remove disposable SQLite NFS mountpoint");
-    fs::remove_file(&config_path).expect("remove disposable SQLite NFS config");
-    fs::remove_file(&database_path).expect("remove disposable SQLite backend");
+    artifacts.finish();
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -656,6 +672,101 @@ fn require_opt_in(variable: &str) {
     );
 }
 
+struct NativeArtifacts {
+    mountpoint: PathBuf,
+    files: Vec<PathBuf>,
+    directories: Vec<PathBuf>,
+    transport: &'static str,
+    armed: bool,
+}
+
+impl NativeArtifacts {
+    fn new(mountpoint: PathBuf, transport: &'static str) -> Self {
+        Self {
+            mountpoint,
+            files: Vec::new(),
+            directories: Vec::new(),
+            transport,
+            armed: true,
+        }
+    }
+
+    fn file(&mut self, path: PathBuf) {
+        self.files.push(path);
+    }
+
+    fn directory(&mut self, path: PathBuf) {
+        self.directories.push(path);
+    }
+
+    fn finish(mut self) {
+        if let Err(error) = self.cleanup() {
+            panic!("native artifact cleanup failed: {error}");
+        }
+    }
+
+    fn cleanup(&mut self) -> Result<(), String> {
+        cleanup_native_mount(&self.mountpoint, self.transport);
+        let mut errors = Vec::new();
+
+        if is_mounted_at(&self.mountpoint) {
+            return Err(format!(
+                "mountpoint {} remained mounted; preserving backing artifacts",
+                self.mountpoint.display()
+            ));
+        } else if let Err(error) = remove_directory(&self.mountpoint) {
+            errors.push(format!(
+                "remove mountpoint {}: {error}",
+                self.mountpoint.display()
+            ));
+        }
+
+        for path in &self.files {
+            if let Err(error) = remove_file(path) {
+                errors.push(format!("remove file {}: {error}", path.display()));
+            }
+        }
+        for path in self.directories.iter().rev() {
+            if let Err(error) = remove_directory(path) {
+                errors.push(format!("remove directory {}: {error}", path.display()));
+            }
+        }
+
+        if errors.is_empty() {
+            self.armed = false;
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
+    }
+}
+
+impl Drop for NativeArtifacts {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(error) = self.cleanup()
+        {
+            eprintln!("native artifact cleanup failed during unwinding: {error}");
+        }
+    }
+}
+
+fn remove_file(path: &std::path::Path) -> std::io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn remove_directory(path: &std::path::Path) -> std::io::Result<()> {
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 struct NativeChildGuard {
     child: Option<std::process::Child>,
     mountpoint: PathBuf,
@@ -810,14 +921,35 @@ fn cleanup_native_mount_bounded(mountpoint: &std::path::Path) -> Result<(), Stri
 }
 
 fn unique_mountpoint() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock after Unix epoch")
         .as_nanos();
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "mount-rs-cli-native-{}-{nanos}",
-        std::process::id()
+        "mount-rs-cli-native-{}-{nanos}-{sequence}",
+        std::process::id(),
     ))
+}
+
+#[test]
+fn native_artifacts_are_unique_and_cleaned_without_a_child() {
+    let mountpoint = unique_mountpoint();
+    let config_path = mountpoint.with_extension("json");
+    let backing_path = mountpoint.with_extension("backing");
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), "fuse");
+    artifacts.file(config_path.clone());
+    artifacts.directory(backing_path.clone());
+
+    fs::create_dir(&mountpoint).expect("create test mountpoint");
+    fs::write(&config_path, b"{}").expect("create test config");
+    fs::create_dir(&backing_path).expect("create test backing directory");
+    artifacts.finish();
+
+    assert!(!mountpoint.exists());
+    assert!(!config_path.exists());
+    assert!(!backing_path.exists());
 }
 
 fn wait_for_mount(

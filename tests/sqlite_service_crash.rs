@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
 use std::process::Stdio;
 #[cfg(target_os = "linux")]
+use std::sync::OnceLock;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 #[cfg(target_os = "linux")]
@@ -242,25 +244,29 @@ async fn wait_unmounted(path: &Path) {
 
 #[cfg(target_os = "linux")]
 async fn cleanup_dead_mount(tools: &NativeTools, path: &Path) {
-    let status = tokio::time::timeout(
-        UNMOUNT_TIMEOUT,
-        Command::new(&tools.fusermount)
-            .arg("-u")
-            .arg("-z")
-            .arg("--")
-            .arg(path)
-            .status(),
-    )
-    .await
-    .expect("dead-mount fusermount deadline")
-    .expect("start fusermount for dead-mount cleanup");
-    if !status.success() && is_mounted(path).await {
-        panic!(
-            "fusermount failed to clean dead mount {} with status {status}",
-            path.display()
-        );
+    for arguments in [["-u"].as_slice(), ["-u", "-z"].as_slice()] {
+        let _status = tokio::time::timeout(
+            UNMOUNT_TIMEOUT,
+            Command::new(&tools.fusermount)
+                .args(arguments)
+                .arg("--")
+                .arg(path)
+                .status(),
+        )
+        .await
+        .expect("dead-mount fusermount deadline")
+        .expect("start fusermount for dead-mount cleanup");
+        if !is_mounted(path).await {
+            break;
+        }
     }
     wait_unmounted(path).await;
+}
+
+#[cfg(target_os = "linux")]
+fn native_fuse_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[cfg(target_os = "linux")]
@@ -507,6 +513,7 @@ async fn sqlite_service_graceful_restart_reopens_delete_and_wal_databases() {
 
     #[cfg(target_os = "linux")]
     {
+        let _test_lock = native_fuse_test_lock().lock().await;
         let _tools = native_tools().await;
         for journal in ["DELETE", "WAL"] {
             graceful_case(journal).await;
@@ -522,6 +529,7 @@ async fn sqlite_service_sigkill_restart_reopens_committed_delete_and_wal_databas
 
     #[cfg(target_os = "linux")]
     {
+        let _test_lock = native_fuse_test_lock().lock().await;
         let tools = native_tools().await;
         for journal in ["DELETE", "WAL"] {
             crash_case(journal, &tools).await;

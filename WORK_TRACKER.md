@@ -136,6 +136,9 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [ ] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
+  Main executed actual R2 differential traces with seeds 4182, 1, 42, 65535,
+  and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
+  oracle, with per-run snapshot cleanup. CLI/native and benchmarks remain open.
 - [ ] W05.4 Record service identity and revision without recording credentials.
 - [x] W05.5 Fix live Node factory expected-byte assertion and guarantee unique
   cloud fixture keys with exact cleanup. Main reran the full PGlite/R2 script
@@ -358,6 +361,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
   Latest jobs were queued/in progress at this update; earlier Node/PGlite
   failures are not closed by local fixes alone.
 - [ ] W20.2 Verify new RustFS and CLI native gates actually execute and pass.
+  Main reran all three macOS CLI native tests after collision-resistant paths
+  and panic-safe cleanup: passed, including actual SQLite DELETE/FULL reopen.
+  Linux crash harness now serializes native cases and tries regular unmount
+  before lazy fallback; its previously failed hosted gate remains unverified.
 - [ ] W20.3 Add real FoundationDB/TiDB, VFS, versioning, adapters and HTTP gates.
 - [ ] W20.4 Run locked build/tests, formatting and strict Clippy on final changes;
   retain logs and clearly distinguish ignored, skipped and credential-gated lanes.
