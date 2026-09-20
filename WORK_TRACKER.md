@@ -639,6 +639,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
 
 - [x] `387940b` adds the N-API FUSE BMAP codec packet: typed request/reply layouts, protocol-minor coverage, all truncation boundaries, trailing-byte rejection and wrong-shape errors against the pinned oracle. The post-publication full oracle-enabled N-API suite passed; PGlite/R2 and native-mount opt-ins remain explicit skips.
 
+- [x] Final combined N-API verification on 2026-09-21 passed after rebuilding the release native binding: elevated `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX pnpm test` reported both IOCTL and BMAP pinned-oracle differentials, plus the full harness/server/CLI/NFS/9P/Unstorage/chunked/distribution gates. The first rerun correctly exposed a stale local native artifact missing the new exports; PGlite/R2 and native-mount opt-ins remain explicit skips.
+
 ## W02 — Independent metadata, blocks and chunking
 
 - [x] Land metadata/block contracts, fixed-size chunking, immutable blocks,
