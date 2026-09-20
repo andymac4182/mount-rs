@@ -107,11 +107,20 @@ RUSTFS_COMBO_COMMAND='cargo test --locked -p mount-rs-tidb --test chunked_rustfs
 The test writes binary data across seven-byte chunks, performs partial writes
 and truncate, closes and reopens ChunkedFs, reads the exact durable namespace
 and blocks back, and checks TiDB writer fencing plus revision CAS conflicts.
+The restart fixture is a scoped manifest: it records the RustFS prefix, TiDB
+volume key, and every block written by the seed phase. The reopen phase rejects
+any prefix or volume-key mismatch before deleting anything, verifies every
+tracked RustFS object is absent after deletion, and verifies the TiDB metadata
+row is absent after cleanup.
 `MOUNT_RS_TIDB_CHUNKED_RUSTFS_REOPEN=1` performs the close/reopen and scoped
 cleanup in one combo invocation; a later invocation with
 `MOUNT_RS_TIDB_EXPECT_PERSISTED=1` can verify persistence across an external
-service restart. The URL must identify TiDB via `SELECT tidb_version(),
-VERSION()`; MySQL, mock, and in-memory substitutes are rejected.
+service restart. Persisted mode must set all three scope values explicitly:
+`MOUNT_RS_TIDB_RUSTFS_PREFIX`, `MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY`, and
+`MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE` to a path outside the transient
+`RUSTFS_RUN_DIR`; it will refuse the harness-generated defaults. The URL must
+identify TiDB via `SELECT tidb_version(), VERSION()`; MySQL, mock, and
+in-memory substitutes are rejected.
 
 Upstream references:
 
