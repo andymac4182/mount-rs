@@ -73,8 +73,10 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 - [ ] **D05 — Launch:** user initiated domain registration and authorized the
   existing Vercel Hobby plan. Verify registration, AWS account and DNS access;
   no duplicate purchase, paid upgrade or additional paid resources.
-- [ ] **D06 — Publication:** obtain authorization for package publication;
-  permission to commit and push is not permission to publish packages.
+- [x] **D06 — Rust crate publication authorization:** user authorized publication
+  from CI on `main` when ready. This is not release-readiness evidence and does
+  not authorize npm publication. Registry authentication and release gates remain
+  implementation tasks; do not publish incomplete or unverified packages.
 
 ## W01 — Core and mountx behavioral parity
 

@@ -465,6 +465,16 @@ is deferred pending that discussion, not implemented or implicitly waived.
 - Keep this launch work tracked alongside engineering delivery. No domain has
   been registered and no marketing deployment is implied by this requirement.
 
+## Rust crate publication
+
+The user authorized publishing Rust crates from CI on `main` once ready.
+Implement a main-branch-only release workflow with registry authentication,
+dependency-ordered publication, package-content/license checks, dry runs and
+revision-matched acceptance gates. Publish only eligible versions after the
+required tests pass; avoid duplicate publication and keep credentials out of
+source and logs. Authorization is not proof of readiness. npm publication
+requires separate authorization.
+
 ## Deferred feature: user-configurable lifecycle hooks
 
 Provide hooks that users can register to run after file/folder lifecycle events
