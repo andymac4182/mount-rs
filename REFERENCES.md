@@ -8,6 +8,17 @@
 
 ## Inspiration and design references
 
+- [CrabBuild](https://github.com/crabbuild): review its blob-backed versioning
+  designs and bring applicable lessons into the versioned-filesystem proposal.
+  Initial candidates are [crab](https://github.com/crabbuild/crab) for large-file
+  object storage, chunking/deduplication and lazy hydration;
+  [prolly](https://github.com/crabbuild/prolly) for immutable ordered maps,
+  structural sharing and diffs; [silo](https://github.com/crabbuild/silo) for an
+  object-backed version ledger; and [trail](https://github.com/crabbuild/trail)
+  for operation history. Pin inspected revisions, evaluate publication and
+  recovery invariants, and record adopt/adapt/reject decisions with tests.
+  No dependency or code reuse is implied; inspect licenses before reuse and
+  retain fixed-size initial chunking unless a later scope decision changes it.
 - [Tensorlake: Firecracker disk snapshots in O(changed bytes)](https://www.tensorlake.ai/blog/firecracker-disk-snapshots-o-changed-bytes):
   storage/diffing reference for versioned filesystems and later copy-on-write.
   Evaluate write-path dirty tracking, explicit zero extents, immutable layers,
