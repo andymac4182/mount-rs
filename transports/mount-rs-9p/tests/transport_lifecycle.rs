@@ -1,6 +1,9 @@
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
+#[cfg(unix)]
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_9p::{
     P9_NOFID, P9_NOTAG, P9_RATTACH, P9_RVERSION, P9_TATTACH, P9_TVERSION, P9AttachOptions, P9Error,
@@ -92,6 +95,7 @@ where
     read_rattach(&mut body).expect("decode Rattach");
 }
 
+#[cfg(unix)]
 fn test_directory(label: &str) -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
