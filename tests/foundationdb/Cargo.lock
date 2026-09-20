@@ -898,6 +898,7 @@ dependencies = [
  "mount-rs-core",
  "mount-rs-foundationdb",
  "mount-rs-r2",
+ "object_store",
  "tokio",
 ]
 
