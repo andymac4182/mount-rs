@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use mount_rs_core::{Capabilities, FileHandle, FsError, Loopback, MkdirOptions, OpenFlags, Stats};
 use mount_rs_kv::{KeyValueMetadata, KeyValueStore, UnstorageOptions, create_unstorage_driver};
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 #[derive(Clone, Default)]
 struct MemoryStore {
@@ -18,6 +19,13 @@ struct StoreState {
     values: BTreeMap<String, Vec<u8>>,
     metadata: BTreeMap<String, KeyValueMetadata>,
     fail_next_set: bool,
+    delayed_set: Option<SetGate>,
+}
+
+#[derive(Clone)]
+struct SetGate {
+    reached: Arc<Notify>,
+    release: Arc<Notify>,
 }
 
 impl MemoryStore {
@@ -39,6 +47,15 @@ impl MemoryStore {
 
     fn fail_next_set(&self) {
         self.state.lock().expect("oracle store lock").fail_next_set = true;
+    }
+
+    fn delay_next_set(&self) -> SetGate {
+        let gate = SetGate {
+            reached: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+        };
+        self.state.lock().expect("oracle store lock").delayed_set = Some(gate.clone());
+        gate
     }
 
     fn value(&self, key: &str) -> Option<Vec<u8>> {
@@ -104,6 +121,16 @@ impl KeyValueStore for MemoryStore {
         Self: 'async_trait,
     {
         Box::pin(async move {
+            let delayed = self
+                .state
+                .lock()
+                .map_err(|_| "oracle store lock poisoned".to_owned())?
+                .delayed_set
+                .take();
+            if let Some(gate) = delayed {
+                gate.reached.notify_one();
+                gate.release.notified().await;
+            }
             let mut state = self
                 .state
                 .lock()
@@ -131,6 +158,11 @@ impl KeyValueStore for MemoryStore {
                 .lock()
                 .map_err(|_| "oracle store lock poisoned".to_owned())?
                 .values
+                .remove(key);
+            self.state
+                .lock()
+                .map_err(|_| "oracle store lock poisoned".to_owned())?
+                .metadata
                 .remove(key);
             Ok(())
         })
@@ -510,6 +542,233 @@ async fn handles_scenario() -> Value {
     })
 }
 
+async fn edge_scenario() -> Value {
+    let shared_store = MemoryStore::default();
+    let shared_fs = fs(shared_store.clone());
+    shared_fs.write_file("/shared", b"abcdef").await.unwrap();
+    let reader = shared_fs.open("/shared", "r", 0).await.unwrap();
+    let truncating = shared_fs.open("/shared", "w", 0).await.unwrap();
+    let mut reader_buffer = vec![0; 6];
+    let reader_count = reader.read(&mut reader_buffer, Some(0)).await.unwrap();
+    reader_buffer.truncate(reader_count);
+    let shared_before_close = json!({
+        "storedBeforeClose": shared_store.value("shared"),
+        "readerAfterTruncate": reader_buffer,
+        "statsAfterTruncate": stable_stats(&shared_fs.stat("/shared").await.unwrap(), false),
+    });
+    truncating.close().await.unwrap();
+    reader.close().await.unwrap();
+    let shared = json!({
+        "storedBeforeClose": shared_before_close["storedBeforeClose"].clone(),
+        "readerAfterTruncate": shared_before_close["readerAfterTruncate"].clone(),
+        "statsAfterTruncate": shared_before_close["statsAfterTruncate"].clone(),
+        "storedAfterClose": shared_store.value("shared"),
+    });
+
+    let pending_store = MemoryStore::default();
+    let pending_fs = fs(pending_store.clone());
+    pending_fs.write_file("/pending", b"aaaa").await.unwrap();
+    let first = pending_fs.open("/pending", "r+", 0).await.unwrap();
+    let second = pending_fs.open("/pending", "r+", 0).await.unwrap();
+    first.write(b"bbbb", Some(0)).await.unwrap();
+    let gate = pending_store.delay_next_set();
+    let syncing = tokio::spawn({
+        let first = Arc::clone(&first);
+        async move { first.sync().await }
+    });
+    gate.reached.notified().await;
+    second.write(b"cccc", Some(0)).await.unwrap();
+    gate.release.notify_one();
+    syncing.await.unwrap().unwrap();
+    first.close().await.unwrap();
+    second.close().await.unwrap();
+    let pending_flush = pending_store.value("pending");
+
+    let renamed_store = MemoryStore::default();
+    let renamed_fs = fs(renamed_store.clone());
+    renamed_fs.write_file("/from", b"old").await.unwrap();
+    let clean = renamed_fs.open("/from", "r", 0).await.unwrap();
+    renamed_fs.rename("/from", "/to").await.unwrap();
+    clean.close().await.unwrap();
+    renamed_store.put("to", b"fresh");
+    let clean_rename = json!({
+        "from": renamed_store.value("from"),
+        "to": renamed_fs.read_file("/to").await.unwrap(),
+    });
+
+    let metadata_store = MemoryStore::default();
+    let metadata_fs = fs(metadata_store.clone());
+    metadata_store.put("meta", b"old");
+    metadata_store.put_meta(
+        "meta",
+        KeyValueMetadata {
+            size: Some(1234),
+            ..KeyValueMetadata::default()
+        },
+    );
+    metadata_fs.unlink("/meta").await.unwrap();
+    let recreated = metadata_fs.open("/meta", "w", 0o666).await.unwrap();
+    recreated.close().await.unwrap();
+    let metadata_after_recreate = stable_stats(&metadata_fs.stat("/meta").await.unwrap(), false);
+
+    let operations_store = MemoryStore::default();
+    let operations_fs = fs(operations_store);
+    operations_fs.write_file("/file", b"x").await.unwrap();
+    operations_fs
+        .mkdir("/empty", MkdirOptions::default())
+        .await
+        .unwrap();
+    operations_fs
+        .mkdir("/nonempty", MkdirOptions::default())
+        .await
+        .unwrap();
+    operations_fs
+        .write_file("/nonempty/child", b"x")
+        .await
+        .unwrap();
+    operations_fs
+        .mkdir("/source", MkdirOptions::default())
+        .await
+        .unwrap();
+    operations_fs
+        .write_file("/source/child", b"x")
+        .await
+        .unwrap();
+    operations_fs
+        .mkdir("/destination", MkdirOptions::default())
+        .await
+        .unwrap();
+    operations_fs
+        .write_file("/destination/child", b"x")
+        .await
+        .unwrap();
+    let recursive_first = operations_fs
+        .mkdir(
+            "/created/leaf",
+            MkdirOptions {
+                recursive: true,
+                mode: None,
+            },
+        )
+        .await
+        .unwrap();
+    let recursive_again = operations_fs
+        .mkdir(
+            "/created/leaf",
+            MkdirOptions {
+                recursive: true,
+                mode: None,
+            },
+        )
+        .await
+        .unwrap();
+    let operation_errors = json!({
+        "mkdirExisting": capture(operations_fs.mkdir("/file", MkdirOptions::default())).await,
+        "mkdirThroughFile": capture(
+            operations_fs.mkdir(
+                "/file/child",
+                MkdirOptions {
+                    recursive: true,
+                    mode: None,
+                },
+            ),
+        )
+        .await,
+        "rmdirFile": capture(operations_fs.rmdir("/file")).await,
+        "rmdirMissing": capture(operations_fs.rmdir("/missing")).await,
+        "rmdirNonempty": capture(operations_fs.rmdir("/nonempty")).await,
+        "rmdirRoot": capture(operations_fs.rmdir("/")).await,
+        "unlinkDirectory": capture(operations_fs.unlink("/empty")).await,
+        "renameMissing": capture(operations_fs.rename("/missing", "/new")).await,
+        "renameFileToDirectory": capture(operations_fs.rename("/file", "/empty")).await,
+        "renameDirectoryToFile": capture(operations_fs.rename("/source", "/file")).await,
+        "renameDirectoryIntoSelf": capture(
+            operations_fs.rename("/source", "/source/child/deeper"),
+        )
+        .await,
+        "renameDirectoryNonempty": capture(
+            operations_fs.rename("/source", "/destination"),
+        )
+        .await,
+    });
+
+    let handle_store = MemoryStore::default();
+    let handle_fs = fs(handle_store);
+    handle_fs.write_file("/f", b"x").await.unwrap();
+    let read_only_handle = handle_fs.open("/f", "r", 0).await.unwrap();
+    let directory_handle = operations_fs.open("/empty", "r", 0).await.unwrap();
+    let mut one_byte = [0; 1];
+    let handle_errors = json!({
+        "writeOnReadOnly": capture(read_only_handle.write(b"y", Some(0))).await,
+        "truncateOnReadOnly": capture(read_only_handle.truncate(0)).await,
+        "directoryRead": capture(directory_handle.read(&mut one_byte, Some(0))).await,
+        "directoryWriteOpen": capture(operations_fs.open("/empty", "w", 0)).await,
+    });
+    directory_handle.close().await.unwrap();
+    read_only_handle.close().await.unwrap();
+    let read_after_close = capture(read_only_handle.read(&mut one_byte, Some(0))).await;
+
+    json!({
+        "sharedTruncate": shared,
+        "pendingFlush": pending_flush,
+        "cleanRename": clean_rename,
+        "metadataAfterRecreate": metadata_after_recreate,
+        "operations": {
+            "recursiveFirst": recursive_first,
+            "recursiveAgain": recursive_again,
+            "errors": operation_errors,
+            "source": operations_fs.read_file("/source/child").await.unwrap(),
+            "destination": operations_fs.read_file("/destination/child").await.unwrap(),
+        },
+        "handleErrors": {
+            "writeOnReadOnly": handle_errors["writeOnReadOnly"].clone(),
+            "truncateOnReadOnly": handle_errors["truncateOnReadOnly"].clone(),
+            "directoryRead": handle_errors["directoryRead"].clone(),
+            "directoryWriteOpen": handle_errors["directoryWriteOpen"].clone(),
+            "readAfterClose": read_after_close,
+        },
+    })
+}
+
+async fn resolution_scenario() -> Value {
+    let shadow_store = MemoryStore::default();
+    shadow_store.put("a:b", b"shadowing");
+    shadow_store.put("a:b:c:d", b"deep");
+    let shadow_fs = fs(shadow_store);
+    let below = json!({
+        "/a/b/c": capture(shadow_fs.stat("/a/b/c")).await,
+        "/a/b/c/d/e": capture(shadow_fs.stat("/a/b/c/d/e")).await,
+        "/a/b/zz": capture(shadow_fs.stat("/a/b/zz")).await,
+    });
+    let missing = json!({
+        "/a/zz/c": capture(shadow_fs.stat("/a/zz/c")).await,
+        "/zz/b/c": capture(shadow_fs.stat("/zz/b/c")).await,
+    });
+
+    let truncate_store = MemoryStore::default();
+    let truncate_fs = fs(truncate_store.clone());
+    truncate_store.put("f", b"abcdef");
+    truncate_fs.truncate("/f", 3).await.unwrap();
+
+    json!({
+        "shadow": {
+            "kind": if shadow_fs.stat("/a/b").await.unwrap().is_file() {
+                "file"
+            } else {
+                "directory"
+            },
+            "below": below,
+            "leaf": if shadow_fs.stat("/a/b/c/d").await.unwrap().is_file() {
+                "file"
+            } else {
+                "directory"
+            },
+            "missing": missing,
+        },
+        "nonzeroTruncate": truncate_fs.read_file("/f").await.unwrap(),
+    })
+}
+
 async fn readonly_scenario() -> Value {
     let store = MemoryStore::default();
     store.put("f", b"content");
@@ -559,6 +818,8 @@ async fn main() {
     let output = json!({
         "basic": basic_scenario().await,
         "handles": handles_scenario().await,
+        "edges": edge_scenario().await,
+        "resolution": resolution_scenario().await,
         "readonly": readonly_scenario().await,
     });
     println!("{}", serde_json::to_string(&output).expect("oracle JSON"));

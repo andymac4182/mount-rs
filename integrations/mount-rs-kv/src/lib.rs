@@ -53,6 +53,11 @@ pub trait KeyValueStore: Send + Sync + 'static {
     async fn set_item_raw(&self, key: &str, value: Vec<u8>)
     -> std::result::Result<(), Self::Error>;
 
+    /// Remove a value and any metadata associated with the same key.
+    ///
+    /// The upstream unstorage driver uses `removeItem(key, { removeMeta: true
+    /// })` for unlink and rename-source cleanup, so a recreated key must not
+    /// inherit the removed file's native metadata.
     async fn remove_item(&self, key: &str) -> std::result::Result<(), Self::Error>;
 
     async fn get_keys(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error>;

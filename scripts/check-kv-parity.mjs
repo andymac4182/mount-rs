@@ -47,6 +47,7 @@ class RawStore {
     this.values = new Map();
     this.metadata = new Map();
     this.failNext = false;
+    this.delayedSet = null;
   }
 
   put(key, value) {
@@ -65,6 +66,19 @@ class RawStore {
     this.failNext = true;
   }
 
+  delayNextSet() {
+    let arrive;
+    let release;
+    const reached = new Promise((resolve) => {
+      arrive = resolve;
+    });
+    const resume = new Promise((resolve) => {
+      release = resolve;
+    });
+    this.delayedSet = { arrive, resume };
+    return { reached, release };
+  }
+
   value(key) {
     return bytes(this.values.get(key));
   }
@@ -78,6 +92,12 @@ class RawStore {
   }
 
   async setItemRaw(key, value) {
+    const delayed = this.delayedSet;
+    if (delayed) {
+      this.delayedSet = null;
+      delayed.arrive();
+      await delayed.resume;
+    }
     if (this.failNext) {
       this.failNext = false;
       throw new Error("transient write failure");
@@ -408,6 +428,158 @@ async function handlesScenario() {
   };
 }
 
+async function edgeScenario() {
+  const sharedStore = new RawStore();
+  const sharedFs = fs(sharedStore);
+  await sharedFs.writeFile("/shared", encoder.encode("abcdef"));
+  const reader = await sharedFs.open("/shared", "r");
+  const truncating = await sharedFs.open("/shared", "w");
+  const shared = {
+    storedBeforeClose: sharedStore.value("shared"),
+    readerAfterTruncate: await readAt(reader, 6, 0),
+    statsAfterTruncate: stableStats(await sharedFs.stat("/shared"), false),
+  };
+  await truncating.close();
+  await reader.close();
+  shared.storedAfterClose = sharedStore.value("shared");
+
+  const pendingStore = new RawStore();
+  const pendingFs = fs(pendingStore);
+  await pendingFs.writeFile("/pending", encoder.encode("aaaa"));
+  const first = await pendingFs.open("/pending", "r+");
+  const second = await pendingFs.open("/pending", "r+");
+  await first.write(encoder.encode("bbbb"), 0, 4, 0);
+  const gate = pendingStore.delayNextSet();
+  const syncing = first.sync();
+  await gate.reached;
+  await second.write(encoder.encode("cccc"), 0, 4, 0);
+  gate.release();
+  await syncing;
+  await first.close();
+  await second.close();
+  const pendingFlush = pendingStore.value("pending");
+
+  const renamedStore = new RawStore();
+  const renamedFs = fs(renamedStore);
+  await renamedFs.writeFile("/from", encoder.encode("old"));
+  const clean = await renamedFs.open("/from", "r");
+  await renamedFs.rename("/from", "/to");
+  await clean.close();
+  renamedStore.put("to", "fresh");
+  const cleanRename = {
+    from: renamedStore.value("from"),
+    to: bytes(await renamedFs.readFile("/to")),
+  };
+
+  const metadataStore = new RawStore();
+  const metadataFs = fs(metadataStore);
+  metadataStore.put("meta", "old");
+  metadataStore.putMeta("meta", { size: 1234 });
+  await metadataFs.unlink("/meta");
+  const recreated = await metadataFs.open("/meta", "w");
+  await recreated.close();
+  const metadataAfterRecreate = stableStats(await metadataFs.stat("/meta"), false);
+
+  const operationsStore = new RawStore();
+  const operationsFs = fs(operationsStore);
+  await operationsFs.writeFile("/file", encoder.encode("x"));
+  await operationsFs.mkdir("/empty");
+  await operationsFs.mkdir("/nonempty");
+  await operationsFs.writeFile("/nonempty/child", encoder.encode("x"));
+  await operationsFs.mkdir("/source");
+  await operationsFs.writeFile("/source/child", encoder.encode("x"));
+  await operationsFs.mkdir("/destination");
+  await operationsFs.writeFile("/destination/child", encoder.encode("x"));
+  const recursiveFirst = await operationsFs.mkdir("/created/leaf", { recursive: true });
+  const recursiveAgain = await operationsFs.mkdir("/created/leaf", { recursive: true });
+  const operationErrors = {
+    mkdirExisting: await capture(operationsFs.mkdir("/file")),
+    mkdirThroughFile: await capture(
+      operationsFs.mkdir("/file/child", { recursive: true }),
+    ),
+    rmdirFile: await capture(operationsFs.rmdir("/file")),
+    rmdirMissing: await capture(operationsFs.rmdir("/missing")),
+    rmdirNonempty: await capture(operationsFs.rmdir("/nonempty")),
+    rmdirRoot: await capture(operationsFs.rmdir("/")),
+    unlinkDirectory: await capture(operationsFs.unlink("/empty")),
+    renameMissing: await capture(operationsFs.rename("/missing", "/new")),
+    renameFileToDirectory: await capture(operationsFs.rename("/file", "/empty")),
+    renameDirectoryToFile: await capture(operationsFs.rename("/source", "/file")),
+    renameDirectoryIntoSelf: await capture(
+      operationsFs.rename("/source", "/source/child/deeper"),
+    ),
+    renameDirectoryNonempty: await capture(
+      operationsFs.rename("/source", "/destination"),
+    ),
+  };
+
+  const handleStore = new RawStore();
+  const handleFs = fs(handleStore);
+  await handleFs.writeFile("/f", encoder.encode("x"));
+  const readOnlyHandle = await handleFs.open("/f", "r");
+  const directoryHandle = await operationsFs.open("/empty", "r");
+  const oneByte = new Uint8Array(1);
+  const handleErrors = {
+    writeOnReadOnly: await capture(
+      readOnlyHandle.write(encoder.encode("y"), 0, 1, 0),
+    ),
+    truncateOnReadOnly: await capture(readOnlyHandle.truncate(0)),
+    directoryRead: await capture(directoryHandle.read(oneByte, 0, 1, 0)),
+    directoryWriteOpen: await capture(operationsFs.open("/empty", "w")),
+  };
+  await directoryHandle.close();
+  await readOnlyHandle.close();
+  handleErrors.readAfterClose = await capture(
+    readOnlyHandle.read(oneByte, 0, 1, 0),
+  );
+
+  return {
+    sharedTruncate: shared,
+    pendingFlush,
+    cleanRename,
+    metadataAfterRecreate,
+    operations: {
+      recursiveFirst: recursiveFirst ?? null,
+      recursiveAgain: recursiveAgain ?? null,
+      errors: operationErrors,
+      source: bytes(await operationsFs.readFile("/source/child")),
+      destination: bytes(await operationsFs.readFile("/destination/child")),
+    },
+    handleErrors,
+  };
+}
+
+async function resolutionScenario() {
+  const shadowStore = new RawStore();
+  shadowStore.put("a:b", "shadowing");
+  shadowStore.put("a:b:c:d", "deep");
+  const shadowFs = fs(shadowStore);
+  const below = {
+    "/a/b/c": await capture(shadowFs.stat("/a/b/c")),
+    "/a/b/c/d/e": await capture(shadowFs.stat("/a/b/c/d/e")),
+    "/a/b/zz": await capture(shadowFs.stat("/a/b/zz")),
+  };
+  const missing = {
+    "/a/zz/c": await capture(shadowFs.stat("/a/zz/c")),
+    "/zz/b/c": await capture(shadowFs.stat("/zz/b/c")),
+  };
+
+  const truncateStore = new RawStore();
+  const truncateFs = fs(truncateStore);
+  truncateStore.put("f", "abcdef");
+  await truncateFs.truncate("/f", 3);
+
+  return {
+    shadow: {
+      kind: (await shadowFs.stat("/a/b")).isFile() ? "file" : "directory",
+      below,
+      leaf: (await shadowFs.stat("/a/b/c/d")).isFile() ? "file" : "directory",
+      missing,
+    },
+    nonzeroTruncate: bytes(await truncateFs.readFile("/f")),
+  };
+}
+
 async function readonlyScenario() {
   const store = new RawStore();
   store.put("f", "content");
@@ -449,6 +621,8 @@ async function readonlyScenario() {
 const upstream = {
   basic: await basicScenario(),
   handles: await handlesScenario(),
+  edges: await edgeScenario(),
+  resolution: await resolutionScenario(),
   readonly: await readonlyScenario(),
 };
 const environment = { ...process.env, MOUNTX_SOURCE: source };
