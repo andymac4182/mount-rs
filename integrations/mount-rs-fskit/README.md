@@ -1,101 +1,162 @@
-# mount-rs FSKit compile-only target
+# mount-rs FSKit V1 and Rust-worker checkpoint
 
-This directory is intentionally **not** a Cargo workspace member and is not a
-functional mount transport yet. It is the SDK/API gate for the required native
-macOS FSKit integration.
+This directory contains the macOS FSKit V1 adapter and its standalone Rust
+worker bridge. It is an unsigned compile/test checkpoint, not evidence of an
+installed or mounted FSKit product.
 
-The target is derived from the File System Extension template installed with
-the local Xcode toolchain. It compiles only the macOS 15.4 FSKit V1 entry-point
-surface:
+The extension target uses the FSKit V1 surface available in the installed SDK
+(`FSVolume.Operations`, `FSVolume.OpenCloseOperations`, and
+`FSVolume.ReadWriteOperations`, with a macOS 15.4 deployment floor). The
+implemented `MountRsFSVolume` translates item identity, metadata, namespace
+operations, open/close state, and read/write callbacks into
+`MountRsWorkerClient` calls. Swift does not implement a second filesystem.
 
-- `UnaryFileSystemExtension`;
-- `FSUnaryFileSystem` and `FSUnaryFileSystemOperations`; and
-- `FSResource`, `FSTaskOptions`, `FSProbeResult`, and the `FSVolume` callback
-  type.
+The standalone `mount-rs-fskit-bridge` crate owns the bounded frame protocol,
+the JSON operation schema, persistent opaque handle table, read-only policy,
+provider error conversion, and async `mount_rs_core::FsDriver` dispatch. Its
+bundled C-ABI constructor accepts a bounded backend configuration for
+`MemoryFs`, the durable single-database `mount-rs-sqlite` driver, or the
+durable split-store composition of `SqliteMetadataStore` and
+`SqliteBlockStore`. The split configuration requires distinct metadata and
+block database paths and releases its writer lease during worker shutdown.
 
-The installed SDK's volume protocols are named `FSVolume.Operations` and
-`FSVolume.ReadWriteOperations`. They are deliberately not implemented in this
-checkpoint. The newer online `FSVolume.Handler` names are not available in the
-installed SDK and must not be copied into this target.
+## XPC service
 
-The installed SDK defines `FSKIT_API_AVAILABILITY_V1` as macOS 15.4. The same
-SDK defines later FSKit APIs at macOS 26.0 and 26.4. This target deliberately
-does not reference those later APIs, so `MACOSX_DEPLOYMENT_TARGET=15.4` is the
-verified compile minimum for this skeleton. It is not yet the supported minimum
-for a functional mount-rs release.
+`MountRsXPCService` is a separate XPC service target. Its real
+`XPCListener(service:)` receives typed Codable messages, passes the bounded
+inner frame to `MountRsRustWorker`, and keeps the Rust worker alive for the
+service lifetime. The service listener uses the default active initialization;
+the test and service code do not double-activate it.
 
-## Compile-only proof
-
-The command below performs an unsigned build against the installed SDK. It
-does not install, activate, package, or sign the extension:
-
-```sh
-xcodebuild \
-  -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
-  -scheme MountRsFSKit \
-  -configuration Debug \
-  -sdk macosx26.5 \
-  -derivedDataPath /tmp/mount-rs-fskit-derived \
-  CODE_SIGNING_ALLOWED=NO \
-  CODE_SIGNING_REQUIRED=NO \
-  build
-```
-
-The same command was also run with `-arch x86_64` and a separate derived-data
-directory. Both `arm64-apple-macos15.4` and `x86_64-apple-macos15.4` compile
-and link successfully against the installed macOS 26.5 SDK.
-
-The generated product is only compiler evidence. Because the target has no
-containing application, no provisioning profile, and no signing identity, it
-must not be copied into an installed application or passed to FSKit activation.
-
-The compile-only class intentionally returns `.notRecognized`/an explicit
-compile-only error. It does not claim a mount, resource format, IPC endpoint,
-provider, or filesystem operation is implemented.
-
-## Manifest and entitlement boundary
-
-`Resources/Info.plist` uses the local Xcode FSKit template's
-`EXAppExtensionAttributes` keys and extension point
-`com.apple.fskit.fsmodule`. The empty resource capability flags are deliberate:
-this checkpoint does not advertise path, generic URL, server, or block resource
-support. `Resources/MountRsFSKit.entitlements` contains only the FSKit module
-entitlement copied from the installed template; no app-group, network, helper,
-or account-specific entitlement is present.
-
-The target remains outside the root Cargo workspace until the Rust worker,
-provider wiring, and signed containing-app/package plan are approved.
-
-## IPC feasibility checkpoint
-
-No IPC code is included here. Apple documents that sandboxed apps in an app
-group can use UNIX-domain sockets only when the socket lives in the app-group
-container, and that the app-group entitlement must be registered. That makes a
-random `/tmp` socket an invalid default for a future sandboxed FSKit extension.
-See [App Groups entitlement](https://developer.apple.com/documentation/BundleResources/Entitlements/com.apple.security.application-groups?changes=_2).
-
-Apple's ExtensionFoundation guidance says XPC is the better option for
-communication with an app extension in a hardened sandbox, and Apple's XPC
-service model supplies launch-on-demand, crash restart, and process isolation.
-See [Adding support for app extensions](https://developer.apple.com/documentation/extensionfoundation/adding-support-for-app-extensions-to-your-app)
-and [XPC](https://developer.apple.com/documentation/xpc).
-
-Therefore the next implementation gate should prototype a minimal signed
-extension-to-worker XPC connection first. A UDS design remains possible only
-with a verified app-group/container entitlement and a lifecycle test. This
-compile-only target does not select or add either transport.
-
-## Local evidence
-
-The compile gate was prepared against:
+The in-process lifecycle test creates an anonymous `XPCListener` and
+`XPCSession`, then verifies this path end to end:
 
 ```text
-macOS 26.5.1 (build 25F80), arm64
-Xcode 26.6 (build 17F113)
-macOS SDK 26.5
-SDK path: /Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX26.5.sdk
-FSKit template: .../macOS/Application Extension/File System Extension.xctemplate
+XPCSession -> MountRsXPCSessionTransport -> MountRsWorkerClient
+           -> MountRsRustWorker -> Rust DriverWorker -> selected FsDriver
 ```
 
-No extension installation, activation, account signing, provisioning, or
-host-system mutation is part of this checkpoint.
+It exercises the memory backend's chunked binary I/O and both SQLite backends'
+reopen behavior, including sparse/partial writes and byte-exact reads through
+new XPC workers. The test is not a substitute for a containing application:
+no service is signed, embedded, installed, launched by launchd, or activated
+through FSKit here.
+
+The standalone service defaults to memory. A containing host can select a
+provider at launch with these environment values (the host remains responsible
+for supplying the paths and lifecycle):
+
+```text
+MOUNT_RS_FSKIT_BACKEND=memory|sqlite|splitSqlite
+MOUNT_RS_FSKIT_DATABASE_PATH=/path/to/filesystem.sqlite       # sqlite
+MOUNT_RS_FSKIT_METADATA_PATH=/path/to/metadata.sqlite         # splitSqlite
+MOUNT_RS_FSKIT_BLOCKS_PATH=/path/to/blocks.sqlite             # splitSqlite
+MOUNT_RS_FSKIT_CHUNK_SIZE=65536                               # optional
+MOUNT_RS_FSKIT_READ_ONLY=1                                   # optional
+```
+
+The inner frame is little-endian and bounded to a 1 MiB body:
+
+```text
+MRFS magic[4]
+version:u16, kind:u8, flags:u8
+request_id:u64, body_length:u32, body[body_length]
+```
+
+Malformed outer frames produce no fabricated filesystem response. Operation
+errors retain the Rust provider's errno/code/path/syscall information.
+Data operations use fixed 128 KiB chunks; the Swift client transparently
+splits larger FSKit reads and writes while preserving the caller's offset.
+
+## Verified commands
+
+Run from the repository root for Rust:
+
+```sh
+cargo fmt --manifest-path integrations/mount-rs-fskit/Cargo.toml -- --check
+cargo test --manifest-path integrations/mount-rs-fskit/Cargo.toml --locked
+cargo clippy --manifest-path integrations/mount-rs-fskit/Cargo.toml \
+  --all-targets --locked -- -D warnings
+MACOSX_DEPLOYMENT_TARGET=15.4 cargo build \
+  --manifest-path integrations/mount-rs-fskit/Cargo.toml \
+  --locked --target aarch64-apple-darwin
+```
+
+Build the Rust archive before either XPC target. The deployment-floor
+environment is required so Rust's object files link cleanly with the Swift
+targets' `MACOSX_DEPLOYMENT_TARGET=15.4`; omitting it can produce a newer-SDK
+object warning at the XPC link step. The XPC target selects the Rust archive
+from `target/aarch64-apple-darwin/debug` for arm64 and
+`target/x86_64-apple-darwin/debug` for x86_64.
+
+The current Rust suite has 11 passing tests, including fixed wire bytes,
+malformed input, caller-buffer sizing, Swift/Rust camel-case operation keys,
+provider errno propagation, read-only rejection, handle shutdown, and real
+`FsDriver` namespace/read/write dispatch plus a durable split-SQLite binary
+reopen test.
+
+The Swift frame seam test is standalone and does not start XPC:
+
+```sh
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+MODULE_CACHE=/tmp/mount-rs-fskit-module-cache
+mkdir -p "$MODULE_CACHE"
+xcrun swiftc -module-cache-path "$MODULE_CACHE" \
+  -target arm64-apple-macos15.4 \
+  -sdk "$SDKROOT" \
+  -swift-version 5 \
+  integrations/mount-rs-fskit/Sources/MountRsXPCDelegate.swift \
+  integrations/mount-rs-fskit/Tests/MountRsXPCDelegateTests.swift \
+  -o /tmp/mount-rs-fskit-delegate-tests && \
+  /tmp/mount-rs-fskit-delegate-tests
+```
+
+The real in-process XPC lifecycle test links the arm64 Rust static library:
+
+```sh
+cd integrations/mount-rs-fskit
+SDKROOT=$(xcrun --sdk macosx --show-sdk-path)
+MODULE_CACHE=/tmp/mount-rs-fskit-module-cache-xpc
+mkdir -p "$MODULE_CACHE"
+xcrun swiftc -module-cache-path "$MODULE_CACHE" -target arm64-apple-macos15.4 -sdk "$SDKROOT" -swift-version 5 \
+  Sources/MountRsXPCDelegate.swift Sources/MountRsRustWorker.swift \
+  Tests/MountRsXPCServiceLifecycleTests.swift \
+  -L target/aarch64-apple-darwin/debug -lmount_rs_fskit_bridge \
+  -o /tmp/mount-rs-fskit-xpc-lifecycle-tests
+/tmp/mount-rs-fskit-xpc-lifecycle-tests
+```
+
+The project gates are unsigned and use the local macOS 26.5 SDK:
+
+```sh
+xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
+  -scheme MountRsFSKit -configuration Debug -sdk macosx26.5 \
+  -derivedDataPath /tmp/mount-rs-fskit-derived-volume-arm64 \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
+  -scheme MountRsXPCService -configuration Debug -sdk macosx26.5 \
+  -derivedDataPath /tmp/mount-rs-fskit-derived-xpc-arm64 \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+```
+
+Both arm64 targets build and link. The extension also builds for x86_64
+against the SDK. The XPC service cannot currently link x86_64 because the
+local Rust toolchain has `aarch64-apple-darwin` but not
+`x86_64-apple-darwin`; no toolchain target was installed for this checkpoint.
+
+## Explicit boundaries
+
+This checkpoint does not claim full FSKit acceptance. The Xcode targets are
+deliberately unsigned (`CODE_SIGNING_ALLOWED=NO`) and skipped from install
+(`SKIP_INSTALL=YES`); this project does not contain a containing application,
+embedding phase, provisioning profile, launchd registration, or FSKit
+activation test. The in-process XPC lifecycle test is therefore transport and
+worker evidence only, not installed-service or mounted-volume evidence.
+Optional FSKit surfaces such as xattrs, kernel-offloaded I/O,
+extent/preallocation, and special-node creation remain separate gaps. Those
+gaps and the host packaging path must be closed and tested before any release
+or mount claim.
+
+The local SDK evidence used here is macOS 26.5.1 (build 25F80), arm64, with
+Xcode 26.6 (build 17F113). No host-system FSKit state was changed.

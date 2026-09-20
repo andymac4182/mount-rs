@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>mount-rs FSKit (compile-only)</string>
+	<string>mount-rs FSKit</string>
 	<key>CFBundleExecutable</key>
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIdentifier</key>
@@ -48,7 +48,7 @@
 				<key>FSfileObjectsAreCaseSensitive</key>
 				<false/>
 				<key>FSName</key>
-				<string>mount-rs FSKit compile-only</string>
+					<string>mount-rs FSKit</string>
 			</dict>
 		</dict>
 		<key>FSRequiresSecurityScopedPathURLResources</key>

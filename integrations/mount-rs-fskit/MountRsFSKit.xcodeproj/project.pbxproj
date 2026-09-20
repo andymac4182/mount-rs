@@ -8,8 +8,14 @@
 
 /* Begin PBXBuildFile section */
 		A10000000000000000000001 /* MountRsFileSystem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* MountRsFileSystem.swift */; };
-		A10000000000000000000002 /* MountRsFileSystemExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* MountRsFileSystemExtension.swift */; };
-		A10000000000000000000003 /* FSKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* FSKit.framework */; };
+			A10000000000000000000002 /* MountRsFileSystemExtension.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* MountRsFileSystemExtension.swift */; };
+			A10000000000000000000003 /* FSKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* FSKit.framework */; };
+			A10000000000000000000004 /* MountRsXPCDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MountRsXPCDelegate.swift */; };
+			A10000000000000000000005 /* MountRsFSItem.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000017 /* MountRsFSItem.swift */; };
+			A10000000000000000000006 /* MountRsFSVolume.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* MountRsFSVolume.swift */; };
+			A10000000000000000000007 /* MountRsXPCDelegate.swift in XPC service */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MountRsXPCDelegate.swift */; };
+			A10000000000000000000008 /* MountRsRustWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MountRsRustWorker.swift */; };
+			A10000000000000000000009 /* MountRsXPCService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* MountRsXPCService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -18,7 +24,14 @@
 		A10000000000000000000012 /* MountRsFileSystemExtension.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsFileSystemExtension.swift; sourceTree = SOURCE_ROOT; };
 		A10000000000000000000013 /* FSKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = FSKit.framework; path = System/Library/Frameworks/FSKit.framework; sourceTree = SDKROOT; };
 		A10000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/Info.plist; sourceTree = SOURCE_ROOT; };
-		A10000000000000000000015 /* MountRsFSKit.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Resources/MountRsFSKit.entitlements; sourceTree = SOURCE_ROOT; };
+			A10000000000000000000015 /* MountRsFSKit.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Resources/MountRsFSKit.entitlements; sourceTree = SOURCE_ROOT; };
+			A10000000000000000000016 /* MountRsXPCDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsXPCDelegate.swift; sourceTree = SOURCE_ROOT; };
+			A10000000000000000000017 /* MountRsFSItem.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsFSItem.swift; sourceTree = SOURCE_ROOT; };
+			A10000000000000000000018 /* MountRsFSVolume.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsFSVolume.swift; sourceTree = SOURCE_ROOT; };
+			A10000000000000000000019 /* MountRsRustWorker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsRustWorker.swift; sourceTree = SOURCE_ROOT; };
+			A1000000000000000000001A /* MountRsXPCService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MountRsXPCService.swift; sourceTree = SOURCE_ROOT; };
+			A1000000000000000000001B /* XPCService-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Resources/XPCService-Info.plist; sourceTree = SOURCE_ROOT; };
+			A1000000000000000000001C /* MountRsXPCService.xpc */ = {isa = PBXFileReference; explicitFileType = wrapper.xpc-service; includeInIndex = 0; path = MountRsXPCService.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -27,6 +40,13 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000003 /* FSKit.framework in Frameworks */,
+			);
+				runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000023 /* XPC service frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -38,8 +58,14 @@
 			children = (
 				A10000000000000000000011 /* MountRsFileSystem.swift */,
 				A10000000000000000000012 /* MountRsFileSystemExtension.swift */,
+				A10000000000000000000016 /* MountRsXPCDelegate.swift */,
+				A10000000000000000000017 /* MountRsFSItem.swift */,
+				A10000000000000000000018 /* MountRsFSVolume.swift */,
+				A10000000000000000000019 /* MountRsRustWorker.swift */,
+				A1000000000000000000001A /* MountRsXPCService.swift */,
 				A10000000000000000000014 /* Info.plist */,
 				A10000000000000000000015 /* MountRsFSKit.entitlements */,
+				A1000000000000000000001B /* XPCService-Info.plist */,
 			);
 			name = Sources;
 			path = .;
@@ -49,6 +75,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000010 /* MountRsFSKit.appex */,
+				A1000000000000000000001C /* MountRsXPCService.xpc */,
 			);
 			name = Products;
 			sourceTree = BUILT_PRODUCTS_DIR;
@@ -82,6 +109,23 @@
 			productReference = A10000000000000000000010 /* MountRsFSKit.appex */;
 			productType = "com.apple.product-type.app-extension";
 		};
+		A10000000000000000000041 /* MountRsXPCService */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000062 /* Build configuration list for PBXNativeTarget "MountRsXPCService" */;
+			buildPhases = (
+				A10000000000000000000024 /* XPC service sources */,
+				A10000000000000000000023 /* XPC service frameworks */,
+				A10000000000000000000025 /* XPC service resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = MountRsXPCService;
+			productName = MountRsXPCService;
+			productReference = A1000000000000000000001C /* MountRsXPCService.xpc */;
+			productType = "com.apple.product-type.xpc-service";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -92,6 +136,9 @@
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
 					A10000000000000000000040 = {
+						CreatedOnToolsVersion = 2630;
+					};
+					A10000000000000000000041 = {
 						CreatedOnToolsVersion = 2630;
 					};
 				};
@@ -108,14 +155,22 @@
 			productRefGroup = A10000000000000000000031;
 			projectDirPath = "";
 			projectRoot = "";
-			targets = (
-				A10000000000000000000040 /* MountRsFSKit */,
+				targets = (
+					A10000000000000000000040 /* MountRsFSKit */,
+					A10000000000000000000041 /* MountRsXPCService */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		A10000000000000000000022 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000025 /* XPC service resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -131,6 +186,19 @@
 			files = (
 				A10000000000000000000001 /* MountRsFileSystem.swift in Sources */,
 				A10000000000000000000002 /* MountRsFileSystemExtension.swift in Sources */,
+				A10000000000000000000004 /* MountRsXPCDelegate.swift in Sources */,
+				A10000000000000000000005 /* MountRsFSItem.swift in Sources */,
+				A10000000000000000000006 /* MountRsFSVolume.swift in Sources */,
+			);
+				runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000024 /* XPC service sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000007 /* MountRsXPCDelegate.swift in XPC service */,
+				A10000000000000000000008 /* MountRsRustWorker.swift in Sources */,
+				A10000000000000000000009 /* MountRsXPCService.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -155,7 +223,7 @@
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Extensions";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
-				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.fskit.compile-only;
+				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.fskit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
@@ -183,13 +251,69 @@
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Extensions";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
-				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.fskit.compile-only;
+				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.fskit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SKIP_INSTALL = YES;
 				SWIFT_EMIT_LOC_STRINGS = NO;
 				SWIFT_VERSION = 5.0;
 				WRAPPER_EXTENSION = appex;
+			};
+			name = Release;
+		};
+		A10000000000000000000074 /* XPC service Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APPLICATION_EXTENSION_API_ONLY = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/XPCService-Info.plist;
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
+				MACOSX_DEPLOYMENT_TARGET = 15.4;
+				OTHER_LDFLAGS = (
+					"-lmount_rs_fskit_bridge",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.worker;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				WRAPPER_EXTENSION = xpc;
+			};
+			name = Debug;
+		};
+		A10000000000000000000075 /* XPC service Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APPLICATION_EXTENSION_API_ONLY = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_IDENTITY = "";
+				CODE_SIGNING_ALLOWED = NO;
+				CODE_SIGNING_REQUIRED = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/XPCService-Info.plist;
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
+				MACOSX_DEPLOYMENT_TARGET = 15.4;
+				OTHER_LDFLAGS = (
+					"-lmount_rs_fskit_bridge",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.worker;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				WRAPPER_EXTENSION = xpc;
 			};
 			name = Release;
 		};
@@ -232,6 +356,15 @@
 			buildConfigurations = (
 				A10000000000000000000070 /* Debug */,
 				A10000000000000000000071 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000062 /* Build configuration list for PBXNativeTarget "MountRsXPCService" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000074 /* XPC service Debug */,
+				A10000000000000000000075 /* XPC service Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

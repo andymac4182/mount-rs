@@ -1,18 +1,20 @@
 import Foundation
 import FSKit
 
-/// Compile-only FSKit delegate.
-///
-/// This target proves that the current FSKit V1 callback surface is available
-/// at the selected deployment target. It deliberately performs no mounting or
-/// Rust/IPC work.
 @objc
 final class MountRsFileSystem: FSUnaryFileSystem & FSUnaryFileSystemOperations {
     func probeResource(
         resource: FSResource,
         replyHandler: @escaping (FSProbeResult?, (any Error)?) -> Void
     ) {
-        replyHandler(.notRecognized, nil)
+        guard !resource.isRevoked else {
+            replyHandler(.notRecognized, nil)
+            return
+        }
+        replyHandler(
+            .usable(name: "mount-rs", containerID: FSContainerIdentifier()),
+            nil
+        )
     }
 
     func loadResource(
@@ -20,19 +22,27 @@ final class MountRsFileSystem: FSUnaryFileSystem & FSUnaryFileSystemOperations {
         options: FSTaskOptions,
         replyHandler: @escaping (FSVolume?, (any Error)?) -> Void
     ) {
-        let error = NSError(
-            domain: "com.andymac4182.mount-rs.fskit.compile-only",
-            code: 1,
-            userInfo: [
-                NSLocalizedDescriptionKey:
-                    "mount-rs FSKit target is compile-only; no volume implementation is installed"
-            ]
-        )
-        replyHandler(nil, error)
+        let readOnly = options.taskOptions.contains { option in
+            option == "-r" || option == "--rdonly" || option == "ro" || option == "read-only" || option == "readonly"
+        }
+        Task {
+            do {
+                let client = try MountRsWorkerClient(xpcService: MountRsXPCServiceName)
+                let volume = MountRsFSVolume(
+                    worker: client,
+                    volumeName: "mount-rs",
+                    readOnly: readOnly
+                )
+                replyHandler(volume, nil)
+            } catch {
+                replyHandler(nil, error)
+            }
+        }
     }
 
     func unloadResource(resource: FSResource, options: FSTaskOptions) async throws {
-        // The V1 API requires an unload callback. There is no worker or volume
-        // to stop in this compile-only target.
+        // The volume's deactivate callback owns worker shutdown. FSKit calls
+        // this hook after the resource has been unloaded, so there is no
+        // second worker lifetime to terminate here.
     }
 }
