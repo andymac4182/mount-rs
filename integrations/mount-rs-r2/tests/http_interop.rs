@@ -1,8 +1,9 @@
 //! The R2 adapter's real signed S3 HTTP client against our driver-backed gateway.
 //! This is interoperability evidence, deliberately not live Cloudflare proof.
+use mount_rs_core::storage::BlockStore;
 use mount_rs_core::{ErrorCode, Loopback, MemoryFs};
 use mount_rs_persist::PersistedFs;
-use mount_rs_r2::{R2Config, R2Store};
+use mount_rs_r2::{R2BlockStore, R2Config, R2Store};
 use mount_rs_s3::{Credentials, S3Server, S3ServerOptions, S3Session, S3SessionOptions};
 use std::sync::Arc;
 
@@ -40,5 +41,23 @@ async fn signed_r2_client_reopens_and_rejects_stale_writes_over_http() {
     let reopened = Loopback::new(PersistedFs::open(store.clone()).await.unwrap());
     assert_eq!(reopened.read_file("/file").await.unwrap(), b"new");
     store.delete_snapshot().await.unwrap();
+    let blocks = R2BlockStore::from_config(&config, "http-test/blocks").unwrap();
+    let payload = (0..1_048_593).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+    let id = blocks.put(&payload).await.unwrap();
+    blocks.flush().await.unwrap();
+    // Rebuild the signed HTTP client, not just the filesystem wrapper.
+    let fresh = R2BlockStore::from_config(&config, "http-test/blocks").unwrap();
+    assert_eq!(fresh.get(&id).await.unwrap(), payload);
+    let replacement = fresh.put(b"independent immutable object").await.unwrap();
+    assert_ne!(replacement, id);
+    assert_eq!(blocks.get(&id).await.unwrap(), payload);
+    let other_prefix = R2BlockStore::from_config(&config, "http-test/other").unwrap();
+    assert_eq!(
+        other_prefix.get(&id).await.unwrap_err().code,
+        ErrorCode::Enoent
+    );
+    fresh.delete(&id).await.unwrap();
+    fresh.delete(&replacement).await.unwrap();
+    assert_eq!(blocks.get(&id).await.unwrap_err().code, ErrorCode::Enoent);
     server.close().await.unwrap();
 }
