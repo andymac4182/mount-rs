@@ -1,6 +1,6 @@
 # Workstream and task tracker
 
-Updated: 2026-09-20. Baseline: `3f52b44`, plus explicitly identified uncommitted
+Updated: 2026-09-20. Baseline: `753df86`, plus explicitly identified uncommitted
 work below. Overall status: **in progress; not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
@@ -24,6 +24,18 @@ exhausted a 75 ms lease before publication. The test now uses long-lived setup
 leases and explicitly expires the persisted lease before takeover, retaining
 busy-owner, stale-writer, and winner-persistence assertions. Five local chunked
 concurrency tests passed; Windows runtime confirmation remains required.
+At `83bca86`, Windows job `106052286866` passed those fencing and HostFs unit
+tests, then failed five HostFs integration tests: unsupported symlinks,
+read-only create flags, and hard-link metadata. Lagrange is implementing these
+without skipping the tests. Windows Node job `106052286914` passed.
+
+Main ran `cargo test --workspace --all-targets --all-features --locked --offline`
+against an isolated committed `cf3c485` snapshot on macOS: exit 0. Explicitly
+ignored remote/native gates are not acceptance evidence from that run.
+Main also reran the full oracle-enabled Node package suite after `753df86`:
+exit 0, including harness/structural drivers, server protocols, 44 typed 9P
+cases, memory parity, distribution and artifact aggregation. PGlite/R2 factory
+and native-mount opt-ins were skipped in this run and remain separate gates.
 
 ## How to read and maintain this tracker
 
