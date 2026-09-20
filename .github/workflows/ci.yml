@@ -203,6 +203,20 @@ jobs:
       - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
       - run: pnpm --dir integrations/mount-rs-napi build
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
+      - name: Install native Node mount prerequisites on Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          test -c /dev/fuse
+      - name: Verify real Node addon mounted I/O and cleanup
+        env:
+          MOUNT_RS_NAPI_NATIVE_MOUNT: '1'
+        run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/native.mjs"], check=True, timeout=180)'
+      - run: pnpm --dir tests/upstream install --frozen-lockfile
+      - name: Run the unmodified upstream driver conformance suite
+        run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir tests/upstream test
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-kv-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-edge-parity.mjs
       - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" node scripts/check-flags-parity.mjs

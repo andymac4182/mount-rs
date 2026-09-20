@@ -64,5 +64,13 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
 
 if [ -n "${MOUNTX_SOURCE:-}" ]; then
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+    pnpm --dir "$repo_dir/tests/upstream" test
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
     node "$repo_dir/scripts/check-trace-parity.mjs"
+fi
+
+if [ -n "${R2_ENDPOINT:-}" ] && [ -n "${R2_BUCKET:-}" ] && \
+   [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ]; then
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+    cargo test --locked -p mount-rs-core --test split_store live_r2_blocks_with_independent_pglite_metadata -- --ignored --nocapture
 fi

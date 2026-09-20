@@ -28,6 +28,9 @@ MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-session.mjs
 pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
 pnpm --dir integrations/mount-rs-napi build
 MOUNTX_SOURCE="$mountx_source" pnpm --dir integrations/mount-rs-napi test
+pnpm --dir tests/upstream install --frozen-lockfile
+MOUNTX_SOURCE="$mountx_source" pnpm --dir tests/upstream test
+MOUNTX_SOURCE="$mountx_source" node scripts/check-kv-parity.mjs
 
 pnpm --dir tests/pglite install --frozen-lockfile
 MOUNTX_SOURCE="$mountx_source" ./scripts/test-pglite.sh

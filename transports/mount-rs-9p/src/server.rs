@@ -116,7 +116,9 @@ impl ConnectionControl {
     }
 
     fn stop(&self) {
-        self.shutdown.notify_waiters();
+        // There is one connection task. Keep a permit when close wins the
+        // race with that task registering its select branch.
+        self.shutdown.notify_one();
     }
 
     fn finish(&self) {
@@ -304,7 +306,10 @@ impl P9Server {
     }
 
     pub fn shutdown(&self) {
-        self.shutdown.notify_waiters();
+        // There is one accept loop. `notify_one` is intentional: unlike
+        // `notify_waiters`, it cannot lose a shutdown requested before the
+        // loop reaches its select.
+        self.shutdown.notify_one();
     }
 
     /// Return live connections in arrival order.
@@ -389,7 +394,11 @@ impl P9Server {
     }
 
     async fn serve_inner(&self) -> io::Result<()> {
-        let listener = self.listener.lock().await.take().ok_or_else(|| {
+        let listener = self.listener.lock().await.take();
+        if self.closed.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let listener = listener.ok_or_else(|| {
             io::Error::new(io::ErrorKind::AlreadyExists, "server has no listener")
         })?;
         match listener {

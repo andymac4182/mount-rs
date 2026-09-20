@@ -463,25 +463,15 @@ impl P9Session {
 
     fn error_reply(&self, header: P9Header, error: FsError) -> Vec<u8> {
         self.count_reply(true);
-        self.frame(header, P9_RLERROR, 16, |writer| {
-            write_rlerror(
-                writer,
-                Rlerror {
-                    ecode: error.code.errno().unsigned_abs(),
-                },
-            );
-            Ok(())
-        })
-        .unwrap_or_else(|_| {
-            // Rlerror is fixed-width and cannot fail in practice. Keep the
-            // final fallback total if an internal invariant is violated.
-            let mut bytes = Vec::with_capacity(11);
-            bytes.extend_from_slice(&11_u32.to_le_bytes());
-            bytes.push(P9_RLERROR);
-            bytes.extend_from_slice(&header.tag.to_le_bytes());
-            bytes.extend_from_slice(&(ErrorCode::Eio.errno() as u32).to_le_bytes());
-            bytes
-        })
+        // Rlerror is a fixed eleven-byte frame. Build it directly so an
+        // internal encoding fallback can never replace the driver's errno
+        // with a fabricated EIO.
+        let mut bytes = Vec::with_capacity(11);
+        bytes.extend_from_slice(&11_u32.to_le_bytes());
+        bytes.push(P9_RLERROR);
+        bytes.extend_from_slice(&header.tag.to_le_bytes());
+        bytes.extend_from_slice(&error.code.errno().unsigned_abs().to_le_bytes());
+        bytes
     }
 
     fn count_request(&self, _type_: Option<u8>) {

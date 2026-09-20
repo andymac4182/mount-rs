@@ -149,6 +149,23 @@ async fn attached_stream_serves_frames_and_closes_without_a_listener() {
     server.close().await.expect("close attach-only server");
 }
 
+#[tokio::test]
+async fn start_then_immediate_close_stops_the_accept_loop() {
+    let server = Arc::new(
+        P9Server::bind(MemoryFs::empty(), P9ServerOptions::default())
+            .await
+            .expect("bind TCP listener"),
+    );
+    let task = server.start().expect("start accept loop");
+
+    server.close().await.expect("close server");
+    timeout(Duration::from_secs(2), task)
+        .await
+        .expect("accept loop stops after close")
+        .expect("accept loop joins")
+        .expect("accept loop exits cleanly");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn unix_listener_accepts_rootless_protocol_and_removes_socket_on_close() {

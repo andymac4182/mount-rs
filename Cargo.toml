@@ -37,6 +37,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [dev-dependencies]
+mount-rs-9p = { path = "transports/mount-rs-9p" }
 mount-rs-s3 = { path = "transports/mount-rs-s3" }
 mount-rs-webdav = { path = "transports/mount-rs-webdav" }
 mount-rs-kv = { path = "integrations/mount-rs-kv" }

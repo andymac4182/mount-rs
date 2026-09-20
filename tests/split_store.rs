@@ -200,6 +200,62 @@ async fn pglite_metadata_and_blocks_compose_independently() {
 }
 
 #[tokio::test]
+#[ignore = "requires dedicated live R2 credentials and an isolated real PGlite server"]
+async fn live_r2_blocks_with_independent_pglite_metadata() {
+    use mount_rs_pglite::PgliteMetadataStore;
+    let config = mount_rs_r2::R2Config::from_env().expect("dedicated R2 configuration required");
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let scope = format!(
+        "pglite-r2-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let prefix = format!("mount-rs-tests/{scope}");
+    let blocks = TrackedR2Blocks {
+        inner: mount_rs_r2::R2BlockStore::from_config(&config, prefix.clone()).unwrap(),
+        created: Default::default(),
+    };
+    exercise(
+        PgliteMetadataStore::connect_with_key(&url, &scope)
+            .await
+            .unwrap(),
+        blocks.clone(),
+    )
+    .await;
+    // Both clients are fresh; no retained in-process byte cache can satisfy this read.
+    let reopened = ChunkedFs::open(
+        PgliteMetadataStore::connect_with_key(&url, &scope)
+            .await
+            .unwrap(),
+        mount_rs_r2::R2BlockStore::from_config(&config, prefix).unwrap(),
+        ChunkedOptions::fixed("pglite-r2-reopen", 65536).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+    expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
+    expected.resize(84, 0);
+    expected[82..].copy_from_slice(&[99, 98]);
+    assert_eq!(
+        Loopback::new(reopened.clone())
+            .read_file("/alias")
+            .await
+            .unwrap(),
+        expected
+    );
+    reopened.shutdown().await.unwrap();
+    let created = blocks.created.lock().unwrap().clone();
+    for id in created {
+        blocks.delete(&id).await.unwrap();
+    }
+    // The metadata volume belongs to the isolated test server. Never clear a
+    // shared database or list/delete objects outside the exact created IDs.
+}
+
+#[tokio::test]
 async fn sqlite_metadata_with_memory_blocks() {
     let directory = tempfile::tempdir().unwrap();
     exercise(
