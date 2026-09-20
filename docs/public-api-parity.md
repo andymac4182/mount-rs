@@ -295,8 +295,10 @@ from the smallest contract boundary to the larger environment boundary:
    live-R2 and native transport concurrency remain separate acceptance gates.
 4. **Remaining public transport/API surface (P1):** the FUSE directory,
    `READ`/`WRITE`, `GETATTR`/`SETATTR`, `OPEN`/`OPENDIR`, `LOOKUP`,
-   `READLINK`, `STATFS`, `BATCH_FORGET`, `INTERRUPT`, and `POLL` body codecs are
-   now public and oracle-differentially tested. Expose the remaining
+   `READLINK`, `STATFS`, `BATCH_FORGET`, `INTERRUPT`, `POLL`, `FALLOCATE`,
+   `RENAME2`, `LSEEK`, and `COPY_FILE_RANGE` body/session boundaries are now
+   public or strictly validated and oracle-differentially tested where an
+   oracle body exists. Expose the remaining
    request/reply bodies, session and native-mount surfaces, then run
    oracle-backed subpath tests for every exported transport rather than
    treating codec or inode fixture tests as transport completion.
@@ -541,6 +543,15 @@ the closure items listed above.
   and `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX pnpm test` in the N-API package
   exited 0. FUSE `POLL` is still intentionally unsupported at the driver
   semantics boundary, and hosted/native platform gates remain open.
+
+### W01 fourth parallel rotation evidence (2026-09-21)
+
+- **PASS** — `1a8b112` Rust FUSE advanced-operation session boundary: valid
+  `FALLOCATE`, `RENAME2`, `LSEEK`, and `COPY_FILE_RANGE` requests reach the
+  explicit safe `ENOSYS` boundary; malformed, truncated, and trailing frames
+  are rejected with `EINVAL`; and unsupported requests do not mutate state or
+  kill the session. The focused locked FUSE suite and strict scoped Clippy
+  gate passed. Remote publication is queued for the next serialized packet.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
