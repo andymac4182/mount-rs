@@ -2,6 +2,8 @@
 
 This file supplements the active porting goal and preserves subsequent user
 requirements. `PORTING_STATUS.md` records evidence, not a reduction of scope.
+User-selected architectural inspiration is tracked in [REFERENCES.md](REFERENCES.md),
+including agentfs, Archil, and Tensorlake; mountx remains the compatibility oracle.
 
 ## Current completion gates
 
