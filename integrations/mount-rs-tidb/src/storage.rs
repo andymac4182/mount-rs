@@ -281,14 +281,22 @@ async fn rollback_and<T>(transaction: Transaction<'_>, error: FsError) -> Result
     Err(error)
 }
 
+fn ambiguous_commit_error(operation: &str, error: &MysqlError) -> FsError {
+    // A connection failure after COMMIT was sent cannot distinguish a
+    // committed transaction from a rolled-back one. Keep this separate from
+    // statement-conflict mapping so callers cannot safely replay the whole
+    // operation just because the server error code is normally retryable.
+    FsError::backend(format!(
+        "TiDB {operation} commit outcome is unknown: {}",
+        mysql_error_detail(error)
+    ))
+}
+
 async fn commit(transaction: Transaction<'_>, operation: &str) -> Result<()> {
-    transaction.commit().await.map_err(|error| {
-        // Do not retry or claim success after this point. A connection error
-        // can leave the server-side commit outcome unknown.
-        FsError::backend(format!(
-            "TiDB {operation} commit outcome is unknown: {error}"
-        ))
-    })
+    transaction
+        .commit()
+        .await
+        .map_err(|error| ambiguous_commit_error(operation, &error))
 }
 
 async fn changed_query<C, P>(
@@ -890,6 +898,7 @@ impl BlockStore for TidbBlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mysql_async::{DriverError, ServerError};
 
     #[test]
     fn effective_transaction_mode_must_be_verified() {
@@ -921,6 +930,35 @@ mod tests {
                 .is_err()
         );
         assert!(TidbStorageOptions::new("").validate().is_err());
+    }
+
+    #[test]
+    fn lease_time_arithmetic_rejects_invalid_and_overflowing_values() {
+        assert!(ttl_ms(Duration::ZERO).is_err());
+        assert_eq!(ttl_ms(Duration::from_millis(1)).unwrap(), 1);
+        assert!(ttl_ms(Duration::from_millis(i64::MAX as u64 + 1)).is_err());
+        assert_eq!(expiry(100, 25).unwrap(), 125);
+        assert!(expiry(u64::MAX, 1).is_err());
+        assert!(nonnegative(-1, "metadata fence").is_err());
+        assert!(signed(u64::MAX, "metadata fence").is_err());
+    }
+
+    #[test]
+    fn commit_errors_remain_ambiguous_even_for_retryable_server_codes() {
+        let server_error = MysqlError::Server(ServerError {
+            code: 1205,
+            message: "Lock wait timeout exceeded".to_owned(),
+            state: "HY000".to_owned(),
+        });
+        let error = ambiguous_commit_error("publish metadata", &server_error);
+        assert!(error.is(ErrorCode::Eio));
+        assert!(!error.is(ErrorCode::Eagain));
+        assert!(error.to_string().contains("commit outcome is unknown"));
+
+        let connection_error = MysqlError::Driver(DriverError::ConnectionClosed);
+        let error = ambiguous_commit_error("release writer", &connection_error);
+        assert!(error.is(ErrorCode::Eio));
+        assert!(error.to_string().contains("commit outcome is unknown"));
     }
 
     #[test]

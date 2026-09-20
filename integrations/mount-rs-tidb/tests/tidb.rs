@@ -212,6 +212,43 @@ async fn actual_tidb_split_store_contract() {
         .acquire_writer("tidb-test-first", Duration::from_secs(30))
         .await
         .expect("acquire first writer");
+
+    metadata
+        .release_writer(&first)
+        .await
+        .expect("release writer before concurrent fencing race");
+
+    let concurrent_a = metadata.clone();
+    let concurrent_b = metadata.clone();
+    let (left, right) = tokio::join!(
+        concurrent_a.acquire_writer("tidb-test-concurrent-a", Duration::from_secs(5)),
+        concurrent_b.acquire_writer("tidb-test-concurrent-b", Duration::from_secs(5)),
+    );
+    match (left, right) {
+        (Ok(lease), Err(error)) => {
+            assert!(error.is(ErrorCode::Eagain));
+            concurrent_a
+                .release_writer(&lease)
+                .await
+                .expect("release concurrently acquired writer");
+        }
+        (Err(error), Ok(lease)) => {
+            assert!(error.is(ErrorCode::Eagain));
+            concurrent_b
+                .release_writer(&lease)
+                .await
+                .expect("release concurrently acquired writer");
+        }
+        (Ok(_), Ok(_)) => panic!("concurrent TiDB writers must not both acquire the lease"),
+        (Err(left), Err(right)) => {
+            panic!("concurrent TiDB acquisition unexpectedly failed twice: {left}; {right}")
+        }
+    }
+
+    let first = metadata
+        .acquire_writer("tidb-test-first", Duration::from_secs(30))
+        .await
+        .expect("reacquire first writer");
     let busy = metadata
         .acquire_writer("tidb-test-busy", Duration::from_secs(2))
         .await
