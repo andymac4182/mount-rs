@@ -13,7 +13,9 @@
 //! namespace changes.
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::{self, File, Metadata, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::Metadata;
+use std::fs::{self, File, OpenOptions};
 use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -35,6 +37,16 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
 const MAX_SYMLINK_DEPTH: usize = 40;
+
+#[cfg(windows)]
+mod windows;
+
+/// Windows requires a file/directory bit even for a dangling symbolic link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostSymlinkType {
+    File,
+    Directory,
+}
 
 /// Options for [`HostFs`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,6 +94,56 @@ impl HostFs {
         self.options
     }
 
+    /// Create a symlink with an optional Windows type hint. With no hint,
+    /// infer the host target's type like Node; a missing target means file.
+    /// The portable FsDriver method has no type parameter and uses inference.
+    pub async fn symlink_with_type(
+        &self,
+        target: &str,
+        path: &str,
+        kind: Option<HostSymlinkType>,
+    ) -> Result<()> {
+        let real = self.secure(path, false, "symlink").await?;
+        let error_path = real.clone();
+        let target = target.to_owned();
+        let target_error = target.clone();
+        run_blocking(move || {
+            #[cfg(unix)]
+            let result = {
+                let _ = kind;
+                std::os::unix::fs::symlink(&target, &real)
+            };
+            #[cfg(windows)]
+            let result = {
+                let directory = kind
+                    .map(|kind| kind == HostSymlinkType::Directory)
+                    .unwrap_or_else(|| {
+                        real.parent()
+                            .unwrap_or(Path::new("/"))
+                            .join(&target)
+                            .is_dir()
+                    });
+                if directory {
+                    std::os::windows::fs::symlink_dir(&target, &real)
+                } else {
+                    std::os::windows::fs::symlink_file(&target, &real)
+                }
+            };
+            #[cfg(not(any(unix, windows)))]
+            let result = {
+                let _ = kind;
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "host symlink unavailable",
+                ))
+            };
+            result.map_err(|error| {
+                fs_error_from_io_with_dest(error, "symlink", target_error, path_string(&error_path))
+            })
+        })
+        .await
+    }
+
     async fn secure(&self, path: &str, follow: bool, syscall: &'static str) -> Result<PathBuf> {
         let mut seen = HashMap::new();
         self.secure_with_memo(path, follow, syscall, &mut seen)
@@ -113,6 +175,14 @@ impl HostFs {
                 continue;
             }
 
+            // A virtual POSIX component must not become a drive, ADS, device
+            // name or a backslash-separated host path on Windows.
+            #[cfg(windows)]
+            if !windows_component_is_safe(&name) {
+                return Err(FsError::new(ErrorCode::Einval)
+                    .with_syscall(syscall)
+                    .with_path(virtual_path));
+            }
             let candidate = current.join(&name);
             let last = pending.is_empty();
             if last && !follow {
@@ -140,16 +210,11 @@ impl HostFs {
                             .with_syscall(syscall)
                             .with_path(virtual_path));
                     }
-                    if target.is_absolute() {
+                    let (absolute, target_segments) = symlink_segments(&target);
+                    if absolute {
                         current = self.root.as_ref().clone();
                         depth = 0;
                     }
-                    let target_segments = target
-                        .to_string_lossy()
-                        .split('/')
-                        .filter(|segment| !segment.is_empty())
-                        .map(ToOwned::to_owned)
-                        .collect::<Vec<_>>();
                     for segment in target_segments.into_iter().rev() {
                         pending.push_front(segment);
                     }
@@ -188,6 +253,53 @@ enum ComponentKind {
     Missing,
     Symlink(PathBuf),
     Other,
+}
+
+fn symlink_segments(target: &Path) -> (bool, Vec<String>) {
+    #[cfg(windows)]
+    {
+        // Windows readlink uses backslashes and may carry a drive/UNC prefix.
+        // Strip the prefix and replay components inside the virtual root;
+        // never hand a rooted/prefixed segment to PathBuf::join.
+        let absolute =
+            target.has_root() || matches!(target.components().next(), Some(Component::Prefix(_)));
+        let segments = target
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(name) => Some(name.to_string_lossy().into_owned()),
+                Component::ParentDir => Some("..".to_owned()),
+                Component::CurDir => Some(".".to_owned()),
+                _ => None,
+            })
+            .collect();
+        (absolute, segments)
+    }
+    #[cfg(not(windows))]
+    {
+        (
+            target.is_absolute(),
+            target
+                .to_string_lossy()
+                .split('/')
+                .filter(|part| !part.is_empty())
+                .map(ToOwned::to_owned)
+                .collect(),
+        )
+    }
+}
+
+#[cfg(windows)]
+fn windows_component_is_safe(name: &str) -> bool {
+    if name.contains(['\\', ':', '\0']) || name.ends_with(['.', ' ']) {
+        return false;
+    }
+    let base = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    !matches!(
+        base.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) && !(base.len() == 4
+        && (base.starts_with("COM") || base.starts_with("LPT"))
+        && matches!(base.as_bytes()[3], b'1'..=b'9'))
 }
 
 async fn look_at(candidate: PathBuf) -> io::Result<ComponentKind> {
@@ -491,7 +603,7 @@ fn stats_from_metadata(metadata: &Metadata) -> Stats {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn stats_from_metadata(metadata: &Metadata) -> Stats {
     let kind = file_type(metadata.file_type());
     Stats {
@@ -564,7 +676,12 @@ fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
+    windows::open(path, flags, mode)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options
@@ -575,22 +692,7 @@ fn open_host(path: &Path, flags: OpenFlags, mode: u32) -> io::Result<File> {
         .append(flags.append)
         .create_new(flags.create && flags.exclusive);
     let _ = mode;
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        // Like libuv, allow read-only directory handles; read() reports EISDIR.
-        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-        options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
-    }
-    options.open(path).map_err(|error| {
-        #[cfg(windows)]
-        if error.raw_os_error() == Some(80) && flags.create && !flags.exclusive {
-            // libuv fs__open: FILE_EXISTS with non-exclusive creation means
-            // the target is a directory, not an ordinary existing file.
-            return io::Error::from(io::ErrorKind::IsADirectory);
-        }
-        error
-    })
+    options.open(path)
 }
 
 #[cfg(unix)]
@@ -613,12 +715,45 @@ fn statfs_host(path: &Path) -> io::Result<StatsFs> {
     })
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn statfs_host(path: &Path) -> io::Result<StatsFs> {
+    windows::statfs(path)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn statfs_host(_path: &Path) -> io::Result<StatsFs> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "host statfs is unavailable on this platform",
     ))
+}
+
+fn stat_host(path: &Path, follow: bool) -> io::Result<Stats> {
+    #[cfg(windows)]
+    {
+        windows::stat(path, follow)
+    }
+    #[cfg(not(windows))]
+    {
+        (if follow {
+            fs::metadata(path)
+        } else {
+            fs::symlink_metadata(path)
+        })
+        .map(|metadata| stats_from_metadata(&metadata))
+    }
+}
+
+fn fstat_host(file: &File) -> io::Result<Stats> {
+    #[cfg(windows)]
+    {
+        windows::fstat(file)
+    }
+    #[cfg(not(windows))]
+    {
+        file.metadata()
+            .map(|metadata| stats_from_metadata(&metadata))
+    }
 }
 
 fn mkdir_host(real: &Path, root: &Path, options: MkdirOptions) -> io::Result<Option<PathBuf>> {
@@ -696,7 +831,14 @@ fn chmod_host(path: &Path, mode: u32) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn chmod_host(path: &Path, mode: u32) -> io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    permissions.set_readonly(mode & 0o200 == 0);
+    fs::set_permissions(path, permissions)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn chmod_host(_path: &Path, _mode: u32) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -721,7 +863,14 @@ fn chown_host(path: &Path, uid: u32, gid: u32, follow: bool) -> io::Result<()> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn chown_host(_path: &Path, _uid: u32, _gid: u32, _follow: bool) -> io::Result<()> {
+    // libuv fs__chown/fs__lchown deliberately succeed without a syscall on
+    // Windows, even for missing paths. This is not emulated POSIX ownership.
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 fn chown_host(_path: &Path, _uid: u32, _gid: u32, _follow: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -753,7 +902,12 @@ fn utimes_host(path: &Path, atime_ms: i64, mtime_ms: i64, follow: bool) -> io::R
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn utimes_host(path: &Path, atime_ms: i64, mtime_ms: i64, follow: bool) -> io::Result<()> {
+    windows::utimes(path, atime_ms, mtime_ms, follow)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn utimes_host(_path: &Path, _atime_ms: i64, _mtime_ms: i64, _follow: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -904,10 +1058,7 @@ impl FileHandle for HostHandle {
                     .with_syscall("fstat")
                     .with_path(path.clone())
             })?;
-            let metadata = file
-                .metadata()
-                .map_err(|error| fs_error_from_io(error, "fstat", path))?;
-            Ok(stats_from_metadata(&metadata))
+            fstat_host(file).map_err(|error| fs_error_from_io(error, "fstat", path))
         })
         .await
     }
@@ -1007,8 +1158,7 @@ impl FsDriver for HostFs {
         let real = self.secure(path, true, "stat").await?;
         let error_path = real.clone();
         run_blocking(move || {
-            fs::metadata(&real)
-                .map(|metadata| stats_from_metadata(&metadata))
+            stat_host(&real, true)
                 .map_err(|error| fs_error_from_io(error, "stat", path_string(&error_path)))
         })
         .await
@@ -1018,8 +1168,7 @@ impl FsDriver for HostFs {
         let real = self.secure(path, false, "lstat").await?;
         let error_path = real.clone();
         run_blocking(move || {
-            fs::symlink_metadata(&real)
-                .map(|metadata| stats_from_metadata(&metadata))
+            stat_host(&real, false)
                 .map_err(|error| fs_error_from_io(error, "lstat", path_string(&error_path)))
         })
         .await
@@ -1175,23 +1324,7 @@ impl FsDriver for HostFs {
     }
 
     async fn symlink(&self, target: &str, path: &str) -> Result<()> {
-        let real = self.secure(path, false, "symlink").await?;
-        let error_path = real.clone();
-        let target = target.to_owned();
-        let target_error = target.clone();
-        run_blocking(move || {
-            #[cfg(unix)]
-            let result = std::os::unix::fs::symlink(&target, &real);
-            #[cfg(not(unix))]
-            let result = Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "host symlink is unavailable on this platform",
-            ));
-            result.map_err(|error| {
-                fs_error_from_io_with_dest(error, "symlink", target_error, path_string(&error_path))
-            })
-        })
-        .await
+        self.symlink_with_type(target, path, None).await
     }
 
     async fn readlink(&self, path: &str) -> Result<String> {

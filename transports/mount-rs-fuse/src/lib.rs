@@ -1,19 +1,56 @@
 //! FUSE protocol primitives and the Linux native mount transport.
 use mount_rs_core::{ErrorCode, OpenFlags};
+pub mod constants;
 pub mod device;
 pub mod init;
 pub mod inodes;
 pub mod mount;
 pub mod notify;
+pub mod protocol;
 pub mod record;
 pub mod session;
 
+pub use constants::{
+    CUSE_INIT, DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN, FATTR_ATIME,
+    FATTR_ATIME_NOW, FATTR_CTIME, FATTR_FH, FATTR_GID, FATTR_KILL_SUIDGID, FATTR_LOCKOWNER,
+    FATTR_MODE, FATTR_MTIME, FATTR_MTIME_NOW, FATTR_SIZE, FATTR_UID, FOPEN_CACHE_DIR,
+    FOPEN_DIRECT_IO, FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FOPEN_NONSEEKABLE,
+    FOPEN_PARALLEL_DIRECT_WRITES, FOPEN_PASSTHROUGH, FOPEN_STREAM, FUSE_ACCESS, FUSE_ASYNC_DIO,
+    FUSE_ASYNC_READ, FUSE_ATOMIC_O_TRUNC, FUSE_ATTR_DAX, FUSE_ATTR_SUBMOUNT, FUSE_AUTO_INVAL_DATA,
+    FUSE_BATCH_FORGET, FUSE_BIG_WRITES, FUSE_BMAP, FUSE_COMPAT_22_INIT_OUT_SIZE,
+    FUSE_COMPAT_ATTR_OUT_SIZE, FUSE_COMPAT_ENTRY_OUT_SIZE, FUSE_COMPAT_INIT_OUT_SIZE,
+    FUSE_COMPAT_MKNOD_IN_SIZE, FUSE_COMPAT_SETXATTR_IN_SIZE, FUSE_COMPAT_STATFS_SIZE,
+    FUSE_COMPAT_WRITE_IN_SIZE, FUSE_COPY_FILE_RANGE, FUSE_CREATE, FUSE_CREATE_SUPP_GROUP,
+    FUSE_DEFAULT_MAX_PAGES_PER_REQ, FUSE_DESTROY, FUSE_DIRECT_IO_ALLOW_MMAP,
+    FUSE_DIRENT_HEADER_SIZE, FUSE_DO_READDIRPLUS, FUSE_EXPIRE_ONLY, FUSE_EXPLICIT_INVAL_DATA,
+    FUSE_EXPORT_SUPPORT, FUSE_EXT_GROUPS, FUSE_FALLOCATE, FUSE_FILE_OPS, FUSE_FLOCK_LOCKS,
+    FUSE_FLUSH, FUSE_FSYNC, FUSE_FSYNC_FDATASYNC, FUSE_FSYNCDIR, FUSE_GETATTR, FUSE_GETATTR_FH,
+    FUSE_GETLK, FUSE_GETXATTR, FUSE_HANDLE_KILLPRIV, FUSE_HANDLE_KILLPRIV_V2, FUSE_HAS_EXPIRE_ONLY,
+    FUSE_HAS_INODE_DAX, FUSE_HAS_IOCTL_DIR, FUSE_HAS_RESEND, FUSE_IN_HEADER_SIZE, FUSE_INIT,
+    FUSE_INIT_EXT, FUSE_INIT_OUT_SIZE, FUSE_INIT_RESERVED, FUSE_INVALID_UIDGID, FUSE_IOCTL,
+    FUSE_KERNEL_MINOR_VERSION, FUSE_KERNEL_VERSION, FUSE_LINK, FUSE_LISTXATTR, FUSE_LK_FLOCK,
+    FUSE_LOOKUP, FUSE_LSEEK, FUSE_MAP_ALIGNMENT, FUSE_MAX_MAX_PAGES, FUSE_MAX_NR_SECCTX,
+    FUSE_MAX_PAGES, FUSE_MIN_READ_BUFFER, FUSE_MKDIR, FUSE_MKNOD, FUSE_NO_EXPORT_SUPPORT,
+    FUSE_NO_OPEN_SUPPORT, FUSE_NO_OPENDIR_SUPPORT, FUSE_NOTIFY_DELETE, FUSE_NOTIFY_POLL,
+    FUSE_NOTIFY_REPLY, FUSE_NOTIFY_RESEND, FUSE_NOTIFY_RETRIEVE, FUSE_NOTIFY_STORE, FUSE_OPEN,
+    FUSE_OPEN_KILL_SUIDGID, FUSE_OPENDIR, FUSE_OUT_HEADER_SIZE, FUSE_PAGE_SIZE,
+    FUSE_PARALLEL_DIROPS, FUSE_PASSTHROUGH, FUSE_POLL, FUSE_POLL_SCHEDULE_NOTIFY, FUSE_POSIX_ACL,
+    FUSE_POSIX_LOCKS, FUSE_READ, FUSE_READ_LOCKOWNER, FUSE_READDIR, FUSE_READDIRPLUS,
+    FUSE_READDIRPLUS_AUTO, FUSE_READLINK, FUSE_RELEASE, FUSE_RELEASE_FLOCK_UNLOCK,
+    FUSE_RELEASE_FLUSH, FUSE_RELEASEDIR, FUSE_REMOVEMAPPING, FUSE_REMOVEXATTR, FUSE_RENAME,
+    FUSE_RENAME2, FUSE_ROOT_ID, FUSE_SECURITY_CTX, FUSE_SETATTR, FUSE_SETLK, FUSE_SETLKW,
+    FUSE_SETUPMAPPING, FUSE_SETXATTR, FUSE_SETXATTR_ACL_KILL_SGID, FUSE_SETXATTR_EXT, FUSE_STATFS,
+    FUSE_STATX, FUSE_SUBMOUNTS, FUSE_SYNCFS, FUSE_TMPFILE, FUSE_UNIQUE_RESEND, FUSE_UNLINK,
+    FUSE_WRITE, FUSE_WRITE_CACHE, FUSE_WRITE_KILL_SUIDGID, FUSE_WRITE_LOCKOWNER,
+    FUSE_WRITEBACK_CACHE, OPCODE_NAMES,
+};
 pub use notify::{
     FUSE_NAME_MAX, FUSE_NOTIFY_INVAL_ENTRY, FUSE_NOTIFY_INVAL_INODE, FUSE_NOTIFY_UNIQUE,
     FuseNotification, FuseNotifyInvalEntryOut, FuseNotifyInvalInodeOut, NotifyError, decode_notify,
     decode_notify_inval_entry, decode_notify_inval_inode, encode_notify, encode_notify_inval_entry,
     encode_notify_inval_inode,
 };
+pub use protocol::*;
 pub use record::{
     ReplayFailure, ReplayReport, TRANSCRIPT_MAGIC, TRANSCRIPT_VERSION, TranscriptDirection,
     TranscriptError, TranscriptFrame, TranscriptRecorder, decode_transcript, encode_transcript,
@@ -24,10 +61,34 @@ pub const IN_HEADER_SIZE: usize = 40;
 pub const OUT_HEADER_SIZE: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProtocolError(pub &'static str);
+pub struct ProtocolError {
+    pub message: String,
+    pub offset: Option<usize>,
+}
+
+impl ProtocolError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            offset: None,
+        }
+    }
+
+    pub fn at(message: impl Into<String>, offset: usize) -> Self {
+        Self {
+            message: message.into(),
+            offset: Some(offset),
+        }
+    }
+}
+
 impl std::fmt::Display for ProtocolError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
+        if let Some(offset) = self.offset {
+            write!(f, "{} at byte {offset}", self.message)
+        } else {
+            f.write_str(&self.message)
+        }
     }
 }
 impl std::error::Error for ProtocolError {}
@@ -47,7 +108,7 @@ pub struct RequestHeader {
 impl RequestHeader {
     pub fn decode(bytes: &[u8]) -> Result<Self, ProtocolError> {
         if bytes.len() < IN_HEADER_SIZE {
-            return Err(ProtocolError("truncated FUSE header"));
+            return Err(ProtocolError::at("truncated FUSE header", bytes.len()));
         }
         let u32_at = |i| u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
         let u64_at = |i| u64::from_le_bytes(bytes[i..i + 8].try_into().unwrap());
@@ -62,7 +123,7 @@ impl RequestHeader {
             total_extlen: u16::from_le_bytes(bytes[36..38].try_into().unwrap()),
         };
         if header.len < IN_HEADER_SIZE as u32 {
-            return Err(ProtocolError("invalid FUSE message length"));
+            return Err(ProtocolError::new("invalid FUSE message length"));
         }
         Ok(header)
     }
@@ -90,7 +151,7 @@ impl<'a> Request<'a> {
     pub fn decode(bytes: &'a [u8], max_bytes: usize) -> Result<Self, ProtocolError> {
         let header = RequestHeader::decode(bytes)?;
         if bytes.len() > max_bytes || header.len as usize != bytes.len() {
-            return Err(ProtocolError(
+            return Err(ProtocolError::new(
                 "FUSE message length mismatch or limit exceeded",
             ));
         }
@@ -98,7 +159,7 @@ impl<'a> Request<'a> {
             .len()
             .checked_sub(header.total_extlen as usize * 8)
             .filter(|end| *end >= IN_HEADER_SIZE)
-            .ok_or(ProtocolError("invalid FUSE extension length"))?;
+            .ok_or_else(|| ProtocolError::new("invalid FUSE extension length"))?;
         Ok(Self {
             header,
             body: &bytes[IN_HEADER_SIZE..end],
