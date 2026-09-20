@@ -416,7 +416,7 @@ export declare function createChunkedDriver(options: JsChunkedOptions): Promise<
  * `FsDriver` object.  `lib.rs` owns the root N-API export; this function is
  * kept here so the adapter remains isolated from the existing native drivers.
  */
-export declare function createDriver(driver: object): Filesystem
+export declare function createDriver(driver: FsDriver): Filesystem
 
 /**
  * Construct the N-API memory driver with the same identity and mode defaults
@@ -425,7 +425,7 @@ export declare function createDriver(driver: object): Filesystem
  */
 export declare function createMemoryDriver(options?: JsMemoryOptions | undefined | null): Filesystem
 
-export declare function createNfsServer(driver: Filesystem, options?: NfsServerOptions | undefined | null): NfsServer
+export declare function createNfsServer(driver: Filesystem | FsDriver, options?: NfsServerOptions | undefined | null): NfsServer
 
 /**
  * Create the rooted host-filesystem driver used by the upstream
@@ -434,9 +434,9 @@ export declare function createNfsServer(driver: Filesystem, options?: NfsServerO
  */
 export declare function createNodeFsDriver(root: string, options?: JsNodeFsOptions | undefined | null): Filesystem
 
-export declare function createP9Server(driver: Filesystem, options?: P9ServerOptions | undefined | null): P9Server
+export declare function createP9Server(driver: Filesystem | FsDriver, options?: P9ServerOptions | undefined | null): P9Server
 
-export declare function createS3Server(source: Filesystem | { buckets: Record<string, Filesystem> }, options?: S3ServerOptions | undefined | null): S3Server
+export declare function createS3Server(source: Filesystem | FsDriver | { buckets: Record<string, Filesystem | FsDriver> }, options?: S3ServerOptions | undefined | null): S3Server
 
 /**
  * Create a filesystem over an unstorage-compatible JavaScript store.
@@ -448,7 +448,7 @@ export declare function createS3Server(source: Filesystem | { buckets: Record<st
  */
 export declare function createUnstorageDriver(store: object, options?: JsUnstorageOptions | undefined | null): Filesystem
 
-export declare function createWebdavServer(driver: Filesystem, options?: WebdavServerOptions | undefined | null): WebdavServer
+export declare function createWebdavServer(driver: Filesystem | FsDriver, options?: WebdavServerOptions | undefined | null): WebdavServer
 
 export declare function dirname(path: string): string
 
@@ -653,7 +653,7 @@ export declare function liveMounts(): Promise<Array<Mounted>>
  * The Rust transport remains authoritative for platform prerequisites; this
  * function never silently falls back after a named transport fails.
  */
-export declare function mount(driver: Filesystem, mountpoint: string, options?: JsAutoMountOptions | undefined | null): Promise<Mounted>
+export declare function mount(driver: Filesystem | FsDriver, mountpoint: string, options?: JsAutoMountOptions | undefined | null): Promise<Mounted>
 
 export declare function nativeP9DecodeMessage(bytes: Uint8Array): NativeP9Message
 
@@ -1205,3 +1205,6 @@ export interface WebdavServerOptions {
 import type { FsError, FsErrorOptions } from "./types/root.js"
 export type { ErrnoCode, FsError, FsErrorOptions } from "./types/root.js"
 export { ERRNO_CODES, joinPath } from "./types/root.js"
+
+import type { FsDriver } from "./types/driver.js"
+export type { FsDriver, FileHandleLike, DirentLike } from "./types/driver.js"

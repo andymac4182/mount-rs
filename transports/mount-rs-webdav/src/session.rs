@@ -562,19 +562,15 @@ impl WebdavSession {
         if !locked.is_empty() {
             return Ok(self.multistatus(&locked));
         }
-        let failures = if stats.is_directory() {
-            self.delete_tree(path).await
-        } else {
-            match self.driver.unlink(path).await {
-                Ok(()) => Vec::new(),
-                Err(error) if is_absent(&error) => Vec::new(),
-                Err(error) => vec![Failure {
-                    path: path.to_owned(),
-                    collection: false,
-                    status: status_for_error(error.code),
-                }],
-            }
-        };
+        // A failure on the request resource is an ordinary HTTP error.
+        // Only recursive collection deletion collects per-resource failures
+        // into a multistatus (matching mountx's #delete / #deleteTree split).
+        if !stats.is_directory() {
+            self.driver.unlink(path).await?;
+            self.discard_unmapped(path).await;
+            return Ok(WebdavResponse::empty(204));
+        }
+        let failures = self.delete_tree(path).await;
         self.discard_unmapped(path).await;
         if failures.is_empty() {
             Ok(WebdavResponse::empty(204))

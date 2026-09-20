@@ -236,3 +236,4 @@ await pendingAssertion
 releasePending()
 
 console.log("mount-rs N-API JS FsDriver: PASS")
+await import("./structural-factories.mjs")

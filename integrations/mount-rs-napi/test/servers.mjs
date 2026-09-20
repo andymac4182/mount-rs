@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import * as net from "node:net";
+import { pathToFileURL } from "node:url";
 
 import {
   Filesystem,
@@ -8,6 +9,18 @@ import {
   createS3Server,
   createWebdavServer,
 } from "../index.js";
+
+let memoryFilesystem = () => Filesystem.memory();
+if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
+  assert.ok(process.env.MOUNTX_SOURCE, "structural server tests require the oracle");
+  const { createMemoryDriver } = await import(pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/drivers/memory.ts`).href);
+  const { createLoopback } = await import(pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/harness.ts`).href);
+  memoryFilesystem = () => {
+    const driver = createMemoryDriver();
+    const loopback = createLoopback(driver);
+    return { ...driver, writeFile: loopback.writeFile.bind(loopback), readFile: loopback.readFile.bind(loopback) };
+  };
+}
 
 const IO_TIMEOUT_MS = 5_000;
 let activePhase = { label: "startup", startedAt: Date.now() };
@@ -196,12 +209,12 @@ function nfsRecord(record) {
 }
 
 async function exerciseNfs() {
-  const filesystem = Filesystem.memory();
+  const filesystem = memoryFilesystem();
   const reports = [];
   const server = createNfsServer(filesystem, {
     host: "127.0.0.1",
     port: 0,
-    maxRecord: 64,
+    maxRecord: 256,
     onTransportError(error, peer) {
       reports.push({ error, peer });
       throw new Error("NFS hook callback deliberately threw");
@@ -228,6 +241,25 @@ async function exerciseNfs() {
     assert.equal(reply.readUInt32BE(4), 1);
     assert.equal(reply.readUInt32BE(20), 0);
 
+    // MOUNT '/' then GETATTR drives the filesystem stat callback over real
+    // RPC, including when the input is a structural JavaScript driver.
+    const mountCall = nfsNullCall(42);
+    mountCall.writeUInt32BE(1, 20);
+    await writeSocket(socket, nfsRecord(Buffer.concat([mountCall, Buffer.from([0, 0, 0, 1, 47, 0, 0, 0])])), "NFS MOUNT");
+    const mountMarker = (await serverReader.readExactly(4)).readUInt32BE(0);
+    const mountReply = await serverReader.readExactly(mountMarker & 0x7fff_ffff);
+    assert.equal(mountReply.readUInt32BE(24), 0, "MOUNT status");
+    const handleLength = mountReply.readUInt32BE(28);
+    const handle = mountReply.subarray(28, 32 + ((handleLength + 3) & ~3));
+    const getattr = nfsNullCall(43);
+    getattr.writeUInt32BE(100_003, 12);
+    getattr.writeUInt32BE(1, 20);
+    await writeSocket(socket, nfsRecord(Buffer.concat([getattr, handle])), "NFS GETATTR");
+    const attrMarker = (await serverReader.readExactly(4)).readUInt32BE(0);
+    const attrReply = await serverReader.readExactly(attrMarker & 0x7fff_ffff);
+    assert.equal(attrReply.readUInt32BE(24), 0, "GETATTR status");
+    assert.equal(attrReply.readUInt32BE(28), 2, "root is a directory");
+
     // A decodable RPC body that the protocol layer cannot dispatch is not a
     // transport failure and must not reach onTransportError.
     await writeSocket(socket, nfsRecord(Buffer.from([1, 2, 3])), "NFS bad RPC body");
@@ -243,7 +275,7 @@ async function exerciseNfs() {
 
     ({ socket, reader: serverReader } = await connectLoopback(server.port));
     const malformedMarker = Buffer.alloc(4);
-    malformedMarker.writeUInt32BE((0x8000_0000 | 65) >>> 0);
+    malformedMarker.writeUInt32BE((0x8000_0000 | 257) >>> 0);
     await writeSocket(socket, malformedMarker, "NFS oversized record marker");
     const report = await waitForTransportError(reports, "NFS transport error");
     assert.ok(report.error instanceof Error);
@@ -296,7 +328,7 @@ async function p9Request(socket, reader, type, tag, body, expectedType) {
 }
 
 async function exerciseP9() {
-  const filesystem = Filesystem.memory();
+  const filesystem = memoryFilesystem();
   const original = Buffer.from("before-9p");
   await filesystem.writeFile("/servers-9p.txt", original);
   const reports = [];
@@ -456,8 +488,8 @@ async function fetchBody(url, init, label) {
 }
 
 async function exerciseS3() {
-  const photos = Filesystem.memory();
-  const notes = Filesystem.memory();
+  const photos = memoryFilesystem();
+  const notes = memoryFilesystem();
   const server = createS3Server({ buckets: { photos, notes } }, {
     bucket: "mountx",
     host: "127.0.0.1",
@@ -493,7 +525,7 @@ async function exerciseS3() {
       "S3 bucket isolation",
     );
     assert.equal(isolated.response.status, 404);
-    assert.deepEqual(await photos.readFile("/servers-s3.txt"), object);
+    assert.deepEqual(Buffer.from(await photos.readFile("/servers-s3.txt")), object);
   } finally {
     await runPhase("S3 cleanup: server lifecycle", () =>
       closeLifecycle(server, "S3", listening),
@@ -502,7 +534,7 @@ async function exerciseS3() {
 }
 
 async function exerciseWebdav() {
-  const filesystem = Filesystem.memory();
+  const filesystem = memoryFilesystem();
   const server = createWebdavServer(filesystem, { host: "127.0.0.1", port: 0 });
   let listening;
   try {

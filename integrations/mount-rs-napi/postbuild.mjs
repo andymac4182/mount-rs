@@ -92,4 +92,11 @@ const utilityTypes = 'import type { FsError, FsErrorOptions } from "./types/root
 if (!types.includes(utilityTypes)) {
   types += `\n${utilityTypes}\nexport type { ErrnoCode, FsError, FsErrorOptions } from "./types/root.js"\nexport { ERRNO_CODES, joinPath } from "./types/root.js"\n`
 }
+const driverTypes = 'import type { FsDriver } from "./types/driver.js"'
+if (!types.includes(driverTypes)) {
+  types += `\n${driverTypes}\nexport type { FsDriver, FileHandleLike, DirentLike } from "./types/driver.js"\n`
+}
+types = types.replace(/(function (?:mount|createNfsServer|createP9Server|createWebdavServer)\(driver: )Filesystem(?=,)/g, "$1Filesystem | FsDriver")
+types = types.replace(/(function createS3Server\(source: )Filesystem \| \{ buckets: Record<string, Filesystem> \}/g, "$1Filesystem | FsDriver | { buckets: Record<string, Filesystem | FsDriver> }")
+types = types.replace(/function createDriver\(driver: object\)/g, "function createDriver(driver: FsDriver)")
 await writeFile(declarations, types)

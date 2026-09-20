@@ -1,5 +1,8 @@
 import {
   ERRNO_CODES,
+  createDriver,
+  mount,
+  type FsDriver,
   FileHandle,
   Filesystem,
   PathLock,
@@ -63,6 +66,21 @@ import {
   type WebdavServer,
   type WebdavServerOptions,
 } from "@mount-rs/core/webdav"
+
+// node:fs/promises and minimal structural drivers satisfy the public boundary.
+import * as nodeFs from "node:fs/promises"
+function checkStructuralFactories(driver: FsDriver): void {
+  createDriver(driver)
+  createNfsServer(driver)
+  createP9Server(driver)
+  createWebdavServer(driver)
+  createS3Server(driver)
+  createS3Server({ buckets: { structural: driver, native: Filesystem.memory() } })
+  void mount(driver, "/typecheck-only")
+}
+const nodeStructural: FsDriver = nodeFs
+void nodeStructural
+void checkStructuralFactories
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
   __napiBindingTarget

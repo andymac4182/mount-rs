@@ -62,18 +62,17 @@ the [`create_driver` factory](../integrations/mount-rs-napi/src/js_driver.rs#L21
 That adapter is not yet the oracle contract boundary:
 
 - `mount`, `createNfsServer`, `createP9Server`, `createS3Server`, and
-  `createWebdavServer` are typed and implemented around a native
-  `Filesystem`, not a structural `FsDriver`; see the native mount signature
-  and server factories in [`lib.rs`](../integrations/mount-rs-napi/src/lib.rs#L2820-L2837)
-  and [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L413-L433).
-- The root facade does not expose the oracle's `FsDriver`, `createLoopback`, or
+  `createWebdavServer` now accept native or structural drivers through the
+  JavaScript facade, with owned-adapter cleanup. Real server tests pass;
+  successful native mounting with a structural driver remains unverified.
+- The root facade exports `FsDriver` types but does not expose `createLoopback` or
   `resolveCapabilities` surface. The oracle definitions are in its
   `src/types.ts` and `src/harness.ts`.
-- The current `js-driver.mjs` comparison deliberately constructs a native
-  adapter on one side and the oracle loopback on the other; it does not pass a
-  plain JS driver directly into every mount/server factory. It also exits with
-  `SKIP` when `MOUNTX_SOURCE` is unset; see
-  [`js-driver.mjs`](../integrations/mount-rs-napi/test/js-driver.mjs#L1-L20).
+- `js-driver.mjs` now includes `structural-factories.mjs`: plain drivers pass
+  through all server factories, with capability/missing-method comparisons,
+  cleanup and eight WebDAV DELETE oracle cases. Main reran these successfully.
+  Mount coverage here is invalid-option rejection, not native acceptance.
+  The parent suite still skips when `MOUNTX_SOURCE` is unset.
 
 **Required closure evidence:** a non-skipped oracle-backed test must pass the
 same structural driver through mount and each server factory, compare
@@ -174,9 +173,8 @@ focused two-bucket PUT/GET isolation coverage; see
 [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L893-L1057) and
 [`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L458-L501).
 
-The oracle accepts structural drivers in the bucket map. The current N-API
-binding rejects a structural JS driver value at this boundary because the map
-extractor requires `Reference<Filesystem>`. Invalid-name and empty-map behavior
+The JavaScript facade now adapts structural drivers in mixed bucket maps before
+the native extractor, with real server isolation coverage. Invalid-name and empty-map behavior
 also needs oracle-backed coverage before this item can be promoted.
 
 ### P2 — S3 low-level and streaming parity: PARTIAL

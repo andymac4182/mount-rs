@@ -218,6 +218,12 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 ## W09 — napi-rs, Node API and packaging
 
+- [x] Accept structural JavaScript drivers in mount/server factories and mixed
+  S3 bucket maps, with owned-adapter cleanup and TypeScript declarations.
+  Main independently passed the pinned-oracle structural factory suite and
+  eight WebDAV DELETE status/survivor comparisons, plus 11 Rust WebDAV tests.
+  Native structural mounts remain unverified; harness exports and remaining
+  public API gaps are still open. These results do not qualify remote backends.
 - [x] Migrate npm packages to `@mount-rs/core` and `@mount-rs/virtual-fs`,
   including loaders, dependencies, imports and distribution checks. No registry
   publication or namespace-ownership verification is implied.

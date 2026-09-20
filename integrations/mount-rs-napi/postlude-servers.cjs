@@ -8,6 +8,96 @@ const SERVER_WRAPPED = Symbol("mountRsServerLifecycleWrapped")
 const CONNECTION_WRAPPED = Symbol("mountRsConnectionLifecycleWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
+const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
+
+function installStructuralFactories(binding) {
+  if (binding[FACTORIES_WRAPPED]) return
+  Object.defineProperty(binding, FACTORIES_WRAPPED, { value: true })
+  const mounts = new Map()
+  async function releaseUnmounted() {
+    for (const [mounted, release] of mounts) {
+      if (!mounted.active) {
+        await release()
+        mounts.delete(mounted)
+      }
+    }
+  }
+  // liveMounts returns new wrappers for the same native lifecycle. Reconcile
+  // owned adapters after unmount through any of those wrappers too.
+  const nativeUnmount = binding.Mounted.prototype.unmount
+  binding.Mounted.prototype.unmount = async function (...args) {
+    try {
+      return await nativeUnmount.apply(this, args)
+    } finally {
+      await releaseUnmounted()
+    }
+  }
+
+  function inputs(source, buckets = false) {
+    const owned = []
+    const adapters = new Map()
+    function adapt(driver) {
+      if (driver instanceof binding.Filesystem) return driver
+      if (!adapters.has(driver)) {
+        const adapter = binding.createDriver(driver)
+        adapters.set(driver, adapter)
+        owned.push(adapter)
+      }
+      return adapters.get(driver)
+    }
+    const release = () => Promise.all(owned.map((driver) => driver.shutdown()))
+    try {
+      const value = buckets && source && typeof source === "object" && !(source instanceof binding.Filesystem) &&
+        typeof source.stat !== "function" && "buckets" in source
+        ? { ...source, buckets: Object.fromEntries(Object.entries(source.buckets).map(
+          ([name, driver]) => [name, adapt(driver)],
+        )) }
+        : adapt(source)
+      return { value, release, owned }
+    } catch (error) {
+      void release().catch(() => {})
+      throw error
+    }
+  }
+
+  for (const name of ["createNfsServer", "createP9Server", "createS3Server", "createWebdavServer"]) {
+    const factory = binding[name]
+    binding[name] = function (source, ...args) {
+      const { value, release, owned } = inputs(source, name === "createS3Server")
+      try {
+        const server = factory(value, ...args)
+        if (owned.length) serverState(server).release = release
+        return server
+      } catch (error) {
+        void release().catch(() => {})
+        throw error
+      }
+    }
+  }
+
+  const nativeMount = binding.mount
+  binding.mount = async function (driver, ...args) {
+    const { value, release, owned } = inputs(driver)
+    try {
+      const mounted = await nativeMount(value, ...args)
+      if (owned.length) {
+        mounts.set(mounted, release)
+      }
+      return mounted
+    } catch (error) {
+      await release()
+      throw error
+    }
+  }
+  const unmountAll = binding.unmountAll
+  binding.unmountAll = async function (...args) {
+    try {
+      return await unmountAll(...args)
+    } finally {
+      await releaseUnmounted()
+    }
+  }
+}
 
 function serverState(server) {
   let state = SERVER_STATE.get(server)
@@ -58,7 +148,12 @@ function wrapServer(Server) {
     if (state.close !== undefined) return state.close
     state.close = cachedPromise(
       () => nativeClose.call(this),
-      () => undefined,
+      async () => {
+        if (state.release) {
+          await state.release()
+          state.release = undefined
+        }
+      },
     )
     return state.close
   }
@@ -132,5 +227,6 @@ module.exports = function installServers(binding) {
     wrapServer(binding && binding[name])
   }
   wrapP9Connection(binding && binding.P9Connection)
+  installStructuralFactories(binding)
   return binding
 }
