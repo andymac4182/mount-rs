@@ -14,6 +14,7 @@ import type {
   NativeFuseNotification,
   NativeFuseNotifyInvalEntryOut,
   NativeFuseNotifyInvalInodeOut,
+  NativeFuseOpenIn,
   NativeFuseOpenOut,
   NativeFuseOutHeader,
   NativeFuseProtocolContext,
@@ -39,6 +40,7 @@ export type {
   NativeFuseNotification,
   NativeFuseNotifyInvalEntryOut,
   NativeFuseNotifyInvalInodeOut,
+  NativeFuseOpenIn,
   NativeFuseOpenOut,
   NativeFuseOutHeader,
   NativeFuseProtocolContext,
@@ -158,6 +160,8 @@ export declare function decodeSetattrIn(body: Uint8Array, context?: NativeFusePr
 export declare function encodeSetattrIn(value: NativeFuseSetattrIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeSetattrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
 export declare function encodeSetattrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeOpenIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseOpenIn
+export declare function encodeOpenIn(value: NativeFuseOpenIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeOpenOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseOpenOut
 export declare function encodeOpenOut(value: NativeFuseOpenOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeReadIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseReadIn
