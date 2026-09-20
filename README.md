@@ -95,7 +95,11 @@ raw samples, and explicit backend/cleanup status. Run
 Remote, mounted-path, and small-operation dispatch performance acceptance
 remains tracked in [`REQUIREMENTS.md`](REQUIREMENTS.md).
 
-The CLI can be run with `cargo run -p mount-rs-cli -- --help` or `-- probe`.
+The Rust CLI is a thin consumer of `mount-rs-sdk`: its mount-free SDK
+contract can be exercised with `cargo run -p mount-rs-cli -- sdk-self-test`
+or a durable config with `--reopen`. The matching Node CLI example is
+`node examples/node-cli/index.mjs --sdk-self-test`; both are covered by the
+provider/consumer integration matrix before native transport tests are run.
 
 ## Development
 
