@@ -414,6 +414,9 @@ complete.
   (`95aca9c`); Rust bridge tests, Swift frame tests, XPC lifecycle tests, and
   unsigned arm64 Xcode targets passed locally.
 - [ ] W13.2 Verify errors, handles, identity, concurrency and lifecycle at the seam.
+  The FSKit path-resource bridge now maps macOS 26+ `FSPathURLResource` values
+  to rooted `HostFs` workers and its direct host-path lifecycle/reopen test
+  passes; installed-volume concurrency and cross-mount visibility remain open.
 - [ ] W13.3 Complete packaging, entitlements and signing plan, then request D03.
 - [ ] W13.4 Activate and test real FSKit mounts, CLI integration, persistence and
   supported SQLite workloads. NFS/FUSE fallback does not satisfy this stream.
@@ -513,7 +516,12 @@ complete.
 - [x] W16.6 Document that waiting for admitted operations does not establish
   bounded cleanup if a backend request never resolves.
 - [ ] W16.7 Add explicit backend cancellation/timeout semantics and remote-store,
-  versioned-view and actual native-mount shared-visibility acceptance.
+  versioned-view and actual native-mount shared-visibility acceptance. The new
+  `tests/native_shared_visibility.rs` records the macOS capability boundary
+  without claiming that acceptance: the current FUSE API is Linux-only and the
+  FSKit target has no signed/activated mounted-volume host. The real three-way
+  test remains open until all three independent mount authorities and their
+  shared-provider locking contract exist.
 
 ## W17 — Multi-drive HTTP server
 

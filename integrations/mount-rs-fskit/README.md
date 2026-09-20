@@ -11,14 +11,22 @@ implemented `MountRsFSVolume` translates item identity, metadata, namespace
 operations, open/close state, and read/write callbacks into
 `MountRsWorkerClient` calls. Swift does not implement a second filesystem.
 
+On macOS 26 and later, FSKit supplies an `FSPathURLResource` for a path-backed
+mount. `MountRsFileSystem` maps that resource to the existing rooted
+`mount-rs-host` driver and keeps the Rust worker in the FSKit extension, so
+each loaded resource has its own root and does not share a global XPC path.
+The direct worker lifecycle test below writes bytes through this path-backed
+configuration and reopens them through a second worker.
+
 The standalone `mount-rs-fskit-bridge` crate owns the bounded frame protocol,
 the JSON operation schema, persistent opaque handle table, read-only policy,
 provider error conversion, and async `mount_rs_core::FsDriver` dispatch. Its
 bundled C-ABI constructor accepts a bounded backend configuration for
-`MemoryFs`, the durable single-database `mount-rs-sqlite` driver, or the
-durable split-store composition of `SqliteMetadataStore` and
-`SqliteBlockStore`. The split configuration requires distinct metadata and
-block database paths and releases its writer lease during worker shutdown.
+`MemoryFs`, the rooted `mount-rs-host` driver, the durable single-database
+`mount-rs-sqlite` driver, or the durable split-store composition of
+`SqliteMetadataStore` and `SqliteBlockStore`. The split configuration requires
+distinct metadata and block database paths and releases its writer lease
+during worker shutdown.
 
 ## XPC service
 
@@ -36,10 +44,11 @@ XPCSession -> MountRsXPCSessionTransport -> MountRsWorkerClient
            -> MountRsRustWorker -> Rust DriverWorker -> selected FsDriver
 ```
 
-It exercises the memory backend's chunked binary I/O and both SQLite backends'
-reopen behavior, including sparse/partial writes and byte-exact reads through
-new XPC workers. The test is not a substitute for a containing application:
-no service is signed, embedded, installed, launched by launchd, or activated
+It exercises the memory backend's chunked binary I/O, the host-backed
+FSKit-style in-process path lifecycle, and both SQLite backends' reopen
+behavior, including sparse/partial writes and byte-exact reads through new
+workers. The test is not a substitute for a containing application: no
+service is signed, embedded, installed, launched by launchd, or activated
 through FSKit here.
 
 The standalone service defaults to memory. A containing host can select a
@@ -47,7 +56,8 @@ provider at launch with these environment values (the host remains responsible
 for supplying the paths and lifecycle):
 
 ```text
-MOUNT_RS_FSKIT_BACKEND=memory|sqlite|splitSqlite
+MOUNT_RS_FSKIT_BACKEND=memory|host|sqlite|splitSqlite
+MOUNT_RS_FSKIT_ROOT=/path/to/host-root                         # host
 MOUNT_RS_FSKIT_DATABASE_PATH=/path/to/filesystem.sqlite       # sqlite
 MOUNT_RS_FSKIT_METADATA_PATH=/path/to/metadata.sqlite         # splitSqlite
 MOUNT_RS_FSKIT_BLOCKS_PATH=/path/to/blocks.sqlite             # splitSqlite
@@ -89,11 +99,11 @@ object warning at the XPC link step. The XPC target selects the Rust archive
 from `target/aarch64-apple-darwin/debug` for arm64 and
 `target/x86_64-apple-darwin/debug` for x86_64.
 
-The current Rust suite has 11 passing tests, including fixed wire bytes,
+The current Rust suite has 12 passing tests, including fixed wire bytes,
 malformed input, caller-buffer sizing, Swift/Rust camel-case operation keys,
 provider errno propagation, read-only rejection, handle shutdown, and real
-`FsDriver` namespace/read/write dispatch plus a durable split-SQLite binary
-reopen test.
+`FsDriver` namespace/read/write dispatch, a rooted host-path binary round trip,
+plus a durable split-SQLite binary reopen test.
 
 The Swift frame seam test is standalone and does not start XPC:
 

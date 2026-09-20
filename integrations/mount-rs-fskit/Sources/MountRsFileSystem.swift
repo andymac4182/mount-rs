@@ -25,18 +25,38 @@ final class MountRsFileSystem: FSUnaryFileSystem & FSUnaryFileSystemOperations {
         let readOnly = options.taskOptions.contains { option in
             option == "-r" || option == "--rdonly" || option == "ro" || option == "read-only" || option == "readonly"
         }
-        Task {
-            do {
-                let client = try MountRsWorkerClient(xpcService: MountRsXPCServiceName)
-                let volume = MountRsFSVolume(
-                    worker: client,
-                    volumeName: "mount-rs",
-                    readOnly: readOnly
-                )
-                replyHandler(volume, nil)
-            } catch {
-                replyHandler(nil, error)
-            }
+        guard #available(macOS 26.0, *),
+              let pathResource = resource as? FSPathURLResource,
+              pathResource.url.isFileURL,
+              !pathResource.url.path.isEmpty
+        else {
+            replyHandler(nil, NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(22),
+                userInfo: [NSLocalizedDescriptionKey: "mount-rs FSKit requires a file path resource"]
+            ))
+            return
+        }
+
+        let resourceURL = pathResource.url.standardizedFileURL
+        let effectiveReadOnly = readOnly || !pathResource.isWritable
+        let didStartAccessing = resourceURL.startAccessingSecurityScopedResource()
+        let configuration = MountRsWorkerConfiguration(
+            backend: .host(root: resourceURL.path),
+            readOnly: effectiveReadOnly
+        )
+        do {
+            let client = try MountRsWorkerClient(configuration: configuration)
+            let volume = MountRsFSVolume(
+                worker: client,
+                volumeName: "mount-rs",
+                readOnly: effectiveReadOnly,
+                resourceURL: didStartAccessing ? resourceURL : nil
+            )
+            replyHandler(volume, nil)
+        } catch {
+            if didStartAccessing { resourceURL.stopAccessingSecurityScopedResource() }
+            replyHandler(nil, error)
         }
     }
 

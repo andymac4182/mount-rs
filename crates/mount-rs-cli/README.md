@@ -219,3 +219,30 @@ driver.uid/gid pair and record the SQLite version, journal mode, synchronous
 setting, locking/recovery results, and cleanup evidence. The host-backed case
 keeps the NFS server's backing-directory ownership aligned with the
 unprivileged macOS kernel client.
+
+## macOS three-way shared visibility boundary
+
+There is currently no valid acceptance command for mounting one mount-rs
+backing location concurrently through macOS NFS, FUSE, and FSKit. The
+capability-boundary check is rootless and non-mutating:
+
+    cargo test --locked -p mount-rs-core --test native_shared_visibility
+
+It records the only currently available macOS native path (NFS), verifies that
+the mount-rs FUSE API returns `UnsupportedPlatform` before touching a
+mountpoint, and records that FSKit now has a path-backed worker lifecycle, but
+the target is still unsigned and has no containing app, activation, or
+mounted-volume host. macFUSE is not interchangeable with this repository's Linux FUSE
+protocol, and the current CLI/auto transport set has no FSKit mount authority.
+The test therefore must not be read as three-way shared-write evidence.
+
+If this gate is later expanded into the real acceptance, it must first acquire
+one exclusive per-run lock, create one disposable backing location, and use
+three distinct sibling mountpoints. Each writer must close or synchronize its
+file before another mount reads the committed bytes; a provider lock or
+single-writer lease must be proven safe for the three independent workers
+before the test shares a database path. Cleanup must unmount each exact path
+with a bounded deadline, verify that it is no longer mounted, remove only the
+empty mountpoint directories, and preserve the backing artifacts when any
+mount remains. Missing FUSE/FSKit capability is an unsupported result, never a
+fallback to NFS or a passing shared-visibility claim.

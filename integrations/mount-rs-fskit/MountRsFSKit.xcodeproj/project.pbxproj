@@ -16,6 +16,7 @@
 			A10000000000000000000007 /* MountRsXPCDelegate.swift in XPC service */ = {isa = PBXBuildFile; fileRef = A10000000000000000000016 /* MountRsXPCDelegate.swift */; };
 			A10000000000000000000008 /* MountRsRustWorker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MountRsRustWorker.swift */; };
 			A10000000000000000000009 /* MountRsXPCService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000001A /* MountRsXPCService.swift */; };
+			A1000000000000000000000A /* MountRsRustWorker.swift in FSKit extension */ = {isa = PBXBuildFile; fileRef = A10000000000000000000019 /* MountRsRustWorker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -189,6 +190,7 @@
 				A10000000000000000000004 /* MountRsXPCDelegate.swift in Sources */,
 				A10000000000000000000005 /* MountRsFSItem.swift in Sources */,
 				A10000000000000000000006 /* MountRsFSVolume.swift in Sources */,
+				A1000000000000000000000A /* MountRsRustWorker.swift in FSKit extension */,
 			);
 				runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -221,8 +223,13 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Extensions";
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
+				OTHER_LDFLAGS = (
+					"-lmount_rs_fskit_bridge",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.fskit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
@@ -249,8 +256,13 @@
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = Resources/Info.plist;
 				INSTALL_PATH = "$(LOCAL_LIBRARY_DIR)/Extensions";
+				LIBRARY_SEARCH_PATHS = "$(PROJECT_DIR)/target/aarch64-apple-darwin/debug";
+				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(PROJECT_DIR)/target/x86_64-apple-darwin/debug";
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/../Frameworks @executable_path/../../../../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 15.4;
+				OTHER_LDFLAGS = (
+					"-lmount_rs_fskit_bridge",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.andymac4182.mount-rs.fskit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;

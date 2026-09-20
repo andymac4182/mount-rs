@@ -20,6 +20,7 @@ use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{
     Capabilities, DirEntry, FileHandle, FsDriver, FsError, MemoryFs, MkdirOptions, Stats, StatsFs,
 };
+use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore, open_sqlite};
 use serde::{Deserialize, Serialize};
 use tokio::runtime::Runtime;
@@ -42,6 +43,11 @@ const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 #[serde(tag = "backend", rename_all = "camelCase")]
 pub enum WorkerBackendConfig {
     Memory {
+        #[serde(default, rename = "readOnly")]
+        read_only: bool,
+    },
+    Host {
+        root: PathBuf,
         #[serde(default, rename = "readOnly")]
         read_only: bool,
     },
@@ -1068,6 +1074,11 @@ fn validate_database_path(path: &Path, label: &'static str) -> mount_rs_core::Re
 async fn build_driver_worker(config: WorkerBackendConfig) -> mount_rs_core::Result<DriverWorker> {
     match config {
         WorkerBackendConfig::Memory { read_only } => Ok(DriverWorker::memory(read_only)),
+        WorkerBackendConfig::Host { root, read_only } => {
+            validate_database_path(&root, "host root")?;
+            let driver = HostFs::with_options(root, HostFsOptions { read_only });
+            Ok(DriverWorker::new(Arc::new(driver), read_only))
+        }
         WorkerBackendConfig::Sqlite {
             database_path,
             read_only,
@@ -1132,7 +1143,7 @@ fn create_worker_handle(config: WorkerBackendConfig) -> *mut RustWorkerHandle {
 
 /// Create a persistent worker from a bounded JSON backend configuration.
 ///
-/// The accepted shapes are `memory`, `sqlite`, and `splitSqlite`. The latter
+/// The accepted shapes are `memory`, `host`, `sqlite`, and `splitSqlite`. The latter
 /// requires distinct `metadataPath` and `blocksPath` values and uses the same
 /// `SqliteMetadataStore`/`SqliteBlockStore` pair as the existing split-store
 /// runtime. Invalid JSON, paths, or provider initialization return null and do
@@ -1506,6 +1517,64 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].entry.name, "hello.txt");
         assert!(entries[0].stats.is_file());
+    }
+
+    #[test]
+    fn host_backend_round_trips_bytes_to_its_rooted_path() {
+        let root = std::env::temp_dir().join(format!(
+            "mount-rs-fskit-host-{}-{}",
+            std::process::id(),
+            NEXT_BACKEND_OWNER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&root).expect("host backend root directory");
+        let config = WorkerBackendConfig::Host {
+            root: root.clone(),
+            read_only: false,
+        };
+        let runtime = Runtime::new().expect("test runtime");
+        let worker = runtime
+            .block_on(build_driver_worker(config))
+            .expect("host worker");
+
+        let OperationResponse::Open { handle, .. } = operation_response(
+            &worker,
+            37,
+            OperationRequest::Open {
+                path: "/shared.txt".to_owned(),
+                flags: "w+".to_owned(),
+                mode: 0o644,
+            },
+        ) else {
+            panic!("open response expected");
+        };
+        let payload = b"FSKit and NFS share this rooted path".to_vec();
+        assert!(matches!(
+            operation_response(
+                &worker,
+                38,
+                OperationRequest::Write {
+                    handle,
+                    offset: 0,
+                    data: payload.clone(),
+                },
+            ),
+            OperationResponse::Write { count } if count == payload.len()
+        ));
+        assert!(matches!(
+            operation_response(&worker, 39, OperationRequest::Close { handle }),
+            OperationResponse::Ok
+        ));
+        assert_eq!(
+            std::fs::read(root.join("shared.txt")).expect("host file exists"),
+            payload
+        );
+
+        let shutdown = runtime
+            .block_on(worker.dispatch(frame(MessageKind::Shutdown, 40, &[])))
+            .expect("host shutdown response");
+        assert_eq!(shutdown.kind, MessageKind::Reply);
+        drop(worker);
+        std::fs::remove_dir_all(root).expect("remove host backend root");
     }
 
     #[test]

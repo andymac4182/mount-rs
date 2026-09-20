@@ -31,6 +31,7 @@ private func mountRsDestroyWorker(_ worker: OpaquePointer?)
 /// pair as one database.
 public enum MountRsWorkerBackend: Sendable {
     case memory
+    case host(root: String)
     case sqlite(databasePath: String)
     case splitSQLite(metadataPath: String, blocksPath: String, chunkSize: Int = 64 * 1024)
 }
@@ -51,6 +52,9 @@ public struct MountRsWorkerConfiguration: Sendable {
         switch backend {
         case .memory:
             object["backend"] = "memory"
+        case .host(let root):
+            object["backend"] = "host"
+            object["root"] = root
         case .sqlite(let databasePath):
             object["backend"] = "sqlite"
             object["databasePath"] = databasePath
@@ -75,6 +79,11 @@ public struct MountRsWorkerConfiguration: Sendable {
         switch backend {
         case "memory":
             return Self(backend: .memory, readOnly: readOnly)
+        case "host":
+            guard let root = environment["MOUNT_RS_FSKIT_ROOT"], !root.isEmpty else {
+                return nil
+            }
+            return Self(backend: .host(root: root), readOnly: readOnly)
         case "sqlite":
             guard let databasePath = environment["MOUNT_RS_FSKIT_DATABASE_PATH"], !databasePath.isEmpty else {
                 return nil
@@ -195,5 +204,51 @@ final class MountRsRustWorker: @unchecked Sendable {
         }
         guard status == mountRsWorkerStatusOK, responseLength <= response.count else { return nil }
         return response.prefix(responseLength)
+    }
+}
+
+/// In-process transport used by the FSKit extension when a path resource is
+/// supplied. FSKit gives the extension the resource URL, so keeping the Rust
+/// worker in the extension avoids trying to smuggle a per-volume path through
+/// a globally named XPC service. The XPC service remains available for hosts
+/// that want a separately managed worker.
+final class MountRsInProcessTransport: MountRsXPCTransport {
+    private let worker: MountRsRustWorker
+    private let lock = NSLock()
+
+    init?(configuration: MountRsWorkerConfiguration) {
+        guard let worker = MountRsRustWorker(configuration: configuration) else { return nil }
+        self.worker = worker
+    }
+
+    private func dispatch(_ request: Data) throws -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let response = worker.dispatch(request) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(71),
+                userInfo: [NSLocalizedDescriptionKey: "mount-rs FSKit worker rejected the request"]
+            )
+        }
+        return response
+    }
+
+    func send(_ request: Data) async throws -> Data {
+        try dispatch(request)
+    }
+}
+
+extension MountRsWorkerClient {
+    /// Create the in-process worker used by an FSKit path resource.
+    public convenience init(configuration: MountRsWorkerConfiguration) throws {
+        guard let transport = MountRsInProcessTransport(configuration: configuration) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(5),
+                userInfo: [NSLocalizedDescriptionKey: "mount-rs FSKit worker could not initialize"]
+            )
+        }
+        self.init(transport: transport)
     }
 }

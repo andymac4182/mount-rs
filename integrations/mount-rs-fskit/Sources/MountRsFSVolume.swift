@@ -9,12 +9,14 @@ import FSKit
 final class MountRsFSVolume: FSVolume, FSVolume.Operations, FSVolume.OpenCloseOperations, FSVolume.ReadWriteOperations {
     private let worker: MountRsWorkerClient
     private let readOnly: Bool
+    private let resourceURL: URL?
     private var rootItem: MountRsFSItem?
     private var cachedStatsFS: MountRsWorkerStatsFS?
 
-    init(worker: MountRsWorkerClient, volumeName: String, readOnly: Bool) {
+    init(worker: MountRsWorkerClient, volumeName: String, readOnly: Bool, resourceURL: URL? = nil) {
         self.worker = worker
         self.readOnly = readOnly
+        self.resourceURL = resourceURL
         super.init(
             volumeID: FSVolume.Identifier(),
             volumeName: FSFileName(string: volumeName)
@@ -313,6 +315,9 @@ final class MountRsFSVolume: FSVolume, FSVolume.Operations, FSVolume.OpenCloseOp
         replyHandler: @escaping ((any Error)?) -> Void
     ) {
         Task {
+            if let resourceURL = self.resourceURL {
+                defer { resourceURL.stopAccessingSecurityScopedResource() }
+            }
             do {
                 try await self.worker.shutdown()
                 replyHandler(nil)

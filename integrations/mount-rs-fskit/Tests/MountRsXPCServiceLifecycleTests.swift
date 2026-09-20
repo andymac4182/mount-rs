@@ -66,6 +66,37 @@ struct MountRsXPCServiceLifecycleTests {
         )
     }
 
+    static func runHostPathLifecycle(root: URL) async throws {
+        let client = try MountRsWorkerClient(
+            configuration: MountRsWorkerConfiguration(backend: .host(root: root.path))
+        )
+        let capabilities = try await client.handshake(readOnly: false)
+        precondition(capabilities.handles && !capabilities.readOnly)
+        let open = try await client.open("/shared.txt", flags: "w+", mode: 0o644)
+        let payload = Array("FSKit and NFS share this rooted path".utf8)
+        let written = try await client.write(handle: open.handle, offset: 0, data: payload)
+        precondition(written == payload.count)
+        try await client.synchronize()
+        try await client.close(open.handle)
+        try await client.shutdown()
+
+        let hostBytes = try Data(contentsOf: root.appendingPathComponent("shared.txt"))
+        precondition(Array(hostBytes) == payload)
+
+        let reopened = try MountRsWorkerClient(
+            configuration: MountRsWorkerConfiguration(backend: .host(root: root.path))
+        )
+        let readOpen = try await reopened.open("/shared.txt", flags: "r")
+        let read = try await reopened.read(
+            handle: readOpen.handle,
+            offset: 0,
+            length: UInt64(payload.count)
+        )
+        precondition(read == payload)
+        try await reopened.close(readOpen.handle)
+        try await reopened.shutdown()
+    }
+
     static func runSQLiteReopenLifecycle(
         configuration: MountRsWorkerConfiguration
     ) async throws {
@@ -126,6 +157,18 @@ struct MountRsXPCServiceLifecycleTests {
         precondition(databasePath == sqlitePath)
         precondition(sqliteConfiguration.readOnly)
 
+        let hostPath = "/tmp/mount-rs-fskit-host"
+        guard let hostConfiguration = MountRsWorkerConfiguration.fromEnvironment([
+            "MOUNT_RS_FSKIT_BACKEND": "host",
+            "MOUNT_RS_FSKIT_ROOT": hostPath,
+        ]) else {
+            preconditionFailure("valid host configuration was rejected")
+        }
+        guard case .host(let root) = hostConfiguration.backend else {
+            preconditionFailure("host configuration selected the wrong backend")
+        }
+        precondition(root == hostPath)
+
         let splitEnvironment = [
             "MOUNT_RS_FSKIT_BACKEND": "splitSqlite",
             "MOUNT_RS_FSKIT_METADATA_PATH": "/tmp/mount-rs-fskit-metadata.sqlite",
@@ -143,6 +186,7 @@ struct MountRsXPCServiceLifecycleTests {
 
         let invalidConfigurations = [
             ["MOUNT_RS_FSKIT_BACKEND": "unknown"],
+            ["MOUNT_RS_FSKIT_BACKEND": "host"],
             ["MOUNT_RS_FSKIT_BACKEND": "sqlite"],
             [
                 "MOUNT_RS_FSKIT_BACKEND": "splitSqlite",
@@ -192,6 +236,12 @@ struct MountRsXPCServiceLifecycleTests {
             runEnvironmentConfigurationTests()
             runWorkerBoundaryTests()
             try await runMemoryLifecycle()
+
+            let hostRoot = FileManager.default.temporaryDirectory
+                .appendingPathComponent("mount-rs-fskit-host-(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: hostRoot, withIntermediateDirectories: false)
+            temporaryRoots.append(hostRoot)
+            try await runHostPathLifecycle(root: hostRoot)
 
             let sqliteRoot = FileManager.default.temporaryDirectory
                 .appendingPathComponent("mount-rs-fskit-sqlite-\(UUID().uuidString)", isDirectory: true)
