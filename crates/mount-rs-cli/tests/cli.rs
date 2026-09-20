@@ -1,6 +1,7 @@
 use mount_rs_cli::color::Color;
 use mount_rs_cli::parse_args;
 use mount_rs_cli::parser::{CliOptions, Command, DriverChoice, TransportChoice, help_text};
+use std::fs;
 use std::process::Command as ProcessCommand;
 
 #[test]
@@ -16,6 +17,7 @@ fn help_and_version_paths_are_pure() {
     assert!(help_text(Color::disabled()).contains("--transport"));
     assert!(help_text(Color::disabled()).contains("--sqlite-single-host"));
     assert!(help_text(Color::disabled()).contains("serve-http --config"));
+    assert!(help_text(Color::disabled()).contains("sdk-self-test"));
 }
 
 #[test]
@@ -121,4 +123,68 @@ fn actual_binary_validates_provider_config_without_credentials_or_network() {
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("valid config:"));
     assert!(!String::from_utf8_lossy(&output.stderr).contains("missing environment variable"));
+}
+
+#[test]
+fn actual_binary_uses_the_public_rust_sdk_for_mount_free_self_tests() {
+    let memory = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args(["sdk-self-test"])
+        .output()
+        .expect("run Rust SDK memory self-test");
+    assert!(
+        memory.status.success(),
+        "Rust SDK memory self-test failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&memory.stdout),
+        String::from_utf8_lossy(&memory.stderr)
+    );
+    assert!(String::from_utf8_lossy(&memory.stdout).contains("Rust SDK wrote and read"));
+
+    let root = std::env::temp_dir().join(format!(
+        "mount-rs-cli-sdk-self-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create Rust SDK self-test directory");
+    let config_path = root.join("config.json");
+    let metadata_path = root.join("metadata.sqlite");
+    let blocks_path = root.join("blocks.sqlite");
+    let config = serde_json::json!({
+        "version": 1,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "metadata": {"kind": "sqlite", "path": metadata_path},
+                "blocks": {"kind": "sqlite", "path": blocks_path},
+                "chunk_size_bytes": 7,
+                "owner": "rust-cli-sdk-self-test"
+            }
+        }
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("serialize Rust SDK config"),
+    )
+    .expect("write Rust SDK config");
+
+    let durable = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args([
+            "sdk-self-test",
+            "--config",
+            config_path.to_str().expect("UTF-8 config path"),
+            "--reopen",
+        ])
+        .output()
+        .expect("run Rust SDK SQLite self-test");
+    let stdout = String::from_utf8_lossy(&durable.stdout);
+    let stderr = String::from_utf8_lossy(&durable.stderr);
+    let status = durable.status;
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        status.success(),
+        "Rust SDK SQLite self-test failed: stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("Rust SDK wrote, shut down, reopened, and read"));
 }
