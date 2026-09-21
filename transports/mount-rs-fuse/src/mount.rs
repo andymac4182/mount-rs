@@ -679,19 +679,6 @@ impl MountState {
                 // forced phase behind the same request.
                 self.request_stop();
                 let task = self.task.lock().expect("mount task lock poisoned").take();
-                if let Some(task) = task {
-                    // Give a normally polling session a short opportunity to
-                    // observe the stop request and run its terminal cleanup.
-                    // A session blocked in the kernel's device read cannot
-                    // observe that request, so waiting for the full unmount
-                    // timeout here would make the forced phase exceed its
-                    // documented bound and leave fusermount waiting on an
-                    // open device descriptor. The drain helper aborts the
-                    // owner task when this grace period expires, which closes
-                    // the descriptor before lazy detach starts.
-                    let grace_deadline = Instant::now() + FORCED_STOP_GRACE;
-                    drain_session_task(&self, task, Some(grace_deadline)).await;
-                }
                 let deadline = Instant::now() + timeout;
                 let force = force_unmount_until(
                     self.mode,
@@ -699,7 +686,19 @@ impl MountState {
                     self.helper.as_deref(),
                     deadline,
                 );
-                force.await;
+                if let Some(task) = task {
+                    // Give a normally polling session a short opportunity to
+                    // observe the stop request and run its terminal cleanup,
+                    // while lazy detach runs concurrently. A session blocked
+                    // in the kernel's device read cannot observe that request;
+                    // the drain helper aborts the owner task when this grace
+                    // period expires, closing the descriptor so the helper
+                    // can finish without adding a serialized second timeout.
+                    let grace_deadline = Instant::now() + FORCED_STOP_GRACE;
+                    tokio::join!(force, drain_session_task(&self, task, Some(grace_deadline)));
+                } else {
+                    force.await;
+                }
                 forced_deadline = Some(deadline);
                 let mount_still_present = mounted_at(&self.mountpoint);
                 forced_mount_present = Some(mount_still_present);
