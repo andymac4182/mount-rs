@@ -636,6 +636,22 @@ async function exerciseNfs() {
   }
 }
 
+async function exerciseNfsSessionDestroy() {
+  const server = createNfsServer(memoryFilesystem());
+  try {
+    assert.equal(server.session.destroyed, false);
+    assert.equal(server.session.v4.destroyed, false);
+    await server.session.v4.destroy();
+    assert.equal(server.session.destroyed, false);
+    assert.equal(server.session.v4.destroyed, true);
+    await server.session.destroy();
+    assert.equal(server.session.destroyed, true);
+    assert.equal(server.session.v4.destroyed, true);
+  } finally {
+    await server.close();
+  }
+}
+
 function p9String(value) {
   const bytes = Buffer.from(value);
   const length = Buffer.alloc(2);
@@ -1838,6 +1854,7 @@ await within(
       throw new Error(`unknown server phase: ${requestedServerPhase}`)
     }
     await runPhase("NFS exercise", exerciseNfs);
+    await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
     await runPhase("9P exercise", exerciseP9);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
     await runPhase("9P attached duplex", exerciseP9AttachedDuplex);

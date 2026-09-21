@@ -1316,6 +1316,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   concurrent session calls; the filesystem-visible exclusive finalization
   marker returns `NoSuchUpload` to the loser and late part writes, while a
   validation-failing Complete releases the marker so a correct retry succeeds.
+- [x] The S3 multipart fault packet now injects one `EIO` while Complete reads
+  a staged part, verifies the filesystem-visible finalization marker is
+  released, and completes the same upload on retry; the full S3 target passes
+  4 unit, 6 chunked, 23 gateway, and 5 public-API tests. This is bounded local
+  fault-injection evidence, not power-loss durability, provider failure,
+  broader ordering/concurrency, or native/hosted acceptance.
 - [x] The same multipart replacement flow is exercised through the generated
   N-API S3 facade: release build/declarations, direct session create/part/list/
   complete/GET, streamed traffic, cancellation, bucket isolation, connection
@@ -1513,8 +1519,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   pinned-oracle N-API package suite passes locally, and fixed-tip hosted
   requalification `35651055621`, Windows job `106503290630`, now passes the
   repaired server, restart, structural, package-distribution, clean-consumer,
-  and artifact-aggregation checks. The overall qualification remains open with
-  separate Linux/ARM/native-FUSE/provider gates, so production remains NO-GO.
+  and artifact-aggregation checks. The overall qualification ended terminal
+  failure because the ARM/Linux/macOS Node jobs hit the same
+  `s3/multipart-complete-signed-trailer` ETag mismatch from the newer W01/S3
+  finalization-marker path, and Ubuntu Rust/native-FUSE/provider gates also
+  failed. This is recorded as a mixed-scope blocker; production remains
+  NO-GO.
 
 ## W05 — Cloudflare R2
 
@@ -2044,7 +2054,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `scripts/verify-w07-production-config.mjs` gate and its positive/negative
   fixtures now enforce the accepted production configuration shape in hosted
   qualification: durable FoundationDB metadata, `shared-provider` authority,
-  HTTPS RustFS blocks and external credential references. This is static policy
+  an explicit positive lease TTL bounded to 24 hours, HTTPS RustFS blocks and
+  external credential references. The negative fixtures independently reject
+  inline block credentials and an unsafe lease TTL. This is static policy
   evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
   replication, recovery, capacity, telemetry or release approval.
   The hosted workflow also runs `scripts/verify-w07-rollout-ledger.mjs`, which
@@ -4120,7 +4132,7 @@ cross-drive isolation.
 | `2026-09-22 FUSE forced-unmount deadline packet` (published as `987c593bc08adfb161a55a7a9eee27ff82606310`) | Share the forced `umount`/lazy-detach deadline with final session-task draining so bounded teardown does not add a third full timeout | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35648821996` and Fault injection run `35648821873` are pending, while the Linux-gated timing test and hosted `/dev/fuse` forced-unmount and broader lifecycle gates remain open |
 | `2026-09-22 FUSE active-state packet` (published as `8ddf48febaedbd78dc22d889e8f3c822a4e6ad45`) | Publish `active == false` at the start of teardown and restore it only for a retryable helper failure that leaves the kernel mount live | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35649715601` is pending and Fault injection run `35649715727` is queued, so the Linux-gated runtime regression and hosted native close-race/callback, crash/restart and durability gates remain open |
 | `2026-09-22 FUSE forced-teardown callback packet` (published as `0d06abb10899f307ce83cd5fa198bab9c5f156a9`) | Report a forced graceful-unmount timeout once through the owned `Task` transport-error hook, preserving callback-panic isolation and existing terminal-state semantics | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI workflow-dispatch run `35650347479` is queued, push CI run `35650323951` was cancelled, and Fault injection run `35650324040` is in progress, so the Linux-gated callback assertion and hosted forced-unmount/fault, crash/restart and durability execution remain open |
-| `2026-09-22 FUSE mount-source parity packet` | Expose the configured FUSE `fsname` through the automatic facade's shared `source` property and return no source for unsupported-platform FUSE objects | FUSE and automatic-facade host tests, host/Linux-target strict Clippy, Linux-target checks, formatting and diff checks pass; the Linux-gated source regression and hosted native source/lifecycle execution remain open |
+| `2026-09-22 FUSE mount-source parity packet` (published as `2a979191d1ef5db37be3a9a3a4bbb2c3efe44457`) | Expose the configured FUSE `fsname` through the automatic facade's shared `source` property and return no source for unsupported-platform FUSE objects | FUSE and automatic-facade host tests, host/Linux-target strict Clippy, Linux-target checks, formatting and diff checks pass; exact-SHA Fault injection run `35652258903`, CI run `35652258837`, and W08 release targets run `35652258840` are pending, while W04 production policy run `35652258913` succeeded but is unrelated, so the Linux-gated source regression and hosted native source/lifecycle execution remain open |
 | `2026-09-22 FUSE native mount-object packet` (published as `4fd3e25e`) | Restore root N-API `Mounted[Symbol.asyncDispose]()` and record the supported-scope decision for transport-specific FUSE `session`, device `fd`, and invalidation members | Runtime/type coverage and the source audit are local PASS; final remote verification is `HEAD=origin/main=4fd3e25e`; exact-SHA CI run `35646646162` is pending and Fault injection run `35646646113` is in progress, so hosted Linux mount/callback/lifecycle evidence remains open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |

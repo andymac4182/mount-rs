@@ -23,7 +23,8 @@ semantics.
 ## Current queue
 
 - Reconcile the remaining upstream NFS connection-object surface and direct
-  session/member parity; the local live-client object/close boundary, bounded
+  session/member parity; the local live-client object/close boundary, both
+  N-API session `destroy()` operations, bounded
   `maxHandles`/NFSv4 pinning policy, bounded v4 channel/state knobs, and
   deterministic static NFSv4 owner map, lease expiry enforcement, and
   request-level `onError` callback now pass. Dynamic owner callbacks and the
@@ -55,6 +56,7 @@ semantics.
 | 2026-09-22 | NFS request error callback parity | Rust `NfsSessionHooks` and N-API `NfsServerOptions.onError` now report ordinary status failures and decoded XDR/dispatch failures; decoded calls, panic isolation, generated typing, and live N-API delivery are covered; complete NFS target passes 37 unit, rootless wire 1, transport concurrency 1, transport errors 4, v4 barrier 1, and v4 wire 6, with release build/typecheck and live server integration green | Dynamic ID-map callbacks, N-API clock injection, native Linux v4.1, hosted lifecycle, and crash/durability remain external gates |
 | 2026-09-22 | NFSv4 dynamic owner and clock callbacks | Rust `Nfs4IdMap` now supports panic-isolated synchronous name/id callbacks, and the N-API `nfs4.idmap.nameOf`/`idOf` plus `nfs4.now` callbacks are retained and released with the server; a live N-API v4.1 `EXCHANGE_ID`/`CREATE_SESSION`/`GETATTR`/`SETATTR` sequence observed owner and group callback arguments, translated names, reverse translations, and injected clock calls. The complete locked NFS target passes 38 unit, rootless wire 1, transport concurrency 1, transport errors 4, v4 barrier 1, and v4 wire 6; release build, generated typecheck, live server integration, pinned NFS codec differential, and strict affected Clippy pass | Full upstream state/member matrix, native Linux v4.1, hosted lifecycle, and cross-process crash/cancellation/concurrency/durability remain external gates |
 | 2026-09-22 | bounded NFS close cancellation | A new real-TCP lifecycle target drives MOUNT into a blocked `FsDriver::stat` and proves both `NfsConnection::close()` and `NfsServer::close()` cancel the request worker, retire the active connection, and return within 250 ms; 2/2 pass. The recorded hosted native-NFS jobs for run `35650924001` were cancelled, so they are not promoted to acceptance evidence. | Full upstream state/member matrix, native Linux v4.1, a completed hosted lifecycle run, and cross-process crash/concurrency/durability remain external gates |
+| 2026-09-22 | N-API session destroy parity | `NfsSession.destroy()` now tears down both shared v3/v4 sessions and `Nfs4Session.destroy()` tears down v4 state; generated declarations, direct runtime assertions, and TypeScript assignments pass alongside the release addon, live N-API server integration, pinned codec differential, and strict affected Clippy | Remaining upstream `driver`/`options`/direct-v3 member differences, native Linux v4.1, a completed hosted lifecycle run, and cross-process crash/concurrency/durability remain external gates |
 
 ## Exact commands and gate boundaries
 
@@ -71,8 +73,8 @@ semantics.
   v3/v4 routing, callback-backed v4.1 `EXCHANGE_ID`/`CREATE_SESSION`, owner
   `GETATTR`/`SETATTR`, injected clock calls, shared handle snapshots, active
   connection count, live client identity/peer/session views, connection
-  close/wait, malformed record reporting, request-level NFS `onError` delivery,
-  and destroyed-state cleanup.
+  close/wait, direct v3/v4 session destruction, malformed record reporting,
+  request-level NFS `onError` delivery, and destroyed-state cleanup.
 - `(cd integrations/mount-rs-napi && node test/nfs-codec.mjs)` — PASS for the
   root/`./nfs` export identity checks and the complete pinned byte differential
   against `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, including

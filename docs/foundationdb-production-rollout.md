@@ -322,9 +322,11 @@ node scripts/verify-w07-production-config.mjs \
   tests/foundationdb/production-config-policy.json
 ```
 
-The dedicated hosted qualification workflow runs both fixtures. A
+The dedicated hosted qualification workflow runs the positive fixture plus
+the inline-secret and invalid-lease-TTL negative fixtures. A
 `W07_PRODUCTION_CONFIG_POLICY_PASS` line is only static deployment-shape
-evidence: the verifier does not open FoundationDB or RustFS, cannot prove
+evidence; it now requires an explicit positive lease TTL bounded to 24 hours,
+but the verifier does not open FoundationDB or RustFS, cannot prove
 ACLs, certificate trust, replication, backups, capacity, monitoring or owner
 approval, and does not change the **NO-GO** decision.
 
