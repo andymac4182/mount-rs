@@ -1790,6 +1790,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   authorization, graceful reopen and scoped object cleanup. Ozone remains
   loopback-only, non-secure and not production replicated-durability
   acceptance.
+- W26.4 follow-up expands the per-drive IOPS qualification matrix to explicit
+  SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 benchmark rows. The Ozone
+  composition invokes every row; each configured provider is held to the
+  1,000-IOPS minimum and absent provider prerequisites are retained as explicit
+  skips. Local benchmark unit/syntax checks, no-credential skip output and a
+  rebuilt current N-API chunked lifecycle pass; terminal hosted IOPS artifacts
+  and provider-specific topologies remain open.
 
 ### W26 production-rollout readiness (post-demo; currently NO-GO)
 
@@ -1805,13 +1812,13 @@ qualification packet alone. W26 has CI only and no staging environment.
 | --- | --- | ---: | --- |
 | P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
 | P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
-| P2 — all-feasible-provider Ozone CI matrix | Ozone CI matrix wired; terminal evidence pending | 30% | SQLite/PGlite and durable TiDB lanes are retained; `ozone-foundationdb` now provides the dedicated durable FoundationDB lane, which still needs a terminal retained result |
+| P2 — all-feasible-provider Ozone CI matrix | Ozone provider matrix expanded; terminal evidence pending | 40% | Benchmark rows now cover SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with configuration-gated skips; existing composition lanes remain provider-specific and each configured row still needs terminal retained evidence |
 | P3 — authentication, TLS, secrets and redaction | Local transport boundary hardened; secure integration open | 50% | Static and runtime R2/Ozone validation rejects malformed, credential-bearing and remote plaintext-HTTP endpoints before client construction; HTTP config/runtime now reject non-loopback binds and require a TLS reverse proxy for remote clients; secure endpoint/auth, least privilege, rotation and full negative-path evidence remain open |
 | P4 — durability/storage failure contract | Partial qualification | 10% | CI client recovery/error evidence plus customer Ozone replication/storage requirements |
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
 | P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |
 | P7 — integration observability and error contract | Local HTTP/OTLP telemetry evidence passed; production integration open | 30% | `mount-rs-http` passed 8 unit and 10 integration tests; OTLP-enabled HTTP passed 11 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection/listing behavior; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
-| P8 — 1,000 IOPS per-drive CI workload | CI gate implemented; hosted result pending | 10% | Existing benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000; Ozone composition CI is wired for 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live evidence is blocked by missing PGlite/N-API prerequisites. |
+| P8 — 1,000 IOPS per-drive CI workload | Per-provider CI gate implemented; hosted result pending | 25% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider; Ozone CI requests SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live Ozone evidence is blocked by missing service credentials/provider topologies. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
 | P10 — security, privacy, tenancy and audit | Threat-model checkpoint and local controls recorded; final review open | 35% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and directory entry/response-byte limit tests pass locally; strict workspace Clippy is green; the core `FsDriver::readdir` API remains vector-based and provider-side pagination is still open; standard scan `943a7c01-e25f-48ee-952f-040b7421e80d` remains running on older revision `f54dff8`, and provenance, secure Ozone auth/rotation and final security evidence remain open |
 | P11 — end-to-end client/platform matrix | HTTP path added to Ozone CI; full matrix open | 25% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; native mounts, every advertised platform, and terminal hosted evidence remain open |
