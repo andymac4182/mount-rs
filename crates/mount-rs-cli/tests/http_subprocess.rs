@@ -3,6 +3,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -15,6 +16,8 @@ struct HttpResponse {
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
+
+static TEMP_ROOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 impl HttpResponse {
     fn header(&self, name: &str) -> Option<&str> {
@@ -244,8 +247,11 @@ fn temporary_root() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock")
         .as_nanos();
-    let root =
-        std::env::temp_dir().join(format!("mount-rs-cli-http-{}-{nanos}", std::process::id()));
+    let sequence = TEMP_ROOT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root = std::env::temp_dir().join(format!(
+        "mount-rs-cli-http-{}-{nanos}-{sequence}",
+        std::process::id()
+    ));
     fs::create_dir(&root).expect("create HTTP test directory");
     root
 }
