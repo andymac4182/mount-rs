@@ -208,6 +208,15 @@ impl P9Session {
             .cloned()
     }
 
+    /// Return this session's handle on the shared byte-range lock table.
+    ///
+    /// The clone preserves the client id, so inspection or explicit lock
+    /// operations through the public handle affect the same ownership that
+    /// protocol requests and teardown use.
+    pub fn lock_client(&self) -> P9LockClient {
+        self.inner.locks.clone()
+    }
+
     /// Answer one complete frame. Malformed framing has no trustworthy tag and
     /// therefore returns `None`; malformed bodies are addressed with `Rlerror`.
     pub async fn handle_call(&self, bytes: &[u8]) -> Option<Vec<u8>> {

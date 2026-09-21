@@ -26,7 +26,9 @@ pub mod wire;
 
 pub use constants::*;
 pub use fids::{Fid, FidOpenState, FidTable, qid_type, qid_version, walk_step};
-pub use locks::{P9LockClient, P9LockRequest, P9LockTable, P9LockTableOptions};
+pub use locks::{
+    P9Lock, P9LockClient, P9LockHolder, P9LockRequest, P9LockTable, P9LockTableOptions,
+};
 pub use mount::{
     MountEntry, P9ClientProbe, P9Mount, P9MountOptions, P9MountTarget, P9MountTransport,
     P9Platform, mount_9p, p9_client_probe, p9_mount_options, p9_platform, parse_mount_table,

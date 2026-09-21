@@ -15,7 +15,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | Gate | State | Required evidence |
 | --- | --- | --- |
 | Public 9P exports and protocol behavior | Local PASS; parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, and public-session behavior |
-| Session and connection objects | Local PASS for current exposed members; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, `userFor`, stats/lifecycle, clients, peer, `closed`, attached stream exposure, and identity tests; upstream driver/fid/lock/assertion surfaces remain open |
+| Session and connection objects | Local PASS for current exposed members; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, `userFor`, live `locks`, stats/lifecycle, clients, peer, `closed`, attached stream exposure, and identity tests; upstream driver/fid/assertion/debug surfaces, full fid graph, lock-table option injection, and property-shaped clients remain open |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
 | Linux native 9P | Hosted PASS for the supported Linux lifecycle scope; crash/reset/half-close recovery is outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2` passed `9p`/`9pnet_fd` probing and all four ignored native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Earlier failure/cancellation records remain below as history |
@@ -42,11 +42,13 @@ upstream stream/attach contract or hosted native mount behavior.
   claimed.
 - Native Tokio listener connections deliberately expose no transferable Node
   `Duplex`; callers needing a Node stream use `P9Server.attach`. The N-API
-  low-level session now exposes scalar `options` and `userFor(fid)` in addition
-  to direct call/destroy, stats, and lifecycle. Upstream `driver`, `fids`,
-  `locks`, assertion/debug, property-shaped `clients`, and 9P mount/barrel
-  helpers remain applicable parity work; they are not silently accepted out of
-  scope.
+  low-level session now exposes scalar `options`, `userFor(fid)`, and a live
+  `locks` client in addition to direct call/destroy, stats, and lifecycle. The
+  standalone `P9LockTable`/`P9LockClient` surface is transport-backed and
+  tested for conflict, ownership, rename, and release. Upstream `driver`,
+  `fids`, assertion/debug, full fid graphs, lock-table option injection,
+  property-shaped `clients`, and 9P mount/barrel helpers remain applicable
+  parity work; they are not silently accepted out of scope.
 - Graceful server close, external unmount, and retryable unmount are in scope;
   the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
@@ -71,6 +73,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | 2026-09-22 | Cancellation-safe unmount and supported-scope boundary | `P9Mount::unmount()` now has cancellation-safe mutex serialization and remains callable after `wait_closed()` resource teardown; the README and tracker define Linux-native, Node-attach, graceful-close, and supervisor-owned crash/reset boundaries. Focused 9P tests 28/28, strict Clippy and formatting pass locally | Hosted verification of the unmount fix remains required; unsupported crash/reset/half-close recovery is not a production claim |
 | 2026-09-22 | Stable hosted Linux 9P qualification | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at exact SHA `431affd660391a0b8ed99815e389ffe12ad229c2`, passed kernel-module probing and the four ignored native tests; the log reports `4 passed; 0 failed`, including `native_linux_server_close_releases_kernel_connection` | Public parity remained partial at that revision, and the overall W01/release decision remains NO-GO; crash/reset/half-close recovery is supervisor-owned rather than a library claim |
 | 2026-09-22 | N-API P9 session metadata parity | `pnpm --dir integrations/mount-rs-napi build:debug`, `node test/typecheck.mjs`, `node test/p9-session-metadata.mjs`, `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/9p-codec.mjs` (44 typed cases), `./scripts/cargo-shared fmt --all -- --check`, `./scripts/cargo-shared test -p mount-rs-9p --all-targets --locked` (28 ordinary tests), and strict `./scripts/cargo-shared clippy -p mount-rs-napi -p mount-rs-9p --all-targets --locked -- -D warnings` passed. `node test/servers.mjs` could not reach its P9 phase because this host's unrelated NFS listener cleanup/relisten returned `Operation not permitted` | `P9Server.options`, `P9Session.options`, and `P9Session.userFor` are now evidenced; upstream driver/fid/lock/assertion/debug/mount/barrel surfaces and the property-shaped `clients` contract remain open; production NO-GO |
+| 2026-09-22 | N-API P9 lock surface parity | `pnpm --dir integrations/mount-rs-napi build:debug`, `node test/typecheck.mjs`, `node test/p9-locks.mjs`, `node test/p9-session-metadata.mjs`, `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/9p-codec.mjs` (44 typed cases), `./scripts/cargo-shared fmt --all -- --check`, `./scripts/cargo-shared test -p mount-rs-9p --all-targets --locked`, and isolated strict `CARGO_TARGET_DIR=/private/tmp/mount-rs-clippy-w01-20260922 ./scripts/cargo-shared clippy -p mount-rs-napi -p mount-rs-9p --all-targets --locked -- -D warnings` passed. The lock test proved grant/conflict/rename/release/inspection, and the session test proved its lock client shares authoritative transport state | `P9LockTable`/`P9LockClient` are now transport-backed; upstream driver/fid/assertion/debug/full fid graph, lock-table option injection, property-shaped `clients`, and 9P mount/barrel surfaces remain open; production NO-GO |
 
 ## Completion rule
 

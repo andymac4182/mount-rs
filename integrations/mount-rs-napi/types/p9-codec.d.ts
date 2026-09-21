@@ -37,6 +37,15 @@ export declare const P9_QID_SIZE: 13
 export declare const P9_MAX_STRING: 65535
 export declare const P9_MAX_ITEM: 16777216
 export declare const P9_DEFAULT_MAX_FRAME: 1048576
+export declare const P9_LOCK_TYPE_RDLCK: 0
+export declare const P9_LOCK_TYPE_WRLCK: 1
+export declare const P9_LOCK_TYPE_UNLCK: 2
+export declare const P9_LOCK_SUCCESS: 0
+export declare const P9_LOCK_BLOCKED: 1
+export declare const P9_LOCK_ERROR: 2
+export declare const P9_LOCK_GRACE: 3
+export declare const P9_LOCK_FLAGS_BLOCK: 1
+export declare const P9_LOCK_FLAGS_RECLAIM: 2
 
 export declare class P9Reader {
   constructor(bytes: Uint8Array, offset?: number)

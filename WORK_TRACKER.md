@@ -14,10 +14,12 @@ attached connection identity/peer/stream/closed state (including the native
 `null` versus attached-stream `undefined` peer boundary), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. It now also exposes the effective scalar server/session policy and
-`P9Session.userFor(fid)`, with generated declarations and an attach-only runtime
-check; the upstream driver/fid/lock/assertion/debug graphs, property-shaped
-`clients` contract, and 9P mount/barrel helpers remain open rather than being
-silently narrowed away. The transport now also broadcasts shutdown safely
+`P9Session.userFor(fid)`, a live transport-backed `P9Session.locks` client, and
+the public `P9LockTable`/`P9LockClient` surface, with generated declarations and
+attach/runtime lock checks; the upstream driver/fid/assertion/debug graphs,
+full fid graph, lock-table option injection, property-shaped `clients` contract,
+and 9P mount/barrel helpers remain open rather than being silently narrowed
+away. The transport now also broadcasts shutdown safely
 across the accept loop and all connections, closes the active-connection
 accept-loop race, and
 reaps completed request tasks while reporting task failures; its in-flight
