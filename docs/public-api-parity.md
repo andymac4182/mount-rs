@@ -41,9 +41,9 @@ described as a complete session or native-mount implementation.
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR`/`SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/`ACCESS`/`FALLOCATE`/`LSEEK`/`GETLK`/`SETLK`/`SETLKW` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
-| NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway and N-API object expose bounded drain, live connection and peer-aware transport-hook state, plus shared buffered/streaming session methods, safe effective options, bucket wrappers, and debug-gated assertions; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, while several oracle members remain absent | **PARTIAL** |
+| NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway and N-API object expose bounded drain, live connection and peer-aware transport-hook state, plus shared buffered/streaming session methods, safe effective options, bucket wrappers, and debug-gated assertions; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, supported server/session callable members, and class 1/2/3 direct-method coverage, while several oracle members remain outside scope | **PARTIAL** |
 | S3 Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; the supported Node `./s3` boundary is the N-API server/session facade, while the oracle's pure codec/helper barrel is explicitly Rust-owned | **PARTIAL; SCOPED** |
-| WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings, read-only active lock records, and direct LOCK/UNLOCK, cancellation, and body-error coverage; the oracle-only `now`, `onAssertion`, and live lock-table controls are explicitly outside the supported N-API scope; broader member parity remains open | **PARTIAL** |
+| WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings, read-only active lock records, and direct LOCK/UNLOCK, cancellation, and body-error coverage; the supported server/session callable-member and class 1/2/3 direct-method differentials pass; the oracle-only `now`, `onAssertion`, and live lock-table controls are explicitly outside the supported N-API scope; broader member parity remains open | **PARTIAL** |
 | CLI | Rust CLI constructs drivers through `mount-rs-sdk` and exposes a real `sdk-self-test`/durable-reopen path; Node CLI uses the N-API SDK for direct and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
 The oracle source used for comparison is local and immutable for this audit;
@@ -385,7 +385,7 @@ matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
 return, deliberate request-body failure mapping, one typed peer-aware callback
 from a Node socket reset, one malformed-HTTP callback, and same-driver server
 recreation preserving file bytes while resetting session locks. It also
-completes eight parallel unique-file PUT/GET requests through one direct
+completes 32 parallel unique-file PUT/GET requests through one direct
 session with exact body readback; this is in-process same-driver evidence only.
 The pinned TypeScript-vs-Rust loopback HTTP differential also passes all 40
 paired S3+WebDAV cases, including 16 authenticated WebDAV cases covering
@@ -409,8 +409,10 @@ is kept request-owned, with N-API exposing safe expiry-aware snapshots instead
 of out-of-band mutators that could bypass WebDAV token/ownership checks. The
 Rust clock boundary is covered by
 `./scripts/cargo-shared test -p mount-rs-webdav --test webdav --locked injected_session_clock_controls_lock_expiry_deterministically`.
-These are accepted supported-scope decisions for N-API; broader session/server
-differential, listener, provider/native, restart, and hosted gates remain open.
+These are accepted supported-scope decisions for N-API; the supported
+session/server callable-member and class 1/2/3 direct-method differentials now
+pass, while broader member, listener, provider/native, restart, and hosted
+gates remain open.
 The Rust listener lifecycle itself is locally qualified by concurrent
 `listen()` serialization, an immediate `listen()`/`close()` shutdown-wakeup
 regression, and a bounded-drain regression: a stalled partial request keeps a
@@ -421,7 +423,7 @@ Clippy and formatting. The N-API WebDAV wrapper also serializes its
 closed-state check with the transport lifecycle; a rebuilt 40-iteration
 real-loopback race test passes. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
-host-enabled WebDAV network/fault/restart matrix, and a focused 16-pair live
+host-enabled WebDAV network/fault/restart matrix, and a focused 32-pair live
 HTTP network-concurrency/authentication/streaming test; hosted network
 concurrency and hosted lifecycle remain open.
 The shared postbuild server facade keeps close idempotent while in flight but
@@ -433,8 +435,9 @@ power-loss, and hosted lifecycle acceptance remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full
-session/server member parity, listener, provider/native, restart, and hosted
-gates remain open.
+session/server member parity beyond the supported callable/member and direct
+method surface, listener, provider/native, restart, and hosted gates remain
+open.
 
 ### P2 — CLI parity: PARTIAL; UNVERIFIED
 

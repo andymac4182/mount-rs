@@ -276,7 +276,7 @@ surfaces.
 | Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
 | Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, root `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
 | NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with v3/v4-aware direct request routing, shared v3/v4 counters and sorted BigInt handle snapshots, a v4 session view, mounts, destroyed state, live connection objects/count, and close/wait lifecycle; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; the full upstream object/session/handle/attach surface and native qualification remain | 75% | — |
-| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection, direct peer-reset, lock-conflict, expiry, malformed-request, same-driver recreation, and same-session parallel-request evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and S3 also exposes safe effective options, bucket wrappers, debug-gated assertions, direct Node peer-fault delivery, and incremental `handleRequestStream` bodies with cancellation and async metrics; the WebDAV subpath now exposes pinned constants/status tables, protocol/XML/lock helpers, active lock-record and recursive owner views, and streamed request/response body bindings with direct class 1/2/3 method, LOCK/UNLOCK, cancellation, and error coverage; its pure pinned oracle differential also passes; complete option/member parity, live providers, and native/hosted lifecycle remain | 78% | — |
+| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection, direct peer-reset, lock-conflict, expiry, malformed-request, same-driver recreation, and same-session parallel-request evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and S3 also exposes safe effective options, bucket wrappers, debug-gated assertions, direct Node peer-fault delivery, and incremental `handleRequestStream` bodies with cancellation and async metrics; the WebDAV subpath now exposes pinned constants/status tables, protocol/XML/lock helpers, active lock-record and recursive owner views, and streamed request/response body bindings with direct class 1/2/3 method, LOCK/UNLOCK, cancellation, and error coverage; its supported callable/member and pure pinned oracle differentials also pass; broader option/member parity, live providers, and native/hosted lifecycle remain | 78% | — |
 | CLI parity and native consumer behavior | Partial | SDK-backed Rust/Node CLI and macOS NFS self-tests pass; exact oracle/native/hosted coverage remains | 65% | — |
 
 Latest W01.1 action: the shared `useDriverIno` option was added to the public
@@ -357,17 +357,19 @@ large WebDAV response delivers one typed peer-aware transport callback, and an
 isolated malformed request delivers one typed peer-aware callback. An
 unsubmitted-token write returns `423` before a one-second lock expires and is
 removed. The active lock view now also preserves the recursive namespaced owner
-XML tree, including predefined entity text. Eight parallel unique-file PUTs and
-GETs through one direct WebDAV session also pass with byte-for-byte readback;
-this is in-process same-driver concurrency evidence only. Complete
-session/member parity remains open, but the three oracle-only controls are now
+XML tree, including predefined entity text. Thirty-two parallel unique-file
+PUTs and GETs through one direct WebDAV session also pass with byte-for-byte
+readback; this is in-process same-driver concurrency evidence only. The
+supported session/server callable-member and class 1/2/3 direct-method
+differentials now pass, while broader session/member parity remains open; the
+three oracle-only controls are now
 an explicit supported-scope decision rather than an unrecorded gap: N-API does
 not expose a synchronous JavaScript `now` callback, a callback for the current
 transport's unreachable assertion sites, or out-of-band mutators for the
 session-owned live `DavLockTable`; the Rust transport's injected clock and
 exact expiry boundary are covered by a deterministic test. `stats.methods` now
-has the oracle's `Map<string, number>` shape. Direct
-listener lifecycle, network/hosted concurrency, and the external
+has the oracle's `Map<string, number>` shape. Direct listener lifecycle and
+local network concurrency are qualified; hosted concurrency and the external
 provider/restart gates also remain open. The explicit ignored macOS native WebDAV
 harness now passes its mount, I/O, and cleanup round-trip locally. At exact
 scope-packet SHA `e13c52bea3485fada8be03ed62fba9a107255507`, hosted CI run
@@ -386,7 +388,8 @@ WebDAV barrel/protocol differential now passes with
 also passes all 40 paired TypeScript/Rust S3+WebDAV cases, including 16
 authenticated WebDAV HTTP cases covering streaming PUT, XML properties,
 ranges, conditional GET, PROPFIND, COPY/MOVE, refusal, missing-resource, and
-DELETE behavior. Broader N-API session/server member differential remains
+DELETE behavior. The supported callable/member and class 1/2/3 direct-method
+differentials pass; broader N-API session/server member differential remains
 open. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)

@@ -140,9 +140,18 @@ try {
   assert.equal(typeof nativeServer.listen, "function", "native listen member")
   assert.equal(typeof nativeServer.close, "function", "native close member")
   assert.equal(typeof nativeServer[Symbol.asyncDispose], "function", "native asyncDispose member")
+  assert.equal(typeof nativeSession.handleRequest, "function", "native buffered session member")
+  assert.equal(typeof nativeSession.handleRequestStream, "function", "native streamed session member")
   assert.equal(typeof oracleServer.listen, "function", "oracle listen member")
   assert.equal(typeof oracleServer.close, "function", "oracle close member")
   assert.equal(typeof oracleServer[Symbol.asyncDispose], "function", "oracle asyncDispose member")
+  assert.equal(typeof oracleSession.handleRequest, "function", "oracle buffered session member")
+
+  for (const key of ["driver", "options", "stats", "assertions", "locks"]) {
+    assert.ok(key in nativeSession, `native session member ${key}`)
+    assert.ok(key in oracleSession, `oracle session member ${key}`)
+  }
+  assert.ok("lockCount" in nativeSession, "native session member lockCount")
 
   for (const key of ["realm", "readChunkBytes", "maxXmlBytes", "maxBodyBytes", "debug"]) {
     assert.equal(nativeSession.options[key], oracleSession.options[key], `session option ${key}`)
