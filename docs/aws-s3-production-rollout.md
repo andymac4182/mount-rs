@@ -152,6 +152,15 @@ recovery, DR, and operational sign-off remain open.
   passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted.
   This remains qualification-account and local-metadata evidence only, not
   production deployment acceptance.
+- The latest pushed source `870348184b5a047faea01f584a68cb961b34f810` passed a
+  fresh authorized `myroot` qualification on 2026-09-22 under
+  `mount-rs-tests/aws-s3/20260921T183403Z-86652-1728a866a9affcd4348775aa8416f075`:
+  sibling-prefix denial, public SDK/CLI self-test, composed AWS S3 filesystem,
+  process reopen, independent PGlite metadata, writer fencing, PGlite
+  backup/restore, fresh-server reopen, and exact owned-prefix cleanup all
+  passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted.
+  This remains qualification-account and local-metadata evidence only, not
+  production deployment acceptance.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
@@ -191,6 +200,12 @@ bucket-policy contract/tamper cases, seven-case CI-input validator, and
 three-case protected-environment fixture all passed locally. These safeguards
 prove fail-closed validation only; they do not approve external GitHub or AWS
 deployment state.
+The same four fixtures passed again at current pushed source
+`f950e5b87092504cc43a8f68a7fcc07098abc345` on 2026-09-22:
+`AWS_S3_TEMPLATE_CONTRACT_PASS`, `AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`,
+`AWS_S3_CI_CONFIG_TEST_PASS cases=7`, and
+`AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`. This is still fail-closed local
+validation only; it does not approve external GitHub or AWS resources.
 Validation does not approve
 the production parameters, role trust policies, metadata topology, backup
 plan, or deployment promotion. Those remain W25.5-W25.9 gates.
