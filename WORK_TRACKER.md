@@ -2965,8 +2965,18 @@ listing a source does not mean it has been reviewed or its code can be reused.
   missing GitHub OIDC provider, and missing immutable-subject role trust; it
   made no changes. A current-source rerun at pushed source
   `cf18d93d7fdd1656d853f208db81b8b133265fe5` returned the same blocked set and
-  made no changes. The
-  workflow now has a secret-safe preflight validator that blocks
+  made no changes.
+- [x] A current read-only rerun at pushed source
+  `ce7b365a45f718009f557035d2549fd0faf2c8a8` through the authenticated
+  `myroot` profile on 2026-09-22 returned the same fail-closed blocker set:
+  `environment_missing_protection_rule`,
+  `environment_missing_protected_branch_policy`,
+  `environment_missing_non_self_review_required_reviewer`, the four missing
+  protected environment inputs/secret, `missing_github_oidc_provider`, and
+  `role_missing_immutable_github_subject_trust`. It made no GitHub or AWS
+  changes; hosted OIDC evidence remains blocked until the deployment owner
+  configures and approves those controls.
+  The workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free seven-case regression matrix covers valid, missing,
   account-mismatch, endpoint, unsafe-prefix, static-credential, and profile-
