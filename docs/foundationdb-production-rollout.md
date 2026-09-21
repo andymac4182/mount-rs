@@ -379,6 +379,15 @@ but the verifier does not open FoundationDB or RustFS, cannot prove
 ACLs, certificate trust, replication, backups, capacity, monitoring or owner
 approval, and does not change the **NO-GO** decision.
 
+The hosted log verifier also requires the exact accepted configuration shape,
+both expected negative-fixture markers and a parsed lease-publication policy
+whose publication interval is shorter than its TTL, whose forward-jump bound
+does not exceed that TTL, and whose TTL is at most 24 hours. The credential-free
+`scripts/test-w07-qualification-log.mjs` step exercises valid evidence plus
+missing-negative-fixture, unsafe-cadence and unbounded-config cases. These are
+evidence-integrity checks only; they do not create production credentials,
+identity, failover, backup, capacity or owner evidence.
+
 The same workflow also runs
 `scripts/verify-w07-rollout-ledger.mjs`. Its
 `W07_ROLLOUT_LEDGER_POLICY_PASS` marker is an internal consistency guard: while

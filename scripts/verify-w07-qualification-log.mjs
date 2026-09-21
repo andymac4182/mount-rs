@@ -38,12 +38,17 @@ const requiredMarkers = [
   [
     "config-policy-pass",
     "W07_PRODUCTION_CONFIG_POLICY_PASS",
-    /W07_PRODUCTION_CONFIG_POLICY_PASS\b/u,
+    /W07_PRODUCTION_CONFIG_POLICY_PASS config_shape=splitstore metadata=foundationdb durable_metadata=true durable_blocks=true lease_authority=shared-provider lease_ttl=explicit-bounded blocks_tls=https secrets=external\b/u,
   ],
   [
     "config-policy-negative",
     "W07_PRODUCTION_CONFIG_POLICY_FAIL",
     /W07_PRODUCTION_CONFIG_POLICY_FAIL reason=config\.driver\.storage\.blocks\.secret_access_key-must-not-be-inline\b/u,
+  ],
+  [
+    "config-policy-negative-lease-ttl",
+    "W07_PRODUCTION_CONFIG_POLICY_FAIL",
+    /W07_PRODUCTION_CONFIG_POLICY_FAIL reason=storage\.lease_ttl_ms-must-be-positive-safe-integer-at-most-24h\b/u,
   ],
   [
     "lease-publication-policy",
@@ -100,6 +105,34 @@ const found = Object.fromEntries(
     return [name, line ? marker(line, token) : null];
   }),
 );
+
+const leasePolicyPattern =
+  /FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS lease_ttl_ms=(\d+) publication_interval_ms=(\d+) max_forward_jump_ms=(\d+)\b/u;
+const leasePolicyLine = findLine(leasePolicyPattern);
+const leasePolicyMatch = leasePolicyLine?.match(leasePolicyPattern);
+const leasePolicy = leasePolicyMatch
+  ? {
+      marker: marker(leasePolicyLine, "FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS"),
+      leaseTtlMs: Number(leasePolicyMatch[1]),
+      publicationIntervalMs: Number(leasePolicyMatch[2]),
+      maxForwardJumpMs: Number(leasePolicyMatch[3]),
+    }
+  : null;
+
+if (
+  leasePolicy &&
+  (!Number.isSafeInteger(leasePolicy.leaseTtlMs) ||
+    !Number.isSafeInteger(leasePolicy.publicationIntervalMs) ||
+    !Number.isSafeInteger(leasePolicy.maxForwardJumpMs) ||
+    leasePolicy.leaseTtlMs <= 0 ||
+    leasePolicy.leaseTtlMs > 24 * 60 * 60 * 1000 ||
+    leasePolicy.publicationIntervalMs <= 0 ||
+    leasePolicy.publicationIntervalMs >= leasePolicy.leaseTtlMs ||
+    leasePolicy.maxForwardJumpMs <= 0 ||
+    leasePolicy.maxForwardJumpMs > leasePolicy.leaseTtlMs)
+) {
+  missing.push("lease-policy-values");
+}
 
 const soakPattern = new RegExp(
   `FOUNDATIONDB_SOAK_PASS rounds=${expectedRounds}\\b`,
@@ -215,6 +248,7 @@ const summary = {
   result: "qualification-pass",
   expectedSoakRounds: expectedRounds,
   markers: found,
+  leasePolicy,
   latency,
   provenance,
 };
