@@ -45,6 +45,8 @@ type HandleReadArgs = FnArgs<(Uint8Array, f64, f64, Option<f64>)>;
 type HandleWriteArgs = FnArgs<(Uint8Array, f64, f64, Option<f64>)>;
 type HandleLengthArgs = FnArgs<(f64,)>;
 type NoArgs = ();
+type OpenFuture<'a> =
+    Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + 'a>>;
 
 #[napi(object)]
 pub struct JsUtimensOptions {
@@ -1593,12 +1595,7 @@ fn encode_open_flags(flags: OpenFlags, path: &str) -> CoreResult<f64> {
 }
 
 impl JsDriver {
-    fn open_with_flags(
-        &self,
-        path: &str,
-        flags: Either<String, f64>,
-        mode: u32,
-    ) -> Pin<Box<dyn Future<Output = CoreResult<Arc<dyn CoreFileHandle>>> + Send + '_>> {
+    fn open_with_flags(&self, path: &str, flags: Either<String, f64>, mode: u32) -> OpenFuture<'_> {
         let lifecycle = Arc::clone(&self.lifecycle);
         let callback = self.callbacks.open.clone();
         let parse_lifecycle = Arc::clone(&self.lifecycle);
