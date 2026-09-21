@@ -628,6 +628,119 @@ async fn request_body_limit_is_enforced_without_unbounded_buffering() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stalled_request_body_is_terminated_by_the_request_timeout() {
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new("memory", Arc::new(MemoryFs::empty()), MEMORY_TOKEN)
+                .expect("drive config"),
+        )
+        .expect("drive registration");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            request_timeout: Duration::from_millis(50),
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+
+    let mut socket = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("stalled PUT socket");
+    socket
+        .write_all(
+            format!(
+                "PUT /v1/drives/memory/fs/stalled HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx",
+                bearer(MEMORY_TOKEN)
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("partial PUT request");
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(1), socket.read_to_end(&mut response))
+        .await
+        .expect("stalled PUT timeout response")
+        .expect("stalled PUT response read");
+    let response = String::from_utf8_lossy(&response);
+    assert!(response.starts_with("HTTP/1.1 408"), "response: {response}");
+    assert!(response.contains("\"code\":\"EIO\""));
+    assert!(response.contains("connection: close"));
+
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_limit_rejects_excess_idle_connections() {
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new("memory", Arc::new(MemoryFs::empty()), MEMORY_TOKEN)
+                .expect("drive config"),
+        )
+        .expect("drive registration");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            max_connections: 1,
+            request_timeout: Duration::from_secs(5),
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+
+    let mut first = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("first connection");
+    first
+        .write_all(
+            format!(
+                "PUT /v1/drives/memory/fs/held HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx",
+                bearer(MEMORY_TOKEN)
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("held request");
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while server.connections() != 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first connection did not become active");
+
+    let mut second = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("second connection");
+    second
+        .write_all(
+            format!(
+                "GET /v1/drives HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: {}\r\nConnection: close\r\n\r\n",
+                bearer(MEMORY_TOKEN)
+            )
+            .as_bytes(),
+        )
+        .await
+        .expect("second request");
+    let mut response = Vec::new();
+    let read_result =
+        tokio::time::timeout(Duration::from_secs(1), second.read_to_end(&mut response))
+            .await
+            .expect("excess connection was not closed");
+    assert!(
+        read_result.is_err() || response.is_empty(),
+        "response: {response:?}"
+    );
+
+    drop(first);
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn immediate_close_is_race_free_and_idempotent() {
     for _ in 0..32 {
         let mut registry = DriveRegistry::new();

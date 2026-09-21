@@ -605,6 +605,8 @@ fn http_server_options(config: &HttpServiceConfig) -> HttpServerOptions {
         max_request_bytes: config.max_request_bytes,
         read_chunk_bytes: config.read_chunk_bytes,
         drain_timeout: Duration::from_millis(config.drain_timeout_ms),
+        max_connections: config.max_connections,
+        request_timeout: Duration::from_millis(config.request_timeout_ms),
         #[cfg(feature = "observability")]
         telemetry: mount_rs_observability::global(),
     }

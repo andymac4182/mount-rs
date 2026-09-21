@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::hash::{BuildHasher, RandomState};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,8 @@ const DEFAULT_HTTP_PORT: u16 = 0;
 const DEFAULT_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
 const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_HTTP_MAX_CONNECTIONS: usize = 256;
+const DEFAULT_HTTP_REQUEST_TIMEOUT_MS: u64 = 30_000;
 
 /// Generate a process-and-instance-specific owner for writer fencing. A
 /// constant or PID-only default would let a restarted process, or a later
@@ -129,6 +132,8 @@ pub(crate) struct HttpServiceConfig {
     pub max_request_bytes: usize,
     pub read_chunk_bytes: usize,
     pub drain_timeout_ms: u64,
+    pub max_connections: usize,
+    pub request_timeout_ms: u64,
     pub drives: Vec<HttpDriveConfig>,
 }
 
@@ -350,6 +355,8 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "max_request_bytes",
             "read_chunk_bytes",
             "drain_timeout_ms",
+            "max_connections",
+            "request_timeout_ms",
             "drives",
         ],
         "config.http",
@@ -363,6 +370,12 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         return Err(ConfigError::at(
             "config.http.host",
             "must be non-empty and contain no whitespace",
+        ));
+    }
+    if !is_loopback_http_host(&host) {
+        return Err(ConfigError::at(
+            "config.http.host",
+            "must be a loopback host; use a TLS reverse proxy for remote clients",
         ));
     }
     let port = optional_u16(object, "port", "config.http")?.unwrap_or(DEFAULT_HTTP_PORT);
@@ -381,6 +394,16 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .map(|value| positive_u64(value, "config.http.drain_timeout_ms"))
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_DRAIN_TIMEOUT_MS);
+    let max_connections = object
+        .get("max_connections")
+        .map(|value| positive_usize(value, "config.http.max_connections"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_MAX_CONNECTIONS);
+    let request_timeout_ms = object
+        .get("request_timeout_ms")
+        .map(|value| positive_u64(value, "config.http.request_timeout_ms"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_REQUEST_TIMEOUT_MS);
     let drives = object
         .get("drives")
         .ok_or_else(|| ConfigError::at("config.http.drives", "is required"))?
@@ -411,8 +434,22 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         max_request_bytes,
         read_chunk_bytes,
         drain_timeout_ms,
+        max_connections,
+        request_timeout_ms,
         drives: parsed_drives,
     })
+}
+
+fn is_loopback_http_host(host: &str) -> bool {
+    let normalized = match (host.starts_with('['), host.ends_with(']')) {
+        (true, true) if host.len() > 2 => &host[1..host.len() - 1],
+        (false, false) if !host.contains(['[', ']']) => host,
+        _ => return false,
+    };
+    normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn parse_http_drive(
@@ -1028,7 +1065,7 @@ fn is_local_http_authority(authority: &str) -> bool {
     };
     matches!(
         host,
-        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
+        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal" | "mount-rs-rustfs"
     )
 }
 
@@ -1519,6 +1556,34 @@ mod tests {
             assert!(error.message().contains("endpoint"), "{endpoint}: {error}");
             assert!(!error.message().contains("password"), "{endpoint}: {error}");
         }
+
+        for endpoint in [
+            "http://127.0.0.1:9878",
+            "http://host.docker.internal:9878",
+            "http://mount-rs-rustfs:9000",
+        ] {
+            let config = format!(
+                r#"{{
+                    "version": 1,
+                    "driver": {{
+                        "kind": "splitstore",
+                        "storage": {{
+                            "metadata": {{"kind": "memory"}},
+                            "blocks": {{
+                                "kind": "r2",
+                                "endpoint": "{endpoint}",
+                                "bucket": "mount-rs-tests",
+                                "prefix": "blocks",
+                                "access_key_id": {{"env": "R2_ACCESS_KEY_ID"}},
+                                "secret_access_key": {{"env": "R2_SECRET_ACCESS_KEY"}}
+                            }}
+                        }}
+                    }}
+                }}"#
+            );
+            parse_config_str(&config, Path::new("/tmp/config"))
+                .unwrap_or_else(|error| panic!("{endpoint}: {error}"));
+        }
     }
 
     #[test]
@@ -1857,6 +1922,8 @@ mod tests {
                     "max_request_bytes": 4096,
                     "read_chunk_bytes": 1024,
                     "drain_timeout_ms": 250,
+                    "max_connections": 12,
+                    "request_timeout_ms": 750,
                     "drives": [
                         {
                             "id": "memory",
@@ -1885,6 +1952,8 @@ mod tests {
         assert_eq!(http.max_request_bytes, 4096);
         assert_eq!(http.read_chunk_bytes, 1024);
         assert_eq!(http.drain_timeout_ms, 250);
+        assert_eq!(http.max_connections, 12);
+        assert_eq!(http.request_timeout_ms, 750);
         assert_eq!(http.drives.len(), 2);
         assert_eq!(http.drives[0].token.name, "MOUNT_RS_MEMORY_TOKEN");
         assert_eq!(
@@ -1924,6 +1993,24 @@ mod tests {
         )
         .unwrap_err();
         assert!(unsafe_id.message().contains("1-64 ASCII"));
+    }
+
+    #[test]
+    fn http_config_rejects_non_loopback_hosts() {
+        let error = parse_config_str(
+            r#"{
+                "version": 1,
+                "http": {
+                    "host": "0.0.0.0",
+                    "drives": [
+                        {"id": "memory", "token": {"env": "TOKEN"}, "driver": {"kind": "memory"}}
+                    ]
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("must be a loopback host"));
     }
 
     #[test]

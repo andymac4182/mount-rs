@@ -6,6 +6,8 @@
     "max_request_bytes": 8388608,
     "read_chunk_bytes": 65536,
     "drain_timeout_ms": 5000,
+    "max_connections": 256,
+    "request_timeout_ms": 30000,
     "drives": [
       {
         "id": "memory",
