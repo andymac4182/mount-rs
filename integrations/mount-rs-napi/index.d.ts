@@ -1395,6 +1395,8 @@ export interface JsP9MountOptions {
   claimOwnership?: boolean
   debug?: boolean
   locks?: P9LockTable
+  onError?: (error: unknown, header: NativeP9Header | undefined) => void
+  onAssertion?: (message: string) => void
   mountOptions?: Array<string>
   unmountTimeoutMs?: number
   /**

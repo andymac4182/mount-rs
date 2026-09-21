@@ -31,8 +31,11 @@ exposes Linux-client probing, refusal and option-string helpers, strict named
 `mount9p` delegation, 9P live-mount filtering/cleanup, and mounted
 transport/server/connection/closed views. It accepts a configured native
 `P9Server` and adopts that exact listener, policy, lock table, callbacks, and
-client set. It deliberately does not claim the oracle's signals, extended
-server-policy/session callback fields, or full hosted native-mount lifecycle.
+client set. Direct and automatic mount-created listeners now also receive the
+bounded scalar policy and direct session `onError`/`onAssertion` callbacks from
+the mount option bag; injected shared servers retain their own hooks. It
+deliberately does not claim the oracle's signals, remaining mount controls, or
+full hosted native-mount lifecycle.
 The `./9p`
 constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
@@ -748,7 +751,8 @@ patch):
 | Main | W01 N-API 9P driver and observability parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: live `P9Session.driver`, debug-gated assertion readback/counters, request-error/assertion callbacks, Node error revival, and root/`./9p` factory identity; release build, generated typecheck, focused N-API tests, 31 ordinary 9P tests, formatting, and strict Clippy passed; lock-option, property-shaped clients, mount-helper, and hosted revision gates remain open |
 | Main | W01 N-API 9P property-shaped clients parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Server.clients` is now a generated/property-shaped live array combining native and attached connections; release build, generated typecheck, host-enabled server integration, P9 runtime checks, focused Rust tests, formatting, and strict Clippy passed; lock-option, mount-helper, and hosted revision gates remain open |
 | Main | W01 N-API 9P lock-table option injection parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9ServerOptions.locks` accepts a `P9LockTable`, and injected ranges are shared with native/attached protocol sessions and visible through server/session option handles; release build, generated typecheck, host-enabled server integration, P9 runtime checks, focused Rust tests, formatting, and strict Clippy passed; mount-helper and hosted revision gates remain open |
-| Main | W01 N-API 9P mount-created server policy | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options map scalar server policy and injected lock tables to mount-created listeners, preserving the prior `./9p` probe/refusal/option/helper and configured shared-server behavior; Rust/N-API mapping tests, generated typecheck/build, focused runtime checks, host-enabled server integration, formatting and strict Clippy passed; signals, direct session callback controls and hosted N-API native-mount lifecycle evidence remain open |
+| Main | W01 N-API 9P mount-created server policy | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options map scalar server policy and injected lock tables to mount-created listeners, preserving the prior `./9p` probe/refusal/option/helper and configured shared-server behavior; Rust/N-API mapping tests, generated typecheck/build, focused runtime checks, host-enabled server integration, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
+| Main | W01 N-API 9P mount-created session callbacks | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options carry `onError`/`onAssertion` into mount-created listeners through the existing Rust session-hook path, while configured shared servers retain their own callbacks; debug build, generated typecheck, focused runtime checks, host-enabled server integration, N-API/Rust tests, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2

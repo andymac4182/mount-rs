@@ -59,7 +59,9 @@ use napi::{Error, Status};
 use napi_derive::napi;
 
 use crate::servers::{
-    JsTransportErrorCallback, TransportErrorCallback, fuse_hooks, nfs_hooks, p9_hooks,
+    JsP9AssertionCallback, JsP9SessionErrorCallback, JsTransportErrorCallback, P9AssertionCallback,
+    P9SessionErrorCallback, TransportErrorCallback, fuse_hooks, nfs_hooks, p9_hooks,
+    p9_session_hooks,
 };
 
 const ERROR_MARKER: &str = "__mount_rs_error_v1__";
@@ -1180,6 +1182,10 @@ pub struct JsP9MountOptions {
     pub claim_ownership: Option<bool>,
     pub debug: Option<bool>,
     pub locks: Option<crate::servers::P9LockTable>,
+    #[napi(ts_type = "(error: unknown, header: NativeP9Header | undefined) => void")]
+    pub on_error: Option<JsP9SessionErrorCallback>,
+    #[napi(ts_type = "(message: string) => void")]
+    pub on_assertion: Option<JsP9AssertionCallback>,
     pub mount_options: Option<Vec<String>>,
     pub unmount_timeout_ms: Option<f64>,
     /// Reuse a configured native 9P server. The server must be listening
@@ -2297,6 +2303,14 @@ fn p9_mount_options(
     };
     let mount_msize = p9_mount_msize(options.mount_msize);
     let server_options = p9_mount_server_options(&options)?;
+    let session_error = options
+        .on_error
+        .map(P9SessionErrorCallback::new)
+        .transpose()?;
+    let assertion = options
+        .on_assertion
+        .map(P9AssertionCallback::new)
+        .transpose()?;
     Ok(Some(mount_rs_9p::P9MountOptions {
         server: options
             .server
@@ -2304,6 +2318,7 @@ fn p9_mount_options(
             .transpose()?,
         server_options,
         server_hooks: mount_rs_9p::P9ServerHooks::default(),
+        session_hooks: p9_session_hooks(session_error.as_ref(), assertion.as_ref()),
         transport: parse_p9_mount_transport(options.transport)?,
         host: options.host.unwrap_or(defaults.host),
         port,

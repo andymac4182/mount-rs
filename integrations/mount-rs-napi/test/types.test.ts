@@ -202,6 +202,13 @@ const p9MountConfig: MountP9Options = {
   claimOwnership: true,
   debug: true,
   locks: new P9LockTable({ maxLocksPerFile: 2 }),
+  onError: (error, header) => {
+    void error
+    void header
+  },
+  onAssertion: (message) => {
+    void message
+  },
 }
 const p9Target: P9MountTarget = { trans: "tcp", port: 564 }
 const p9Probe: P9ClientProbe = p9ClientProbe()
