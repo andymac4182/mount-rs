@@ -771,17 +771,32 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
         )),
     };
 
-    if std::panic::AssertUnwindSafe(session.destroy())
-        .catch_unwind()
-        .await
-        .is_err()
-    {
-        failure.get_or_insert_with(|| {
-            FuseTransportError::from_message(
-                FuseTransportErrorKind::Task,
-                "FUSE session cleanup panicked".to_owned(),
-            )
-        });
+    let cleanup = tokio::time::timeout(
+        state.options.unmount_timeout,
+        std::panic::AssertUnwindSafe(session.destroy()).catch_unwind(),
+    )
+    .await;
+    match cleanup {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            failure.get_or_insert_with(|| {
+                FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    "FUSE session cleanup panicked".to_owned(),
+                )
+            });
+        }
+        Err(_) => {
+            failure.get_or_insert_with(|| {
+                FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    format!(
+                        "FUSE session cleanup did not finish within {}ms",
+                        state.options.unmount_timeout.as_millis()
+                    ),
+                )
+            });
+        }
     }
 
     if let Some(error) = failure {
@@ -833,6 +848,17 @@ fn read_task_join_error(error: tokio::task::JoinError) -> FuseTransportError {
         } else {
             format!("FUSE read task failed: {error}")
         },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn read_worker_drain_timeout_error() -> FuseTransportError {
+    FuseTransportError::from_message(
+        FuseTransportErrorKind::Task,
+        format!(
+            "FUSE read worker did not cancel within {}ms",
+            READ_TASK_DRAIN_TIMEOUT.as_millis()
+        ),
     )
 }
 
@@ -990,13 +1016,7 @@ async fn run_session_loop(
                     }
                     Ok(None) => {}
                     Err(_) => {
-                        failure = Some(FuseTransportError::from_message(
-                            FuseTransportErrorKind::Task,
-                            format!(
-                                "FUSE read worker did not cancel within {}ms",
-                                READ_TASK_DRAIN_TIMEOUT.as_millis()
-                            ),
-                        ));
+                        failure = Some(read_worker_drain_timeout_error());
                         break;
                     }
                 }
@@ -1047,7 +1067,9 @@ async fn run_session_loop(
         .await
         {
             Ok(Some(error)) => failure = Some(error),
-            Ok(None) | Err(_) => {
+            Ok(None) => {}
+            Err(_) => {
+                failure = Some(read_worker_drain_timeout_error());
                 // Dropping the JoinSet aborts any worker that did not honor
                 // cancellation within the bound. The native device must be
                 // released even when a backend future is not cancellation
@@ -2145,6 +2167,163 @@ mod tests {
         ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
             self.inner.open(path, flags, mode).await
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct BlockingCloseHandle {
+        inner: Arc<dyn mount_rs_core::FileHandle>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FileHandle for BlockingCloseHandle {
+        fn fd(&self) -> Option<u64> {
+            self.inner.fd()
+        }
+
+        async fn read(
+            &self,
+            buffer: &mut [u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.read(buffer, position).await
+        }
+
+        async fn write(
+            &self,
+            buffer: &[u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn sync(&self) -> mount_rs_core::Result<()> {
+            self.inner.sync().await
+        }
+
+        async fn datasync(&self) -> mount_rs_core::Result<()> {
+            self.inner.datasync().await
+        }
+
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct BlockingCloseDriver {
+        inner: Arc<mount_rs_core::MemoryFs>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FsDriver for BlockingCloseDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            let inner = self.inner.open(path, flags, mode).await?;
+            Ok(Arc::new(BlockingCloseHandle { inner }))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn destroy_bounds_backend_handle_cleanup_and_reports_task_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.close().await.expect("close seed file");
+        let driver = Arc::new(BlockingCloseDriver { inner });
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-blocking-close-test"),
+            MountOptions {
+                unmount_timeout: Duration::from_millis(25),
+                ..MountOptions::default()
+            },
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        let _ = read_test_reply(&mut peer).await;
+        peer.write_all(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_reply(&mut peer).await;
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+        peer.write_all(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_reply(&mut peer).await;
+        assert_eq!(i32::from_le_bytes(open[4..8].try_into().unwrap()), 0);
+
+        peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 4, 0, &[]))
+            .await
+            .expect("send destroy");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("blocking close must not keep the session alive")
+            .expect("session task should finish after bounded cleanup");
+
+        assert!(state.closed.load(Ordering::Acquire));
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
+        assert!(observed[0].message.contains("session cleanup"));
     }
 
     #[cfg(target_os = "linux")]
