@@ -11,6 +11,7 @@ const server = createWebdavServer(filesystem, {
 const objects = Array.from({ length: 16 }, (_, index) =>
   Buffer.alloc(64 * 1024 + index, index),
 )
+let authServer
 
 try {
   await server.listen()
@@ -49,9 +50,35 @@ try {
   }
   assert.equal(server.session.stats.methods.get("PUT"), 16)
   assert.equal(server.session.stats.methods.get("GET"), 16)
+
+  authServer = createWebdavServer(filesystem, {
+    host: "127.0.0.1",
+    port: 0,
+    credentials: { username: "network-user", password: "network-secret" },
+    realm: "network-realm",
+  })
+  await authServer.listen()
+  const unauthorized = await fetch(`${authServer.url}/`, {
+    method: "OPTIONS",
+    signal: AbortSignal.timeout(10_000),
+  })
+  assert.equal(unauthorized.status, 401)
+  assert.match(unauthorized.headers.get("www-authenticate") ?? "", /^Basic realm="network-realm"/)
+  await unauthorized.arrayBuffer()
+
+  const authorized = await fetch(`${authServer.url}/`, {
+    method: "OPTIONS",
+    headers: {
+      authorization: `Basic ${Buffer.from("network-user:network-secret").toString("base64")}`,
+    },
+    signal: AbortSignal.timeout(10_000),
+  })
+  assert.equal(authorized.status, 200)
+  await authorized.arrayBuffer()
 } finally {
+  await authServer?.close().catch(() => {})
   await server.close().catch(() => {})
   await filesystem.shutdown()
 }
 
-console.log("mount-rs N-API WebDAV network concurrency: PASS (16 concurrent HTTP PUT/GET pairs)")
+console.log("mount-rs N-API WebDAV network concurrency/auth: PASS (16 concurrent HTTP PUT/GET pairs)")
