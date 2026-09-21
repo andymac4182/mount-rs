@@ -2444,7 +2444,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   and temporary staging now have a configured byte quota, request-boundary TTL
   reaper, and backing-file-aware DeleteObjects behavior. Remaining repository-
   coverage findings from the sealed review remain open. Do not place AWS
-  secrets in the repository or CI logs.
+  secrets in the repository or CI logs. The hosted workflow now captures the
+  exact source SHA, lockfile/template/script hashes, Rust toolchain metadata,
+  and bounded acceptance log as a pinned 14-day artifact even when the
+  preflight safely refuses to authenticate; a successful run is still
+  required before this becomes release evidence.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
