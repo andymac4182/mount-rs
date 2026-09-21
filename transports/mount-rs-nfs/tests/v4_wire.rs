@@ -2,8 +2,10 @@
 //!
 //! This exercises the TCP record-marking server, the v4.1 client/session
 //! handshake, slot sequencing, file handles, OPEN/READ/WRITE/CLOSE and
-//! namespace cleanup. It deliberately does not invoke the host kernel mount
-//! client; native mount prerequisites are platform- and privilege-specific.
+//! namespace cleanup. It also drives two independent v4.1 sessions through
+//! concurrent file round trips. It deliberately does not invoke the host
+//! kernel mount client; native mount prerequisites are platform- and
+//! privilege-specific.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -11,9 +13,10 @@ use std::time::{Duration, Instant};
 
 use mount_rs_core::MemoryFs;
 use mount_rs_nfs::v4::{
-    CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME, NFS4ERR_BADSESSION,
-    NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS,
-    NFS4ERR_TOOSMALL, UNSTABLE4,
+    CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
+    NFS4ERR_BADSESSION, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED,
+    NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
+    UNSTABLE4,
 };
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler,
@@ -293,6 +296,184 @@ fn parse_sequence_and_handle(mut reader: XdrReader<'_>) -> (Vec<u8>, Vec<u8>) {
     let handle = reader.var_opaque(128, "root handle").unwrap();
     reader.end("root handle response").unwrap();
     (handle, Vec::new())
+}
+
+async fn connect_v4_client(
+    address: std::net::SocketAddr,
+    xid: u32,
+    owner: &[u8],
+) -> (TcpStream, Client) {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect concurrent NFS client");
+    let clientid = parse_exchange(
+        rpc(
+            &mut stream,
+            xid,
+            compound("concurrent-exchange", &[exchange_args_for(owner)]),
+        )
+        .await,
+    );
+    let session = parse_create_session(
+        rpc(
+            &mut stream,
+            xid + 1,
+            compound(
+                "concurrent-create-session",
+                &[create_session_args(clientid)],
+            ),
+        )
+        .await,
+    );
+    let mut client = Client {
+        session,
+        clientid,
+        sequence: 1,
+        slot: 0,
+    };
+    let mut response = rpc(
+        &mut stream,
+        xid + 2,
+        compound(
+            "concurrent-reclaim-complete",
+            &[
+                sequence(&client),
+                op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
+            ],
+        ),
+    )
+    .await;
+    parse_compound_header(&mut response, 2);
+    consume_sequence_result(&mut response, "concurrent reclaim");
+    parse_result_header(&mut response, OP_RECLAIM_COMPLETE);
+    response.end("concurrent reclaim response").unwrap();
+    client.sequence += 1;
+    (stream, client)
+}
+
+async fn concurrent_file_round_trip(
+    stream: &mut TcpStream,
+    client: &mut Client,
+    xid: &mut u32,
+    owner: &[u8],
+    name: &str,
+    payload: &[u8],
+) -> Vec<u8> {
+    let open = op(OP_OPEN, |writer| {
+        writer.u32(0);
+        writer.u32(OPEN4_SHARE_ACCESS_BOTH);
+        writer.u32(0);
+        writer.u64(client.clientid);
+        writer.var_opaque(owner);
+        writer.u32(OPEN4_CREATE);
+        writer.u32(UNCHECKED4);
+        empty_attrs(writer);
+        writer.u32(CLAIM_NULL);
+        writer.string(name);
+    });
+    let mut response = rpc(
+        stream,
+        *xid,
+        compound(
+            "concurrent-open",
+            &[
+                sequence(client),
+                op(OP_PUTROOTFH, |_| {}),
+                open,
+                op(OP_GETFH, |_| {}),
+            ],
+        ),
+    )
+    .await;
+    *xid += 1;
+    client.sequence += 1;
+    parse_compound_header(&mut response, 4);
+    consume_sequence_result(&mut response, "concurrent open");
+    parse_result_header(&mut response, OP_PUTROOTFH);
+    parse_result_header(&mut response, OP_OPEN);
+    let stateid: [u8; 16] = response
+        .fixed_opaque(16, "concurrent open stateid")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let _ = response.bool("concurrent open cinfo atomic").unwrap();
+    let _ = response.u64("concurrent open cinfo before").unwrap();
+    let _ = response.u64("concurrent open cinfo after").unwrap();
+    let _ = response.u32("concurrent open rflags").unwrap();
+    let _ = response.array(16, "concurrent open attrset", |reader| {
+        reader.u32("attrset word")
+    });
+    assert_eq!(response.u32("concurrent open delegation").unwrap(), 0);
+    parse_result_header(&mut response, OP_GETFH);
+    let file_handle = response.var_opaque(128, "concurrent file handle").unwrap();
+    response.end("concurrent open response").unwrap();
+
+    let write = op(OP_WRITE, |writer| {
+        writer.fixed_opaque(&stateid, 16);
+        writer.u64(0);
+        writer.u32(UNSTABLE4);
+        writer.var_opaque(payload);
+    });
+    let mut response = rpc(
+        stream,
+        *xid,
+        compound(
+            "concurrent-write",
+            &[
+                sequence(client),
+                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                write,
+            ],
+        ),
+    )
+    .await;
+    *xid += 1;
+    client.sequence += 1;
+    parse_compound_header(&mut response, 3);
+    consume_sequence_result(&mut response, "concurrent write");
+    parse_result_header(&mut response, OP_PUTFH);
+    parse_result_header(&mut response, OP_WRITE);
+    assert_eq!(
+        response.u32("concurrent write count").unwrap(),
+        payload.len() as u32
+    );
+    assert_eq!(
+        response.u32("concurrent write committed").unwrap(),
+        UNSTABLE4
+    );
+    let _ = response
+        .fixed_opaque(8, "concurrent write verifier")
+        .unwrap();
+    response.end("concurrent write response").unwrap();
+
+    let read = op(OP_READ, |writer| {
+        writer.fixed_opaque(&stateid, 16);
+        writer.u64(0);
+        writer.u32(128);
+    });
+    let mut response = rpc(
+        stream,
+        *xid,
+        compound(
+            "concurrent-read",
+            &[
+                sequence(client),
+                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                read,
+            ],
+        ),
+    )
+    .await;
+    *xid += 1;
+    client.sequence += 1;
+    parse_compound_header(&mut response, 3);
+    consume_sequence_result(&mut response, "concurrent read");
+    parse_result_header(&mut response, OP_PUTFH);
+    parse_result_header(&mut response, OP_READ);
+    let _ = response.bool("concurrent read eof").unwrap();
+    let data = response.var_opaque(128, "concurrent read data").unwrap();
+    response.end("concurrent read response").unwrap();
+    data
 }
 
 #[test]
@@ -1787,4 +1968,71 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
         .expect("spawn v4 share test thread")
         .join()
         .expect("v4 share test thread panicked");
+}
+
+#[test]
+fn nfs_v4_clients_round_trip_distinct_files_concurrently() {
+    std::thread::Builder::new()
+        .name("nfs-v4-concurrency-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 concurrency test runtime")
+                .block_on(async {
+                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen concurrent NFS server");
+                    let (mut first, mut first_client) =
+                        connect_v4_client(address, 401, b"concurrent-client-one").await;
+                    let (mut second, mut second_client) =
+                        connect_v4_client(address, 501, b"concurrent-client-two").await;
+                    assert_eq!(server.connections(), 2);
+
+                    let mut first_xid = 403;
+                    let mut second_xid = 503;
+                    let (first_data, second_data) = tokio::join!(
+                        concurrent_file_round_trip(
+                            &mut first,
+                            &mut first_client,
+                            &mut first_xid,
+                            b"concurrent-owner-one",
+                            "concurrent-one.txt",
+                            b"first concurrent payload",
+                        ),
+                        concurrent_file_round_trip(
+                            &mut second,
+                            &mut second_client,
+                            &mut second_xid,
+                            b"concurrent-owner-two",
+                            "concurrent-two.txt",
+                            b"second concurrent payload",
+                        ),
+                    );
+                    assert_eq!(first_data, b"first concurrent payload");
+                    assert_eq!(second_data, b"second concurrent payload");
+
+                    first
+                        .shutdown()
+                        .await
+                        .expect("close first concurrent client");
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close second concurrent client");
+                    timeout(Duration::from_secs(2), async {
+                        while server.connections() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("concurrent NFS clients close");
+                    server.close().await.expect("close concurrent NFS server");
+                });
+        })
+        .expect("spawn v4 concurrency test thread")
+        .join()
+        .expect("v4 concurrency test thread panicked");
 }
