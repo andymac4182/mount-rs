@@ -1874,6 +1874,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   also passed `live_aws_s3_pglite_prepare_for_restart` with independent-writer
   fencing and `live_aws_s3_pglite_reopen_after_restore` after restoring a
   temporary on-disk PGlite data directory into a fresh server process.
+  The rerun after adding the explicit AWS S3 five-retry/30-second request
+  budget passed the same CLI, composed, process-reopen, independent-PGlite,
+  fencing, and restore/reopen gates under
+  `mount-rs-tests/aws-s3/20260921T141112Z-81269-ab3a599172244316234d1f3b23181dba`.
   This is local metadata backup/restore and restart evidence only.
   This does not close W25.6: production metadata ownership, multi-writer
   fencing, backup/restore, schema migration, failure recovery, and DR evidence
@@ -1889,8 +1893,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   counts through local snapshots, tracing, and OTLP counters. The new
   [`docs/aws-s3-operations-runbook.md`](docs/aws-s3-operations-runbook.md)
   maps those signals to alerts, identity/expiry checks, retention/cost review,
-  failure drills, and canary/rollback evidence. These are implementation and
-  runbook surfaces only. Exporter wiring, object-store retry measurement,
+  failure drills, and canary/rollback evidence. The AWS provider now pins a
+  five-retry, 30-second internal retry budget below the temporary-credential
+  safety boundary. These are implementation and runbook surfaces only.
+  Exporter wiring, object-store retry measurement,
   credential-expiry detection, cost/retention alerts, approved SLO thresholds,
   and exercised staging procedures remain deployment gates.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,

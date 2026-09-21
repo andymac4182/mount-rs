@@ -81,6 +81,14 @@ jobs:
           mkdir -p artifacts
           ./scripts/test-rustfs.sh 2>&1 | tee artifacts/foundationdb-production-qualification.log
 
+      - name: Validate W07 qualification evidence markers
+        if: success()
+        run: |
+          node scripts/verify-w07-qualification-log.mjs \
+            artifacts/foundationdb-production-qualification.log \
+            5 \
+            artifacts/foundationdb-production-qualification-summary.json
+
       - name: Preserve W07 qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

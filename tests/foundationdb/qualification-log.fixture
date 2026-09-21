@@ -1,0 +1,13 @@
+W07_PRODUCTION_CONFIG_POLICY_PASS config_shape=splitstore metadata=foundationdb durable_metadata=true durable_blocks=true lease_authority=shared-provider blocks_tls=https secrets=external
+W07_PRODUCTION_CONFIG_POLICY_FAIL reason=config.driver.storage.blocks.secret_access_key-must-not-be-inline
+FOUNDATIONDB_RUSTFS_NETWORK_READY alias=mount-rs-rustfs container=mount-rs-rustfs-fixture
+FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403
+FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=9990 p95_us=85061 p99_us=85061 total_ms=167 throughput_ops_per_sec=65.76
+FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision=8 volume_prefix=fixture cleanup_deferred=true
+FOUNDATIONDB_SOAK_PASS rounds=5
+FOUNDATIONDB_NAPI_PASS image=node:24-bookworm
+FOUNDATIONDB_SERVICE_RESTART_READY topology=durable server=fixture
+FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS volume_prefix=fixture
+FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5
+RUSTFS_COMBO_PASS name=foundationdb-production-qualification
+RUSTFS_INTEGRATION_PASS endpoint=http://127.0.0.1:32769 bucket=mount-rs-rustfs-test prefix=fixture
