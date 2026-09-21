@@ -1926,7 +1926,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
   role are test resources, so production resource review remains open. The
-  A fresh read-only resource audit rerun on 2026-09-22 at current pushed head
+  A fresh read-only resource audit rerun on 2026-09-22 at audit commit
   `2f13354` also passed the account/region binding, all four public-access
   blocks, BucketOwnerEnforced ownership, AES256 encryption, seven-day
   lifecycle, and one-day incomplete-multipart abort checks for that
@@ -2001,7 +2001,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `2f13354`; it therefore cannot be used as current-head release
+  audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
   `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
   and partial 606-file inventory; the issue is remediated on current pushed
