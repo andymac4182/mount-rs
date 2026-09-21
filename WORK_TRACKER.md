@@ -1018,7 +1018,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   multi-chunk GET, early iterator return, and deliberate request-stream
   failure; WebDAV integration 13/13, isolated N-API compile, release build,
   generated typecheck, server integration, and scoped warning-denied Clippy
-  passed. Direct Node socket-reset tests now produce exactly one typed
+  passed. The same direct session packet exposes active `WebdavLockView`
+  records after LOCK and observes zero records after UNLOCK. Direct Node
+  socket-reset tests now produce exactly one typed
   peer-aware callback event for both S3 and WebDAV. Complete WebDAV
   session/member parity remains open; active lock-record readback and
   post-UNLOCK cleanup, plus the session-owned driver wrapper, are verified.

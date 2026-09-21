@@ -43,7 +43,7 @@ described as a complete session or native-mount implementation.
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR`/`SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/`ACCESS`/`FALLOCATE`/`LSEEK`/`GETLK`/`SETLK`/`SETLKW` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway exposes bounded drain, live connection and peer-aware transport-hook state, and the N-API object now exposes a shared session with buffered and streaming request/response methods; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, while several oracle members remain absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
-| WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings with direct cancellation and body-error coverage; complete member parity remains open | **PARTIAL** |
+| WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings, read-only active lock records, and direct LOCK/UNLOCK, cancellation, and body-error coverage; complete member parity remains open | **PARTIAL** |
 | CLI | Rust CLI constructs drivers through `mount-rs-sdk` and exposes a real `sdk-self-test`/durable-reopen path; Node CLI uses the N-API SDK for direct and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
 The oracle source used for comparison is local and immutable for this audit;
@@ -288,8 +288,10 @@ public through the transport crate, and the N-API `./webdav` entry preserves
 root server/class identity while exposing the low-level constants/status,
 path/header/XML/lock helpers and generated declarations. The N-API session now
 accepts async-iterable or Web ReadableStream request bodies and returns a
-pull-based response iterator; the direct probe covers chunked PUT, multi-chunk
-GET, early iterator return, and deliberate request-body failure mapping. The
+pull-based response iterator; the session also exposes read-only active lock
+records with expiry cleanup. The direct probe covers LOCK/UNLOCK cleanup,
+chunked PUT, multi-chunk GET, early iterator return, and deliberate
+request-body failure mapping. The
 pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
 provider/native, restart, and complete member-parity gates remain open.
 
