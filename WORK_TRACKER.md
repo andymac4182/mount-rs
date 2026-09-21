@@ -1316,6 +1316,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   concurrent session calls; the filesystem-visible exclusive finalization
   marker returns `NoSuchUpload` to the loser and late part writes, while a
   validation-failing Complete releases the marker so a correct retry succeeds.
+- [x] The S3 multipart fault packet now injects one `EIO` while Complete reads
+  a staged part, verifies the filesystem-visible finalization marker is
+  released, and completes the same upload on retry; the full S3 target passes
+  4 unit, 6 chunked, 23 gateway, and 5 public-API tests. This is bounded local
+  fault-injection evidence, not power-loss durability, provider failure,
+  broader ordering/concurrency, or native/hosted acceptance.
 - [x] The same multipart replacement flow is exercised through the generated
   N-API S3 facade: release build/declarations, direct session create/part/list/
   complete/GET, streamed traffic, cancellation, bucket isolation, connection

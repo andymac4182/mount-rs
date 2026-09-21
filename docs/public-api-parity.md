@@ -316,7 +316,7 @@ and a native gateway test do not establish complete oracle parity or a live AWS
 service result. The current Rust gateway packet also verifies bounded drain
 timeout, accepted-connection cleanup, loopback-only credentialed binding,
 assertion cleanliness, and one peer-aware reset-on-close transport event
-across the 18 gateway cases. The generated package build and N-API integration
+across the 23 gateway cases. The generated package build and N-API integration
 verify connection/transport-error member parity and direct Node peer-fault
 injection; live AWS/R2 and native/hosted lifecycle evidence remain open. The
 oracle-only pure codec/helper members are explicitly outside the supported Node

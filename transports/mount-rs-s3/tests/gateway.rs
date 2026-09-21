@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -842,6 +842,148 @@ async fn invalid_multipart_complete_releases_finalization_claim_for_retry() {
             .await
             .is_err()
     );
+}
+
+#[derive(Clone)]
+struct FaultOnReadFs {
+    inner: MemoryFs,
+    fail_next_read: Arc<AtomicBool>,
+}
+
+struct FaultOnReadHandle {
+    inner: Arc<dyn FileHandle>,
+    fail_next_read: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl FileHandle for FaultOnReadHandle {
+    async fn read(&self, buffer: &mut [u8], position: Option<u64>) -> FsResult<usize> {
+        if self.fail_next_read.swap(false, Ordering::SeqCst) {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio).with_syscall("read")
+            );
+        }
+        self.inner.read(buffer, position).await
+    }
+
+    async fn write(&self, buffer: &[u8], position: Option<u64>) -> FsResult<usize> {
+        self.inner.write(buffer, position).await
+    }
+
+    async fn stat(&self) -> FsResult<mount_rs_core::Stats> {
+        self.inner.stat().await
+    }
+
+    async fn truncate(&self, length: u64) -> FsResult<()> {
+        self.inner.truncate(length).await
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.inner.close().await
+    }
+}
+
+#[async_trait]
+impl FsDriver for FaultOnReadFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<mount_rs_core::DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        let inner = self.inner.open(path, flags, mode).await?;
+        Ok(Arc::new(FaultOnReadHandle {
+            inner,
+            fail_next_read: Arc::clone(&self.fail_next_read),
+        }))
+    }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        self.inner.rename(old_path, new_path).await
+    }
+
+    async fn mkdir(
+        &self,
+        path: &str,
+        options: mount_rs_core::MkdirOptions,
+    ) -> FsResult<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+
+    async fn rmdir(&self, path: &str) -> FsResult<()> {
+        self.inner.rmdir(path).await
+    }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
+    }
+}
+
+#[tokio::test]
+async fn failed_multipart_assembly_releases_finalization_claim_for_retry() {
+    let driver = FaultOnReadFs {
+        inner: MemoryFs::empty(),
+        fail_next_read: Arc::new(AtomicBool::new(false)),
+    };
+    let session = S3Session::new(driver.clone());
+    let initiated = session
+        .handle(request("POST", "/mountx/fault.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/fault.bin?uploadId={upload_id}&partNumber=1"),
+            b"fault-retry bytes",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+    let part_etag = header(&part, "etag").expect("part ETag");
+    let complete_body = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+
+    driver.fail_next_read.store(true, Ordering::SeqCst);
+    let failed = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/fault.bin?uploadId={upload_id}"),
+            complete_body.as_bytes(),
+            &[],
+        ))
+        .await;
+    assert_eq!(failed.status, 500);
+    assert!(
+        driver
+            .inner
+            .stat(&format!("/.mountx-multipart/{upload_id}/.finalizing"))
+            .await
+            .is_err()
+    );
+
+    let completed = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/fault.bin?uploadId={upload_id}"),
+            complete_body.as_bytes(),
+            &[],
+        ))
+        .await;
+    assert_eq!(completed.status, 200);
+    let object = session
+        .handle(request("GET", "/mountx/fault.bin", [], &[]))
+        .await;
+    assert_eq!(object.status, 200);
+    assert_eq!(object.body, b"fault-retry bytes");
 }
 
 #[tokio::test]
