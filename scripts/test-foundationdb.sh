@@ -214,7 +214,7 @@ if [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq 1 ]; then
   if [ -z "$authority_prefix" ]; then
     authority_prefix="$test_prefix/lease-authority"
   fi
-  test_command="${test_command} && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle -- --ignored --nocapture"
+  test_command="${test_command} && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle cli_foundationdb_rustfs_config_binary_mounts_and_reopens -- --ignored --exact --nocapture"
 fi
 native_mount_args=""
 if [ "$run_native_cli" -eq 1 ]; then

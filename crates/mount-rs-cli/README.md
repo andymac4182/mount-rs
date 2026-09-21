@@ -279,7 +279,9 @@ environment:
     R2_BUCKET=mount-rs-rustfs \
     R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \
     cargo test -p mount-rs-cli --features foundationdb \
-      --test native_lifecycle -- --ignored --nocapture
+      --test native_lifecycle \
+      cli_foundationdb_rustfs_config_binary_mounts_and_reopens -- \
+      --ignored --exact --nocapture
 
 Linux selects FUSE and macOS selects native NFS. The test runs the actual
 config-driven CLI twice, writes and reopens bytes through FoundationDB

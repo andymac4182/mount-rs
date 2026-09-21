@@ -932,7 +932,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   cluster, composing RustFS blocks when that lane is active. The same lane now
   has an explicit Linux FUSE prerequisite and runs the config-driven CLI native
   lifecycle/reopen test inside the client container with a separately
-  published shared-provider authority when `/dev/fuse` is available. The live
+  published shared-provider authority when `/dev/fuse` is available; the script
+  selects only that FoundationDB test so unrelated ignored FUSE cases cannot
+  fail the lane. The live
   Node gate uses that same published authority prefix. The macOS native-NFS job
   now also compiles the FoundationDB-enabled CLI lifecycle test; live macOS
   service/cluster acceptance and the hosted result remain open.
