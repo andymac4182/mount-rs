@@ -29,6 +29,12 @@ launching the full durable topology. Set
 attempt is wanted; that mode is not a durable acceptance result and is marked
 `diagnostic-underprovisioned-not-durable-acceptance` in the final result.
 
+Before topology setup the harness performs one formatted Docker server-info
+probe for architecture, CPU and memory. If the daemon cannot return that
+response, the command exits with status 2 as an environment prerequisite
+failure and creates no test network, volume or container; no
+`TIDB_ACCEPTANCE` result is emitted.
+
 The test performs these checks in order:
 
 1. Wait for all PD/TiKV stores and the TiDB status endpoint.

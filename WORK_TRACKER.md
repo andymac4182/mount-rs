@@ -2611,6 +2611,19 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   job `106504528377`, later completed successfully with the W08 policy and
   release-identity/provenance steps green.
 
+- [x] W08.35 **Docker server-capacity preflight hardening:** the real TiDB
+  harness now obtains architecture, CPU and memory from one formatted Docker
+  server-info probe before any network, volume or container is created. A
+  daemon that becomes unavailable between a plain health check and a field
+  query now exits cleanly with a prerequisite-boundary message instead of
+  leaking a Docker CLI panic or entering partial topology setup. `sh -n` and
+  the current local unavailable-daemon run both passed the expected fail-closed
+  path with exit status 2 and no `TIDB_ACCEPTANCE` marker. This improves
+  diagnosis and cleanup safety; it does not make local Docker capacity,
+  provider credentials or production topology evidence available. *(Harness
+  implementation/static qualification; provider and production gates remain
+  external.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the

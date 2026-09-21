@@ -129,6 +129,14 @@ validator/test, and the existing release-identity/provenance policy passed.
 This is hosted implementation/static qualification only; it does not close
 P01–P09 or supply production provider, canary, rollback or approval evidence.
 
+W08.35 hardens the real TiDB harness preflight: architecture, CPU and memory
+are read from one formatted Docker server-info response before any isolated
+network, volume or container is created. If the daemon becomes unavailable
+while the CLI is rendering server fields, the harness now exits with status 2
+and a clear prerequisite-boundary message, without emitting `TIDB_ACCEPTANCE`
+or attempting partial topology setup. This is harness safety evidence only; it
+does not close P01 or promote local Docker capacity into production evidence.
+
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
 tests and strict Clippy with `-D warnings` using a bounded external Cargo
