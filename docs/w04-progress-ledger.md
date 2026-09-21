@@ -10,18 +10,19 @@ gate required by W04.2.
 
 | Field | Current value |
 | --- | --- |
-| Snapshot base revision | `1187a90bfb0be178237996a06082dcbafa3ef124` (origin/main immediately before this ledger update) |
+| Snapshot base revision | `6d59d204af80c883bf47a59ffb5a4b77829f8ec8` (origin/main immediately before this ledger update) |
 | Ledger publication | This current ledger revision is committed and pushed to `origin/main`; the exact commit is recorded in Git history |
 | Current-head local evidence revision | `5424080afbc2027d5dcb0ab79a09ca9a4a32fdc8` (the docs-only `fac9c7e` sync landed after the gate) |
 | Latest synced verification revision | `113724487e9efc172ab69254d995377cfcfab296` (workspace test and scoped Clippy evidence; unrelated W26/TiDB/CLI changes are included) |
-| Latest full W04 gate revision | `1187a90bfb0be178237996a06082dcbafa3ef124` (published `origin/main` tree with the exact pinned oracle; full `scripts/test-pglite.sh` exited 0) |
-| Snapshot time | 2026-09-21 18:24 AEST / 2026-09-21 08:24 UTC |
+| Latest full W04 gate revision | `6d59d204af80c883bf47a59ffb5a4b77829f8ec8` (current `origin/main` after the chunked-shutdown fix; exact pinned oracle; full `scripts/test-pglite.sh` exited 0) |
+| Latest published repository revision | `1938a4911cf02c1123b953d5613677c13963ee50` (ledger-only change after the post-fix gate) |
+| Snapshot time | 2026-09-21 18:33 AEST / 2026-09-21 08:33 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
 | Checklist completion | **87.5%**: 7 of 8 W04 checklist items are checked; W04.2 remains open |
-| Implementation/local qualification | **Complete for the recorded packet**; the fresh oracle-enabled W04 gate passed at `1187a90`, and synced workspace tests plus scoped W04 Clippy passed at `1137244` |
+| Implementation/local qualification | **Complete for the recorded packet**; the fresh post-fix oracle-enabled W04 gate passed at `6d59d20`, and synced workspace tests plus scoped W04 Clippy passed at `1137244` |
 | Hosted/native/provider acceptance | **Incomplete**: hosted Linux Node evidence is green; hosted macOS Node evidence is still queued; R2/TiDB rows are explicit local skips |
 | Overall release decision | **Not complete** until W04.2's post-fix macOS and Linux Node logs pass |
-| Current external blocker | GitHub Actions jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) have remained `queued` with no `started_at` |
+| Current external blocker | Target run jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) remain `queued` with no runner; corroborating run [35578377706](https://github.com/andymac4182/mount-rs/actions/runs/35578377706) has Ubuntu Node jobs in progress while both macOS Node jobs are also queued |
 
 The 87.5% figure is a checklist ratio, not a readiness claim. The open item
 is the acceptance gate that determines whether the workstream can be called
@@ -34,8 +35,8 @@ fully working.
 | Land real socket-server integration and provider/factory coverage | Complete — implementation | 100% | W04 tracker checkbox; current tree contains the PGlite socket server, provider, factory, and integration test surfaces under `integrations/mount-rs-pglite/` and `tests/pglite/`. | None for this item. Keep regressions covered by the W04 gate. | 0h remaining |
 | Fix transaction cleanup before releasing a connection slot | Complete — implementation and regression | 100% | Tracker records `29ffb3b`; deterministic slot-release suite passed during the recorded W04 local gate. | None for this item. | 0h remaining |
 | Add injected cleanup-failure regression and fail closed | Complete — implementation and regression | 100% | Tracker records `cfce82a`; `server_cleanup_failure.mjs` reported `pglite cleanup failure fail-closed: ok`; the expected injected error was retained as diagnostic evidence. | None for this item. | 0h remaining |
-| W04.1 full `scripts/test-pglite.sh` local gate | Complete — local qualification | 100% | The latest oracle-enabled run at `1187a90bfb0be178237996a06082dcbafa3ef124` exited 0 and passed slot cleanup, injected failure, provider parity, reconnect, fencing, cancellation, disk restart, mixed stores, Node factories, chunked mounts, and userspace FUSE. R2 and TiDB/RustFS rows retained explicit skips. The synced workspace test gate also exited 0 at `1137244`; scoped PGlite/N-API Clippy passed with `-D warnings`. | No further local W04.1 action unless W04.2 exposes a regression. | 0h remaining |
-| Fresh current-tree rerun, SDK/CLI users, upstream, and trace lanes | Complete — local qualification | 100% | The latest current-tree run with the exact pinned oracle `pithings/mountx@85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` exited 0: Rust SDK `pass=6 skip=3 fail=0`, Node SDK `pass=5 skip=3 fail=0`, CLI `pass=12 skip=2 fail=0`, upstream `1,200 passed / 82 skipped`, and trace `40/40` across five seeds and eight backends, including PGlite and chunked-PGlite. R2/TiDB/RustFS credentials/services remained explicit skips; hosted/provider claims are not inferred from this local result. | None for the current local result; hosted W04.2 remains separate. | 0h remaining |
+| W04.1 full `scripts/test-pglite.sh` local gate | Complete — local qualification | 100% | The latest post-fix oracle-enabled run at `6d59d204af80c883bf47a59ffb5a4b77829f8ec8` exited 0 and passed slot cleanup, injected failure, provider parity, reconnect, fencing, cancellation, disk restart, mixed stores, Node factories, chunked mounts, and userspace FUSE. R2 and TiDB/RustFS rows retained explicit skips. The synced workspace test gate also exited 0 at `1137244`; scoped PGlite/N-API Clippy passed with `-D warnings`. | No further local W04.1 action unless W04.2 exposes a regression. | 0h remaining |
+| Fresh current-tree rerun, SDK/CLI users, upstream, and trace lanes | Complete — local qualification | 100% | The latest post-fix current-tree run with the exact pinned oracle `pithings/mountx@85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` exited 0: Rust SDK `pass=6 skip=3 fail=0`, Node SDK `pass=5 skip=3 fail=0`, CLI `pass=12 skip=2 fail=0`, upstream `1,200 passed / 82 skipped`, and trace `40/40` across five seeds and eight backends, including PGlite and chunked-PGlite. R2/TiDB/RustFS credentials/services remained explicit skips; hosted/provider claims are not inferred from this local result. | None for the current local result; hosted W04.2 remains separate. | 0h remaining |
 | Teardown-race fix and bounded close/reopen safety | Complete — implementation and local regression | 100% | Tracker records the PostgreSQL Terminate-frame cleanup path, I/O-turn barrier, listener restoration, and tracked cleanup barrier. Readiness passed 10/10; bounded close/reopen passed 5/5 in the recorded gate; focused current-tree runs also passed the bounded regression repeatedly. | None unless hosted macOS reproduces the historical `Eio` failure. | 0h remaining; 2–6h contingency if hosted failure reproduces |
 | W04.2 hosted macOS/Linux reconnect acceptance | **Open — external hosted gate** | **0% of this item** | Required run: [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894). Linux Node job [106211636722](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636722) completed successfully; direct logs include slot-release success, cleanup-failure fail-closed success, `mount-rs N-API PGlite integration: PASS`, Rust SDK `pass=6 skip=3 fail=0`, Node SDK `pass=5 skip=2 fail=0`, and CLI `pass=12 skip=2 fail=0`. macOS jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) remain queued, so their required `Verify PGlite integration and restart recovery` logs do not yet exist. | Keep monitoring the two queued jobs. When each completes, inspect its log for the exact PGlite recovery step. If both pass, update W04.2 and the dashboard, run formatting/diff checks, commit, rebase if needed, and push. If either fails, isolate the failure, fix it, rerun the focused and full relevant gates, and publish that fix as the next chunk. | 0.25–0.5h log audit once runners start; 0.5–1h tracker/publish work if green; 2–6h if a code regression requires remediation. External queue time is unknown and is not engineering time. |
 | W04.3 versioning, mount-free VFS, and native SQLite-hosting tests | Complete — implementation and local qualification | 100% | Tracker records the rebased packet published through `90c33949`; durable PGlite version metadata, reconnect/version history, mount-free SQLite VFS, native SQLite-hosting tests, and the configuration-driven gate are present. Focused versioning/VFS, locked compilation, formatting, Clippy, and script checks passed in the recorded evidence. | None for W04.3; hosted reconnect remains W04.2's separate gate. | 0h remaining |
@@ -79,6 +80,11 @@ fully working.
   `1,200 passed / 82 skipped`, and trace parity reported `40/40` passes across
   five seeds and eight backends; this is local oracle qualification, not
   hosted macOS evidence.
+- After the unrelated `c71c8ee` chunked-shutdown fix landed, the N-API addon
+  was rebuilt against the rebased tree and the tracked generated declaration
+  file was restored without source changes. The post-fix gate at `6d59d20`
+  reproduced the same green upstream and trace results, so the local evidence
+  covers the current chunked shutdown implementation as well.
 
 ### Hosted/native/provider boundary
 
@@ -88,6 +94,10 @@ fully working.
 - The two macOS Node jobs have remained queued since `2026-09-21T04:14:51Z`
   with no `started_at`. Queued is an external wait, not a failure and not a
   pass. The active heartbeat monitor is responsible for rechecking them.
+- As a diagnostic only, newer run `35578377706` started its Ubuntu Node jobs
+  while its `macos-latest` and `macos-15-intel` Node jobs remained queued. This
+  corroborates a macOS runner-capacity/platform queue; it is not substituted
+  for the required monitored run and does not change W04.2's open status.
 - The same CI run contains unrelated non-W04 failures in other jobs. They must
   remain visible in CI review but do not change the W04-specific conclusion.
 
@@ -140,6 +150,8 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 | 2026-09-21 18:00–18:14 AEST | Rebasing onto the latest `origin/main`, running the full locked workspace tests, and running both full and W04-scoped Clippy gates. | Workspace tests exited 0; W04 PGlite/N-API Clippy passed with warnings denied. Full workspace Clippy exposed one unrelated TiDB `single_match` warning, which was left untouched. | Engineering/verification, ~0.25h |
 | 2026-09-21 18:15–18:18 AEST | Reran `scripts/test-pglite.sh` on the exact published `origin/main` tree. | Full W04 gate exited 0; Rust SDK `6/3/0`, Node SDK `5/3/0`, and CLI `12/2/0` pass/skip/fail summaries remained green, with provider prerequisites explicitly skipped. | Engineering/verification, ~0.25h |
 | 2026-09-21 18:19–18:24 AEST | Fetched the exact pinned mountx oracle, installed the pinned oracle/upstream dependencies, and reran the full gate with `MOUNTX_SOURCE` enabled. | Upstream `1,200 passed / 82 skipped`; trace `40/40` across five seeds and eight backends; all W04 lifecycle/provider-matrix stages remained green with explicit provider skips. | Engineering/verification, ~0.25h |
+| 2026-09-21 18:25–18:30 AEST | Rebased onto the unrelated `c71c8ee` chunked-shutdown fix, rebuilt the N-API addon with the shared target, restored generated declarations, and reran the oracle-enabled gate. | Post-fix gate at `6d59d20` exited 0 with upstream `1,200 passed / 82 skipped` and trace `40/40`; no tracked build artifact changes remained. | Engineering/verification, ~0.25h |
+| 2026-09-21 18:31–18:33 AEST | Compared the required run with the newest CI run after the next push. | Target macOS jobs remained queued; diagnostic run `35578377706` showed Ubuntu Node jobs in progress while both macOS Node jobs were queued. | Hosted verification, ~0.1h; external queue remains non-engineering time |
 
 ## Publication note
 
