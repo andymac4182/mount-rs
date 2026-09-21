@@ -1662,6 +1662,20 @@ impl S3Session {
             self.options.credentials.as_ref(),
         )?;
         let requested = parse_complete_document(&body, self.options.max_xml_bytes)?;
+        // Validate before creating the destination's parent. The TypeScript
+        // gateway creates that parent lazily only once assembly is ready, so
+        // malformed or invalid completes do not leave empty object dirs.
+        let preflight_parts = multipart_parts(&driver, upload_id, &requested).await?;
+        let preflight_size = multipart_parts_size(&preflight_parts);
+        ensure_staging_capacity(
+            &driver,
+            self.options.multipart_staging_max_bytes,
+            None,
+            preflight_size,
+        )
+        .await?;
+        require_atomic_rename(&driver)?;
+        ensure_parent(&driver, &target.path).await?;
         // Reserve the completion inode before claiming the persisted terminal
         // marker. S3 ETags include the object inode for parity with the
         // TypeScript gateway; creating the marker first would shift the
@@ -1696,35 +1710,8 @@ impl S3Session {
         let mut marker_cleanup = StagedPathCleanup::new(Arc::clone(&driver), marker.clone());
         let result: S3Result<S3Response> = async {
             let manifest = read_manifest(&driver, upload_id, &target.key).await?;
-            let mut previous = 0_u32;
-            let mut parts = Vec::new();
-            for (index, (number, etag)) in requested.iter().enumerate() {
-                if *number <= previous {
-                    return Err(S3Failure::s3("InvalidPartOrder"));
-                }
-                previous = *number;
-                let path = part_path(upload_id, *number);
-                let stats = driver.stat(&path).await.map_err(|error| {
-                    if matches!(
-                        error.code,
-                        mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
-                    ) {
-                        S3Failure::s3("InvalidPart")
-                    } else {
-                        S3Failure::Fs(error)
-                    }
-                })?;
-                if !stats.is_file() || unquote_etag(etag) != object_etag(&stats) {
-                    return Err(S3Failure::s3("InvalidPart"));
-                }
-                if index + 1 < requested.len() && stats.size < MIN_PART_SIZE {
-                    return Err(S3Failure::s3("EntityTooSmall"));
-                }
-                parts.push((path, stats.size));
-            }
-            let assembled_size = parts
-                .iter()
-                .fold(0_u64, |total, (_, size)| total.saturating_add(*size));
+            let parts = multipart_parts(&driver, upload_id, &requested).await?;
+            let assembled_size = multipart_parts_size(&parts);
             ensure_staging_capacity(
                 &driver,
                 self.options.multipart_staging_max_bytes,
@@ -1733,7 +1720,6 @@ impl S3Session {
             )
             .await?;
             require_atomic_rename(&driver)?;
-            ensure_parent(&driver, &target.path).await?;
             // Assemble through a private staging file instead of collecting all
             // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
             // the existing destination unchanged if a part read or metadata update
@@ -3843,6 +3829,46 @@ fn chunk_signature(signing: &ChunkSigning<'_>, previous: &str, payload_hash: &st
         previous,
         payload_hash,
     )
+}
+
+async fn multipart_parts(
+    driver: &Arc<dyn FsDriver>,
+    upload_id: &str,
+    requested: &[(u32, String)],
+) -> S3Result<Vec<(String, u64)>> {
+    let mut previous = 0_u32;
+    let mut parts = Vec::with_capacity(requested.len());
+    for (index, (number, etag)) in requested.iter().enumerate() {
+        if *number <= previous {
+            return Err(S3Failure::s3("InvalidPartOrder"));
+        }
+        previous = *number;
+        let path = part_path(upload_id, *number);
+        let stats = driver.stat(&path).await.map_err(|error| {
+            if matches!(
+                error.code,
+                mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+            ) {
+                S3Failure::s3("InvalidPart")
+            } else {
+                S3Failure::Fs(error)
+            }
+        })?;
+        if !stats.is_file() || unquote_etag(etag) != object_etag(&stats) {
+            return Err(S3Failure::s3("InvalidPart"));
+        }
+        if index + 1 < requested.len() && stats.size < MIN_PART_SIZE {
+            return Err(S3Failure::s3("EntityTooSmall"));
+        }
+        parts.push((path, stats.size));
+    }
+    Ok(parts)
+}
+
+fn multipart_parts_size(parts: &[(String, u64)]) -> u64 {
+    parts
+        .iter()
+        .fold(0_u64, |total, (_, size)| total.saturating_add(*size))
 }
 
 async fn claim_multipart_finalization(
