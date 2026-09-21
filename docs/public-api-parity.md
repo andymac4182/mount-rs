@@ -358,6 +358,9 @@ Rust clock boundary is covered by
 `./scripts/cargo-shared test -p mount-rs-webdav --test webdav --locked injected_session_clock_controls_lock_expiry_deterministically`.
 These are accepted supported-scope decisions for N-API; broader session/server
 differential, listener, provider/native, restart, and hosted gates remain open.
+The Rust listener lifecycle itself is locally qualified by concurrent
+`listen()` serialization and an immediate `listen()`/`close()` shutdown-wakeup
+regression; N-API network/hosted concurrency and hosted lifecycle remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full

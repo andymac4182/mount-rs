@@ -809,6 +809,12 @@ transport tracker together.
 | W01-S3 | [`docs/W01_S3_PROGRESS.md`](docs/W01_S3_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 | W01-WebDAV | [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 
+Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
+`listen()`/`close()` lifecycle transitions and guards the accept loop against
+an immediate-close shutdown lost wakeup; focused WebDAV tests pass 17/17.
+N-API network/hosted concurrency, crash/power-loss restart, provider
+durability, and broader hosted session/member lifecycle remain open.
+
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
 - [x] Latest local upstream-suite stage: 1,194 passed, 88 skipped; not full parity

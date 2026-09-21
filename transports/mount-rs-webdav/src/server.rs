@@ -162,6 +162,7 @@ pub struct WebdavServer {
     shutdown: Arc<Notify>,
     closing: Arc<AtomicUsize>,
     drained: Arc<Notify>,
+    lifecycle: tokio::sync::Mutex<()>,
     state: Mutex<ServerState>,
     connections: Arc<AtomicUsize>,
     hooks: WebdavServerHooks,
@@ -198,6 +199,7 @@ impl WebdavServer {
             shutdown: Arc::new(Notify::new()),
             closing: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(Notify::new()),
+            lifecycle: tokio::sync::Mutex::new(()),
             state: Mutex::new(ServerState { task: None }),
             connections: Arc::new(AtomicUsize::new(0)),
             hooks,
@@ -226,6 +228,7 @@ impl WebdavServer {
     }
 
     pub async fn listen(&self) -> Result<(), WebdavServerError> {
+        let _lifecycle = self.lifecycle.lock().await;
         if self
             .state
             .lock()
@@ -252,8 +255,14 @@ impl WebdavServer {
         let hooks_for_task = self.hooks.clone();
         let task = tokio::spawn(async move {
             loop {
+                let shutdown_notified = shutdown.notified();
+                tokio::pin!(shutdown_notified);
+                shutdown_notified.as_mut().enable();
+                if closing_for_task.load(Ordering::Acquire) != 0 {
+                    break;
+                }
                 tokio::select! {
-                    _ = shutdown.notified() => break,
+                    _ = shutdown_notified => break,
                     accepted = listener.accept() => {
                         let (stream, peer) = match accepted {
                             Ok(accepted) => accepted,
@@ -323,6 +332,7 @@ impl WebdavServer {
     }
 
     pub async fn close(&self) -> Result<(), WebdavServerError> {
+        let _lifecycle = self.lifecycle.lock().await;
         let task = self
             .state
             .lock()
