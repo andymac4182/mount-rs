@@ -42,6 +42,8 @@ try {
   })
   assert.equal(mounted.active, true)
   assert.equal(mounted.transport, "9p")
+  assert.equal(typeof mounted.source, "string")
+  assert.ok(mounted.source.length > 0)
   assert.equal(mounted.trans, "unix")
   assert.ok(mounted.server)
   assert.ok(mounted.connection)
