@@ -32,6 +32,13 @@ Capacity failures return `SlowDown`; `DeleteObjects` removes the corresponding
 backing staging tree or returns an error instead of reporting an unperformed
 deletion.
 
+When a driver advertises `Capabilities::durable_writes`, every successful S3
+mutation awaits that driver's `syncfs` barrier before returning. A durable
+driver that cannot complete the barrier returns an error rather than a false
+durable success. Volatile drivers retain their existing behavior; this
+transport does not claim power-loss durability for a driver that does not
+advertise the capability.
+
 `S3Session::stats()` exposes a point-in-time operational snapshot with request
 latency totals/maxima, buffered and consumed streaming request/response bytes,
 operation counts, and bounded authentication, conditional-conflict,
