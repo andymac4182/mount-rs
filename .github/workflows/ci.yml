@@ -507,6 +507,22 @@ jobs:
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --all-targets --locked
 
+  http-observability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify HTTP health/readiness and telemetry consumers
+        run: cargo test --locked -p mount-rs-http --all-features
+      - name: Verify HTTP observability lint
+        run: cargo clippy --locked -p mount-rs-http --all-targets --all-features -- -D warnings
+
   windows-node:
     runs-on: windows-latest
     timeout-minutes: 45
