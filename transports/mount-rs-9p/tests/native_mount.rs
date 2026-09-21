@@ -104,6 +104,38 @@ async fn mounted_file_io(mountpoint: PathBuf) -> io::Result<()> {
     .map_err(|error| io::Error::other(format!("mounted I/O task failed: {error}")))?
 }
 
+async fn concurrent_mounted_file_io(mountpoint: &Path) -> io::Result<()> {
+    let mut tasks = Vec::new();
+    for index in 0..8_u32 {
+        let mountpoint = mountpoint.to_path_buf();
+        tasks.push(spawn_blocking(move || {
+            let source = mountpoint.join(format!("concurrent-{index}"));
+            let renamed = mountpoint.join(format!("concurrent-{index}-renamed"));
+            let payload = format!("native 9P concurrent payload {index}\n").into_bytes();
+            fs::write(&source, &payload)?;
+            let read_back = fs::read(&source)?;
+            if read_back != payload {
+                return Err(io::Error::other(format!(
+                    "concurrent native 9P read did not match for worker {index}"
+                )));
+            }
+            fs::rename(&source, &renamed)?;
+            if fs::read(&renamed)? != payload {
+                return Err(io::Error::other(format!(
+                    "concurrent native 9P rename read did not match for worker {index}"
+                )));
+            }
+            Ok::<(), io::Error>(())
+        }));
+    }
+    for task in tasks {
+        task.await.map_err(|error| {
+            io::Error::other(format!("concurrent native I/O task failed: {error}"))
+        })??;
+    }
+    Ok(())
+}
+
 async fn bounded_unmount(mount: &P9Mount) -> io::Result<()> {
     timeout(TEARDOWN_TIMEOUT, mount.unmount())
         .await
@@ -184,6 +216,50 @@ async fn native_linux_mount_and_unmount_lifecycle_is_opt_in() {
     mount_with_file_io("io")
         .await
         .expect("native 9P lifecycle and I/O");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Linux v9fs/CAP_SYS_ADMIN; set MOUNT_RS_9P_NATIVE_TEST=1 and pass --ignored"]
+async fn native_linux_concurrent_file_io_and_unmount_are_bounded() {
+    require_native_host();
+    let mountpoint = make_mountpoint("concurrent")
+        .await
+        .expect("create native mountpoint");
+    let mount = match mount_9p(
+        MemoryFs::empty(),
+        &mountpoint,
+        P9MountOptions {
+            unmount_timeout: Some(COMMAND_TIMEOUT),
+            ..P9MountOptions::default()
+        },
+    )
+    .await
+    {
+        Ok(mount) => mount,
+        Err(error) => {
+            remove_mountpoint(mountpoint)
+                .await
+                .expect("remove failed native mountpoint");
+            panic!("native concurrent 9P mount failed: {error}");
+        }
+    };
+
+    let io_result = timeout(
+        Duration::from_secs(45),
+        concurrent_mounted_file_io(&mountpoint),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "concurrent native I/O timed out"))
+    .and_then(|result| result);
+    let unmount_result = bounded_unmount(&mount).await;
+    match (io_result, unmount_result) {
+        (Ok(()), Ok(())) => remove_mountpoint(mountpoint)
+            .await
+            .expect("remove detached concurrent mountpoint"),
+        (io_result, unmount_result) => panic!(
+            "native concurrent 9P lifecycle failed; refusing recursive cleanup: I/O={io_result:?}, unmount={unmount_result:?}"
+        ),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
