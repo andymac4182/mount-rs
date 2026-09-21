@@ -389,15 +389,16 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         connection release, ordinary mount/unmount, and external umount. This
         closes the supported Linux lifecycle scope; automatic recovery after a
         process crash, arbitrary kernel reset, or half-close remains outside
-        the library contract and needs supervisor-level evidence. The N-API
-        surface now also exposes scalar options, <code>userFor</code>, and a
-        transport-backed live lock client, while upstream driver/fid/debug,
-        full fid-graph, option-injection, and property-shaped client parity
-        remain open. Follow-on parity checks cover all 124 upstream 9P
-        constants and <code>messageName</code> results plus live session fids,
-        cursor/open state, hardlink identity, clunk snapshots, and retained
-        open-handle enumeration; focused Rust tests report 30 passes. Overall
-        production status remains NO-GO.
+        the library contract and needs supervisor-level evidence. The current packet adds live <code>P9Session.driver</code>,
+        debug-gated assertion readback/counters, request-error and assertion
+        callbacks with Node error revival, and root/<code>./9p</code> factory
+        identity. Release build, generated typecheck, focused N-API tests,
+        formatting, strict Clippy, and 31 ordinary 9P tests passed. The public
+        barrel now differentially checks all 124 upstream constants and the
+        44-codec surface, alongside live session fids, cursor/open state,
+        hardlink identity, clunk snapshots, and retained open handles. Lock
+        option injection, property-shaped clients, mount helpers, and hosted
+        revision gates remain open. Overall production status remains NO-GO.
       </>
     ),
     sources: [
@@ -639,10 +640,15 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
     ),
     evidence: (
       <>
-        The current tracker records 13 Rust WebDAV tests, a passing isolated
-        locked N-API check, release addon/declaration generation, and a direct
-        buffered session/options/driver/auth slice. The pinned pure protocol
-        differential now passes at the recorded oracle revision.
+        The current tracker records 17 focused Rust WebDAV tests, a passing
+        isolated locked N-API check, release addon/declaration generation, and
+        a direct buffered session/options/driver/auth slice. The pinned pure
+        protocol differential now passes at the recorded oracle revision. The
+        latest lifecycle slice passed formatting and the locked WebDAV test
+        target, including the immediate <code>listen()</code>/<code>close()</code>
+        lost-wakeup regression and 16 concurrent <code>listen()</code> calls
+        sharing one loopback port; N-API network/hosted concurrency,
+        crash/power-loss restart, and provider durability remain open.
         The direct streaming facade passes a three-chunk PUT, multi-chunk GET,
         early response-iterator return, and deliberate request-body failure
         mapping for async iterables and Web ReadableStreams. Active
