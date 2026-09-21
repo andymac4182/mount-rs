@@ -13,7 +13,7 @@ use hyper::body::{Body as HttpBodyTrait, Frame, Incoming, SizeHint};
 use hyper::header;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
-use hyper_util::rt::TokioIo;
+use hyper_util::rt::{TokioIo, TokioTimer};
 use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 #[cfg(feature = "observability")]
 use mount_rs_observability::Telemetry;
@@ -22,11 +22,13 @@ use mount_rs_observability::extract_headers;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type HttpBody = UnsyncBoxBody<Bytes, BoxError>;
@@ -160,6 +162,8 @@ pub struct HttpServerOptions {
     pub max_request_bytes: usize,
     pub read_chunk_bytes: usize,
     pub drain_timeout: Duration,
+    pub max_connections: usize,
+    pub request_timeout: Duration,
     #[cfg(feature = "observability")]
     pub telemetry: Telemetry,
 }
@@ -172,6 +176,8 @@ impl Default for HttpServerOptions {
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
             read_chunk_bytes: DEFAULT_READ_CHUNK_BYTES,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
+            max_connections: DEFAULT_MAX_CONNECTIONS,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
             #[cfg(feature = "observability")]
             telemetry: Telemetry::disabled(),
         }
@@ -192,6 +198,7 @@ impl HttpServerOptions {
 pub enum HttpServerError {
     Bind(std::io::Error),
     Io(std::io::Error),
+    InsecureBind { host: String },
     Join(Arc<tokio::task::JoinError>),
     Timeout,
 }
@@ -200,6 +207,10 @@ impl fmt::Display for HttpServerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Bind(error) | Self::Io(error) => error.fmt(f),
+            Self::InsecureBind { host } => write!(
+                f,
+                "HTTP listener host '{host}' is not allowed; bind to loopback and use a TLS reverse proxy for remote clients"
+            ),
             Self::Join(error) => error.fmt(f),
             Self::Timeout => f.write_str("HTTP server close timed out"),
         }
@@ -217,6 +228,7 @@ struct AppState {
 struct RequestConfig {
     max_request_bytes: usize,
     read_chunk_bytes: usize,
+    request_timeout: Duration,
     control: RuntimeControl,
     #[cfg(feature = "observability")]
     telemetry: Telemetry,
@@ -264,6 +276,7 @@ pub struct HttpServer {
     close_outcome: Mutex<Option<CloseOutcome>>,
     task: Mutex<Option<ListenerState>>,
     connections: Arc<AtomicUsize>,
+    connection_permits: Arc<Semaphore>,
 }
 
 impl fmt::Debug for HttpServer {
@@ -303,6 +316,7 @@ impl HttpServer {
                 config: RequestConfig {
                     max_request_bytes: options.max_request_bytes.max(1),
                     read_chunk_bytes: options.read_chunk_bytes.max(1),
+                    request_timeout: positive_duration(options.request_timeout),
                     control,
                     #[cfg(feature = "observability")]
                     telemetry: options.telemetry,
@@ -319,6 +333,7 @@ impl HttpServer {
             close_outcome: Mutex::new(None),
             task: Mutex::new(None),
             connections: Arc::new(AtomicUsize::new(0)),
+            connection_permits: Arc::new(Semaphore::new(options.max_connections.max(1))),
         }
     }
 
@@ -348,6 +363,7 @@ impl HttpServer {
             return Ok(());
         }
 
+        validate_bind_host(&self.host)?;
         let address = socket_address(&self.host, self.requested_port)
             .await
             .map_err(HttpServerError::Bind)?;
@@ -362,6 +378,7 @@ impl HttpServer {
         let counter = Arc::clone(&self.connections);
         let drained = Arc::clone(&self.drained);
         let closing = Arc::clone(&self.closing);
+        let connection_permits = Arc::clone(&self.connection_permits);
         let task = tokio::spawn(async move {
             loop {
                 if closing.load(Ordering::Acquire) != 0 {
@@ -380,6 +397,10 @@ impl HttpServer {
                         if closing.load(Ordering::Acquire) != 0 {
                             break;
                         }
+                        let Ok(permit) = Arc::clone(&connection_permits).try_acquire_owned()
+                        else {
+                            continue;
+                        };
                         let state = Arc::clone(&state);
                         let shutdown = Arc::clone(&shutdown);
                         let counter = Arc::clone(&counter);
@@ -387,14 +408,19 @@ impl HttpServer {
                         let closing = Arc::clone(&closing);
                         counter.fetch_add(1, Ordering::AcqRel);
                         tokio::spawn(async move {
+                            let _permit = permit;
                             let _guard = ConnectionGuard { counter, drained };
+                            let request_timeout = state.config.request_timeout;
                             let service = service_fn(move |request| {
                                 handle_request(request, Arc::clone(&state))
                             });
                             let io = TokioIo::new(stream);
-                            let connection = hyper::server::conn::http1::Builder::new()
+                            let mut builder = hyper::server::conn::http1::Builder::new();
+                            builder
                                 .keep_alive(true)
-                                .serve_connection(io, service);
+                                .header_read_timeout(Some(request_timeout))
+                                .timer(TokioTimer::new());
+                            let connection = builder.serve_connection(io, service);
                             tokio::pin!(connection);
                             let shutdown_notified = shutdown.notified();
                             tokio::pin!(shutdown_notified);
@@ -681,6 +707,18 @@ impl RequestError {
         }
     }
 
+    fn request_timeout() -> Self {
+        Self::Client {
+            status: StatusCode::REQUEST_TIMEOUT,
+            code: ErrorCode::Eio,
+            message: "request exceeded the configured timeout".to_owned(),
+            close: true,
+            content_range: None,
+            allow: None,
+            authenticate: false,
+        }
+    }
+
     fn server_closing() -> Self {
         Self::Client {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -811,6 +849,21 @@ impl HttpResponseFailure {
 }
 
 async fn handle_request(
+    request: Request<Incoming>,
+    state: Arc<AppState>,
+) -> Result<Response<HttpBody>, std::convert::Infallible> {
+    match tokio::time::timeout(
+        state.config.request_timeout,
+        handle_request_instrumented(request, state),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => Ok(error_response(RequestError::request_timeout())),
+    }
+}
+
+async fn handle_request_instrumented(
     request: Request<Incoming>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
@@ -1458,6 +1511,31 @@ fn content_length_exceeds(headers: &hyper::HeaderMap, limit: usize) -> bool {
         .is_some_and(|length| length > limit as u64)
 }
 
+fn positive_duration(duration: Duration) -> Duration {
+    if duration.is_zero() {
+        Duration::from_millis(1)
+    } else {
+        duration
+    }
+}
+
+fn validate_bind_host(host: &str) -> Result<(), HttpServerError> {
+    let normalized = unbracket_host(host).ok_or_else(|| HttpServerError::InsecureBind {
+        host: host.to_owned(),
+    })?;
+    let is_loopback = normalized.eq_ignore_ascii_case("localhost")
+        || normalized
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if is_loopback {
+        Ok(())
+    } else {
+        Err(HttpServerError::InsecureBind {
+            host: host.to_owned(),
+        })
+    }
+}
+
 fn parse_range(value: &str, size: u64) -> Result<ByteRange, ()> {
     let Some(spec) = value.strip_prefix("bytes=") else {
         return Err(());
@@ -1822,6 +1900,22 @@ mod tests {
         let debug = format!("{drive:?}");
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("test-secret-value"));
+    }
+
+    #[tokio::test]
+    async fn non_loopback_bind_is_rejected_before_socket_bind() {
+        let result = HttpServer::start(
+            DriveRegistry::new(),
+            HttpServerOptions {
+                host: "0.0.0.0".to_owned(),
+                ..HttpServerOptions::default()
+            },
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(HttpServerError::InsecureBind { host }) if host == "0.0.0.0"
+        ));
     }
 
     #[test]

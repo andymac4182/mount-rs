@@ -21,7 +21,9 @@ All routes are versioned under `/v1`:
 File reads support one `bytes=start-end` range and return `416` for invalid or
 multi-range requests. Uploads and JSON requests are bounded by
 `HttpServerOptions::max_request_bytes`; streamed reads use a bounded channel and
-`read_chunk_bytes`.
+`read_chunk_bytes`. The listener also enforces `max_connections`, applies a
+bounded header and request timeout, and closes excess connections before they
+reach request handling.
 
 `PUT` is a bounded streaming write, not an atomic publish. The current driver
 contract has no portable temporary-file/atomic-publish operation, so a request
@@ -32,8 +34,10 @@ staging integration may add atomic publication where the backend can prove it.
 Every drive route requires the exact `Authorization: Bearer <token>` value for
 that drive. Unknown drives fail closed, traversal and encoded separators are
 rejected before driver normalization, and tokens are private/redacted. The
-listener does not provide TLS; deployments binding beyond loopback must put the
-server behind a TLS/authenticated boundary.
+listener accepts only loopback hosts (`127.0.0.1`, `::1`, or `localhost`) and
+does not provide TLS. Customers exposing the service remotely must put it
+behind a TLS/authenticated boundary and keep the mount-rs listener loopback
+bound; non-loopback HTTP binds are rejected before socket creation.
 
 Distributed caching, cache invalidation, and cross-process version coordination
 are intentionally outside this primary slice.
