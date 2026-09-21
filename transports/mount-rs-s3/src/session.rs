@@ -9,7 +9,7 @@ use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use futures_core::Stream;
@@ -26,12 +26,13 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::protocol::{
     self, ByteRange, ListObjectsXml, ListPartsXml, ListedObject, ListedPart, MAX_PART_SIZE,
-    MAX_XML_BYTES, MIN_PART_SIZE, MULTIPART_PREFIX, ObjectTarget, Operation, S3Failure, S3Response,
-    S3Result, STREAMING_STAGING_PREFIX, compare_utf8, conditional_match, content_encoding_chunked,
-    decode_continuation_token, delete_result_xml, encode_continuation_token, error_response,
-    header_md5, initiate_multipart_xml, is_staging_key, list_buckets_xml, list_objects_xml,
-    list_parts_xml, parse_complete_document, parse_delete_document, parse_meta_mtime,
-    parse_object_key, parse_request_target, s3_error, unquote_etag, xml_response,
+    MAX_XML_BYTES, MIN_PART_SIZE, MULTIPART_PREFIX, ObjectTarget, Operation, S3Error, S3Failure,
+    S3Response, S3Result, STREAMING_STAGING_PREFIX, compare_utf8, conditional_match,
+    content_encoding_chunked, decode_continuation_token, delete_result_xml,
+    encode_continuation_token, error_response, header_md5, initiate_multipart_xml, is_staging_key,
+    list_buckets_xml, list_objects_xml, list_parts_xml, parse_complete_document,
+    parse_delete_document, parse_meta_mtime, parse_object_key, parse_request_target, s3_error,
+    unquote_etag, xml_response,
 };
 use crate::sigv4::{self, Credentials, HeaderEntry, SigV4Failure, header_list, header_value};
 
@@ -194,6 +195,49 @@ pub struct S3SessionStats {
     pub replies: u64,
     pub errors: u64,
     pub operations: BTreeMap<String, u64>,
+    /// Total request handling time in whole milliseconds.
+    pub duration_ms_total: u64,
+    /// Maximum request handling time in whole milliseconds.
+    pub duration_ms_max: u64,
+    /// Bytes received by the buffered in-process request API. Streaming HTTP
+    /// bodies are not counted because they are consumed after dispatch.
+    pub request_bytes: u64,
+    /// Bytes returned before a streaming response is handed to the HTTP
+    /// runtime. A streamed response is therefore counted as zero here.
+    pub response_bytes: u64,
+    /// Error counts by a bounded operational class. The map can never contain
+    /// user-controlled labels or an unbounded S3 error-code cardinality.
+    pub error_classes: BTreeMap<S3ErrorClass, u64>,
+}
+
+/// Stable, bounded classes for S3 operational error metrics.
+///
+/// The gateway deliberately does not expose raw request paths, object keys, or
+/// provider error messages as metric labels. Applications can map these
+/// classes to their own exporter or alerting system without creating a
+/// high-cardinality series for every object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum S3ErrorClass {
+    Authentication,
+    ConditionalConflict,
+    Throttled,
+    Client,
+    Server,
+}
+
+fn classify_error(error: &S3Error) -> S3ErrorClass {
+    match error.code.as_str() {
+        "AccessDenied"
+        | "AuthorizationHeaderMalformed"
+        | "AuthorizationQueryParametersError"
+        | "InvalidAccessKeyId"
+        | "RequestTimeTooSkewed"
+        | "SignatureDoesNotMatch" => S3ErrorClass::Authentication,
+        "OperationAborted" | "PreconditionFailed" => S3ErrorClass::ConditionalConflict,
+        "ServiceUnavailable" | "SlowDown" => S3ErrorClass::Throttled,
+        _ if error.status >= 500 => S3ErrorClass::Server,
+        _ => S3ErrorClass::Client,
+    }
 }
 
 #[derive(Clone)]
@@ -263,6 +307,7 @@ impl S3Session {
     /// Answer exactly one in-process request. Errors are converted to an S3
     /// response rather than escaping to the HTTP layer.
     pub async fn handle_request(&self, head: S3RequestHead, body: Vec<u8>) -> S3Response {
+        let started = Instant::now();
         {
             let mut stats = self.stats.lock().await;
             stats.requests += 1;
@@ -272,7 +317,7 @@ impl S3Session {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request_id = format!("mountx-{request_id:016x}");
         let result = self.dispatch(&head, &body).await;
-        let response = match result {
+        let (response, error_class) = match result {
             Ok(mut response) => {
                 response
                     .headers
@@ -280,15 +325,25 @@ impl S3Session {
                 if head.method.eq_ignore_ascii_case("HEAD") {
                     response.body.clear();
                 }
-                response
+                (response, None)
             }
-            Err(error) => error_response(&error.error(), &request_id, error.resource()),
+            Err(error) => {
+                let s3_error = error.error();
+                let error_class = classify_error(&s3_error);
+                (
+                    error_response(&s3_error, &request_id, error.resource()),
+                    Some(error_class),
+                )
+            }
         };
-        let mut stats = self.stats.lock().await;
-        stats.replies += 1;
-        if response.status >= 400 {
-            stats.errors += 1;
-        }
+        self.record_response_stats(
+            started,
+            body.len() as u64,
+            response.body.len() as u64,
+            response.status,
+            error_class,
+        )
+        .await;
         response
     }
 
@@ -303,6 +358,7 @@ impl S3Session {
         head: S3RequestHead,
         body: S3RequestBody,
     ) -> S3StreamResponse {
+        let started = Instant::now();
         {
             let mut stats = self.stats.lock().await;
             stats.requests += 1;
@@ -312,7 +368,7 @@ impl S3Session {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request_id = format!("mountx-{request_id:016x}");
         let result = self.dispatch_stream(&head, body).await;
-        let response = match result {
+        let (response, error_class) = match result {
             Ok(mut response) => {
                 response
                     .headers
@@ -320,22 +376,53 @@ impl S3Session {
                 if head.method.eq_ignore_ascii_case("HEAD") {
                     response.body = None;
                 }
-                response
+                (response, None)
             }
-            Err(error) => S3StreamResponse::from(error_response(
-                &error.error(),
-                &request_id,
-                error.resource(),
-            )),
+            Err(error) => {
+                let s3_error = error.error();
+                let error_class = classify_error(&s3_error);
+                (
+                    S3StreamResponse::from(error_response(
+                        &s3_error,
+                        &request_id,
+                        error.resource(),
+                    )),
+                    Some(error_class),
+                )
+            }
         };
-        let mut stats = self.stats.lock().await;
-        stats.replies += 1;
-        if response.status >= 400 {
-            stats.errors += 1;
-        }
+        let response_bytes = match &response.body {
+            Some(S3StreamBody::Bytes(bytes)) => bytes.len() as u64,
+            Some(S3StreamBody::Stream(_)) | None => 0,
+        };
+        self.record_response_stats(started, 0, response_bytes, response.status, error_class)
+            .await;
         // Keep the response owned by this function until after statistics are
         // updated.  This also makes the error path mirror handle_request.
         response
+    }
+
+    async fn record_response_stats(
+        &self,
+        started: Instant,
+        request_bytes: u64,
+        response_bytes: u64,
+        status: u16,
+        error_class: Option<S3ErrorClass>,
+    ) {
+        let elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        let mut stats = self.stats.lock().await;
+        stats.replies += 1;
+        stats.duration_ms_total = stats.duration_ms_total.saturating_add(elapsed_ms);
+        stats.duration_ms_max = stats.duration_ms_max.max(elapsed_ms);
+        stats.request_bytes = stats.request_bytes.saturating_add(request_bytes);
+        stats.response_bytes = stats.response_bytes.saturating_add(response_bytes);
+        if status >= 400 {
+            stats.errors += 1;
+        }
+        if let Some(error_class) = error_class {
+            *stats.error_classes.entry(error_class).or_default() += 1;
+        }
     }
 
     async fn dispatch_stream(

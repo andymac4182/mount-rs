@@ -133,6 +133,7 @@ unsafe extern "system" {
     ) -> i32;
     fn CreateDirectoryW(path: *const u16, security: *const c_void) -> i32;
     fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> i32;
+    fn GetShortPathNameW(path: *const u16, short_path: *mut u16, length: u32) -> u32;
     fn DeleteFileW(path: *const u16) -> i32;
     fn RemoveDirectoryW(path: *const u16) -> i32;
     fn DeviceIoControl(
@@ -236,6 +237,56 @@ fn wide_host_path(path: &Path) -> io::Result<Vec<u16>> {
 
 fn wide_symbolic_link_path(path: &Path) -> io::Result<Vec<u16>> {
     wide_path(path, false)
+}
+
+fn short_symbolic_link_path(path: &Path) -> io::Result<Option<Vec<u16>>> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let name = path
+        .file_name()
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let parent = wide_host_path(parent)?;
+
+    // GetShortPathNameW accepts the extended namespace and returns the size
+    // including the terminator when the output buffer is queried with zero.
+    // A short parent lets CreateSymbolicLinkW stay in the unprivileged Win32
+    // path used by Node/libuv, even when the ordinary path exceeds MAX_PATH.
+    let required = unsafe { GetShortPathNameW(parent.as_ptr(), std::ptr::null_mut(), 0) };
+    if required == 0 {
+        return Ok(None);
+    }
+    let mut short = vec![0_u16; required as usize];
+    let length = unsafe { GetShortPathNameW(parent.as_ptr(), short.as_mut_ptr(), required) };
+    if length == 0 || (length as usize) >= short.len() {
+        return Ok(None);
+    }
+    short.truncate(length as usize);
+    if short.starts_with(&[92, 92, 63, 92, 85, 78, 67, 92]) {
+        short = [92, 92]
+            .into_iter()
+            .chain(short[8..].iter().copied())
+            .collect();
+    } else if short.starts_with(&[92, 92, 63, 92]) {
+        short = short[4..].to_vec();
+    }
+
+    let name: Vec<u16> = name.encode_wide().collect();
+    if name.is_empty() || name.contains(&0) {
+        return Ok(None);
+    }
+    if !short.ends_with(&[92]) {
+        short.push(92);
+    }
+    short.extend(name);
+    // Retain the ordinary namespace only when the short path is genuinely
+    // within the Win32 limit; otherwise the extended/reparse fallback below
+    // remains responsible for the operation.
+    if short.len() + 1 > 260 {
+        return Ok(None);
+    }
+    short.push(0);
+    Ok(Some(short))
 }
 
 fn wide_link_target(target: &str) -> io::Result<Vec<u16>> {
@@ -414,6 +465,13 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
     };
     let mut flags = type_flag | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
     let mut link_path = &link;
+    let short_link = if link.len() > 260 {
+        short_symbolic_link_path(path).ok().flatten()
+    } else {
+        None
+    };
+    let mut short_attempted = false;
+    let mut extended_attempted = false;
     // Windows 10 Developer Mode supports this flag without elevation. Older
     // Windows versions reject the flag itself; libuv retries without it so
     // the ordinary elevated symlink behavior remains available.
@@ -434,15 +492,29 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             && error.raw_os_error() == Some(206)
             && extended_link != link
         {
-            // ERROR_FILENAME_EXCED_RANGE: retain the normal namespace for
-            // short paths, but still support long link names when the host
-            // process and filesystem have opted into long paths.
-            link_path = &extended_link;
+            // ERROR_FILENAME_EXCED_RANGE: first try the short aliases of the
+            // existing parent components. This keeps creation in the normal
+            // unprivileged Win32 namespace on runners where 8.3 names are
+            // available, while still supporting long-path-aware filesystems.
+            if let Some(short_link) = short_link.as_ref() {
+                link_path = short_link;
+                short_attempted = true;
+            } else {
+                link_path = &extended_link;
+                extended_attempted = true;
+            }
             continue;
         }
-        if std::ptr::eq(link_path, &extended_link)
-            && matches!(error.raw_os_error(), Some(2) | Some(3))
-        {
+        if short_attempted && matches!(error.raw_os_error(), Some(2) | Some(3)) {
+            // The short-name lookup can succeed while the link API still
+            // rejects that namespace. Give the explicit extended path one
+            // chance before using the low-level reparse fallback.
+            link_path = &extended_link;
+            short_attempted = false;
+            extended_attempted = true;
+            continue;
+        }
+        if extended_attempted && matches!(error.raw_os_error(), Some(2) | Some(3)) {
             // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND both occur when
             // the long-link fallback is needed on hosted Windows runners.
             return create_long_symlink(path, target, directory);

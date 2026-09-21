@@ -1044,7 +1044,7 @@ fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> 
         drives: readiness.then_some(registry.len()),
     };
     let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"status\":\"error\"}".to_vec());
-    json_response(status, Bytes::from(bytes), method == Method::HEAD)
+    health_json_response(status, Bytes::from(bytes), method == Method::HEAD)
 }
 
 async fn handle_file(
@@ -1736,6 +1736,20 @@ fn json_response(status: StatusCode, bytes: Bytes, head: bool) -> Response<HttpB
             full_body(bytes)
         })
         .unwrap_or_else(|_| Response::new(full_body(Bytes::new())))
+}
+
+fn health_json_response(status: StatusCode, bytes: Bytes, head: bool) -> Response<HttpBody> {
+    let mut response = json_response(status, bytes, head);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        header::HeaderValue::from_static("nosniff"),
+    );
+    response
 }
 
 fn empty_response(status: StatusCode) -> Response<HttpBody> {

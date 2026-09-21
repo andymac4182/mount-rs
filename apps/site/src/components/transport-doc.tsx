@@ -426,7 +426,7 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
     name: 'HTTP multi-drive API',
     eyebrow: 'Transport / unmounted service',
     maturity: 'Preview',
-    maturityNote: 'Loopback service, bearer isolation, ranges, streaming, and reopen checks; deployment hardening remains the caller’s job.',
+    maturityNote: 'Loopback service with bearer isolation, ranges, streaming, reopen, and bounded health/readiness probes; a hosted all-features HTTP/OTLP gate now passes, while deployment hardening remains the caller’s job.',
     summary: (
       <>
         The HTTP service exposes named mount-rs drives without creating a
@@ -492,9 +492,13 @@ curl -H 'Authorization: Bearer demo-memory' \
         macOS arm64 W30.5 loopback collector test now receives non-empty
         <code>/v1/traces</code>, <code>/v1/metrics</code>, and
         <code>/v1/logs</code> payloads without raw path bytes, and the HTTP
-        observability integration gate recorded 7 passes. This verifies the
-        local exporter/collector boundary; external collector reachability and
-        broader multi-drive and hosted coverage remain open.
+        observability integration gate recorded 7 passes. Hosted CI run
+        <code>35599817215</code>, source <code>b26819e</code>, also passed the
+        all-features HTTP health/readiness, telemetry/OTLP, and strict-Clippy
+        job <code>106333141914</code>. This is hosted exporter-path and
+        contract evidence only: deployed collector reachability, provider-
+        aware readiness, dashboards, paging, SLOs, and production hardening
+        remain open.
       </>
     ),
     sources: [
@@ -502,6 +506,7 @@ curl -H 'Authorization: Bearer demo-memory' \
       { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
       { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
       { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/src/server.rs' },
+      { label: 'Hosted HTTP observability CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35599817215' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#quick-local-demo' },
     ],
   },

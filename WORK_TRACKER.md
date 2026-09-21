@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native, hosted acceptance and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -957,16 +957,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   fail the lane. The live
   Node gate uses that same published authority prefix. The macOS native-NFS job
   now also compiles the FoundationDB-enabled CLI lifecycle test; live macOS
-  service/cluster acceptance and the hosted result remain open.
-- [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
+  service/cluster acceptance remains open, while the hosted Linux result is
+  recorded under W07.6 below.
+- [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
   FoundationDB service-restart evidence. The hosted CI lane and Docker harness
   now run the consumer feature checks, shared-provider authority publication,
   owned FoundationDB service restart, a separate post-restart authority
-  republish, and fresh-client RustFS reopen; hosted result remains pending until
-  CI runs. No emulated acceptance.
+  republish, and fresh-client RustFS reopen; the terminal hosted result is
+  recorded below. No emulated acceptance.
   The local arm64 durable qualification run on 2026-09-21 used the
   `foundationdb-soak-durable` composition name, three pinned FoundationDB
   7.4.7 server containers with `double`/SSD configuration, one bounded soak
@@ -1001,17 +1002,42 @@ Evidence landed without closing the remaining W01 acceptance gates:
   client checks with non-cancelling concurrency. It retains the terminal
   redacted log as a run artifact so a long W07 result is not invalidated by an
   unrelated mainline push; its result is still qualification evidence only.
+  Hosted run
+  [35598049389](https://github.com/andymac4182/mount-rs/actions/runs/35598049389)
+  (job
+  [106327338587](https://github.com/andymac4182/mount-rs/actions/runs/35598049389/job/106327338587))
+  at revision `65c52b9` completed green on `ubuntu-24.04` in 12m15s. It
+  emitted `FOUNDATIONDB_RUSTFS_NETWORK_READY alias=mount-rs-rustfs`,
+  `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403`,
+  `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=1`,
+  `FOUNDATIONDB_NAPI_PASS image=node:24-bookworm`,
+  `FOUNDATIONDB_SERVICE_RESTART_READY`,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64 service_restart=pass soak_rounds=1`,
+  `RUSTFS_COMBO_PASS name=foundationdb-production-qualification` and
+  `RUSTFS_INTEGRATION_PASS`. This is terminal hosted Linux qualification for
+  the tested revision; it does not close the production identity/TLS,
+  backup/recovery, capacity, observability, macOS or release-owner gates.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
-  sentinel objects remain untouched. This does not close the W07.6 service-
-  restart or hosted-composition boundaries above. The
+  sentinel objects remain untouched. The earlier target-gated packet did not
+  itself close the W07.6 service-restart or hosted-composition boundaries; the
+  terminal hosted evidence above now does. The
   published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
   fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
-  handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
+  handling; its original local runtime lane was blocked by host `libfdb_c` and
+  Docker, while the dedicated hosted lane is now green.
 - [ ] W07.7 **Production rollout readiness and go/no-go:** the demo and local
   Docker evidence are not production acceptance. Before enabling any production
   consumer, close every gate below with a linked revision, test/run result,
   environment identity and accountable owner:
+  The credential-free
+  `scripts/verify-w07-production-config.mjs` gate and its positive/negative
+  fixtures now enforce the accepted production configuration shape in hosted
+  qualification: durable FoundationDB metadata, `shared-provider` authority,
+  HTTPS RustFS blocks and external credential references. This is static policy
+  evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
+  replication, recovery, capacity, telemetry or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
@@ -1043,13 +1069,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   - [ ] **Hosted and platform evidence:** obtain green hosted
     FoundationDB/RustFS, Node, CLI/native Linux and macOS/Linux build/native
     acceptance runs. Record the actual runner, cluster/image, revision and
-    result; failed, skipped, cancelled or unavailable evidence remains open.
+  result; failed, skipped, cancelled or unavailable evidence remains open.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
   result may be promoted to a production PASS.
-  The production gate ledger, deployment contract and rollout sequence are
-  tracked in [`docs/foundationdb-production-rollout.md`](docs/foundationdb-production-rollout.md).
+  The production gate ledger, deployment contract, operational runbook and
+  rollout sequence are tracked in
+  [`docs/foundationdb-production-rollout.md`](docs/foundationdb-production-rollout.md)
+  and [`docs/W07-operations-runbook.md`](docs/W07-operations-runbook.md).
 
 ## W08 — TiDB
 
@@ -1156,11 +1184,15 @@ reproducible in a production-like environment.
   retention and redaction; exercise an alert end to end. The HTTP transport
   now implements unauthenticated `GET`/`HEAD /healthz` (listener/process
   liveness) and `/readyz` (non-empty configured drive registry, with `503`
-  for an empty registry); `mount-rs-http` passed 8 unit tests, 10 integration
-  tests and strict Clippy. This is a process/configuration implementation
-  slice only: provider-aware readiness, collector, SLO, paging, redaction and
-  end-to-end alert evidence remain open. *(Implementation + hosted/provider;
-  collector and on-call route are not configured.)*
+  for an empty registry); the default `mount-rs-http` suite passed 8 unit and
+  10 integration tests, and its all-features observability/OTLP suite passed 8
+  unit and 13 integration tests; strict Clippy passed in both configurations.
+  Hosted CI run `35599817215`, source `b26819e`, job `106333141914` also
+  reached terminal success for that all-features gate. This is
+  process/configuration and local/hosted exporter-path evidence only:
+  provider-aware readiness, collector, SLO, paging, redaction and end-to-end
+  alert evidence remain open. *(Implementation + hosted/provider; collector
+  and on-call route are not configured.)*
 - [ ] **W08-P06 (20%) — capacity/load/soak:** run representative baseline,
   peak, saturation, failover and multi-hour soak workloads; record latency,
   throughput, errors, headroom and scaling limits. The bounded public-N-API
@@ -1650,6 +1682,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   AWS block test passed, and the cross-process reopen test passed. The run
   cleaned its owned prefix and emitted `AWS_S3_TEST_PASS` at
   `mount-rs-tests/aws-s3/20260921T120543Z-65309-0663df4c1d84504983babd5ff88f4e02`.
+- [x] The current pushed head `2633bec` refreshed the live qualification in the
+  selected `myroot` account. The read-only resource audit passed with caller
+  account `922978963556`, the scoped role denied the sibling prefix, the public
+  Rust CLI self-test wrote/shut down/reopened/read successfully, the composed
+  AWS S3 block test passed, the fresh-process reopen test passed, and owned
+  prefix cleanup emitted `AWS_S3_TEST_PASS` at
+  `mount-rs-tests/aws-s3/20260921T124037Z-88398-91d73f60bde3b905c3af2cc78b38b224`.
+  This is current test-account evidence, not production resource or hosted
+  deployment acceptance.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -1705,14 +1746,22 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.7 Add deployment observability and operations: S3 latency/error and
   retry metrics, conditional-conflict and orphan/cleanup signals, credential
   expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
-  canary/rollback procedures.
+  canary/rollback procedures. The adjacent S3 gateway now exposes a bounded
+  `S3Session::stats()` snapshot for latency, buffered bytes, operation counts,
+  and authentication/conditional/throttling/client/server error classes; the
+  public SDK's optional observability path records provider block latency,
+  errors, and bytes. This is an instrumentation surface only. Exporter wiring,
+  retry visibility, credential-expiry detection, cost/retention alerts,
+  SLO thresholds, orphan/cleanup signals, and an exercised incident runbook
+  remain deployment gates.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
-  references. Both remediations and the secret-safe CI preflight are landed at
-  current head `82ffeb9`; the follow-up Standard scan reports zero reportable
+  references. Both remediations and the secret-safe CI preflight are landed;
+  current pushed head `b46e37f` is covered by Standard scan
+  `f73dd069-4102-4465-aaf7-8d6165282a36`, which reports zero reportable
   findings in the 21 directly reviewed W25 surfaces, with partial repository
   coverage (592 files, 21 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. The latest

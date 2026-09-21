@@ -8,20 +8,22 @@ export const Route = createFileRoute('/docs/')({
 function DocsOverview() {
   return (
     <article className="doc-article">
-      <p className="eyebrow">Documentation / overview</p>
-      <h1>The boundary is the product.</h1>
+      <p className="eyebrow">Documentation / start here</p>
+      <h1>Turn the file boundary into an explicit design choice.</h1>
       <p className="doc-lede">
-        mount-rs gives Rust and Node applications a filesystem-shaped contract
-        while keeping persistence, chunking, and mounting as explicit choices.
+        The business case is simple: keep file semantics stable while the
+        deployment, metadata provider, block store, or transport changes.
+        These pages show the contract behind that promise.
       </p>
 
       <div className="callout callout-blue">
-        <strong>Practical reading order</strong>
-        <p>
-          Start with the direct contract, then look at composition. The API
-          guide describes what exists in this repository today; acceptance
-          requirements describe what is not yet a blanket guarantee.
-        </p>
+          <strong>Choose your next decision</strong>
+          <p>
+            Start with Rust or Node if you are integrating the contract. Choose
+            providers when you are designing storage. Choose transports when you
+            are deciding how the file surface reaches a process. The acceptance
+            requirements describe what is not yet a blanket guarantee.
+          </p>
       </div>
 
       <h2>Three layers, one observable contract</h2>
