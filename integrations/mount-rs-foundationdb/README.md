@@ -86,7 +86,9 @@ let authority = mount_rs_foundationdb::FoundationDbLeaseAuthority::connect(
     "mount-rs/lease-authority",
     mount_rs_foundationdb::FoundationDbLimits::default(),
 )?;
-authority.publish_system_now_ms().await?;
+authority
+    .publish_system_now_ms_with_max_forward_jump(std::time::Duration::from_secs(300))
+    .await?;
 // In a separate worker process, use read-only FoundationDB credentials.
 let oracle = mount_rs_foundationdb::FoundationDbSharedLeaseOracle::connect(
     "/etc/foundationdb/fdb.cluster",
@@ -104,7 +106,10 @@ Run the publisher in one protected authority service and give storage workers
 only the read capability for its authority keyspace. The shared reader never
 advances time or falls back to a worker's local clock; an unpublished or
 unavailable authority returns an error and leases fail closed. The authority
-still needs an operational clock-skew bound and recovery policy.
+publisher's bounded-forward-jump API fails closed if one observed wall-clock
+advance exceeds the configured safety bound. The authority still needs an
+operational clock-skew monitor, a publish cadence shorter than the shortest
+lease TTL and a recovery policy.
 
 Before enabling this mode in production, the deployment must enforce one
 write-capable authority identity per authority prefix, a consumer identity that
@@ -152,7 +157,10 @@ serialization only; they are not converted into `expires_at_ms`, because a
 commit version is not a wall-clock duration. The persisted logical fence and
 core revision remain the concurrency tokens, while the persisted oracle remains
 the expiry authority. This avoids the unsafe conversion of FDB commit versions
-into wall-clock durations.
+into wall-clock durations. Use
+`publish_system_now_ms_with_max_forward_jump` (or its explicit-sample
+counterpart) in the authority service to reject an unsafe forward jump rather
+than publishing it.
 
 ## Ambiguous commit handling
 
@@ -209,7 +217,10 @@ The opt-in integration test uses `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE` (or the
 platform default cluster file when `MOUNT_RS_FOUNDATIONDB_USE_DEFAULT=1`). It
 uses a unique key prefix, proves the ordinary constructor fails closed, then
 exercises the FoundationDB-hosted shared authority with two independent
-readers, a backward time sample, forward recovery, and stale-writer fencing.
+readers, a backward time sample, bounded forward recovery, and stale-writer
+fencing. The publisher uses the bounded-forward-jump API in the production
+qualification path; deployment identity and clock monitoring remain external
+acceptance gates.
 It then explicitly selects the persisted single-authority lease oracle and
 exercises block immutability, lease fencing, revision-conflict handling,
 metadata reload, and deletion against the real cluster. It separately

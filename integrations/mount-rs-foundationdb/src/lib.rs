@@ -233,6 +233,15 @@ fn system_now_ms() -> Result<u64> {
         })
 }
 
+fn duration_millis(duration: Duration, description: &str) -> Result<u64> {
+    let millis = u64::try_from(duration.as_millis())
+        .map_err(|_| FsError::new(ErrorCode::Eoverflow).with_message(description))?;
+    if millis == 0 {
+        return Err(FsError::new(ErrorCode::Einval).with_message(description));
+    }
+    Ok(millis)
+}
+
 /// A FoundationDB-backed shared lease oracle.
 ///
 /// Every call transactionally reads and advances one persisted monotonic
@@ -374,6 +383,35 @@ impl FoundationDbLeaseAuthority {
     /// Publish a provider-time sample, retaining the larger value already in
     /// the record when the authority clock moved backwards.
     pub async fn publish_now_ms(&self, now_ms: u64) -> Result<u64> {
+        self.publish_now_ms_internal(now_ms, None).await
+    }
+
+    /// Publish a provider-time sample while bounding one forward advance.
+    ///
+    /// A forward advance larger than `max_forward_jump` fails closed without
+    /// changing the authority record. This protects lease expiry from a
+    /// forward host-clock jump and from an authority that was offline longer
+    /// than the deployment's publication policy. Callers should invoke this
+    /// method on a cadence shorter than the shortest lease TTL and retain the
+    /// error as an operational clock/authority alert.
+    pub async fn publish_now_ms_with_max_forward_jump(
+        &self,
+        now_ms: u64,
+        max_forward_jump: Duration,
+    ) -> Result<u64> {
+        let max_forward_jump_ms = duration_millis(
+            max_forward_jump,
+            "FoundationDB authority forward-jump bound must be positive",
+        )?;
+        self.publish_now_ms_internal(now_ms, Some(max_forward_jump_ms))
+            .await
+    }
+
+    async fn publish_now_ms_internal(
+        &self,
+        now_ms: u64,
+        max_forward_jump_ms: Option<u64>,
+    ) -> Result<u64> {
         if now_ms == 0 {
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("FoundationDB lease authority time must be non-zero"));
@@ -391,7 +429,8 @@ impl FoundationDbLeaseAuthority {
                         .await?
                         .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
                         .transpose()?;
-                    let published = current.unwrap_or(0).max(now_ms);
+                    let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
+                        .map_err(TxnError::Fs)?;
                     trx.set(&key, &encode_oracle_time(published));
                     Ok(published)
                 })
@@ -408,6 +447,17 @@ impl FoundationDbLeaseAuthority {
     /// use [`FoundationDbSharedLeaseOracle`] and never call it themselves.
     pub async fn publish_system_now_ms(&self) -> Result<u64> {
         self.publish_now_ms(system_now_ms()?).await
+    }
+
+    /// Publish the authority process's wall-clock sample with a bounded
+    /// forward-jump policy. See [`Self::publish_now_ms_with_max_forward_jump`]
+    /// for the safety boundary and scheduling requirement.
+    pub async fn publish_system_now_ms_with_max_forward_jump(
+        &self,
+        max_forward_jump: Duration,
+    ) -> Result<u64> {
+        self.publish_now_ms_with_max_forward_jump(system_now_ms()?, max_forward_jump)
+            .await
     }
 
     /// Create the read-only oracle view for this authority key.
@@ -1028,6 +1078,28 @@ fn decode_oracle_time(bytes: &[u8]) -> Result<u64> {
         return Err(backend_error("invalid FoundationDB lease oracle time"));
     }
     Ok(now_ms)
+}
+
+fn authority_time_sample(
+    current: Option<u64>,
+    proposed: u64,
+    max_forward_jump_ms: Option<u64>,
+) -> Result<u64> {
+    if proposed == 0 {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("FoundationDB lease authority time must be non-zero"));
+    }
+    let current = current.unwrap_or(0);
+    if let Some(max_forward_jump_ms) = max_forward_jump_ms
+        && current != 0
+        && proposed > current
+        && proposed - current > max_forward_jump_ms
+    {
+        return Err(FsError::new(ErrorCode::Eio).with_message(
+            "FoundationDB lease authority clock advanced beyond the configured safety bound",
+        ));
+    }
+    Ok(current.max(proposed))
 }
 
 fn encode_last_fence(fence: u64) -> Vec<u8> {
@@ -1912,6 +1984,34 @@ mod tests {
         );
         assert_eq!(decode_oracle_time(&encode_oracle_time(123)).unwrap(), 123);
         assert_eq!(decode_last_fence(&encode_last_fence(17)).unwrap(), 17);
+    }
+
+    #[test]
+    fn authority_clock_policy_clamps_backward_and_rejects_large_forward_jumps() {
+        assert_eq!(
+            authority_time_sample(Some(2_000), 1_000, Some(60_000)).unwrap(),
+            2_000
+        );
+        assert_eq!(
+            authority_time_sample(Some(2_000), 62_000, Some(60_000)).unwrap(),
+            62_000
+        );
+        let error = authority_time_sample(Some(2_000), 62_001, Some(60_000)).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert!(error.to_string().contains("safety bound"));
+        assert_eq!(
+            authority_time_sample(None, 62_001, Some(1)).unwrap(),
+            62_001
+        );
+    }
+
+    #[test]
+    fn authority_clock_policy_requires_a_positive_duration() {
+        assert!(duration_millis(Duration::ZERO, "authority bound must be positive").is_err());
+        assert_eq!(
+            duration_millis(Duration::from_millis(1), "authority bound").unwrap(),
+            1
+        );
     }
 
     #[test]

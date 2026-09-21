@@ -148,6 +148,14 @@ The deployment must prove and continuously enforce all of the following:
 - credentials, cluster files, certificates, and rotation material are injected
   at runtime and never committed or printed.
 
+The provider now exposes
+`publish_system_now_ms_with_max_forward_jump` and its explicit-sample
+counterpart. They fail closed before writing when one proposed authority-time
+advance exceeds the configured bound; the unit and real-cluster authority
+paths exercise this guard. This is an implementation safety boundary, not
+evidence of the production host's clock monitor, identity policy, publication
+cadence or failover procedure.
+
 These are deployment controls. The library API and a shared FoundationDB
 `Database` handle cannot prove the credential/tenant/ACL boundary by
 themselves, so a production negative test with the actual identities is

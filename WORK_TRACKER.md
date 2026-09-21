@@ -934,10 +934,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   runtime evidence now also exercises the process-owned authority, reader and
   storage `connect` paths. The hosted native CLI lane now publishes a current
   authority sample in a separate process before running the consumer with the
-  shared-provider/read-only configuration. Deployment-level authority
-  credential/clock-skew controls are now documented as an explicit deployment
-  contract, but their enforcement and hosted runtime evidence remain pending,
-  so this item is not yet marked complete.
+  shared-provider/read-only configuration. The authority publisher now also
+  exposes an explicit bounded-forward-jump API that fails closed before an
+  unsafe wall-clock sample is written; unit coverage and the real-cluster
+  authority/composition paths use that guard. Deployment-level authority
+  credentials, clock monitoring/cadence and hosted evidence for the new guard
+  remain pending, so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
