@@ -407,6 +407,14 @@ test, and the pinned codec and inode oracle tests also passed. Hosted CI run
 Linux `/dev/fuse` evidence; native mount/callback, FSKit, close/crash/restart,
 mutation/write concurrency, locks, and durability remain open and W01 stays
 NO-GO.
+The local FUSE checkpoint was then rebased onto current `origin/main`, which
+includes the eight-client native concurrency and read-panic callback-fault
+harnesses. The locked FUSE target, strict Clippy, Linux test-target compile,
+locked N-API target, rebuilt debug addon, generated typecheck, mount-free
+session, pinned codec oracle, and inode oracle all passed. The ignored native
+harnesses were not executable on this macOS host, so hosted `/dev/fuse`,
+callback delivery, panic/cleanup, close/crash/restart, mutation/write
+concurrency, locks, durability, and FSKit remain external; W01 stays NO-GO.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
