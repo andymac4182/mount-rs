@@ -257,6 +257,79 @@ async fn observability_records_success_and_bounded_http_errors() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_and_readiness_are_unauthenticated_and_bounded() {
+    let server = test_server().await;
+    let client = reqwest::Client::new();
+    let base = server.url();
+
+    let health = client
+        .get(format!("{base}/healthz"))
+        .send()
+        .await
+        .expect("health response");
+    assert_eq!(health.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        health
+            .json::<serde_json::Value>()
+            .await
+            .expect("health JSON")["status"],
+        "ok"
+    );
+
+    let readiness = client
+        .get(format!("{base}/readyz"))
+        .send()
+        .await
+        .expect("readiness response");
+    assert_eq!(readiness.status(), reqwest::StatusCode::OK);
+    let readiness_body = readiness
+        .json::<serde_json::Value>()
+        .await
+        .expect("readiness JSON");
+    assert_eq!(readiness_body["status"], "ready");
+    assert_eq!(readiness_body["drives"], 3);
+
+    let method = client
+        .post(format!("{base}/healthz"))
+        .send()
+        .await
+        .expect("health method response");
+    assert_eq!(method.status(), reqwest::StatusCode::METHOD_NOT_ALLOWED);
+
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_registry_is_not_ready_but_is_healthy() {
+    let server = HttpServer::start(DriveRegistry::new(), HttpServerOptions::default())
+        .await
+        .expect("HTTP server");
+    let client = reqwest::Client::new();
+    let base = server.url();
+
+    assert_eq!(
+        client
+            .get(format!("{base}/healthz"))
+            .send()
+            .await
+            .expect("health response")
+            .status(),
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        client
+            .get(format!("{base}/readyz"))
+            .send()
+            .await
+            .expect("readiness response")
+            .status(),
+        reqwest::StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_http_exposes_isolated_memory_and_sqlite_drives() {
     let server = test_server().await;
     let client = reqwest::Client::new();
