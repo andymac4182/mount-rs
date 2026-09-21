@@ -1,11 +1,12 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 02:21 AEST**
+Status snapshot: **2026-09-22 02:35 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: `origin/main` at `2aaae52` before this hosted-evidence
+Publication snapshot: `origin/main` at `a8d82ca` before this ledger-refresh
 chunk; this update records the terminal W08.21 manual target-attestation
-qualification. The approved tag-triggered release, registry acceptance,
-canary, rollback and owner approval remain production/provider gates.
+qualification and the corrected rollout evidence matrix. The approved
+tag-triggered release, registry acceptance, canary, rollback and owner approval
+remain production/provider gates.
 Authoritative W08 hosted evidence includes CI run `35624385556`, source
 `2ab3cf1`, its terminal Linux/macOS build, download-verification and
 provenance/SBOM-attestation jobs, CI run `35617415427`'s earlier terminal
@@ -292,6 +293,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 01:56–02:00 AEST (approx.) | Recorded W08.19 as a separate correction chunk, updated the rollout/tracker boundary with the exact setup error and full SHA, and prepared the corrected workflows for publication. | ~3 min | ~1 min local diff/static inspection | The action-resolution defect is corrected locally; hosted attestation qualification remains open until the corrected workflow is pushed and rerun. |
 | 2026-09-22 02:00–02:09 AEST (approx.) | Followed corrected run `35622899242` at source `2f43721`: both target builds, downloads, provenance attestations and CycloneDX SBOM attestations executed, but both final verifier steps failed because `gh attestation verify` rejects simultaneous `--signer-repo` and `--signer-workflow`. Removed the redundant `--signer-repo` flag from both workflows and recorded W08.20 for the next rerun. | ~5 min | ~8 min hosted build/download/attestation wait and log retrieval | Hosted attestation generation is proven; hosted identity verification remains open. No final attestation verification PASS or production signature result is claimed. |
 | 2026-09-22 02:09–02:22 AEST (approx.) | Published W08.20 as `2ab3cf1` after reconciling concurrent `origin/main`, dispatched manual `attest=true` run `35624385556`, followed it to terminal success, and captured both target hashes, six terminal job IDs, four repository attestation records, four Rekor entries and the two `W08_RELEASE_TARGET_ATTESTATION_PASS` markers. Updated the tracker, production rollout and ledger with W08.21 evidence. | ~8 min | ~5 min hosted build/download/attestation wait plus ~4 min log/evidence retrieval and ~5 min documentation | Hosted target attestation is now terminally qualified for Linux x86_64 and macOS arm64. The approved tag release, release-registry acceptance, staged canary, rollback and owner approval remain open. |
+| 2026-09-22 02:22–02:35 AEST (approx.) | Audited the P01–P09 handoff after W08.21, corrected the rollout P09 summary and evidence matrix so the terminal manual attestation is not reported as absent, committed `ff6fd91`, reconciled concurrent mainline changes and published the result in `a8d82ca`. | ~5 min | ~4 min remote fetch/merge/push | The documentation now consistently separates terminal manual target-attestation evidence from the still-unexecuted approved tag release, provider staging, observability, canary, rollback and release-owner gates. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
