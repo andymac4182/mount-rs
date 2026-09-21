@@ -1109,8 +1109,9 @@ evidence is terminal, owned and reproducible in a production-like environment.
 - [ ] **W08-P07 (15%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
-  + implementation; the hosted TLS compile gate passed, while the actual
-  endpoint, certificates, security approval and network controls are external.
+  + implementation; hosted TLS compile and guard job `106301529923` in run
+  `35589825356` passed, while the actual endpoint, certificates, security
+  approval and network controls are external.
   `scripts/test-tidb-tls.sh` now provides the guarded credentialed provider
   gate and rejects missing TLS/CA/hostname verification before connecting.)*
 - [ ] **W08-P08 (15%) — failure drills/runbooks/on-call:** exercise client and
