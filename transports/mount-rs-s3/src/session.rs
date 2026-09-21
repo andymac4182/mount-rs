@@ -38,6 +38,8 @@ use crate::sigv4::{self, Credentials, HeaderEntry, SigV4Failure, header_list, he
 const DEFAULT_BUCKET: &str = "mountx";
 const DEFAULT_READ_CHUNK: usize = 128 * 1024;
 const DEFAULT_MAX_BODY: usize = 512 * 1024 * 1024;
+const DEFAULT_MULTIPART_STAGING_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
+const DEFAULT_MULTIPART_STAGING_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MANIFEST_NAME: &str = "upload.json";
 
 struct ListObjectsRequest<'a> {
@@ -75,6 +77,24 @@ struct StreamWriteRequest<'a> {
     exclusive: bool,
     create_parent: bool,
     cleanup_on_error: bool,
+    staging_quota: Option<StagingQuota>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StagingQuota {
+    limit: u64,
+    used: u64,
+    replaced: u64,
+}
+
+impl StagingQuota {
+    fn allows(self, position: u64, additional: u64) -> bool {
+        self.used
+            .saturating_sub(self.replaced)
+            .saturating_add(position)
+            .saturating_add(additional)
+            <= self.limit
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +104,8 @@ pub struct S3SessionOptions {
     pub max_body_bytes: usize,
     pub max_xml_bytes: usize,
     pub read_chunk_bytes: usize,
+    pub multipart_staging_ttl_ms: i64,
+    pub multipart_staging_max_bytes: u64,
 }
 
 impl Default for S3SessionOptions {
@@ -94,6 +116,8 @@ impl Default for S3SessionOptions {
             max_body_bytes: DEFAULT_MAX_BODY,
             max_xml_bytes: MAX_XML_BYTES,
             read_chunk_bytes: DEFAULT_READ_CHUNK,
+            multipart_staging_ttl_ms: DEFAULT_MULTIPART_STAGING_TTL_MS,
+            multipart_staging_max_bytes: DEFAULT_MULTIPART_STAGING_MAX_BYTES,
         }
     }
 }
@@ -206,8 +230,14 @@ impl S3Session {
 
     pub fn from_buckets_with_options(
         buckets: impl IntoIterator<Item = (String, Arc<dyn FsDriver>)>,
-        options: S3SessionOptions,
+        mut options: S3SessionOptions,
     ) -> Self {
+        if options.multipart_staging_ttl_ms <= 0 {
+            options.multipart_staging_ttl_ms = DEFAULT_MULTIPART_STAGING_TTL_MS;
+        }
+        if options.multipart_staging_max_bytes == 0 {
+            options.multipart_staging_max_bytes = DEFAULT_MULTIPART_STAGING_MAX_BYTES;
+        }
         Self {
             buckets: Arc::new(buckets.into_iter().collect()),
             options,
@@ -787,6 +817,7 @@ impl S3Session {
         body: S3RequestBody,
         verified: Option<&sigv4::VerifiedRequest>,
     ) -> S3Result<S3StreamResponse> {
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let existing = driver.stat(&target.path).await.ok();
         check_put_conditionals(existing.as_ref(), &head.headers)?;
         let requested_mtime =
@@ -821,6 +852,12 @@ impl S3Session {
             ));
         }
         require_atomic_rename(&driver)?;
+        // Stage at the private root, but create the destination hierarchy
+        // before the final rename. A rename cannot create a missing parent and
+        // nested object keys are valid S3 keys.
+        ensure_parent(&driver, &target.path).await?;
+        let staging_quota =
+            staging_quota(&driver, self.options.multipart_staging_max_bytes, None).await?;
         let exclusive = existing.is_none() && check_create_only(&head.headers);
         let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
         write_stream_body(StreamWriteRequest {
@@ -834,6 +871,7 @@ impl S3Session {
             exclusive: false,
             create_parent: true,
             cleanup_on_error: true,
+            staging_quota: Some(staging_quota),
         })
         .await?;
         if exclusive {
@@ -921,11 +959,15 @@ impl S3Session {
             }
         }
         let (keys, quiet) = parse_delete_document(&body, self.options.max_xml_bytes)?;
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let mut deleted = Vec::new();
         let mut errors = Vec::new();
         for key in keys {
             if is_staging_key(&key) {
-                deleted.push(key);
+                match delete_staging_key(&driver, &key).await {
+                    Ok(()) => deleted.push(key),
+                    Err(error) => errors.push((key, error.error())),
+                }
                 continue;
             }
             let target = match parse_object_key("", &key) {
@@ -1126,6 +1168,8 @@ impl S3Session {
                 "A key ending in / names a directory and cannot be uploaded in parts.",
             )));
         }
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
+        ensure_staging_capacity(&driver, self.options.multipart_staging_max_bytes, None, 0).await?;
         let upload_id = new_upload_id();
         let directory = upload_directory(&upload_id);
         driver
@@ -1151,6 +1195,13 @@ impl S3Session {
             false,
         )
         .await?;
+        if let Err(error) =
+            ensure_staging_capacity(&driver, self.options.multipart_staging_max_bytes, None, 0)
+                .await
+        {
+            let _ = remove_tree(&driver, &directory).await;
+            return Err(error);
+        }
         Ok(xml_response(
             200,
             initiate_multipart_xml(&target.bucket, &target.key, &upload_id),
@@ -1166,6 +1217,7 @@ impl S3Session {
         part_number: u32,
         request: UploadBody<'_>,
     ) -> S3Result<S3Response> {
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
         if !aws_chunked_body(&request.head.headers) {
             validate_declared_length(&request.head.headers, request.body.len())?;
@@ -1181,6 +1233,13 @@ impl S3Session {
             return Err(S3Failure::s3("EntityTooLarge"));
         }
         let path = part_path(upload_id, part_number);
+        ensure_staging_capacity(
+            &driver,
+            self.options.multipart_staging_max_bytes,
+            Some(&path),
+            body.len() as u64,
+        )
+        .await?;
         write_bytes(&driver, &path, &body, false)
             .await
             .map_err(|error| match error {
@@ -1208,8 +1267,15 @@ impl S3Session {
         part_number: u32,
         request: StreamUploadBody<'_>,
     ) -> S3Result<S3StreamResponse> {
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
         let path = part_path(upload_id, part_number);
+        let staging_quota = staging_quota(
+            &driver,
+            self.options.multipart_staging_max_bytes,
+            Some(&path),
+        )
+        .await?;
         let max_part_bytes = self
             .options
             .max_body_bytes
@@ -1226,6 +1292,7 @@ impl S3Session {
             exclusive: false,
             create_parent: false,
             cleanup_on_error,
+            staging_quota: Some(staging_quota),
         })
         .await
         .map_err(|error| match error {
@@ -1254,6 +1321,7 @@ impl S3Session {
         upload_id: &str,
         request: UploadBody<'_>,
     ) -> S3Result<S3Response> {
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         if !aws_chunked_body(&request.head.headers) {
             validate_declared_length(&request.head.headers, request.body.len())?;
         }
@@ -1292,7 +1360,18 @@ impl S3Session {
             }
             parts.push((path, stats.size));
         }
+        let assembled_size = parts
+            .iter()
+            .fold(0_u64, |total, (_, size)| total.saturating_add(*size));
+        ensure_staging_capacity(
+            &driver,
+            self.options.multipart_staging_max_bytes,
+            None,
+            assembled_size,
+        )
+        .await?;
         require_atomic_rename(&driver)?;
+        ensure_parent(&driver, &target.path).await?;
         // Assemble through a private staging file instead of collecting all
         // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
         // the existing destination unchanged if a part read or metadata update
@@ -1359,6 +1438,7 @@ impl S3Session {
         target: &ObjectTarget,
         upload_id: &str,
     ) -> S3Result<S3Response> {
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let _ = read_manifest(&driver, upload_id, &target.key).await?;
         remove_tree(&driver, &upload_directory(upload_id)).await?;
         Ok(S3Response::empty(204))
@@ -1372,6 +1452,7 @@ impl S3Session {
         max_parts: usize,
         marker: u32,
     ) -> S3Result<S3Response> {
+        reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let _ = read_manifest(&driver, upload_id, &target.key).await?;
         let directory = upload_directory(upload_id);
         let mut parts = Vec::new();
@@ -1609,10 +1690,225 @@ fn is_upload_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
+fn enforce_staging_quota(
+    quota: Option<StagingQuota>,
+    position: u64,
+    additional: u64,
+) -> S3Result<()> {
+    if quota.is_some_and(|quota| !quota.allows(position, additional)) {
+        return Err(S3Failure::s3("SlowDown"));
+    }
+    Ok(())
+}
+
+async fn staging_quota(
+    driver: &Arc<dyn FsDriver>,
+    limit: u64,
+    replacement_path: Option<&str>,
+) -> S3Result<StagingQuota> {
+    let used = staging_usage_bytes(driver).await?;
+    let replaced = match replacement_path {
+        Some(path) => match driver.stat(path).await {
+            Ok(stats) if stats.is_file() => stats.size,
+            Ok(_) => 0,
+            Err(error)
+                if matches!(
+                    error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+            {
+                0
+            }
+            Err(error) => return Err(S3Failure::Fs(error)),
+        },
+        None => 0,
+    };
+    let quota = StagingQuota {
+        limit,
+        used,
+        replaced,
+    };
+    enforce_staging_quota(Some(quota), 0, 0)?;
+    Ok(quota)
+}
+
+async fn ensure_staging_capacity(
+    driver: &Arc<dyn FsDriver>,
+    limit: u64,
+    replacement_path: Option<&str>,
+    incoming: u64,
+) -> S3Result<()> {
+    let quota = staging_quota(driver, limit, replacement_path).await?;
+    enforce_staging_quota(Some(quota), 0, incoming)
+}
+
+async fn staging_usage_bytes(driver: &Arc<dyn FsDriver>) -> S3Result<u64> {
+    let mut total = sum_staging_tree(driver, &format!("/{MULTIPART_PREFIX}")).await?;
+    let entries = match driver.readdir("/").await {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.code,
+                mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+            ) =>
+        {
+            return Ok(total);
+        }
+        Err(error) => return Err(S3Failure::Fs(error)),
+    };
+    for entry in entries {
+        if !entry.is_file() || !entry.name.starts_with(STREAMING_STAGING_PREFIX) {
+            continue;
+        }
+        let path = format!("/{}", entry.name);
+        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        total = total
+            .checked_add(stats.size)
+            .ok_or_else(|| S3Failure::s3("SlowDown"))?;
+    }
+    Ok(total)
+}
+
+async fn reap_staging(driver: &Arc<dyn FsDriver>, ttl_ms: i64) -> S3Result<()> {
+    let now = now_ms();
+    let expired = |mtime_ms: i64| now.saturating_sub(mtime_ms) >= ttl_ms;
+    let multipart_root = format!("/{MULTIPART_PREFIX}");
+    let entries = match driver.readdir(&multipart_root).await {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.code,
+                mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+            ) =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(S3Failure::Fs(error)),
+    };
+    for entry in entries {
+        if !entry.is_directory() {
+            continue;
+        }
+        let path = format!("{multipart_root}/{}", entry.name);
+        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        if expired(stats.mtime_ms) {
+            remove_tree(driver, &path).await?;
+        }
+    }
+
+    let entries = match driver.readdir("/").await {
+        Ok(entries) => entries,
+        Err(error)
+            if matches!(
+                error.code,
+                mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+            ) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(S3Failure::Fs(error)),
+    };
+    for entry in entries {
+        if !entry.is_file() || !entry.name.starts_with(STREAMING_STAGING_PREFIX) {
+            continue;
+        }
+        let path = format!("/{}", entry.name);
+        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        if expired(stats.mtime_ms) {
+            match driver.unlink(&path).await {
+                Ok(()) => {}
+                Err(error) if error.code == mount_rs_core::ErrorCode::Enoent => {}
+                Err(error) => return Err(S3Failure::Fs(error)),
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn delete_staging_key(driver: &Arc<dyn FsDriver>, key: &str) -> S3Result<()> {
+    let multipart_prefix = format!("{MULTIPART_PREFIX}/");
+    if let Some(suffix) = key.strip_prefix(&multipart_prefix) {
+        let mut components = suffix.split('/');
+        let upload_id = components.next().unwrap_or_default();
+        if !is_upload_id(upload_id) {
+            return Err(S3Failure::s3("InvalidRequest"));
+        }
+        match (components.next(), components.next()) {
+            (None, None) => {}
+            (Some(MANIFEST_NAME), None) => {}
+            (Some(part), None)
+                if part
+                    .strip_prefix("part-")
+                    .and_then(|number| number.parse::<u32>().ok())
+                    .is_some_and(|number| (1..=10_000).contains(&number)) => {}
+            _ => return Err(S3Failure::s3("InvalidRequest")),
+        }
+        return remove_tree(driver, &upload_directory(upload_id)).await;
+    }
+    if key.starts_with(STREAMING_STAGING_PREFIX)
+        && key.len() > STREAMING_STAGING_PREFIX.len()
+        && !key.contains('/')
+    {
+        let path = format!("/{key}");
+        match driver.unlink(&path).await {
+            Ok(()) => return Ok(()),
+            Err(error) if error.code == mount_rs_core::ErrorCode::Enoent => return Ok(()),
+            Err(error) => return Err(S3Failure::Fs(error)),
+        }
+    }
+    Err(S3Failure::s3("InvalidRequest"))
+}
+
+fn sum_staging_tree<'a>(
+    driver: &'a Arc<dyn FsDriver>,
+    path: &'a str,
+) -> Pin<Box<dyn Future<Output = S3Result<u64>> + Send + 'a>> {
+    Box::pin(async move {
+        let entries = match driver.readdir(path).await {
+            Ok(entries) => entries,
+            Err(error)
+                if matches!(
+                    error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+            {
+                return Ok(0);
+            }
+            Err(error) => return Err(S3Failure::Fs(error)),
+        };
+        let mut total = 0_u64;
+        for entry in entries {
+            if !entry.is_file() && !entry.is_directory() {
+                continue;
+            }
+            let child = format!(
+                "{}/{}",
+                normalize_path(path).trim_end_matches('/'),
+                entry.name
+            );
+            let size = if entry.is_directory() {
+                sum_staging_tree(driver, &child).await?
+            } else {
+                driver.stat(&child).await.map_err(S3Failure::Fs)?.size
+            };
+            total = total
+                .checked_add(size)
+                .ok_or_else(|| S3Failure::s3("SlowDown"))?;
+        }
+        Ok(total)
+    })
+}
+
 async fn ensure_parent(driver: &Arc<dyn FsDriver>, path: &str) -> S3Result<()> {
+    let parent = dirname(path);
+    if parent == "/" {
+        // The root already exists. Avoid requiring an otherwise optional
+        // mkdir implementation just to publish an object at the bucket root.
+        return Ok(());
+    }
     driver
         .mkdir(
-            &dirname(path),
+            &parent,
             MkdirOptions {
                 recursive: true,
                 mode: Some(0o777),
@@ -1799,6 +2095,7 @@ async fn write_stream_body(request: StreamWriteRequest<'_>) -> S3Result<u64> {
         exclusive,
         create_parent,
         cleanup_on_error,
+        staging_quota,
     } = request;
     let chunked = aws_chunked_body(headers);
     let declared_length = if chunked {
@@ -1837,6 +2134,7 @@ async fn write_stream_body(request: StreamWriteRequest<'_>) -> S3Result<u64> {
                 if payload.is_empty() {
                     continue;
                 }
+                enforce_staging_quota(staging_quota, position, payload.len() as u64)?;
                 if handle.is_none() {
                     handle =
                         Some(open_stream_handle(driver, path, exclusive, create_parent).await?);
@@ -1857,6 +2155,7 @@ async fn write_stream_body(request: StreamWriteRequest<'_>) -> S3Result<u64> {
                 if payload.is_empty() {
                     continue;
                 }
+                enforce_staging_quota(staging_quota, position, payload.len() as u64)?;
                 if handle.is_none() {
                     handle =
                         Some(open_stream_handle(driver, path, exclusive, create_parent).await?);

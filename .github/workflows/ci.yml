@@ -293,6 +293,9 @@ jobs:
           MOUNT_RS_TIDB_RUSTFS_PREFIX: mount-rs-ci/tidb-rustfs/${{ github.run_id }}/${{ github.run_attempt }}
           MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY: mount-rs-ci-tidb-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
           MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE: ${{ runner.temp }}/mount-rs-tidb-rustfs-${{ github.run_id }}-${{ github.run_attempt }}.fixture
+          MOUNT_RS_TIDB_RUSTFS_SOAK_OPERATIONS: '64'
+          MOUNT_RS_TIDB_RUSTFS_SOAK_CONCURRENCY: '8'
+          MOUNT_RS_TIDB_RUSTFS_SOAK_PAYLOAD_BYTES: '65536'
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
         run: ./scripts/test-tidb-rustfs.sh
 

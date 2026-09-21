@@ -978,6 +978,29 @@ Evidence landed without closing the remaining W01 acceptance gates:
   published on main as `39a20b6`. This is local loopback/non-secure
   qualification evidence only: hosted acceptance, production identity/TLS,
   power-loss/backup recovery, capacity and operational gates remain open.
+  Hosted run `35591729423` at revision `1ea183e` reached the durable
+  FoundationDB configuration, transaction readiness, image match and cluster
+  readiness markers, then failed before the composition client could start:
+  `curl: (7) Failed to connect to host.docker.internal port 32768` and
+  `FoundationDB client container could not reach the composed block endpoint`.
+  The workflow was later superseded, so it is not hosted PASS evidence. This
+  exposed the Linux loopback-publish portability gap fixed in `6d2a5d4`, which
+  now attaches the owned RustFS container to the FoundationDB client network;
+  a terminal hosted rerun of that fix remains required.
+  The follow-up local arm64 durable run `foundationdb-network-cleanup` tested
+  the fix before commit `65b521c` (published as `6d2a5d4`) and exited 0 with
+  `FOUNDATIONDB_RUSTFS_NETWORK_READY`,
+  `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403`,
+  `FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/arm64 service_restart=pass soak_rounds=0`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; owned network disconnect
+  and cleanup also completed. This remains local qualification evidence only.
+  The dedicated manually dispatched
+  [W07 hosted qualification workflow](.github/workflows/foundationdb-production.yml)
+  now runs this durable composition, one bounded soak round, the live Node
+  addon, the Linux native CLI/FUSE lifecycle and the service-restart/fresh-
+  client checks with non-cancelling concurrency. It retains the terminal
+  redacted log as a run artifact so a long W07 result is not invalidated by an
+  unrelated mainline push; its result is still qualification evidence only.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
@@ -1132,10 +1155,15 @@ reproducible in a production-like environment.
   budgets; configure metrics/logs/traces, health checks, dashboards, paging,
   retention and redaction; exercise an alert end to end. *(Implementation +
   hosted/provider; collector and on-call route are not configured.)*
-- [ ] **W08-P06 (10%) — capacity/load/soak:** run representative baseline,
+- [ ] **W08-P06 (20%) — capacity/load/soak:** run representative baseline,
   peak, saturation, failover and multi-hour soak workloads; record latency,
-  throughput, errors, headroom and scaling limits. *(Hosted/provider +
-  implementation; workload and production-sized capacity are open.)*
+  throughput, errors, headroom and scaling limits. The bounded public-N-API
+  TiDB/RustFS soak harness in
+  `tests/provider_matrix/tidb-rustfs-soak.mjs` is enabled in the hosted
+  `tidb-rustfs` composition at 64 operations, concurrency 8 and 65,536-byte
+  payloads, and emits p50/p95/p99/throughput markers. *(Hosted/provider +
+  implementation; workload representativeness, resource telemetry and
+  production-sized capacity are open.)*
 - [ ] **W08-P07 (20%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
@@ -1655,15 +1683,20 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
-  smoke. The workflow action references are now pinned to verified full SHAs,
-  but hosted OIDC trust, the protected versioning-status input, and the
-  deployment evidence remain open. The adjacent S3 gateway now refuses
+  smoke. The fresh targeted security scan at baseline `89992ce` identified
+  an AWS transport-override finding and mutable non-AWS workflow action
+  references; this packet closes the transport override, while the workflow
+  pinning remains an active remediation. Hosted OIDC trust, the protected
+  versioning-status input, and the deployment evidence remain open. The
+  adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
   same bounded cross-driver staging and atomic publication path. ListObjectsV2
-  now uses bounded continuation-aware traversal with prefix pruning. Remaining
-  staging-retention and repository-coverage findings from the sealed review
-  remain open. Do not place AWS secrets in the repository or CI logs.
+  now uses bounded continuation-aware traversal with prefix pruning. Multipart
+  and temporary staging now have a configured byte quota, request-boundary TTL
+  reaper, and backing-file-aware DeleteObjects behavior. Remaining repository-
+  coverage findings from the sealed review remain open. Do not place AWS
+  secrets in the repository or CI logs.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.

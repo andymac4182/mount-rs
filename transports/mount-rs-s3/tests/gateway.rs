@@ -685,6 +685,126 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
 }
 
 #[tokio::test]
+async fn multipart_staging_is_bounded_reaped_and_deleted_honestly() {
+    let driver = MemoryFs::empty();
+    let session = S3Session::new_with_options(
+        driver.clone(),
+        S3SessionOptions {
+            multipart_staging_max_bytes: 64,
+            multipart_staging_ttl_ms: 60_000,
+            ..S3SessionOptions::default()
+        },
+    );
+
+    let initiated = session
+        .handle(request("POST", "/mountx/quota.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let quota_upload_id = xml_field(&initiated.body, "UploadId");
+    let oversized = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/quota.bin?uploadId={quota_upload_id}&partNumber=1"),
+            vec![b'x'; 128],
+            &[],
+        ))
+        .await;
+    assert_eq!(oversized.status, 503);
+    assert!(String::from_utf8_lossy(&oversized.body).contains("<Code>SlowDown</Code>"));
+
+    let cleanup_body =
+        format!("<Delete><Object><Key>.mountx-multipart/{quota_upload_id}</Key></Object></Delete>");
+    let cleaned = session
+        .handle(request("POST", "/mountx?delete", cleanup_body, &[]))
+        .await;
+    assert_eq!(cleaned.status, 200);
+    assert!(String::from_utf8_lossy(&cleaned.body).contains(&format!(
+        "<Deleted><Key>.mountx-multipart/{quota_upload_id}</Key></Deleted>"
+    )));
+    assert!(
+        driver
+            .stat(&format!("/.mountx-multipart/{quota_upload_id}"))
+            .await
+            .is_err()
+    );
+
+    let initiated = session
+        .handle(request("POST", "/mountx/delete.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let delete_upload_id = xml_field(&initiated.body, "UploadId");
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/delete.bin?uploadId={delete_upload_id}&partNumber=1"),
+            b"part",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+    let delete_part_body = format!(
+        "<Delete><Object><Key>.mountx-multipart/{delete_upload_id}/part-1</Key></Object></Delete>"
+    );
+    let deleted_part = session
+        .handle(request("POST", "/mountx?delete", delete_part_body, &[]))
+        .await;
+    assert_eq!(deleted_part.status, 200);
+    assert!(
+        String::from_utf8_lossy(&deleted_part.body).contains(&format!(
+            "<Deleted><Key>.mountx-multipart/{delete_upload_id}/part-1</Key></Deleted>"
+        ))
+    );
+    assert!(
+        driver
+            .stat(&format!("/.mountx-multipart/{delete_upload_id}"))
+            .await
+            .is_err()
+    );
+
+    let staging = driver
+        .open("/.mountx-put-test", "w", 0o666)
+        .await
+        .expect("stream staging file");
+    staging
+        .write(b"x", Some(0))
+        .await
+        .expect("write stream staging file");
+    staging.close().await.expect("close stream staging file");
+    let delete_stream_body = "<Delete><Object><Key>.mountx-put-test</Key></Object></Delete>";
+    let deleted_stream = session
+        .handle(request("POST", "/mountx?delete", delete_stream_body, &[]))
+        .await;
+    assert_eq!(deleted_stream.status, 200);
+    assert!(
+        String::from_utf8_lossy(&deleted_stream.body)
+            .contains("<Deleted><Key>.mountx-put-test</Key></Deleted>")
+    );
+    assert!(driver.stat("/.mountx-put-test").await.is_err());
+
+    let initiated = session
+        .handle(request("POST", "/mountx/reap.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let reap_upload_id = xml_field(&initiated.body, "UploadId");
+    let upload_directory = format!("/.mountx-multipart/{reap_upload_id}");
+    driver
+        .utimes(&upload_directory, 0, 0)
+        .await
+        .expect("age multipart staging");
+    let parts = session
+        .handle(request(
+            "GET",
+            &format!("/mountx/reap.bin?uploadId={reap_upload_id}"),
+            [],
+            &[],
+        ))
+        .await;
+    assert_eq!(parts.status, 404);
+    assert!(String::from_utf8_lossy(&parts.body).contains("<Code>NoSuchUpload</Code>"));
+    assert!(driver.stat(&upload_directory).await.is_err());
+}
+
+#[tokio::test]
 async fn http_server_is_rootless_and_sigv4_supports_header_and_presigned_forms() {
     let credentials = Credentials::new("AKIAMOUNTX7GATEWAY9", "test-secret-key");
     let session_options = S3SessionOptions {

@@ -1,0 +1,77 @@
+name: W07 FoundationDB production qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# The repository-wide CI workflow cancels long provider jobs whenever another
+# workstream pushes to main. Keep this explicit W07 qualification run stable so
+# its terminal result can be retained in the production evidence packet.
+concurrency:
+  group: w07-foundationdb-production-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  foundationdb-rustfs:
+    name: Durable FoundationDB, RustFS, Node, CLI, and restart qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install real PGlite and Node factory prerequisites
+        run: |
+          pnpm --dir tests/pglite install --frozen-lockfile
+          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+
+      - name: Build the default N-API addon with the locked Rust graph
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
+
+      - name: Install and verify the Linux FUSE prerequisite for the FDB CLI gate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          test -c /dev/fuse
+          test -r /dev/fuse
+          test -w /dev/fuse
+          command -v fusermount3
+
+      - name: Verify durable FoundationDB metadata, RustFS chunks, and restart
+        env:
+          RUSTFS_COMBO_NAME: foundationdb-production-qualification
+          RUSTFS_COMBO_TIMEOUT_SECONDS: '900'
+          RUSTFS_COMBO_COMMAND: ./scripts/test-foundationdb.sh
+          MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
+          MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS: '1'
+          MOUNT_RS_FOUNDATIONDB_NAPI: '1'
+          MOUNT_RS_FOUNDATIONDB_NATIVE_CLI: '1'
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          ./scripts/test-rustfs.sh 2>&1 | tee artifacts/foundationdb-production-qualification.log
+
+      - name: Preserve W07 qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: foundationdb-production-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/foundationdb-production-qualification.log
+          if-no-files-found: warn

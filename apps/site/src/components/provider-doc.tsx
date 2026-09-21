@@ -805,7 +805,10 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         The layout is an owned prefix containing one immutable object per
         fixed-size chunk, inspected through S3 GET/HEAD/LIST and ranged reads.
         Conditional create, ETag CAS, and cleanup are verified against the
-        actual AWS endpoint by the W25 gate.
+        actual AWS endpoint by the W25 gate. The S3 gateway's streaming PUT
+        and multipart completion paths stage under private
+        <code>.mountx-put-...</code> keys and publish with atomic rename;
+        staging entries are hidden from ordinary listings.
       </>
     ),
     layout: (
@@ -821,8 +824,11 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         S3's service durability and visibility behavior belong to the selected
         AWS deployment. The adapter uses signed requests, create-only
         immutable publication, conditional updates, and completed upload
-        barriers. Multi-writer scope and metadata-provider durability still
-        belong to the selected deployment.
+        barriers. Streaming PUT, multipart completion, and CopyObject use
+        bounded staging with <code>read_chunk_bytes</code>, so a failed
+        integrity check or source read does not replace an existing destination
+        before the final rename. Multi-writer scope and metadata-provider
+        durability still belong to the selected deployment.
       </>
     ),
     inspectLabel: 'Inspect an AWS-owned prefix without exposing credentials',
@@ -850,7 +856,10 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         not infer multi-writer or power-loss guarantees from the SQLite test
         composition. Production deployments still need explicit metadata
         durability, backup/restore, monitoring, cost/retention, and hosted
-        release qualification. Use the AWS workload identity chain rather than
+        release qualification. The bounded publication path requires a driver
+        with <code>atomic_rename</code>; unsupported drivers return an explicit
+        <code>NotImplemented</code> response rather than falling back to a
+        weaker direct write. Use the AWS workload identity chain rather than
         committing long-lived access keys.
       </>
     ),
@@ -864,12 +873,20 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         65,537-byte boundary read, four concurrent writers, multi-chunk
         overwrite/truncate/extend/sparse-tail behavior, fresh-process reopen,
         and owner-verified cleanup with zero remaining objects. Cloudflare R2
-        and RustFS results remain separate providers.
+        and RustFS results remain separate providers. Separately, the
+        2026-09-21 S3 gateway hardening sequence added bounded staged PUT,
+        multipart completion, and cross-driver CopyObject publication, with
+        existing-object preservation on integrity/read failure. That is
+        implementation and rootless gateway-test evidence, not a new hosted
+        AWS durability or release-qualification claim.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
+      { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
+      { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
+      { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },
       { label: 'S3-compatible block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
     ],
   },
