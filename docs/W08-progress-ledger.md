@@ -1,12 +1,14 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 04:42 AEST**
+Status snapshot: **2026-09-22 04:47 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: current `origin/main` is
-`d68f14de3c13c0510237e9a88c615c1a8e74c9a3`, which contains the published
-W08.28 implementation (`dff55858`, merge tip `6abc0535`) and the source
-ancestry used by W08.29. The W08.29 tracker/ledger evidence was committed as
-`ad45bf06` and reconciled into this public merge tip. Hosted W08.29 run
+Publication snapshot: W08.29 evidence commit `ad45bf06` was reconciled into
+public merge tip `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`; the subsequent
+pointer-synchronized ledger and rollout notes were published in merge tip
+`3cd43779a8f440b47278e5112f9ec48b12f43e23` (the ref verified at **04:47
+AEST**). These public tips contain the published W08.28 implementation
+(`dff55858`, merge tip `6abc0535`) and the source ancestry used by W08.29.
+Hosted W08.29 run
 `35638433010` qualified source `9d3a6e502eccec9ba54c00e80c98e6e1da175177`;
 the target artifacts, manifests, SBOMs and attestations were independently
 reverified after download.
@@ -356,7 +358,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 03:55–03:59 AEST | Ran the full locked workspace test and strict workspace Clippy with `-D warnings` on latest integrated source `5c7cc705`, using bounded target `/private/tmp/mount-rs-w08-current-cargo-target`. | ~3 min | ~27.5s test/lint execution plus compilation/setup | W08.27 latest integrated source verification passed. Explicit provider/native skips and all production P01–P09 gates remain open; no live-provider or production claim is added. |
 | 2026-09-22 04:08–04:21 AEST | Added W08.28's protected production-candidate release workflow, narrowed the existing preview tag trigger, ran Ruby YAML parsing, embedded Bash `bash -n` (3 preview + 5 candidate blocks) and `git diff --check`, committed `dff55858`, reconciled concurrent `origin/main`, and pushed the result in merge tip `6abc0535`. | ~8 min | ~0 min hosted/provider/native; ~1 min static validation; ~4 min fetch/merge/push | Candidate release admission is implementation-complete but unexecuted. Required environment reviewers/policies, candidate tag, registry publication, canary, rollback and owner approval remain external P09 gates. |
 | 2026-09-22 04:21–04:35 AEST | Followed publication-side policy run `35638005702` to terminal success, classified push target run `35638005694` as cancelled with `jobs=[]` before execution, dispatched and followed `attest=true` target run `35638433010`, extracted its six terminal job IDs and target digests, downloaded both public bundles, independently verified checksums/manifests/288-component SBOMs/tar contents, and verified both SLSA and CycloneDX attestations with exact source identity. | ~14 min | ~5 min hosted build/download/attestation observation plus ~2 min artifact/attestation re-verification and ~2 min remote synchronization | W08.29 hosted target qualification passed. The cancellation created no evidence and remains separate; candidate-tag publication, protected environment approval, registry acceptance, canary, rollback and owner approval remain open. |
-| 2026-09-22 04:35–04:42 AEST | Reconciled the W08.29 evidence commit with concurrent `origin/main`, pushed the public merge tip, then synchronized the ledger and rollout notes to the exact public SHA. | ~5 min | ~2 min remote fetch/merge/push wait | W08.29 evidence is publicly integrated at `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`; production candidate publication, canary, rollback and approval remain open. |
+| 2026-09-22 04:35–04:47 AEST | Reconciled the W08.29 evidence commit with concurrent `origin/main`, pushed the public merge tip, synchronized the ledger and rollout notes to the publication baseline, reconciled one further concurrent mainline update, and verified the resulting public ref. | ~7 min | ~4 min remote fetch/merge/push wait | W08.29 evidence is publicly integrated; pointer-synchronized documentation is present in verified merge tip `3cd43779a8f440b47278e5112f9ec48b12f43e23`. Production candidate publication, canary, rollback and approval remain open. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
