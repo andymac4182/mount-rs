@@ -38,6 +38,9 @@ jobs:
       - name: Verify W07 rollout ledger remains internally consistent
         run: node scripts/verify-w07-rollout-ledger.mjs
 
+      - name: Test W07 rollout ledger fail-closed cases
+        run: node scripts/test-w07-rollout-ledger.mjs
+
       - name: Verify W07 production config policy without credentials or network
         run: |
           set -o pipefail

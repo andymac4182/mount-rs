@@ -256,6 +256,10 @@ The same workflow also runs
 the rollout is **NO-GO**, it requires W07.7 and all seven nested production
 gates to remain open, and it requires the runbook's external-drill boundary.
 It does not check any production environment and cannot close a gate by itself.
+The adjacent `scripts/test-w07-rollout-ledger.mjs` step exercises the current
+NO-GO ledger plus premature-GO, missing-nested-gate and missing-drill-boundary
+cases, including a synthetic complete-GO document set. These are regression
+tests for the tracking control only; they do not create production evidence.
 
 The real composition test now emits
 `FOUNDATIONDB_LATENCY_PASS workload=composition` with operation count,
