@@ -757,6 +757,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   remain in Keychain; this is local dirty-worktree evidence, not release acceptance.
 - [ ] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
+  The 2026-09-21 isolated rerun at base revision `6f1ab93` passed the local
+  signed-HTTP R2 adapter contract (`10/10` unit tests and `1/1` HTTP test):
+  immutable create, ranged reads, stale conditional read/write rejection,
+  fresh-client reopen, eight concurrent publications, prefix isolation and
+  exact cleanup. The provider matrix reported `5` local Rust SDK passes,
+  `4` skips and `0` failures; its R2 and PGlite rows skipped because
+  `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`, and `PGLITE_DATABASE_URL` were unset. This is
+  local S3-compatible evidence, not live Cloudflare R2 evidence; no dedicated
+  transient-failure retry injection was run, so W05.2 remains open.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
   Main executed actual R2 differential traces with seeds 4182, 1, 42, 65535,
   and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
@@ -769,6 +779,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   full benchmark matrix remain open. The full `scripts/test-all.sh` rerun at
   `73c33e0` also passed the live R2 lane end-to-end; this does not close the
   native/hosted portions of this task.
+  The 2026-09-21 isolated rerun reported `4` Node SDK passes, `2` skips and
+  `0` failures; `9` CLI passes, `2` skips and `0` failures; and the storage
+  benchmark unit gate passed. The Node R2 factory and PGlite rows skipped for
+  missing configuration. The live Cloudflare CLI and service-evidence scripts
+  stopped at credential preflight with `R2_ENDPOINT` unset; no remote request,
+  write or cleanup ran. The full N-API suite reached native server checks only
+  after elevated host access, then stopped on a stale local native binding
+  (`binding[nativeName] is not a function`) while R2 remained an explicit
+  credential skip. W05.3 live R2, native and hosted acceptance therefore
+  remains open.
 - [x] W05.4 Record service identity and revision without recording credentials.
   `integrations/mount-rs-r2` now exposes a redacted `R2ServiceIdentity` and
   `scripts/r2-service-evidence.sh` records only endpoint authority, bucket,
