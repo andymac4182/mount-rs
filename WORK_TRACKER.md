@@ -2481,6 +2481,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   admission job. This validates evidence completeness only; it cannot
   authenticate provider results or create production approval. *(Implementation
   /static qualification; production evidence and approval remain external.)*
+  The current-tip push run `35650626028` at source
+  `8f3a19a891b8d432ff551c04789921575bb12f4f` cancelled before creating jobs
+  (`jobs=[]`); the earlier successful run `35650533691` at source `95437f6`
+  predates W08.34 and is not counted as packet-validator evidence.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

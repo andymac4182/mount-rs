@@ -118,6 +118,11 @@ full source revision, provider versions, topology, environment, terminal
 test/run, owner, cleanup outcome, rollback outcome and evidence reference.
 This is completeness/safety validation only; it cannot authenticate the
 underlying provider or owner claims.
+The first successful policy run after the change, `35650533691` at source
+`95437f67`, predates W08.34 and therefore does not qualify this validator. The
+current-tip run `35650626028` at source
+`8f3a19a891b8d432ff551c04789921575bb12f4f` cancelled before creating jobs
+(`jobs=[]`), so no hosted W08.34 packet result is claimed.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
