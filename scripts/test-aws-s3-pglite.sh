@@ -3,7 +3,8 @@ set -eu
 
 # Run the AWS S3 block provider with an isolated external PGlite metadata
 # server. The parent AWS harness owns the credentials, prefix claim, and
-# version-aware cleanup; this script owns only the PGlite child and log file.
+# version-aware cleanup; this script owns only its PGlite child, temporary
+# database snapshot, and log file.
 umask 077
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
@@ -35,53 +36,93 @@ case "$AWS_S3_TEST_PREFIX" in
     ;;
 esac
 
-if ! command -v node >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1; then
-  echo "AWS S3 plus PGlite test requires Node.js and cargo" >&2
+if ! command -v node >/dev/null 2>&1 || ! command -v cargo >/dev/null 2>&1 || ! command -v tar >/dev/null 2>&1; then
+  echo "AWS S3 plus PGlite test requires Node.js, cargo, and tar" >&2
   exit 2
 fi
 
 server_dir="$repo_dir/tests/pglite"
 port=$(node -e 'const net=require("net"); const s=net.createServer(); s.listen(0,"127.0.0.1",()=>{console.log(s.address().port);s.close()})')
 log_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-pglite.XXXXXX")
+data_dir=$(mktemp -d "${TMPDIR:-/tmp}/mount-rs-aws-s3-pglite-data.XXXXXX")
+backup_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-pglite-backup.XXXXXX.tar")
+scope="aws-s3-pglite-${AWS_S3_TEST_PREFIX##*/}"
 server_pid=
 
-cleanup() {
+stop_server() {
   if [ -n "${server_pid:-}" ]; then
     kill "$server_pid" 2>/dev/null || true
     wait "$server_pid" 2>/dev/null || true
+    server_pid=
   fi
+}
+
+cleanup() {
+  stop_server
   rm -f "$log_file"
+  rm -f "$backup_file"
+  rm -rf "$data_dir"
 }
 trap cleanup EXIT INT TERM
 
-PGLITE_PORT="$port" node "$server_dir/server.mjs" >"$log_file" 2>&1 &
-server_pid=$!
-ready=0
-for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
-  if grep -q PGLITE_READY "$log_file"; then
-    ready=1
-    break
+start_server() {
+  : >"$log_file"
+  PGLITE_DATA_DIR="$data_dir" \
+    PGLITE_PORT="$port" \
+    node "$server_dir/server.mjs" >"$log_file" 2>&1 &
+  server_pid=$!
+  ready=0
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    if grep -q PGLITE_READY "$log_file"; then
+      ready=1
+      break
+    fi
+    if ! kill -0 "$server_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 1
+  done
+  if [ "$ready" -ne 1 ]; then
+    sed -n '1,160p' "$log_file"
+    echo "AWS_S3_PGLITE_TEST_BLOCKED reason=pglite_server_not_ready" >&2
+    exit 1
   fi
-  sleep 1
-done
-if [ "$ready" -ne 1 ]; then
-  sed -n '1,160p' "$log_file"
-  echo "AWS_S3_PGLITE_TEST_BLOCKED reason=pglite_server_not_ready" >&2
-  exit 1
-fi
+}
 
-PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-AWS_DEFAULT_REGION="$AWS_S3_TEST_REGION" \
-AWS_S3_TEST_BUCKET="$AWS_S3_TEST_BUCKET" \
-AWS_S3_TEST_REGION="$AWS_S3_TEST_REGION" \
-AWS_S3_TEST_PREFIX="$AWS_S3_TEST_PREFIX" \
-CARGO_NET_OFFLINE=true \
-  "$repo_dir/scripts/cargo-shared" test \
-    --manifest-path "$repo_dir/Cargo.toml" \
-    --locked \
-    -p mount-rs-core \
-    --test split_store \
-    live_aws_s3_blocks_with_independent_pglite_metadata \
-    -- --exact --ignored --nocapture
+run_test() {
+  test_name=$1
+  PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+  AWS_DEFAULT_REGION="$AWS_S3_TEST_REGION" \
+  AWS_S3_TEST_BUCKET="$AWS_S3_TEST_BUCKET" \
+  AWS_S3_TEST_REGION="$AWS_S3_TEST_REGION" \
+  AWS_S3_TEST_PREFIX="$AWS_S3_TEST_PREFIX" \
+  AWS_S3_PGLITE_SCOPE="$scope" \
+  CARGO_NET_OFFLINE=true \
+    "$repo_dir/scripts/cargo-shared" test \
+      --manifest-path "$repo_dir/Cargo.toml" \
+      --locked \
+      -p mount-rs-core \
+      --test split_store \
+      "$test_name" \
+      -- --exact --ignored --nocapture
+}
 
-echo "AWS_S3_PGLITE_TEST_PASS prefix=$AWS_S3_TEST_PREFIX"
+start_server
+run_test live_aws_s3_blocks_with_independent_pglite_metadata
+run_test live_aws_s3_pglite_prepare_for_restart
+stop_server
+
+# Treat the on-disk PGlite directory as a backup artifact, then restore it to
+# a fresh directory before the second server process opens the same volume.
+# This is a local metadata backup/restore drill; the parent AWS harness still
+# owns cleanup of all objects below the exact test prefix.
+tar -C "$data_dir" -cf "$backup_file" .
+rm -rf "$data_dir"
+mkdir "$data_dir"
+tar -C "$data_dir" -xf "$backup_file"
+
+start_server
+run_test live_aws_s3_pglite_reopen_after_restore
+stop_server
+
+echo "AWS_S3_PGLITE_TEST_PASS prefix=$AWS_S3_TEST_PREFIX scope=$scope"

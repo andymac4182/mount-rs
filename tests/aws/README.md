@@ -143,8 +143,9 @@ The corresponding versioned CLI provider shape is:
 
 When the AWS harness has already assumed the scoped test role, set
 `MOUNT_RS_RUN_AWS_S3_PGLITE=1` to add the external PGlite metadata pairing
-row. The parent run starts the pinned PGlite socket server, passes its
-exported short-lived AWS credentials to the Rust test, and removes the child
+rows. The parent run starts the pinned PGlite socket server with a temporary
+on-disk data directory, passes its exported short-lived AWS credentials to the
+Rust tests, snapshots and restores that directory, and removes the child
 prefix during the same version-aware cleanup:
 
 ```sh
@@ -157,9 +158,14 @@ AWS_S3_TEST_REGION=ap-southeast-2 \
 ./scripts/test-aws-s3.sh
 ```
 
-The pairing row proves an actual AWS S3 block store can reopen with fresh
-PGlite metadata and a fresh signed client. It is not production metadata,
-multi-writer, backup/restore, or disaster-recovery evidence.
+The first pairing row proves an actual AWS S3 block store can reopen with
+fresh PGlite metadata and a fresh signed client. The persistent rows then
+exercise independent-writer fencing, close the metadata clients, restore the
+PGlite data directory into a fresh server process, and reopen the same AWS
+objects. This is a local metadata backup/restore and provider-pairing
+qualification lane; it is not approval of PGlite as production metadata, an
+independent backup system, a multi-region disaster-recovery result, or a
+production SLO result.
 
 The AWS provider accepts credentials through the `object_store` workload
 chain (environment credentials, web identity, ECS task credentials, or EC2

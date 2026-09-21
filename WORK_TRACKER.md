@@ -1823,6 +1823,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   isolated real PGlite socket server, a fresh metadata connection, a fresh
   signed AWS client, filesystem reopen, and exact parent-prefix cleanup at
   `mount-rs-tests/aws-s3/20260921T133321Z-23452-0493c0f8fe5454cbfd42f48dfd58f728/pglite`.
+  The expanded opt-in run at `mount-rs-tests/aws-s3/20260921T134403Z-54972-b8831d9b39f99263ce764ba298b05302`
+  also passed `live_aws_s3_pglite_prepare_for_restart` with independent-writer
+  fencing and `live_aws_s3_pglite_reopen_after_restore` after restoring a
+  temporary on-disk PGlite data directory into a fresh server process.
+  This is local metadata backup/restore and restart evidence only.
   This does not close W25.6: production metadata ownership, multi-writer
   fencing, backup/restore, schema migration, failure recovery, and DR evidence
   remain open.
