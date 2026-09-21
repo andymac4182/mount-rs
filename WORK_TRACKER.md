@@ -501,7 +501,7 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
+| W25 | Actual AWS S3 integration | Private myroot test bucket and scoped role provisioned; Rust tests pending | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite and durable FoundationDB composition gates added, hosted result pending; durable TiDB mixed store remains open | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
@@ -1426,27 +1426,36 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 - [x] W25.1 AWS MCP became available after the app restart. STS identity and
   account-owned bucket inventory verified; testing region is `ap-southeast-2`.
-- [x] Create and read back private bucket
-  `mount-rs-integration-106427005394-ap-southeast-2`: all four public-access
+- [x] Create and read back private `myroot` bucket
+  `mount-rs-integration-922978963556-ap-southeast-2`: all four public-access
   blocks enabled, bucket-owner-enforced ownership, AES256 server-side
   encryption, test-resource tags, seven-day expiry under `mount-rs-tests/`,
-  and one-day incomplete multipart cleanup. No access keys were created.
-  Local `myroot` SSO credentials are expired; secure local test authentication
-  and least-privilege test access remain pending. MCP provisioning is not a
-  Rust integration test result.
-- [x] AWS MCP OAuth was revalidated on 2026-09-21 for account `106427005394`: bucket location, all four public-access blocks, bucket-owner-enforced ownership, AES256 encryption, lifecycle and tags were read successfully; the root `mount-rs-tests/aws-s3/` inventory was empty before and after testing. A unique-prefix service-side probe passed create-only immutable publication, duplicate rejection, byte ranges, stale conditional read/CAS rejection, current ETag CAS, a 65,537-byte boundary read, four concurrent writers, scoped deletion, and post-delete empty-prefix verification. This is AWS API/SDK evidence only: the MCP caller was account root and the bucket has no bucket policy, so least-privilege authorization remains unverified.
-- [ ] W25.2 Provision private test bucket, narrowly scoped access, and test-data
-  cleanup/retention policy. Keep credentials outside chat and source control.
+  and one-day incomplete multipart cleanup. The
+  `mount-rs-aws-s3-integration-test` role is scoped to the harness prefix and
+  trusted only by the authenticated `myroot` SSO role; no access keys were
+  created. MCP provisioning is not a Rust integration test result.
+- [x] AWS MCP OAuth was revalidated on 2026-09-21 for account `106427005394`: bucket location, all four public-access blocks, bucket-owner-enforced ownership, AES256 encryption, lifecycle and tags were read successfully; the root `mount-rs-tests/aws-s3/` inventory was empty before and after testing. A unique-prefix service-side probe passed create-only immutable publication, duplicate rejection, byte ranges, stale conditional read/CAS rejection, current ETag CAS, a 65,537-byte boundary read, four concurrent writers, scoped deletion, and post-delete empty-prefix verification. This is AWS API/SDK evidence only: the MCP caller was account root and the bucket has no bucket policy, so least-privilege authorization remains unverified. That historical MCP bucket is not the selected `myroot` target and remains untouched.
+- [x] W25.2 Provision private test bucket, narrowly scoped access, and test-data
+  cleanup/retention policy. The 2026-09-21 `myroot` provisioning created the
+  dedicated `ap-southeast-2` bucket, Block Public Access, BucketOwnerEnforced,
+  AES256, seven-day `mount-rs-tests/` retention, one-day multipart-abort
+  cleanup, tags, and a one-hour role at
+  `arn:aws:iam::922978963556:role/mount-rs/mount-rs-aws-s3-integration-test`.
+  The role grants only prefix-scoped list/object access plus caller identity,
+  and credentials remain outside chat and source control.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
   tests with restart/reopen, ranges, conditional immutable writes and cleanup.
   AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance. The
   checked-in Rust crate compiles with `cargo test --manifest-path
-  tests/aws/Cargo.toml --locked --lib --no-run`, but the actual two ignored
-  service tests remain blocked: the local `AWS_PROFILE=myroot` SSO session is
-  expired before the harness can claim a prefix, so no Rust `ChunkedFs`,
-  SQLite+S3, or fresh-process reopen acceptance is claimed.
+  tests/aws/Cargo.toml --locked --lib --no-run`; the actual two ignored service
+  tests still require the live `myroot` run before Rust `ChunkedFs`, SQLite+S3,
+  or fresh-process reopen acceptance can be claimed.
 - [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The harness now emits the secret-free `AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` and exits 3 when local credentials cannot be exported, making the AWS MCP/OAuth-to-local-Cargo boundary explicit. The W25 worker verified the AWS-crate compile and ordinary ignored-test gate; the two actual AWS-service tests remain blocked until the local `myroot` SSO session is renewed. No live Rust acceptance is claimed yet.
-- [x] The harness now accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that caller-provided role with a one-hour session, and uses the resulting temporary credentials for all S3 requests and cleanup. It does not create IAM resources or access keys; W25.2 still requires explicit role provisioning and W25.3 still requires a live local Rust run.
+- [x] The harness accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that
+  caller-provided role with a one-hour session, and uses the resulting temporary
+  credentials for all S3 requests and cleanup. It does not create IAM resources
+  or access keys; W25.2 is provisioned in `myroot`, and W25.3 still requires the
+  live local Rust run.
 
 ## W26 — Apache Ozone S3 backend
 

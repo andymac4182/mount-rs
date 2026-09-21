@@ -29,7 +29,7 @@ repository.
 Use a dedicated private S3 bucket. The W25 configuration recorded for this
 repository is:
 
-- bucket: `mount-rs-integration-106427005394-ap-southeast-2`;
+- bucket: `mount-rs-integration-922978963556-ap-southeast-2`;
 - region: `ap-southeast-2`;
 - all four S3 Block Public Access settings enabled;
 - Bucket owner enforced object ownership;
@@ -64,7 +64,7 @@ concrete reserved run prefix in both statements):
       "Sid": "ListOnlyMountRsTestPrefix",
       "Effect": "Allow",
       "Action": "s3:ListBucket",
-      "Resource": "arn:aws:s3:::mount-rs-integration-106427005394-ap-southeast-2",
+      "Resource": "arn:aws:s3:::mount-rs-integration-922978963556-ap-southeast-2",
       "Condition": {
         "StringLike": {
           "s3:prefix": "mount-rs-tests/aws-s3/*"
@@ -79,7 +79,7 @@ concrete reserved run prefix in both statements):
         "s3:GetObject",
         "s3:PutObject"
       ],
-      "Resource": "arn:aws:s3:::mount-rs-integration-106427005394-ap-southeast-2/mount-rs-tests/aws-s3/*"
+      "Resource": "arn:aws:s3:::mount-rs-integration-922978963556-ap-southeast-2/mount-rs-tests/aws-s3/*"
     },
     {
       "Sid": "IdentifyTestPrincipal",
@@ -112,8 +112,8 @@ The explicit opt-in is required:
 
 ```sh
 AWS_PROFILE=myroot \
-AWS_S3_TEST_ROLE_ARN=arn:aws:iam::106427005394:role/mount-rs-aws-s3-integration-test \
-AWS_S3_TEST_BUCKET=mount-rs-integration-106427005394-ap-southeast-2 \
+AWS_S3_TEST_ROLE_ARN=arn:aws:iam::922978963556:role/mount-rs/mount-rs-aws-s3-integration-test \
+AWS_S3_TEST_BUCKET=mount-rs-integration-922978963556-ap-southeast-2 \
 AWS_S3_TEST_REGION=ap-southeast-2 \
 MOUNT_RS_RUN_AWS_S3=1 \
 ./scripts/test-aws-s3.sh
