@@ -24,9 +24,11 @@ kernel-connection teardown. Session destruction also wakes and drains in-flight
 `Tflush` waiters. Local lifecycle 6/6, transport-error 8/8, the focused native
 target, strict 9P Clippy and formatting pass. Hosted run `35616832528` / job
 `106389895603` passed the prior Linux kernel-client mount/read/write/unmount
-packet; the current packet's CI run `35624869535` at `e5f4dda` was canceled
-before jobs materialized, so a fresh hosted run is still required for this
-packet and the concurrent-I/O harness.
+packet; the later current run `35625437327` / native-9p job `106418844564`
+passed 3/4 ignored tests but exposed a live-mount cleanup failure in the
+server-close test. The local follow-up separates kernel unmount coordination
+from resource teardown, and a fresh hosted run is required to verify it and
+the concurrent-I/O harness.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
@@ -1014,7 +1016,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
-  loopback integration verified direct class 1/2/3 methods plus chunked PUT,
+  host-enabled integration verified direct OPTIONS/MKCOL/PUT/HEAD/GET,
+  PROPFIND/PROPPATCH, COPY/MOVE, LOCK/UNLOCK, DELETE, and PATCH refusal, plus
+  chunked PUT,
   multi-chunk GET, early iterator return, and deliberate request-stream
   failure; WebDAV integration 13/13, isolated N-API compile, release build,
   generated typecheck, server integration, and scoped warning-denied Clippy
@@ -1440,6 +1444,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification checkpoint for that revision; production identity/ACL/TLS,
   backup/recovery, capacity, observability, macOS and release-owner gates
   remain open.
+  A later non-cancelling hosted run
+  [35623491280](https://github.com/andymac4182/mount-rs/actions/runs/35623491280)
+  (job
+  [106415143857](https://github.com/andymac4182/mount-rs/actions/runs/35623491280/job/106415143857))
+  tested current-main revision `336d9a3` on `ubuntu-24.04` and completed green
+  in 12m26s. Its retained artifact
+  `foundationdb-production-qualification-35623491280-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
+  throughput_ops_per_sec=64.28`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a newer bounded
+  current-main qualification checkpoint, not production-duration, capacity,
+  identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1492,9 +1511,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
-  - [ ] **Hosted and platform evidence:** the hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `aa3dae3` in run
-    `35620006731` on `ubuntu-24.04`, with the retained
+  - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
+    Node, CLI/native Linux checkpoint is green for revision `336d9a3` in run
+    `35623491280` on `ubuntu-24.04`, with the retained
     `qualification-pass` artifact. Complete the advertised macOS/Linux
     build/native matrix and any remaining clean-install/package evidence;
     record the actual runner, cluster/image, revision and result. Failed,
