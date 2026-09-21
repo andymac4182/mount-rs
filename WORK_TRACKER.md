@@ -2022,6 +2022,24 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   verification; provider, native and production environments remain
   external.)*
 
+- [x] W08.26 **Current-main hosted Linux/macOS target and attestation
+  qualification:** manual `workflow_dispatch` with `attest=true` run
+  `35633841116` completed successfully from source
+  `56aae0c3f28686e225bb5feb0c528e50acc0a1e8`. Linux build/download/
+  attestation jobs `106446286719`, `106447678688`, `106448672423` and macOS
+  jobs `106446286427`, `106447678718`, `106448672409` all passed final target
+  verification. Linux tarball SHA-256 is
+  `5ef9ddb46b5a7967fb26b6379a217f648291d2598be75e9c7d8847f7aa42371c`
+  (8,328,164 bytes); macOS arm64 is
+  `f857b369be15f8f09833722acb4b1739dd05a794aa0636aa4135f5f703905bec`
+  (6,918,766 bytes). Repository attestation records are `49008658`,
+  `49008661`, `49008767` and `49008775`; Rekor entries are `2906497681`,
+  `2906497694`, `2906498178` and `2906498191`. Both
+  `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed. This is current-main
+  hosted qualification, not an approved tag release, registry acceptance,
+  canary, rollback or owner approval. *(Hosted/provider qualification;
+  release approval and production deployment are external gates.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the
