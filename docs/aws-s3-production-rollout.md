@@ -47,6 +47,12 @@ logs, or support bundles. The `r2` provider remains the explicit choice for
 S3-compatible endpoints; the AWS provider rejects endpoint overrides so a
 green test cannot be mistaken for AWS evidence.
 
+The AWS provider uses an explicit bounded object-store retry policy of five
+retries and a 30-second retry window. This is a request-latency safety bound,
+not an approved workload SLO or proof that internal retry attempts are
+exported; the selected deployment still needs fault-injection measurement and
+an owner-approved retry/error budget.
+
 The metadata provider, bucket, prefix, and workload identity must be reviewed
 as one deployment. The S3 role must be limited to the required bucket/prefix
 operations, while maintenance and cleanup authority must be separate and
@@ -65,7 +71,11 @@ The expanded run at
 `mount-rs-tests/aws-s3/20260921T134403Z-54972-b8831d9b39f99263ce764ba298b05302`
 also passed independent-writer fencing, restored a temporary on-disk PGlite
 data directory into a fresh server process, and reopened the same AWS-backed
-filesystem. This is local metadata backup/restore and restart evidence only.
+filesystem. The rerun after the explicit AWS S3 five-retry/30-second request
+budget passed the CLI, composed, process-reopen, independent-PGlite,
+fencing, and restore/reopen gates under
+`mount-rs-tests/aws-s3/20260921T141112Z-81269-ab3a599172244316234d1f3b23181dba`.
+This is local metadata backup/restore and restart evidence only.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
