@@ -24,8 +24,9 @@ use mount_rs_nfs::protocol::{
     write_dir_op, write_read_args, write_write_args,
 };
 use mount_rs_nfs::rpc::{RPC_SUCCESS, RecordAssembler, decode_reply, encode_call, frame_record};
-use mount_rs_nfs::xdr::encode_xdr;
-use mount_rs_nfs::{NfsServer, NfsServerOptions};
+use mount_rs_nfs::v4::{CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_BADSESSION};
+use mount_rs_nfs::xdr::{XdrReader, XdrWriter, encode_xdr};
+use mount_rs_nfs::{NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
@@ -34,6 +35,13 @@ use tokio::time::timeout;
 const CHILD_ENV: &str = "MOUNT_RS_NFS_PROCESS_CHILD";
 const ROOT_ENV: &str = "MOUNT_RS_NFS_PROCESS_ROOT";
 const TEST_NAME: &str = "nfs_v3_host_backend_survives_process_crash_and_restart";
+const V4_TEST_NAME: &str = "nfs_v4_session_is_process_local_after_process_crash";
+
+const OP_GETFH: u32 = 10;
+const OP_PUTROOTFH: u32 = 24;
+const OP_EXCHANGE_ID: u32 = 42;
+const OP_CREATE_SESSION: u32 = 43;
+const OP_SEQUENCE: u32 = 53;
 
 struct TestRoot(PathBuf);
 
@@ -81,8 +89,12 @@ impl ServerProcess {
 }
 
 async fn start_child(root: &Path, role: &str) -> ServerProcess {
+    start_child_for(root, role, TEST_NAME).await
+}
+
+async fn start_child_for(root: &Path, role: &str, test_name: &str) -> ServerProcess {
     let mut child = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", TEST_NAME, "--nocapture"])
+        .args(["--exact", test_name, "--nocapture"])
         .env(CHILD_ENV, role)
         .env(ROOT_ENV, root)
         .stdout(Stdio::piped())
@@ -135,6 +147,214 @@ async fn exchange(stream: &mut TcpStream, call: Vec<u8>) -> Vec<u8> {
     })
     .await
     .expect("RPC reply timeout")
+}
+
+fn v4_op(opcode: u32, body: impl FnOnce(&mut XdrWriter)) -> Vec<u8> {
+    let mut writer = XdrWriter::new();
+    writer.u32(opcode);
+    body(&mut writer);
+    writer.into_bytes()
+}
+
+fn v4_compound(tag: &str, operations: &[Vec<u8>]) -> Vec<u8> {
+    let mut writer = XdrWriter::new();
+    writer.string(tag);
+    writer.u32(1);
+    writer.u32(operations.len() as u32);
+    for operation in operations {
+        writer.raw(operation);
+    }
+    writer.into_bytes()
+}
+
+fn v4_sequence(session: &[u8; 16], sequence: u32) -> Vec<u8> {
+    v4_op(OP_SEQUENCE, |writer| {
+        writer.fixed_opaque(session, 16);
+        writer.u32(sequence);
+        writer.u32(0);
+        writer.u32(0);
+        writer.bool(true);
+    })
+}
+
+fn v4_channel(writer: &mut XdrWriter) {
+    writer.u32(0);
+    writer.u32(1 << 20);
+    writer.u32(1 << 20);
+    writer.u32(1 << 20);
+    writer.u32(64);
+    writer.u32(4);
+    writer.u32(0);
+}
+
+fn v4_reader(record: &[u8]) -> XdrReader<'static> {
+    let (reply, mut body) = decode_reply(record).expect("decode NFSv4 reply");
+    assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
+    XdrReader::new(Box::leak(body.rest().to_vec().into_boxed_slice()))
+}
+
+fn v4_compound_status(reader: &mut XdrReader<'_>, expected_count: usize) -> u32 {
+    let status = reader
+        .u32("NFSv4 compound status")
+        .expect("read compound status");
+    let _ = reader
+        .string(1024, "NFSv4 compound tag")
+        .expect("read compound tag");
+    assert_eq!(
+        reader
+            .u32("NFSv4 compound result count")
+            .expect("read compound result count") as usize,
+        expected_count
+    );
+    status
+}
+
+fn v4_result_status(reader: &mut XdrReader<'_>, expected_op: u32) -> u32 {
+    assert_eq!(
+        reader
+            .u32("NFSv4 result operation")
+            .expect("read result operation"),
+        expected_op
+    );
+    reader
+        .u32("NFSv4 result status")
+        .expect("read result status")
+}
+
+fn v4_consume_sequence(reader: &mut XdrReader<'_>) {
+    assert_eq!(v4_result_status(reader, OP_SEQUENCE), 0);
+    let _ = reader
+        .fixed_opaque(16, "NFSv4 sequence session")
+        .expect("read sequence session");
+    for label in [
+        "sequence number",
+        "sequence slot",
+        "sequence highest slot",
+        "sequence target slot",
+        "sequence status flags",
+    ] {
+        let _ = reader.u32(label).expect("read sequence result");
+    }
+}
+
+fn v4_exchange_args(owner: &[u8]) -> Vec<u8> {
+    v4_op(OP_EXCHANGE_ID, |writer| {
+        writer.fixed_opaque(b"v4-crash", 8);
+        writer.var_opaque(owner);
+        writer.u32(0);
+        writer.u32(0);
+        writer.u32(0);
+    })
+}
+
+fn v4_create_session_args(clientid: u64) -> Vec<u8> {
+    v4_op(OP_CREATE_SESSION, |writer| {
+        writer.u64(clientid);
+        writer.u32(1);
+        writer.u32(CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
+        v4_channel(writer);
+        v4_channel(writer);
+        writer.u32(0);
+        writer.u32(1);
+        writer.u32(0);
+    })
+}
+
+async fn establish_v4_session(stream: &mut TcpStream, xid: u32) -> [u8; 16] {
+    let exchange_record = exchange(
+        stream,
+        encode_call(
+            xid,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound("crash-exchange", &[v4_exchange_args(b"crash-client")]),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&exchange_record);
+    assert_eq!(v4_compound_status(&mut response, 1), 0);
+    assert_eq!(v4_result_status(&mut response, OP_EXCHANGE_ID), 0);
+    let clientid = response.u64("NFSv4 client id").expect("read client id");
+    assert_eq!(response.u32("NFSv4 exchange sequence").unwrap(), 1);
+    let _ = response.u32("NFSv4 exchange flags").unwrap();
+    assert_eq!(response.u32("NFSv4 state protection").unwrap(), 0);
+    let _ = response.u64("NFSv4 server owner minor id").unwrap();
+    let _ = response
+        .var_opaque(1024, "NFSv4 server owner major id")
+        .unwrap();
+    let _ = response.var_opaque(1024, "NFSv4 server scope").unwrap();
+    assert_eq!(response.u32("NFSv4 implementation count").unwrap(), 0);
+    response.end("NFSv4 exchange response").unwrap();
+
+    let create_session_record = exchange(
+        stream,
+        encode_call(
+            xid + 1,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound("crash-create-session", &[v4_create_session_args(clientid)]),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&create_session_record);
+    assert_eq!(v4_compound_status(&mut response, 1), 0);
+    assert_eq!(v4_result_status(&mut response, OP_CREATE_SESSION), 0);
+    let session: [u8; 16] = response
+        .fixed_opaque(16, "NFSv4 session id")
+        .unwrap()
+        .try_into()
+        .unwrap();
+    assert_eq!(response.u32("NFSv4 create-session sequence").unwrap(), 1);
+    assert_eq!(response.u32("NFSv4 create-session flags").unwrap(), 0);
+    for _ in 0..2 {
+        for label in [
+            "headerpad",
+            "max request",
+            "max response",
+            "max cached",
+            "max operations",
+            "max requests",
+        ] {
+            let _ = response.u32(label).unwrap();
+        }
+        assert_eq!(response.u32("rdma count").unwrap(), 0);
+    }
+    response.end("NFSv4 create-session response").unwrap();
+
+    let root_record = exchange(
+        stream,
+        encode_call(
+            xid + 2,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-root",
+                &[
+                    v4_sequence(&session, 1),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    v4_op(OP_GETFH, |_| {}),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&root_record);
+    assert_eq!(v4_compound_status(&mut response, 3), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_GETFH), 0);
+    let _ = response.var_opaque(128, "NFSv4 root handle").unwrap();
+    response.end("NFSv4 root response").unwrap();
+    session
 }
 
 async fn mount_root(stream: &mut TcpStream, xid: u32) -> Vec<u8> {
@@ -326,4 +546,53 @@ async fn nfs_v3_host_backend_survives_process_crash_and_restart() {
         std::fs::read(root.0.join("crash-recovered.txt")).expect("read persisted backend file"),
         payload
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nfs_v4_session_is_process_local_after_process_crash() {
+    if std::env::var_os(CHILD_ENV).is_some() {
+        child_server().await;
+        return;
+    }
+
+    let root = TestRoot::new();
+    let seed = start_child_for(&root.0, "seed", V4_TEST_NAME).await;
+    let mut first = TcpStream::connect(seed.address)
+        .await
+        .expect("connect seed NFSv4 server");
+    let session = establish_v4_session(&mut first, 101).await;
+    first.shutdown().await.expect("close seed NFSv4 connection");
+    drop(first);
+    seed.crash().await;
+
+    let replacement = start_child_for(&root.0, "replacement", V4_TEST_NAME).await;
+    let mut second = TcpStream::connect(replacement.address)
+        .await
+        .expect("connect replacement NFSv4 server");
+    let stale_record = exchange(
+        &mut second,
+        encode_call(
+            111,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound("stale-session", &[v4_sequence(&session, 2)]),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&stale_record);
+    assert_eq!(
+        v4_compound_status(&mut response, 0),
+        NFS4ERR_BADSESSION,
+        "a replacement process must reject the old NFSv4 session before dispatch"
+    );
+    response.end("stale NFSv4 session response").unwrap();
+    second
+        .shutdown()
+        .await
+        .expect("close replacement NFSv4 connection");
+    drop(second);
+    replacement.crash().await;
 }

@@ -755,6 +755,7 @@ patch):
 | Main | W01 N-API 9P mount-created server policy | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options map scalar server policy and injected lock tables to mount-created listeners, preserving the prior `./9p` probe/refusal/option/helper and configured shared-server behavior; Rust/N-API mapping tests, generated typecheck/build, focused runtime checks, host-enabled server integration, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 N-API 9P mount-created session callbacks | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options carry `onError`/`onAssertion` into mount-created listeners through the existing Rust session-hook path, while configured shared servers retain their own callbacks; debug build, generated typecheck, focused runtime checks, host-enabled server integration, N-API/Rust tests, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 N-API 9P direct-facade signal teardown | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct `./9p` mounts support `signals` with process-wide `SIGINT`/`SIGTERM` cleanup, unmount-all dispatch, last-mount handler removal, and default-signal re-raise; the signal and mount-helper regressions plus syntax/diff checks passed; automatic cross-transport signal ownership, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
+| Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the stable hosted `Native 9P` workflow now loads `9p`/`9pnet_fd`, builds the public addon, and runs automatic, direct `./9p`, and structural-driver mounted-I/O/cleanup checks as root; local direct-test syntax/diff checks pass, but the exact-SHA hosted N-API result is still pending, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -887,14 +888,15 @@ Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
 immediate-close shutdown lost wakeup, and retains a timed-out drain state so a
 second `close()` cannot report false success or rebind while a stalled
 connection remains active, and aborts tracked connection tasks when the
-drain deadline expires. On published tip `4bc10ad1`, the focused Rust target passes 18/18 with strict
+drain deadline expires. The preceding implementation packet `4bc10ad1`
+passed the focused Rust target 18/18 with strict
 Clippy and formatting. The N-API WebDAV wrapper serializes its closed-state
 check with the transport lifecycle; the shared postbuild server facade now
 clears a failed close promise so a timed-out WebDAV close can be retried after
 the peer exits. The focused wrapper race test passes 40 alternating
 real-loopback iterations, its stalled-request timeout/retry regression passes,
-and the focused direct-session concurrency probe passes 32 concurrent PUT/GET
-requests, while the network-concurrency/auth test passes 32 concurrent HTTP
+and the focused direct-session concurrency probe passes 64 concurrent PUT/GET
+requests, while the network-concurrency/auth test passes 64 concurrent HTTP
 PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 opt-in
@@ -903,7 +905,9 @@ host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
 Hosted network concurrency, power-loss/live-provider durability, and broader
 hosted session/member lifecycle remain open; local SQLite process-crash
-recovery is covered by the dedicated N-API probe.
+recovery is covered by the dedicated N-API probe. The callable/member packet
+`8f0e74138286a678cbc5868d3cc4a528fb1b9fe9` has exact-SHA CI and release lanes
+pending or queued, so no hosted WebDAV acceptance is claimable from that packet.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.

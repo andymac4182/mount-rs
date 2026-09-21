@@ -274,9 +274,9 @@ Current focused behavior:
   policy, lock table, callbacks, and client set rather than creating a second
   listener. Mount-created listeners now receive the scalar server-policy
   fields, lock table, and direct session `onError`/`onAssertion` callbacks from
-  the same option bag. This is not full oracle mount parity: signals and the
-  automatic cross-transport signal ownership and the remaining mount controls
-  are explicitly unsupported in this packet, and
+  the same option bag. This is not full oracle mount parity: automatic
+  cross-transport signal ownership and the remaining mount controls are
+  explicitly unsupported in this packet, and
   hosted N-API native mount lifecycle evidence remains unverified.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
@@ -293,11 +293,15 @@ Current focused behavior:
   now pass the privileged native NFSv3/NFSv4.1 and SQLite-over-NFS checks;
   the host-backed NFSv3 process-crash/restart test rejects the old file handle
   with `NFS3ERR_STALE` and then recovers a `FILE_SYNC` payload through a
-  replacement server. Rootless NFSv4.1 wire coverage also drives two
+  replacement server. A forced-crash NFSv4.1 child-process test also rejects
+  the old session with `NFS4ERR_BADSESSION` before dispatch. Rootless NFSv4.1
+  wire coverage also drives two
   independent sessions through concurrent distinct-file OPEN/WRITE/READ
   round trips. NFSv4 lease/replay/file-handle recovery, cross-process/native
   concurrency, power-loss durability, and whole-workflow release acceptance
-  remain open. The exact published concurrency tip's CI run
+  remain open. Multiple server processes sharing one backend are outside the
+  supported scope because session/lease/replay/handle arbitration is
+  process-local. The exact published concurrency tip's CI run
   `35663954461` was cancelled before jobs were created, so it adds no newer
   hosted native result. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
@@ -385,7 +389,7 @@ matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
 return, deliberate request-body failure mapping, one typed peer-aware callback
 from a Node socket reset, one malformed-HTTP callback, and same-driver server
 recreation preserving file bytes while resetting session locks. It also
-completes 32 parallel unique-file PUT/GET requests through one direct
+completes 64 parallel unique-file PUT/GET requests through one direct
 session with exact body readback; this is in-process same-driver evidence only.
 The pinned TypeScript-vs-Rust loopback HTTP differential also passes all 40
 paired S3+WebDAV cases, including 16 authenticated WebDAV cases covering
@@ -423,7 +427,7 @@ Clippy and formatting. The N-API WebDAV wrapper also serializes its
 closed-state check with the transport lifecycle; a rebuilt 40-iteration
 real-loopback race test passes. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
-host-enabled WebDAV network/fault/restart matrix, and a focused 32-pair live
+host-enabled WebDAV network/fault/restart matrix, and a focused 64-pair live
 HTTP network-concurrency/authentication/streaming test; hosted network
 concurrency and hosted lifecycle remain open.
 The shared postbuild server facade keeps close idempotent while in flight but
