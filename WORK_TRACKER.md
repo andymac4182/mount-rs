@@ -1466,6 +1466,20 @@ listing a source does not mean it has been reviewed or its code can be reused.
   real multi-node restart evidence, but remains loopback/non-secure test
   deployment evidence rather than production auth, TLS or power-loss proof;
   hosted CI remains revision-specific and pending.
+- The hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
+  Linux-amd64 Ozone gateway (`ozone`, job `106274147767`) and the mixed
+  SQLite/PGlite Ozone composition (`ozone-compositions`, job
+  `106274147763`). Its durable TiDB job (`tidb`, `106274147942`) passed the
+  three direct TiDB provider tests and the ambiguous-commit test, then timed
+  out for 300 seconds at the first `TiDB restart readiness` phase. The
+  matching TiDB/RustFS job (`tidb-rustfs`, `106274147791`) passed its direct
+  provider, `TIDB_CHUNKED_RUSTFS_SEED_PASS`, and its ambiguous-commit phase,
+  then hit the same frontend restart timeout. The published 30-second
+  graceful shutdown change (`63dbdbd`) did not resolve this boundary. W26.3
+  therefore remains open; the next bounded attempt moves the deliberate
+  dropped-COMMIT failure injection after durable restart/reopen so the
+  restart gate is not contaminated by that test's intentionally unknown
+  client outcome.
 - [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
   revision CAS and stale-writer fencing. SQLite, PGlite, single-node TiDB and

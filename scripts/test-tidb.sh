@@ -708,8 +708,6 @@ set -e
 if [ "$provider_status" -ne 0 ]; then
   exit "$provider_status"
 fi
-run_ambiguous_commit_test
-
 if [ "$topology" = durable ]; then
   # Confirm data remains available through PD quorum recovery, a TiDB frontend
   # restart, and a TiKV store restart. This is still a test-cluster check, not
@@ -741,6 +739,13 @@ if [ "$topology" = durable ]; then
     exit "$provider_status"
   fi
 fi
+
+# The failure-injection lane deliberately drops a client connection after
+# TiDB has processed COMMIT. Keep it after the durable restart/reopen gate so
+# an intentionally unknown client outcome cannot contaminate the frontend
+# startup check; it still exercises the provider's no-replay contract before
+# the owned topology is cleaned up.
+run_ambiguous_commit_test
 
 if [ "$topology" = durable ] && [ "$capacity_issue" -eq 0 ]; then
   evidence_class="durable-multinode-restart"
