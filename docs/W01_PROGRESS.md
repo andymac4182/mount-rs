@@ -210,7 +210,14 @@ crash/power-loss and provider durability remain unqualified. The pinned pure
 WebDAV barrel/protocol differential now passes with
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; broader session/server member
-differential remains open.
+differential remains open. A read-only status check for the published tip
+`9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
+35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
+and [fault-injection run
+35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044)
+cancelled, while [Live Cloudflare R2 run
+35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
+failed; no hosted WebDAV PASS is claimable from this tip.
 
 Next W01.1 action: close the next smallest remaining mount-free export or
 behavior gap, then rerun the pinned oracle and generated type/build checks
@@ -347,6 +354,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | The host-enabled `node test/servers.mjs` WebDAV phase created `/concurrent`, completed eight parallel unique-file PUTs and eight parallel GETs through one `WebdavSession.handleRequest`, and verified every body byte-for-byte | — | 72% W01.1 planning view | This is in-process same-driver evidence only; network-client, native, hosted, crash/power-loss restart, provider durability, complete session/member parity, and oracle differential remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/webdav-codec.mjs` passed the complete pure WebDAV constants/path/header/XML/lock/document differential at oracle `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; source-backed host-enabled `node test/servers.mjs` also passed | — | 72% W01.1 planning view | Full session/server member differential, native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Added recursive N-API `WebdavXmlNode` owner readback to `WebdavLockView`; host-enabled local and pinned structural-driver `node test/servers.mjs` runs accepted namespaced `A&amp;B` owner text, while the Rust 13-test target and strict WebDAV/N-API Clippy passed after bounded predefined/numeric XML reference decoding | — | 72% W01.1 planning view | Complete session/member parity beyond lock-owner readback, native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Read-only status for published tip `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5`: [CI run 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088) and [fault-injection run 35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044) were cancelled, and [Live Cloudflare R2 run 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090) failed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 
