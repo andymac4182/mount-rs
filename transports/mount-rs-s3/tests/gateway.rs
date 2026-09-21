@@ -1244,6 +1244,61 @@ async fn failed_multipart_assembly_releases_finalization_claim_for_retry() {
 }
 
 #[tokio::test]
+async fn multipart_completion_keeps_destination_inode_before_finalization_marker() {
+    let driver = MemoryFs::empty();
+    let session = S3Session::new(driver.clone());
+    let initiated = session
+        .handle(request("POST", "/mountx/etag.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/etag.bin?uploadId={upload_id}&partNumber=1"),
+            b"stable multipart bytes",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+    let part_etag = header(&part, "etag").expect("part ETag");
+
+    let probe_path = format!("/.mountx-multipart/{upload_id}/allocation-probe");
+    let probe = driver
+        .open(&probe_path, "wx", 0o600)
+        .await
+        .expect("allocation probe opens");
+    probe.close().await.expect("allocation probe closes");
+    let probe_stats = driver
+        .stat(&probe_path)
+        .await
+        .expect("allocation probe stats");
+    driver
+        .unlink(&probe_path)
+        .await
+        .expect("allocation probe removes");
+
+    let complete_body = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/etag.bin?uploadId={upload_id}"),
+            complete_body.as_bytes(),
+            &[],
+        ))
+        .await;
+    assert_eq!(completed.status, 200);
+
+    let object = driver
+        .stat("/etag.bin")
+        .await
+        .expect("completed object stats");
+    assert_eq!(object.ino, probe_stats.ino + 1);
+}
+
+#[tokio::test]
 async fn multipart_complete_and_abort_race_has_one_terminal_winner() {
     let driver = MemoryFs::empty();
     let session = Arc::new(S3Session::new(driver.clone()));
