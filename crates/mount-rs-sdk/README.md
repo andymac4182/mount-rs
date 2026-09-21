@@ -23,9 +23,22 @@ filesystem.shutdown().await?;
 # }
 ```
 
-Use [`SplitOptions`] when metadata and byte storage need different providers.
+Use SplitOptions when metadata and byte storage need different providers.
 The SDK owns the provider handles and closes PGlite connections after the
 chunked filesystem has released its writer lease.
+
+FoundationDB is an opt-in native feature:
+
+~~~toml
+mount-rs-sdk = { version = "0.1", features = ["foundationdb"] }
+~~~
+
+StoreConfig::FoundationDb opens the configured cluster file and requires an
+explicit FoundationDbLeaseAuthority::PersistedSingleAuthority choice. That
+choice is for an owned single-authority/test cluster; it does not provide the
+protected shared time authority required by independent production writers.
+The default SDK build remains portable and returns ENOTSUP if a FoundationDB
+store is selected without the native feature or on an unsupported target.
 
 ## Optional observability
 

@@ -15,6 +15,16 @@ use mount_rs_core::storage::{
     BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
 };
 use mount_rs_core::{FsError, MemoryFs, backend_error};
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
+use mount_rs_foundationdb::{FoundationDbStorage, FoundationDbStorageOptions};
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
@@ -58,6 +68,12 @@ pub enum StoreConfig {
         volume_key: String,
         durable: bool,
     },
+    FoundationDb {
+        cluster_file: PathBuf,
+        volume_key: String,
+        durable: bool,
+        lease_authority: FoundationDbLeaseAuthority,
+    },
     R2 {
         endpoint: String,
         bucket: String,
@@ -66,6 +82,17 @@ pub enum StoreConfig {
         secret_access_key: String,
         durable: bool,
     },
+}
+
+/// Lease authority choices exposed by consumer configuration.
+///
+/// The persisted choice is intentionally named as a single-authority mode:
+/// it is suitable for an owned test cluster or one trusted writer authority,
+/// but it is not a substitute for a protected shared provider-time authority
+/// in a multi-host production deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FoundationDbLeaseAuthority {
+    PersistedSingleAuthority,
 }
 
 /// Options for a filesystem with independent metadata and block providers.
@@ -447,6 +474,16 @@ enum ProviderResource {
     PgliteBlocks(PgliteBlockStore),
     TidbMetadata(TidbMetadataStore),
     TidbBlocks(TidbBlockStore),
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    FoundationDb(FoundationDbStorage),
 }
 
 impl ProviderResource {
@@ -456,6 +493,22 @@ impl ProviderResource {
             Self::PgliteBlocks(store) => store.close().await,
             Self::TidbMetadata(store) => store.close().await,
             Self::TidbBlocks(store) => store.close().await,
+            #[cfg(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            ))]
+            // FoundationDB storage owns the process-scoped network guard. It
+            // must stay alive until the provider handles themselves are
+            // dropped, so shutdown only releases the chunked lease here.
+            Self::FoundationDb(storage) => {
+                let _ = storage;
+                Ok(())
+            }
         }
     }
 }
@@ -545,6 +598,50 @@ async fn open_metadata(
                 vec![ProviderResource::TidbMetadata(store)],
             ))
         }
+        StoreConfig::FoundationDb {
+            cluster_file,
+            volume_key,
+            durable,
+            lease_authority,
+        } => {
+            #[cfg(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            ))]
+            {
+                let storage = open_foundationdb_storage(
+                    cluster_file,
+                    volume_key,
+                    *durable,
+                    *lease_authority,
+                )?;
+                let store = storage.metadata();
+                Ok((
+                    Arc::new(store),
+                    vec![ProviderResource::FoundationDb(storage)],
+                ))
+            }
+            #[cfg(not(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            )))]
+            {
+                let _ = (cluster_file, volume_key, durable, lease_authority);
+                Err(FsError::enotsup(
+                    "FoundationDB SDK support (enable the foundationdb feature on a supported native target)",
+                ))
+            }
+        }
         StoreConfig::R2 { .. } => Err(backend_error(
             "metadata provider 'r2' is unsupported; R2 is block-only",
         )),
@@ -587,6 +684,50 @@ async fn open_blocks(
                 vec![ProviderResource::TidbBlocks(store)],
             ))
         }
+        StoreConfig::FoundationDb {
+            cluster_file,
+            volume_key,
+            durable,
+            lease_authority,
+        } => {
+            #[cfg(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            ))]
+            {
+                let storage = open_foundationdb_storage(
+                    cluster_file,
+                    volume_key,
+                    *durable,
+                    *lease_authority,
+                )?;
+                let store = storage.blocks();
+                Ok((
+                    Arc::new(store),
+                    vec![ProviderResource::FoundationDb(storage)],
+                ))
+            }
+            #[cfg(not(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            )))]
+            {
+                let _ = (cluster_file, volume_key, durable, lease_authority);
+                Err(FsError::enotsup(
+                    "FoundationDB SDK support (enable the foundationdb feature on a supported native target)",
+                ))
+            }
+        }
         StoreConfig::R2 {
             endpoint,
             bucket,
@@ -606,6 +747,30 @@ async fn open_blocks(
             Ok((Arc::new(store), Vec::new()))
         }
     }
+}
+
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
+fn open_foundationdb_storage(
+    cluster_file: &Path,
+    volume_key: &str,
+    durable: bool,
+    lease_authority: FoundationDbLeaseAuthority,
+) -> Result<FoundationDbStorage> {
+    let options = FoundationDbStorageOptions::new(volume_key).with_durable(durable);
+    let options = match lease_authority {
+        FoundationDbLeaseAuthority::PersistedSingleAuthority => {
+            options.with_persisted_lease_oracle()
+        }
+    };
+    FoundationDbStorage::connect(cluster_file, options)
 }
 
 #[cfg(test)]

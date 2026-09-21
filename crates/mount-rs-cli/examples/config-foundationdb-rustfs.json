@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "foundationdb",
+        "cluster_file": "/etc/foundationdb/fdb.cluster",
+        "volume_key": "mount-rs/foundationdb-rustfs",
+        "durable": true,
+        "lease_authority": "persisted-single-authority"
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "http://127.0.0.1:9878",
+        "bucket": "mount-rs-rustfs",
+        "prefix": "mount-rs/foundationdb-rustfs",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 65536,
+      "owner": "mount-rs-fdb-rustfs"
+    }
+  }
+}

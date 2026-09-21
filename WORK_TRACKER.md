@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Verifying; local S3/R2 HTTP and configuration gates pass, but live provider acceptance is still credential-gated | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; target-gated root member landed; production authority, consumer/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -900,7 +900,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
-- [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+- [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage. Rust
+  SDK/CLI FoundationDB selection is now wired behind an opt-in native feature
+  with an explicit persisted single-authority/test mode; Node and live
+  native-mount acceptance remain open. The native-feature test binaries still
+  require the host FoundationDB client library (libfdb_c).
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.

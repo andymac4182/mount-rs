@@ -16,6 +16,7 @@
 ))]
 
 use async_trait::async_trait;
+use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
 use foundationdb::options::TransactionOption;
 use foundationdb::{Database, FdbError, TransactOption, Transaction};
 use mount_rs_core::chunking::{ChunkerConfig, from_config};
@@ -28,7 +29,7 @@ use std::convert::TryFrom;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// FoundationDB's hard key limit.
@@ -467,6 +468,14 @@ impl FoundationDbStorage {
     /// The caller must have called `foundationdb::boot()` and must retain its
     /// network guard until all handles are dropped.
     pub fn from_database(db: Database, options: FoundationDbStorageOptions) -> Result<Self> {
+        Self::from_database_with_network(db, options, None)
+    }
+
+    fn from_database_with_network(
+        db: Database,
+        options: FoundationDbStorageOptions,
+        network: Option<Arc<NetworkAutoStop>>,
+    ) -> Result<Self> {
         let options = options.validate()?;
         let db = Arc::new(db);
         let prefix = options.prefix;
@@ -487,6 +496,7 @@ impl FoundationDbStorage {
                 durable: options.durable,
                 limits,
                 oracle,
+                _network: network,
             }),
         })
     }
@@ -510,6 +520,24 @@ impl FoundationDbStorage {
         Self::from_cluster_file(foundationdb::default_config_path(), options)
     }
 
+    /// Boot the process-wide FoundationDB client network and open a cluster
+    /// file. The returned storage retains the network guard for as long as any
+    /// clone of this storage remains alive.
+    ///
+    /// FoundationDB permits one client-network initialization per process, so
+    /// all consumer-facing providers in this process share the same guard.
+    /// The native client remains alive for the process lifetime after the first
+    /// successful call; applications that own a different network lifecycle
+    /// should use [`Self::from_database`] instead and retain their own guard.
+    pub fn connect(path: impl AsRef<Path>, options: FoundationDbStorageOptions) -> Result<Self> {
+        let network = client_network()?;
+        let path = path.as_ref().to_str().ok_or_else(|| {
+            FsError::new(ErrorCode::Einval).with_message("cluster path is not UTF-8")
+        })?;
+        let db = Database::from_path(path).map_err(fdb_error)?;
+        Self::from_database_with_network(db, options, Some(network))
+    }
+
     pub fn metadata(&self) -> FoundationDbMetadataStore {
         FoundationDbMetadataStore(Arc::clone(&self.inner))
     }
@@ -525,6 +553,7 @@ struct Inner {
     durable: bool,
     limits: FoundationDbLimits,
     oracle: Option<Arc<dyn LeaseOracle>>,
+    _network: Option<Arc<NetworkAutoStop>>,
 }
 
 /// Retry policy for a FoundationDB transaction closure.
@@ -676,6 +705,25 @@ fn fdb_error(error: FdbError) -> FsError {
         ambiguous_commit_error(code, message)
     } else {
         FsError::backend(format!("FoundationDB error {code}: {message}"))
+    }
+}
+
+static CLIENT_NETWORK: OnceLock<std::result::Result<Arc<NetworkAutoStop>, String>> =
+    OnceLock::new();
+
+fn client_network() -> Result<Arc<NetworkAutoStop>> {
+    let result = CLIENT_NETWORK.get_or_init(|| {
+        let builder = FdbApiBuilder::default()
+            .build()
+            .map_err(|error| format!("FoundationDB client API initialization failed: {error}"))?;
+        let network = unsafe { builder.boot() }.map_err(|error| {
+            format!("FoundationDB client network initialization failed: {error}")
+        })?;
+        Ok(Arc::new(network))
+    });
+    match result {
+        Ok(network) => Ok(Arc::clone(network)),
+        Err(message) => Err(FsError::backend(message.clone())),
     }
 }
 

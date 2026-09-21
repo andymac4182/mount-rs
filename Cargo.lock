@@ -1528,6 +1528,7 @@ dependencies = [
  "mount-rs-auto",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-foundationdb",
  "mount-rs-host",
  "mount-rs-memory",
  "mount-rs-observability",

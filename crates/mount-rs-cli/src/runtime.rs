@@ -17,7 +17,8 @@ use mount_rs_http::{
 #[cfg(feature = "observability")]
 use mount_rs_observability::{Telemetry, set_global as set_global_telemetry};
 use mount_rs_sdk::{
-    Filesystem, FilesystemKind, HostOptions, MemoryOptions, SplitOptions, StoreConfig,
+    Filesystem, FilesystemKind, FoundationDbLeaseAuthority, HostOptions, MemoryOptions,
+    SplitOptions, StoreConfig,
 };
 
 use crate::color::Color;
@@ -257,6 +258,21 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             connection: resolve_storage_env(connection)?,
             volume_key: volume_key.clone(),
             durable: *durable,
+        }),
+        StorageProvider::FoundationDb {
+            cluster_file,
+            volume_key,
+            durable,
+            lease_authority,
+        } => Ok(StoreConfig::FoundationDb {
+            cluster_file: cluster_file.clone(),
+            volume_key: volume_key.clone(),
+            durable: *durable,
+            lease_authority: match lease_authority {
+                FoundationDbLeaseAuthority::PersistedSingleAuthority => {
+                    FoundationDbLeaseAuthority::PersistedSingleAuthority
+                }
+            },
         }),
         StorageProvider::R2 {
             endpoint,

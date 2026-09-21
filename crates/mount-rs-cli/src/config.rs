@@ -69,6 +69,12 @@ pub enum StorageProvider {
         volume_key: String,
         durable: bool,
     },
+    FoundationDb {
+        cluster_file: PathBuf,
+        volume_key: String,
+        durable: bool,
+        lease_authority: mount_rs_sdk::FoundationDbLeaseAuthority,
+    },
     R2 {
         endpoint: String,
         bucket: String,
@@ -549,6 +555,42 @@ fn parse_provider(
                     .map(|value| required_value_bool(value, &format!("{path}.durable")))
                     .transpose()?
                     .unwrap_or(false),
+            }
+        }
+        "foundationdb" => {
+            reject_unknown(
+                object,
+                &[
+                    "kind",
+                    "cluster_file",
+                    "volume_key",
+                    "durable",
+                    "lease_authority",
+                ],
+                path,
+            )?;
+            let lease_authority = required_nonempty_string(object, "lease_authority", path)?;
+            let lease_authority = match lease_authority.as_str() {
+                "persisted-single-authority" => {
+                    mount_rs_sdk::FoundationDbLeaseAuthority::PersistedSingleAuthority
+                }
+                _ => {
+                    return Err(ConfigError::at(
+                        &format!("{path}.lease_authority"),
+                        "expected 'persisted-single-authority'",
+                    ));
+                }
+            };
+            StorageProvider::FoundationDb {
+                cluster_file: required_path(object, "cluster_file", path, base_dir)?,
+                volume_key: optional_nonempty_string(object, "volume_key", path)?
+                    .unwrap_or_else(|| "mount-rs".to_owned()),
+                durable: object
+                    .get("durable")
+                    .map(|value| required_value_bool(value, &format!("{path}.durable")))
+                    .transpose()?
+                    .unwrap_or(false),
+                lease_authority,
             }
         }
         "r2" => {
@@ -1390,6 +1432,99 @@ mod tests {
         assert_eq!(connection.name, "MOUNT_RS_TIDB_URL");
         assert_eq!(volume_key, "cli-tidb-rustfs");
         assert!(durable);
+    }
+
+    #[test]
+    fn foundationdb_storage_requires_an_explicit_single_authority_mode() {
+        let spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {
+                            "kind": "foundationdb",
+                            "cluster_file": "fdb.cluster",
+                            "volume_key": "cli-fdb-rustfs",
+                            "lease_authority": "persisted-single-authority"
+                        },
+                        "blocks": {
+                            "kind": "r2",
+                            "endpoint": "http://127.0.0.1:9878",
+                            "bucket": "mount-rs-rustfs",
+                            "prefix": "mount-rs/fdb-rustfs",
+                            "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
+                            "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"}
+                        }
+                    }
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap();
+        let Some(SplitStorageConfig {
+            metadata:
+                StorageProvider::FoundationDb {
+                    cluster_file,
+                    volume_key,
+                    lease_authority,
+                    ..
+                },
+            blocks: StorageProvider::R2 { .. },
+            ..
+        }) = spec.storage
+        else {
+            panic!("expected FoundationDB metadata and RustFS-compatible R2 blocks");
+        };
+        assert_eq!(cluster_file, Path::new("/tmp/config/fdb.cluster"));
+        assert_eq!(volume_key, "cli-fdb-rustfs");
+        assert_eq!(
+            lease_authority,
+            mount_rs_sdk::FoundationDbLeaseAuthority::PersistedSingleAuthority
+        );
+
+        let missing_authority = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {
+                            "kind": "foundationdb",
+                            "cluster_file": "fdb.cluster"
+                        },
+                        "blocks": {"kind": "memory"}
+                    }
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap_err();
+        assert!(missing_authority.message().contains("lease_authority"));
+
+        let invalid_authority = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {
+                            "kind": "foundationdb",
+                            "cluster_file": "fdb.cluster",
+                            "lease_authority": "host-clock"
+                        },
+                        "blocks": {"kind": "memory"}
+                    }
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap_err();
+        assert!(
+            invalid_authority
+                .message()
+                .contains("persisted-single-authority")
+        );
     }
 
     #[test]

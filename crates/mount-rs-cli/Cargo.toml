@@ -13,6 +13,7 @@ observability = [
     "mount-rs-http/observability",
     "mount-rs-sdk/observability",
 ]
+foundationdb = ["mount-rs-sdk/foundationdb"]
 
 [[bin]]
 name = "mount-rs"

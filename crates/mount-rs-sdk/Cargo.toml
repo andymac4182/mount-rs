@@ -11,6 +11,7 @@ readme = "README.md"
 [features]
 default = []
 observability = ["dep:mount-rs-observability"]
+foundationdb = ["dep:mount-rs-foundationdb", "mount-rs-foundationdb/foundationdb"]
 
 [dependencies]
 async-trait = "0.1"
@@ -24,6 +25,9 @@ mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
 mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
 mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
 mount-rs-tidb = { path = "../../integrations/mount-rs-tidb" }
+
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "linux", target_arch = "aarch64"), all(target_os = "macos", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+mount-rs-foundationdb = { path = "../../integrations/mount-rs-foundationdb", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
