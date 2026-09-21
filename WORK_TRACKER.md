@@ -2339,8 +2339,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   protected environment configuration are required before rerunning hosted
   evidence. The read-only
   [`scripts/audit-aws-s3-ci-oidc.sh`](scripts/audit-aws-s3-ci-oidc.sh) now
-  checks the immutable GitHub subject, OIDC provider, exact role trust, protected
-  environment, and required input names without mutating either system. The
+  checks the immutable GitHub subject, OIDC provider, exact single GitHub
+  federation trust statement, protected environment, and required input names
+  without mutating either system; additional or broad GitHub federation trust
+  statements fail closed. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free six-case regression matrix covers valid, missing,

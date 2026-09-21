@@ -126,12 +126,23 @@ if [ -n "$ROLE_ARN" ]; then
         --arg subject "$expected_subject" '
           def includes($value):
             if type == "array" then index($value) != null else . == $value end;
-          any(.Statement[]?;
-            .Effect == "Allow"
-            and ((.Principal.Federated // empty) | includes($provider))
-            and ((.Action // empty) | includes("sts:AssumeRoleWithWebIdentity"))
-            and .Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
-            and .Condition.StringEquals["token.actions.githubusercontent.com:sub"] == $subject
+          def as_array:
+            if type == "array" then . else [.] end;
+          [
+            .Statement[]?
+            | select(
+                .Effect == "Allow"
+                and ((.Principal.Federated // empty) | includes($provider))
+              )
+          ] as $github_statements
+          | ($github_statements | length) == 1
+          and (
+            $github_statements[0] as $statement
+            | (($statement.Principal | keys | sort) == ["Federated"])
+            and $statement.Principal.Federated == $provider
+            and (($statement.Action | as_array | sort) == ["sts:AssumeRoleWithWebIdentity"])
+            and $statement.Condition.StringEquals["token.actions.githubusercontent.com:aud"] == "sts.amazonaws.com"
+            and $statement.Condition.StringEquals["token.actions.githubusercontent.com:sub"] == $subject
           )' >/dev/null 2>&1 || block role_missing_immutable_github_subject_trust
     else
       block github_subject_metadata_missing
