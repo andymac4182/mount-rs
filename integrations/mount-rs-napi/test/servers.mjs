@@ -28,7 +28,7 @@ if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
   };
 }
 
-const IO_TIMEOUT_MS = 5_000;
+const IO_TIMEOUT_MS = 20_000;
 let activePhase = { label: "startup", startedAt: Date.now() };
 
 function phaseSummary() {
