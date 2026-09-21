@@ -137,6 +137,9 @@ The template was syntax-validated with the read-only AWS CloudFormation API on
 dot components, widening the transport deny to all object keys, expiring
 noncurrent versions, and adding parameter rules for role separation and KMS
 selection on 2026-09-22; no stack or change set was created.
+The template bucket-name constraint and the read-only resource auditor now
+reject consecutive dots and invalid length or edge characters consistently
+with the hosted preflight.
 Validation does not approve
 the production parameters, role trust policies, metadata topology, backup
 plan, or deployment promotion. Those remain W25.5-W25.9 gates.

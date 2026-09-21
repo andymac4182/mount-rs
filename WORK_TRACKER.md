@@ -2431,7 +2431,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `scripts/test-aws-s3-production-template.rb` gate now structurally asserts
   the retained bucket controls, KMS/versioning rules, lifecycle, and all five
   policy statements; it is wired into the hosted preflight and passed locally
-  without AWS credentials.
+  without AWS credentials. The CloudFormation bucket-name constraint and the
+  read-only resource audit now reject consecutive dots and invalid length or
+  edge characters consistently with the hosted preflight.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
