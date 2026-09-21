@@ -1440,6 +1440,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification checkpoint for that revision; production identity/ACL/TLS,
   backup/recovery, capacity, observability, macOS and release-owner gates
   remain open.
+  A later non-cancelling hosted run
+  [35623491280](https://github.com/andymac4182/mount-rs/actions/runs/35623491280)
+  (job
+  [106415143857](https://github.com/andymac4182/mount-rs/actions/runs/35623491280/job/106415143857))
+  tested current-main revision `336d9a3` on `ubuntu-24.04` and completed green
+  in 12m26s. Its retained artifact
+  `foundationdb-production-qualification-35623491280-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
+  throughput_ops_per_sec=64.28`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a newer bounded
+  current-main qualification checkpoint, not production-duration, capacity,
+  identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1492,9 +1507,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
-  - [ ] **Hosted and platform evidence:** the hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `aa3dae3` in run
-    `35620006731` on `ubuntu-24.04`, with the retained
+  - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
+    Node, CLI/native Linux checkpoint is green for revision `336d9a3` in run
+    `35623491280` on `ubuntu-24.04`, with the retained
     `qualification-pass` artifact. Complete the advertised macOS/Linux
     build/native matrix and any remaining clean-install/package evidence;
     record the actual runner, cluster/image, revision and result. Failed,
