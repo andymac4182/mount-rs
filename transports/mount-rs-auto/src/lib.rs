@@ -29,7 +29,9 @@ use std::time::Duration;
 use mount_rs_core::FsDriver;
 
 pub use mount_rs_9p::{P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport, P9Platform};
-pub use mount_rs_fuse::mount::{FuseMount, MountError as FuseMountError, MountMode, MountOptions};
+pub use mount_rs_fuse::mount::{
+    FuseMount, FuseMountHooks, MountError as FuseMountError, MountMode, MountOptions,
+};
 pub use mount_rs_nfs::{
     NativeNfsMount, NfsClientProbe, NfsMountError, NfsMountOptions, NfsPlatform, NfsVersion,
 };
@@ -148,6 +150,16 @@ impl AutoMountOptions {
             ..NfsMountOptions::default()
         }
     }
+}
+
+/// Native lifecycle hooks for the automatic facade.
+///
+/// FUSE is the only hook currently owned by this facade; 9P and NFS server
+/// callbacks remain attached to their listener APIs. Keeping this separate
+/// from [`AutoMountOptions`] preserves existing option-bag struct literals.
+#[derive(Clone, Default)]
+pub struct AutoMountHooks {
+    pub fuse: FuseMountHooks,
 }
 
 /// A native mount error tagged with the transport that produced it.
@@ -626,6 +638,20 @@ where
     D: FsDriver + 'static,
     P: AsRef<Path>,
 {
+    mount_with_hooks(driver, mountpoint, options, AutoMountHooks::default()).await
+}
+
+/// Mount through the automatic facade with transport lifecycle hooks.
+pub async fn mount_with_hooks<D, P>(
+    driver: D,
+    mountpoint: P,
+    options: AutoMountOptions,
+    hooks: AutoMountHooks,
+) -> Result<AutoMount, AutoMountError>
+where
+    D: FsDriver + 'static,
+    P: AsRef<Path>,
+{
     let probe = if options.transport.named().is_none() {
         Some(probe_transports())
     } else {
@@ -637,10 +663,11 @@ where
 
     let mounted = match transport {
         Transport::Fuse => {
-            let mount = mount_rs_fuse::mount::mount(
+            let mount = mount_rs_fuse::mount::mount_with_hooks(
                 Arc::new(driver),
                 &requested_mountpoint,
                 options.fuse_options(),
+                hooks.fuse,
             )
             .await
             .map_err(AutoMountError::Fuse)?;

@@ -189,6 +189,17 @@ coverage. Its locked N-API check/Clippy, debug addon build, focused session/
 codec/typecheck tests, FUSE tests, formatting and diff checks pass; the full
 `MOUNTX_SOURCE` package suite, native Linux callback events, FSKit, cancellation,
 concurrency, crash/restart and durability remain open.
+
+The current W01-FUSE callback slice threads `FuseMountHooks` through
+`mount-rs-auto` and exposes the root N-API `mount(..., { onTransportError })`
+option. The JavaScript callback is converted to an owned thread-safe function
+before `Env::spawn_future`, so the async mount path never carries a non-`Send`
+N-API value. The generated declarations, locked auto/N-API check and Clippy,
+16 N-API unit tests, debug addon build, generated TypeScript check, default
+facade test, and focused FUSE suite pass locally. `MOUNTX_SOURCE` codec rows
+remain explicit skips, and hosted Linux callback-event delivery, native
+mount/lifecycle, FSKit, cancellation, concurrency, crash/restart and durability
+remain open; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure

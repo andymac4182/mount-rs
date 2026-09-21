@@ -102,6 +102,13 @@ function checkStructuralFactories(driver: FsDriver): void {
   createS3Server(driver)
   createS3Server({ buckets: { structural: driver, native: Filesystem.memory() } })
   void mount(driver, "/typecheck-only")
+  void mount(driver, "/typecheck-fuse-callback", {
+    transport: "fuse",
+    onTransportError(error, peer) {
+      void error
+      void peer
+    },
+  })
 }
 const nodeStructural: FsDriver = nodeFs
 void nodeStructural

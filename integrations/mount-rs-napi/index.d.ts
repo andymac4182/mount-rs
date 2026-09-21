@@ -981,6 +981,7 @@ export interface JsAutoMountOptions {
    * NFS. This does not enable WAL or distributed SQLite locking.
    */
   nfsSqliteSingleHost?: boolean
+  onTransportError?: (error: unknown, peer: string | undefined) => void
 }
 
 export interface JsAutoProbe {
