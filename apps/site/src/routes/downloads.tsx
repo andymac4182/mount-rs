@@ -116,12 +116,17 @@ function DownloadsPage() {
           <li>
             GitHub Actions runs the CLI tests, builds
             <code> mount-rs-cli</code> with <code>--locked --release</code>, and
-            verifies the binary version and target.
+            verifies the binary version and target. The current workflow also
+            writes a release manifest and CycloneDX SBOM, then generates and
+            verifies Sigstore attestations for the archive.
           </li>
           <li>
-            The workflow publishes only the platform archive and
-            <code> SHA256SUMS</code> to the GitHub prerelease, then downloads
-            them again and checks the checksum before completing.
+            The published GitHub release is downloaded again and checked for
+            matching checksums, manifest/SBOM contents, attestations, archive
+            shape, and <code>mount-rs --version</code> before the workflow
+            completes. The current <code>{cliRelease.tag}</code> release
+            predates those extra verification assets, so this page links only
+            the archive and <code>SHA256SUMS</code> that are actually present.
           </li>
         </ol>
 
