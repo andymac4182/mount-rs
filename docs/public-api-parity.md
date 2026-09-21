@@ -253,10 +253,11 @@ Current focused behavior:
   live session lock client and the standalone `P9LockTable`/`P9LockClient`
   inspection and mutation surface are now backed by the transport's shared
   lock state, including conflict, rename, release, and ownership evidence.
-  The `./9p` barrel now exposes the complete upstream constants surface,
-  including message names, masks, qid bits, wire sizes, version values, and
-  Linux open flags where applicable; all 124 upstream constants/functions are
-  differentially checked. It also exposes the Rust-backed `FidTable` alias,
+  The `./9p` barrel now exposes the complete upstream constants/default surface,
+  including message names, masks, qid bits, wire sizes, version values, Linux
+  open flags where applicable, and the six public default values; the pinned
+  runtime checks pass all 124 upstream constants and all 274 upstream runtime
+  barrel exports. It also exposes the Rust-backed `FidTable` alias,
   live `P9Session.fids`, mutable path/open/iounit/cursor views, qid/cursor
   helpers, detached clunk snapshots, and retained open-handle enumeration;
   focused tests cover the oracle lifecycle, hardlink/release identity,
@@ -281,10 +282,11 @@ Current focused behavior:
   automatic-mount scope. The direct `MountP9Options` fields are complete
   against the pinned oracle, and `P9Mount.source` is narrowed to `string` and
   runtime-asserted by the hosted direct mount. Exact SHA
-  `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed the hosted N-API Linux
+  `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed the hosted N-API Linux
   automatic, direct `./9p`, and structural-driver 9P mounted-I/O/cleanup gate
-  in run `35665824215`, job `106552944097`; crash/reset/half-close recovery
-  remains supervisor-owned.
+  in [run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703),
+  job `106558367429`; the Rust job `106558367006` passed all four ignored
+  native tests. Crash/reset/half-close recovery remains supervisor-owned.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
   session views, server-owned driver wrappers, effective scalar options,

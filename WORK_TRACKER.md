@@ -37,15 +37,16 @@ the mount option bag; injected shared servers retain their own hooks. It
 deliberately does not claim automatic cross-transport signal ownership or
 unsupported native platforms. The pinned direct-option audit found no
 additional unrepresented `MountP9Options` fields, and `P9Mount.source` is now
-string-qualified and runtime-checked in the hosted direct mount. Exact SHA
-`3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed hosted Linux automatic,
-direct `./9p`, and structural-driver N-API mounted I/O/cleanup in Native 9P
-run `35665824215`, N-API job `106552944097`, with Rust job `106552944349` also
-passing; the direct `./9p` facade now owns the bounded `signals` teardown
-option.
-The `./9p`
-constants/message-name
-barrel is now complete against the pinned upstream surface, with all 124
+string-qualified and runtime-checked in the hosted direct mount. The pinned
+runtime audit also covers all 124 constants and all 274 upstream runtime
+`./9p` barrel exports, including the six public defaults. Exact SHA
+`0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed hosted Linux automatic,
+direct `./9p`, and structural-driver N-API mounted I/O/cleanup in [Native 9P
+run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703),
+N-API job `106558367429`, with Rust job `106558367006` also passing; the
+direct `./9p` facade now owns the bounded `signals` teardown option.
+The `./9p` constants/message-name/default barrel is now complete against the
+pinned upstream surface, with all 124 constants and all 274 runtime barrel
 exports differentially checked. The transport
 now also broadcasts shutdown safely
 across the accept loop and all connections, closes the active-connection
@@ -772,6 +773,7 @@ patch):
 | Main | W01 N-API 9P direct-facade signal teardown | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct `./9p` mounts support `signals` with process-wide `SIGINT`/`SIGTERM` cleanup, unmount-all dispatch, last-mount handler removal, and default-signal re-raise; the signal and mount-helper regressions plus syntax/diff checks passed; automatic cross-transport signal ownership, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
+| Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
