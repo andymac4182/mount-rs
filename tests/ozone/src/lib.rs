@@ -19,7 +19,11 @@ use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(120);
-const GATEWAY_FAILURE_TIMEOUT: Duration = Duration::from_secs(5);
+// A stopped Docker Desktop gateway can take several seconds to surface a
+// connection failure when the host is under load. Keep the fault window
+// bounded without making the integration test flaky on resource-constrained
+// CI or developer hosts.
+const GATEWAY_FAILURE_TIMEOUT: Duration = Duration::from_secs(15);
 
 fn local_config() -> R2Config {
     let config = R2Config::from_env().expect("Ozone R2-compatible test environment is required");
