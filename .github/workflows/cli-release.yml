@@ -141,7 +141,6 @@ jobs:
           signer_workflow="$GITHUB_REPOSITORY/.github/workflows/cli-release.yml"
           common_args=(
             --repo "$GITHUB_REPOSITORY"
-            --signer-repo "$GITHUB_REPOSITORY"
             --signer-workflow "$signer_workflow"
             --source-digest "$RELEASE_COMMIT"
             --source-ref "$GITHUB_REF"
@@ -255,7 +254,6 @@ jobs:
           signer_workflow="$GITHUB_REPOSITORY/.github/workflows/cli-release.yml"
           common_args=(
             --repo "$GITHUB_REPOSITORY"
-            --signer-repo "$GITHUB_REPOSITORY"
             --signer-workflow "$signer_workflow"
             --source-digest "$release_commit"
             --source-ref "$GITHUB_REF"

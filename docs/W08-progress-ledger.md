@@ -1,11 +1,11 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 01:56 AEST**
+Status snapshot: **2026-09-22 02:08 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: `origin/main` at `11a7b22` before this correction chunk;
-this update records the W08.19 full-action-pin correction and the first live
-hosted attestation setup failure. The tag-triggered and opt-in manual hosted
-attestation executions remain unqualified production/provider gates.
+Publication snapshot: `origin/main` at `2f43721` before this correction chunk;
+this update records the W08.20 hosted-verifier flag correction. The tag-
+triggered and opt-in manual hosted attestation executions remain unqualified
+production/provider gates.
 Authoritative W08 hosted evidence includes CI run `35617415427`, source
 `b0ca8a9`, its terminal Linux/macOS build and download-verification jobs, plus
 the earlier terminal functional, HTTP-contract, release-policy, SBOM and
@@ -114,12 +114,14 @@ P01–P05; P06–P09 then gate canary and production approval.
 | **W08.18** Attestation dispatch concurrency isolation | **Implementation slice landed — 100%; hosted attestation execution still open** | `.github/workflows/w08-release-targets.yml` now keys concurrency by both event type and ref, so the explicit manual `workflow_dispatch` attestation qualification does not share the pending slot with push-triggered target runs. The first dispatch attempt `35620392878` (source `0a4de6f`) was cancelled before job creation while the old shared `main` group was being replaced by concurrent pushes; its `jobs=[]` result is recorded as a boundary, not a PASS. | No provider or hosted attestation result exists yet; no OIDC token, Sigstore bundle, attestation ID/URL or release-registry record was created by the cancelled run. | Push this fix, dispatch `attest=true` again, and retain terminal build/download/attestation jobs and exact verification outputs. | **~0.25 engineer-day** workflow hardening and diagnosis; hosted rerun time is provisional, excluding queue time. | Continuous concurrent `main` pushes can still delay the run; GitHub Actions OIDC/attestation permissions and public-repository support remain external. |
 
 | **W08.19** Full SHA pin correction after hosted setup failure | **Implementation correction landed — 100%; hosted rerun open** | Both attestation workflow references now use the full immutable `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6` SHA. The correction is based on the terminal GitHub setup error, not an inferred local result. | Run `35620932700`, source `11a7b22`: target build/download jobs passed, while attestation jobs `106406881524` and `106406881625` failed in `Set up job` because the shortened ref was rejected. No action step or OIDC/Sigstore operation ran. | Publish the full-pin correction, rerun `attest=true`, and retain the terminal attestation action outputs and `gh attestation verify` results. | **~0.25 engineer-day** diagnosis and correction; hosted rerun is provisional, excluding queue time. | GitHub action resolution, OIDC/attestation availability, repository plan and external release approval remain gates. |
+| **W08.20** Hosted attestation verifier identity-flag correction | **Implementation correction landed — 100%; hosted rerun open** | `gh attestation verify` now supplies the precise `--signer-workflow` identity without the mutually exclusive `--signer-repo` flag in both the tag-release and target-matrix workflows. | Run `35622899242`, source `2f43721`: Linux build `106410068242` (3m36s), macOS build `106410067711` (3m47s), downloaded Linux `106411933587` (6s) and downloaded macOS `106411933583` (8s) all passed. Both target attestation jobs generated provenance and CycloneDX SBOM attestations, then failed only at verification because GitHub CLI reported `--signer-repo` and `--signer-workflow` are mutually exclusive. No final `gh attestation verify` PASS is claimed. | Publish this flag correction and rerun `attest=true`; retain successful action outputs, terminal verifier output, attestation IDs/URLs and target hashes. | **~0.25 engineer-day** verifier diagnosis and correction; hosted rerun is provisional, excluding queue time. | GitHub CLI verifier behavior, OIDC/attestation availability, repository plan and external release approval remain gates. |
 
 ## Evidence ledger
 
 ### Local implementation and compile evidence
 
 | CI `35620932700`, source `11a7b22`, attestation jobs `106406881524`, `106406881625` | PARTIAL — W08.17 hosted build/download pass plus W08.19 action-pin setup failure | Both target builds passed (`106403507404` macOS arm64 3m57s; `106403507916` Linux x86_64 3m40s), and both downloaded-asset verification jobs passed (`106406448310` macOS 5s; `106406448372` Linux 9s). The two attestation jobs failed at `Set up job` before any action step because GitHub rejected shortened ref `1e69f48acb82d1966a394da916b4c1698aa569d` and required full ref `1e69f48acb82d1966a394da916b4c1698aa569d6`. No OIDC/Sigstore evidence exists; the correction is queued for rerun. |
+| CI `35622899242`, source `2f43721`, attestation jobs `106412019988`, `106412020019` | PARTIAL — W08.19 hosted build/download and attestation-generation pass plus W08.20 verifier-flag failure | Linux/macOS target build and download jobs passed. Both attestation jobs completed the full-SHA setup, asset download, provenance attestation and CycloneDX SBOM attestation steps. The final verifier failed with `if any flags in the group [cert-identity cert-identity-regex signer-repo signer-workflow] are set none of the others can be; [signer-repo signer-workflow] were all set`. The redundant `--signer-repo` flag is removed locally; no terminal verifier PASS or production signature result is claimed. |
 
 These checks establish implementation/build state only. They do not substitute
 for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
@@ -191,7 +193,7 @@ the evidence counted here.
 ## Remaining action plan
 
 1. No required W08 functional implementation or hosted acceptance action
-   remains for the defined scope. W08.6 and W08.11–W08.19 add credential-free
+   remains for the defined scope. W08.6 and W08.11–W08.20 add credential-free
    or artifact-path policy gates, but none is a production deployment or
    published release result. Preserve the exact terminal job IDs above; do not
    replace them with a later queued/cancelled aggregate status.
@@ -203,11 +205,11 @@ the evidence counted here.
 4. Close P06–P08 with production-like load/soak, failure drills and an owned
    operator runbook/on-call acknowledgement.
 5. Run the approved tag-triggered CLI release workflow and retain its actual
-   artifact, `SHA256SUMS`, manifest and unsigned SBOM; then run W08.17–W08.19's
+   artifact, `SHA256SUMS`, manifest and unsigned SBOM; then run W08.17–W08.20's
    hosted
    attestation path and close P09 with signed
    provenance/SBOM, canary telemetry, rollback evidence and an explicit
-   go/no-go approval. W08.12–W08.19's local and hosted artifact-policy
+   go/no-go approval. W08.12–W08.20's local and hosted artifact-policy
    evidence is not a published release result.
 6. If the W08 harness or provider implementation changes, rerun the durable
    and composite hosted rows before reopening W08. Keep native platform rows
@@ -285,6 +287,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 01:34–01:41 AEST (approx.) | Dispatched W08 target attestation run `35620392878` after publishing the dependency correction; observed GitHub complete it as `cancelled` with zero jobs because concurrent `main` pushes occupied the shared pending concurrency group; inspected the live run list, synchronized to `origin/main` `00e7169`, and isolated manual dispatches from push events in the concurrency key. | ~5 min | ~3 min remote dispatch/status observation | No OIDC/Sigstore action ran and no provider evidence was created. The concurrency fix is ready to publish and a new manual dispatch is required. |
 | 2026-09-22 01:41–01:56 AEST (approx.) | Retried the isolated target attestation run `35620932700` at source `11a7b22`; both target builds and both downloaded-asset verification jobs passed, but attestation jobs `106406881524` and `106406881625` failed at hosted setup because the action ref was shortened. Retrieved the exact GitHub error, corrected both workflows to the full `actions/attest@v4.2.2` SHA, and updated the evidence boundary. | ~8 min | ~10 min hosted build/download/attestation wait and log retrieval | Hosted build/download qualification passed. No attestation action step, OIDC token or Sigstore bundle was created; the full-SHA correction must be published and rerun. |
 | 2026-09-22 01:56–02:00 AEST (approx.) | Recorded W08.19 as a separate correction chunk, updated the rollout/tracker boundary with the exact setup error and full SHA, and prepared the corrected workflows for publication. | ~3 min | ~1 min local diff/static inspection | The action-resolution defect is corrected locally; hosted attestation qualification remains open until the corrected workflow is pushed and rerun. |
+| 2026-09-22 02:00–02:09 AEST (approx.) | Followed corrected run `35622899242` at source `2f43721`: both target builds, downloads, provenance attestations and CycloneDX SBOM attestations executed, but both final verifier steps failed because `gh attestation verify` rejects simultaneous `--signer-repo` and `--signer-workflow`. Removed the redundant `--signer-repo` flag from both workflows and recorded W08.20 for the next rerun. | ~5 min | ~8 min hosted build/download/attestation wait and log retrieval | Hosted attestation generation is proven; hosted identity verification remains open. No final attestation verification PASS or production signature result is claimed. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

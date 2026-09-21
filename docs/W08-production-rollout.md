@@ -123,6 +123,15 @@ step, OIDC token or Sigstore bundle was created. The workflow now uses the
 full verified v4.2.2 SHA and requires a rerun before treating the attestation
 path as hosted-qualified.
 
+The corrected qualification (`35622899242`, source `2f43721`) then passed both
+target builds, both downloaded-asset checks and both attestation-generation
+steps for provenance and CycloneDX SBOMs. Its final verification steps failed
+only because the workflow supplied the mutually exclusive `--signer-repo` and
+`--signer-workflow` options to `gh attestation verify`. W08.20 removes the
+redundant repository option from both workflows. No terminal verifier PASS,
+attestation acceptance, tag publication, canary, rollback or approval is
+claimed until the corrected manual dispatch completes.
+
 The first explicit target-matrix dispatch (`35620392878`, source `0a4de6f`)
 was accepted but cancelled before job creation because concurrent `main` pushes
 occupied the old shared pending concurrency group. W08.18 now keys the target

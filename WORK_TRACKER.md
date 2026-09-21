@@ -1657,6 +1657,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   fresh `attest=true` hosted run; target attestation, tag publication, canary,
   rollback and approval remain W08-P09 gates. *(Release implementation fix;
   GitHub action resolution and hosted attestation are external gates.)*
+- [x] W08.20 **Hosted attestation verifier identity-flag correction:** the
+  target qualification `35622899242` at source `2f43721` passed both target
+  builds, both downloaded-asset checks and both provenance/SBOM attestation
+  generation steps. Its final `gh attestation verify` steps failed because
+  GitHub CLI rejects simultaneous `--signer-repo` and `--signer-workflow`
+  options. Both release workflows now use the precise `--signer-workflow`
+  identity without the redundant repository option. The correction is ready
+  for a fresh `attest=true` run; terminal verifier acceptance, tag publication,
+  canary, rollback and approval remain W08-P09 gates. *(Release implementation
+  fix; hosted verifier behavior, OIDC/attestation availability and release
+  approval are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1759,8 +1770,8 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.19's pinned attestation wiring,
-  dispatch isolation and full-pin correction, but they do not create executed cryptographic
+  target/download matrix and W08.17–W08.20's pinned attestation wiring,
+  dispatch isolation, full-pin correction and verifier identity fix, but they do not create executed cryptographic
   signing/attestation evidence or run a real tag release, and do not close the
   canary, rollback or approval gates.
   *(Release implementation + hosted;
