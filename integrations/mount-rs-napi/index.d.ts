@@ -331,6 +331,16 @@ export declare class NativeP9Writer {
   writeRgetlock(value: NativeP9Rgetlock): void
 }
 
+/** Read-only N-API view of the NFSv4.1 session routed by an [`NfsServer`]. */
+export declare class Nfs4Session {
+  /**
+   * Handle one unframed NFSv4 RPC record. Malformed records return `null`;
+   * decoded calls return one encoded RPC reply.
+   */
+  handleCall(bytes: Buffer): Promise<Buffer | null>
+  get destroyed(): boolean
+}
+
 export declare class NfsRecordAssembler {
   constructor(limit?: number | undefined | null)
   get pending(): number
@@ -345,6 +355,21 @@ export declare class NfsServer {
   [Symbol.asyncDispose](): Promise<void>
 }
 
+export declare class NfsSession {
+  /**
+   * Handle one unframed NFSv3 or NFSv4 RPC record. Malformed records return
+   * `null`; decoded calls return one encoded RPC reply.
+   */
+  handleCall(bytes: Buffer): Promise<Buffer | null>
+  /**
+   * The NFSv4.1 session routed by this server. Its state is read-only at the
+   * N-API boundary and shares the server-owned driver lifetime.
+   */
+  get v4(): Nfs4Session
+  get stats(): NfsSessionStats
+  get mounts(): Array<Array<string>>
+  get destroyed(): boolean
+}
 /**
  * An owned XDR reader.  The transport reader remains borrowed internally for
  * each operation, so no N-API object can retain a view into JavaScript memory.

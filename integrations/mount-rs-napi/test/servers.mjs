@@ -5,6 +5,8 @@ import { pathToFileURL } from "node:url";
 
 import {
   Filesystem,
+  Nfs4Session,
+  NfsSession,
   createNfsServer,
   createP9Server,
   createS3Server,
@@ -234,6 +236,13 @@ function nfsNullCall(xid) {
   return call;
 }
 
+function nfsV4NullCall(xid) {
+  const call = nfsNullCall(xid);
+  call.writeUInt32BE(100_003, 12);
+  call.writeUInt32BE(4, 16);
+  return call;
+}
+
 function nfsRecord(record) {
   const marker = Buffer.alloc(4);
   marker.writeUInt32BE((0x8000_0000 | record.length) >>> 0);
@@ -260,6 +269,31 @@ async function exerciseNfs() {
     assert.equal(server.port, 0);
     listening = (await listenLifecycle(server, "NFS")).listening;
     assert.ok(server.port > 0);
+    assert.equal(server.connections, 0);
+    assert.ok(server.session instanceof NfsSession);
+    assert.ok(server.session.v4 instanceof Nfs4Session);
+    assert.deepEqual(server.session.mounts, []);
+    assert.equal(server.session.destroyed, false);
+    assert.deepEqual(server.session.stats, {
+      requests: 0,
+      replies: 0,
+      errors: 0,
+      dropped: 0,
+      procedures: {},
+    });
+
+    const directReply = await server.session.handleCall(nfsNullCall(40));
+    assert.ok(Buffer.isBuffer(directReply));
+    assert.equal(directReply.readUInt32BE(0), 40);
+    assert.equal(directReply.readUInt32BE(20), 0);
+    assert.equal(server.session.stats.requests, 1);
+
+    const directV4Reply = await server.session.handleCall(nfsV4NullCall(44));
+    assert.ok(Buffer.isBuffer(directV4Reply));
+    assert.equal(directV4Reply.readUInt32BE(0), 44);
+    assert.equal(directV4Reply.readUInt32BE(4), 1);
+    assert.equal(directV4Reply.readUInt32BE(20), 0);
+    assert.equal(server.session.v4.destroyed, false);
 
     ({ socket, reader: serverReader } = await connectLoopback(server.port));
     await writeSocket(socket, nfsRecord(nfsNullCall(41)), "NFS NULL call");
@@ -321,6 +355,9 @@ async function exerciseNfs() {
     await runPhase("NFS cleanup: server lifecycle", () =>
       closeLifecycle(server, "NFS", listening),
     );
+    assert.equal(server.connections, 0);
+    assert.equal(server.session.destroyed, true);
+    assert.equal(server.session.v4.destroyed, true);
     assert.equal(reports.length, 1);
   }
 }

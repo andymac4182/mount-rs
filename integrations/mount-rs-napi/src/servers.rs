@@ -20,9 +20,10 @@ use mount_rs_9p::{
 };
 use mount_rs_core::{ErrorCode, FsDriver, FsError};
 use mount_rs_nfs::{
-    NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
-    NfsServerOptions as TransportNfsServerOptions, NfsTransportError as TransportNfsError,
-    NfsTransportErrorHook as TransportNfsErrorHook,
+    NFS_V4, NFS4_PROGRAM, Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
+    NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
+    NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
+    NfsTransportError as TransportNfsError, NfsTransportErrorHook as TransportNfsErrorHook,
 };
 use mount_rs_s3::{
     Credentials as TransportS3Credentials, S3Server as TransportS3Server,
@@ -365,6 +366,110 @@ fn nfs_options(
 }
 
 #[napi]
+pub struct NfsSession {
+    inner: TransportNfsSession,
+    v4_inner: TransportNfs4Session,
+}
+
+#[napi(object)]
+pub struct NfsSessionStats {
+    pub requests: f64,
+    pub replies: f64,
+    pub errors: f64,
+    pub dropped: f64,
+    pub procedures: HashMap<String, f64>,
+}
+
+/// Read-only N-API view of the shared NFSv3 session owned by a server.
+#[napi]
+impl NfsSession {
+    /// Handle one unframed NFSv3 or NFSv4 RPC record. Malformed records return
+    /// `null`; decoded calls return one encoded RPC reply.
+    #[napi]
+    pub async fn handle_call(&self, bytes: Buffer) -> Option<Buffer> {
+        let context = TransportNfsRequestContext::default();
+        let reply = if is_nfs_v4(bytes.as_ref()) {
+            self.v4_inner.handle_call(bytes.as_ref(), context).await
+        } else {
+            self.inner.handle_call(bytes.as_ref(), context).await
+        };
+        reply.map(Buffer::from)
+    }
+
+    /// The NFSv4.1 session routed by this server. Its state is read-only at the
+    /// N-API boundary and shares the server-owned driver lifetime.
+    #[napi(getter)]
+    pub fn v4(&self) -> Nfs4Session {
+        Nfs4Session {
+            inner: self.v4_inner.clone(),
+        }
+    }
+
+    #[napi(getter)]
+    pub fn stats(&self) -> NfsSessionStats {
+        let stats = self.inner.stats();
+        NfsSessionStats {
+            requests: stats.requests as f64,
+            replies: stats.replies as f64,
+            errors: stats.errors as f64,
+            dropped: stats.dropped as f64,
+            procedures: stats
+                .procedures
+                .into_iter()
+                .map(|(name, count)| (name, count as f64))
+                .collect(),
+        }
+    }
+
+    #[napi(getter)]
+    pub fn mounts(&self) -> Vec<Vec<String>> {
+        self.inner
+            .mounts()
+            .into_iter()
+            .map(|(hostname, directory)| vec![hostname, directory])
+            .collect()
+    }
+
+    #[napi(getter)]
+    pub fn destroyed(&self) -> bool {
+        self.inner.destroyed() && self.v4_inner.destroyed()
+    }
+}
+
+/// Read-only N-API view of the NFSv4.1 session routed by an [`NfsServer`].
+#[napi]
+pub struct Nfs4Session {
+    inner: TransportNfs4Session,
+}
+
+#[napi]
+impl Nfs4Session {
+    /// Handle one unframed NFSv4 RPC record. Malformed records return `null`;
+    /// decoded calls return one encoded RPC reply.
+    #[napi]
+    pub async fn handle_call(&self, bytes: Buffer) -> Option<Buffer> {
+        self.inner
+            .handle_call(bytes.as_ref(), TransportNfsRequestContext::default())
+            .await
+            .map(Buffer::from)
+    }
+
+    #[napi(getter)]
+    pub fn destroyed(&self) -> bool {
+        self.inner.destroyed()
+    }
+}
+
+fn is_nfs_v4(bytes: &[u8]) -> bool {
+    if bytes.len() < 20 {
+        return false;
+    }
+    let program = u32::from_be_bytes(bytes[12..16].try_into().expect("NFS program bytes"));
+    let version = u32::from_be_bytes(bytes[16..20].try_into().expect("NFS version bytes"));
+    program == NFS4_PROGRAM && version == NFS_V4
+}
+
+#[napi]
 pub struct NfsServer {
     inner: Arc<TransportNfsServer>,
     host: String,
@@ -375,6 +480,18 @@ pub struct NfsServer {
 
 #[napi]
 impl NfsServer {
+    pub(crate) fn native_server(&self) -> Arc<TransportNfsServer> {
+        Arc::clone(&self.inner)
+    }
+
+    #[napi(getter)]
+    pub fn session(&self) -> NfsSession {
+        NfsSession {
+            inner: self.inner.session().clone(),
+            v4_inner: self.inner.v4_session().clone(),
+        }
+    }
+
     #[napi(getter)]
     pub fn host(&self) -> String {
         self.host.clone()
