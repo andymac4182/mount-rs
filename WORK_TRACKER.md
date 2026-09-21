@@ -246,6 +246,14 @@ covers the bounded close. Local all-target FUSE tests, strict Clippy,
 formatting, and Linux-target test type-check pass, while hosted close races,
 concurrent request behavior, crash/restart, callback-event, lock and
 durability evidence remain external; W01 stays NO-GO.
+The bounded concurrency packet now permits up to 16 positional `FUSE_READ`
+workers with a single serialized reply writer. Stateful operations and writes
+still use the serialized session boundary, and stop aborts plus drains read
+workers; a Linux-gated barrier-driver harness proves two reads overlap. Local
+all-target FUSE tests, strict Clippy, formatting, and Linux-target test
+type-check pass, while hosted `/dev/fuse`, native mutation/write concurrency,
+close/crash/restart, callback-event, lock and durability evidence remain
+external; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure

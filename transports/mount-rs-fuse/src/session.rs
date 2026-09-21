@@ -1,5 +1,7 @@
 //! Driver-backed requests for modern FUSE (7.9+). Negotiation and mount
 //! lifecycle are separate and remain under implementation.
+#[cfg(target_os = "linux")]
+use crate::constants::FUSE_READ;
 use crate::{
     Request,
     constants::{
@@ -30,6 +32,36 @@ const F_UNLCK: u32 = 2;
 // pinned mountx session: unsupported RENAME2 flag bits get ENOSYS so the
 // kernel can fall back to a plain rename where appropriate.
 const RENAME2_UNSUPPORTED_FLAGS: u32 = 0b111;
+
+/// A validated read that can run without holding the mutable session state.
+/// Stateful requests continue through [`FuseSession::handle`] in order.
+#[cfg(target_os = "linux")]
+pub(crate) struct PreparedRead {
+    unique: u64,
+    handle: Arc<dyn FileHandle>,
+    offset: u64,
+    size: usize,
+}
+
+#[cfg(target_os = "linux")]
+impl PreparedRead {
+    pub(crate) async fn reply(self) -> Vec<u8> {
+        let mut body = vec![0; self.size];
+        match self.handle.read(&mut body, Some(self.offset)).await {
+            Ok(count) if count <= self.size => {
+                body.truncate(count);
+                let mut reply = Vec::with_capacity(16 + body.len());
+                reply.extend(((16 + body.len()) as u32).to_le_bytes());
+                reply.extend(0i32.to_le_bytes());
+                reply.extend(self.unique.to_le_bytes());
+                reply.extend(body);
+                reply
+            }
+            Ok(_) => error_reply(self.unique, ErrorCode::Eio).to_vec(),
+            Err(error) => error_reply(self.unique, error.code).to_vec(),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct HeldLock {
@@ -592,6 +624,52 @@ impl FuseSession {
     pub fn open_handles(&self) -> usize {
         self.handles.len() + self.directories.len()
     }
+
+    /// Prepare a positional READ without retaining mutable session state over
+    /// the backend future. Invalid or not-yet-ready reads return `None` so the
+    /// normal serialized dispatcher can produce the canonical error reply.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn prepare_read(
+        &self,
+        bytes: &[u8],
+    ) -> std::result::Result<Option<PreparedRead>, crate::ProtocolError> {
+        let request = Request::decode(bytes, self.max_request)?;
+        if request.header.opcode != FUSE_READ
+            || request.header.unique == 0
+            || self.negotiated.is_none()
+            || self.destroyed
+            || validate_body(FUSE_READ, request.body).is_err()
+        {
+            return Ok(None);
+        }
+        let handle_id = match u64_at(request.body, 0) {
+            Ok(handle_id) => handle_id,
+            Err(_) => return Ok(None),
+        };
+        let offset = match u64_at(request.body, 8) {
+            Ok(offset) => offset,
+            Err(_) => return Ok(None),
+        };
+        let Ok(raw_size) = u32_at(request.body, 16) else {
+            return Ok(None);
+        };
+        let Ok(size) = usize::try_from(raw_size) else {
+            return Ok(None);
+        };
+        if size > self.max_request {
+            return Ok(None);
+        }
+        let Some(handle) = self.handles.get(&handle_id).cloned() else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedRead {
+            unique: request.header.unique,
+            handle,
+            offset,
+            size,
+        }))
+    }
+
     /// Returns no frame for FORGET and BATCH_FORGET. Malformed FORGET bodies
     /// are ignored to match the pinned no-reply oracle; malformed
     /// BATCH_FORGET bodies remain rejected before changing inode state.

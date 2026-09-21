@@ -571,7 +571,7 @@ impl MountState {
 
     fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
-        self.stop_notify.notify_one();
+        self.stop_notify.notify_waiters();
     }
 
     fn abort_task(&self) {
@@ -652,17 +652,21 @@ impl MountState {
 
 #[cfg(target_os = "linux")]
 async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<MountState>) {
-    let mut failure =
-        match std::panic::AssertUnwindSafe(run_session_loop(&mut session, &device, &state))
-            .catch_unwind()
-            .await
-        {
-            Ok(failure) => failure,
-            Err(_) => Some(FuseTransportError::from_message(
-                FuseTransportErrorKind::Task,
-                "FUSE session task panicked".to_owned(),
-            )),
-        };
+    let device = Arc::new(device);
+    let mut failure = match std::panic::AssertUnwindSafe(run_session_loop(
+        &mut session,
+        Arc::clone(&device),
+        Arc::clone(&state),
+    ))
+    .catch_unwind()
+    .await
+    {
+        Ok(failure) => failure,
+        Err(_) => Some(FuseTransportError::from_message(
+            FuseTransportErrorKind::Task,
+            "FUSE session task panicked".to_owned(),
+        )),
+    };
 
     if std::panic::AssertUnwindSafe(session.destroy())
         .catch_unwind()
@@ -687,18 +691,70 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
 }
 
 #[cfg(target_os = "linux")]
+const MAX_PARALLEL_READS: usize = 16;
+
+#[cfg(target_os = "linux")]
+async fn write_reply_until_stop(
+    device: Arc<FuseDevice>,
+    writer: Arc<tokio::sync::Mutex<()>>,
+    state: Arc<MountState>,
+    reply: Vec<u8>,
+) -> Result<(), FuseTransportError> {
+    if state.stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let _guard = tokio::select! {
+        _ = state.stop_notify.notified() => return Ok(()),
+        guard = writer.lock() => guard,
+    };
+    if state.stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    tokio::select! {
+        _ = state.stop_notify.notified() => Ok(()),
+        result = device.write_frame(&reply) => result.map_err(|error| {
+            FuseTransportError::from_io(FuseTransportErrorKind::Write, &error)
+        }),
+    }
+}
+
+#[cfg(target_os = "linux")]
 async fn run_session_loop(
     session: &mut FuseSession,
-    device: &FuseDevice,
-    state: &MountState,
+    device: Arc<FuseDevice>,
+    state: Arc<MountState>,
 ) -> Option<FuseTransportError> {
     let mut failure = None;
+    let writer = Arc::new(tokio::sync::Mutex::new(()));
+    let permits = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_READS));
+    let mut read_tasks = tokio::task::JoinSet::<Result<(), FuseTransportError>>::new();
     loop {
         if state.stop.load(Ordering::Acquire) {
             break;
         }
         let frame = tokio::select! {
             _ = state.stop_notify.notified() => break,
+            task = read_tasks.join_next(), if !read_tasks.is_empty() => {
+                match task {
+                    Some(Ok(Ok(()))) | None => {}
+                    Some(Ok(Err(error))) => {
+                        failure = Some(error);
+                        break;
+                    }
+                    Some(Err(error)) => {
+                        failure = Some(FuseTransportError::from_message(
+                            FuseTransportErrorKind::Task,
+                            if error.is_panic() {
+                                "FUSE read task panicked".to_owned()
+                            } else {
+                                format!("FUSE read task failed: {error}")
+                            },
+                        ));
+                        break;
+                    }
+                }
+                continue;
+            }
             result = device.read_frame() => result,
         };
         let frame = match frame {
@@ -715,6 +771,34 @@ async fn run_session_loop(
         if state.stop.load(Ordering::Acquire) {
             break;
         }
+        match session.prepare_read(&frame) {
+            Ok(Some(prepared)) => {
+                let permit = tokio::select! {
+                    _ = state.stop_notify.notified() => break,
+                    result = Arc::clone(&permits).acquire_owned() => match result {
+                        Ok(permit) => permit,
+                        Err(_) => break,
+                    },
+                };
+                let device = Arc::clone(&device);
+                let writer = Arc::clone(&writer);
+                let state = Arc::clone(&state);
+                read_tasks.spawn(async move {
+                    let _permit = permit;
+                    let reply = prepared.reply().await;
+                    write_reply_until_stop(device, writer, state, reply).await
+                });
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                failure = Some(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Protocol,
+                    error.to_string(),
+                ));
+                break;
+            }
+        }
         let reply = tokio::select! {
             _ = state.stop_notify.notified() => break,
             result = session.handle(&frame) => match result {
@@ -729,16 +813,34 @@ async fn run_session_loop(
             },
         };
         if let Some(reply) = reply
-            && let Err(error) = device.write_frame(&reply).await
+            && let Err(error) = write_reply_until_stop(
+                Arc::clone(&device),
+                Arc::clone(&writer),
+                Arc::clone(&state),
+                reply,
+            )
+            .await
         {
-            failure = Some(FuseTransportError::from_io(
-                FuseTransportErrorKind::Write,
-                &error,
-            ));
+            failure = Some(error);
             break;
         }
         if session.negotiated.is_some() && !state.ready.swap(true, Ordering::AcqRel) {
             state.ready_notify.notify_waiters();
+        }
+    }
+    read_tasks.abort_all();
+    while let Some(task) = read_tasks.join_next().await {
+        if failure.is_none()
+            && let Err(error) = task
+        {
+            failure = Some(FuseTransportError::from_message(
+                FuseTransportErrorKind::Task,
+                if error.is_panic() {
+                    "FUSE read task panicked".to_owned()
+                } else {
+                    format!("FUSE read task failed: {error}")
+                },
+            ));
         }
     }
     failure
@@ -1811,6 +1913,214 @@ mod tests {
                 .expect("transport error lock")
                 .is_none()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ReadBarrierHandle {
+        inner: Arc<dyn mount_rs_core::FileHandle>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FileHandle for ReadBarrierHandle {
+        fn fd(&self) -> Option<u64> {
+            self.inner.fd()
+        }
+
+        async fn read(
+            &self,
+            buffer: &mut [u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.barrier.wait().await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            self.inner.read(buffer, position).await
+        }
+
+        async fn write(
+            &self,
+            buffer: &[u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn sync(&self) -> mount_rs_core::Result<()> {
+            self.inner.sync().await
+        }
+
+        async fn datasync(&self) -> mount_rs_core::Result<()> {
+            self.inner.datasync().await
+        }
+
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.inner.close().await
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct ReadBarrierDriver {
+        inner: Arc<mount_rs_core::MemoryFs>,
+        active: Arc<std::sync::atomic::AtomicUsize>,
+        max_active: Arc<std::sync::atomic::AtomicUsize>,
+        barrier: Arc<tokio::sync::Barrier>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FsDriver for ReadBarrierDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            let inner = self.inner.open(path, flags, mode).await?;
+            Ok(Arc::new(ReadBarrierHandle {
+                inner,
+                active: Arc::clone(&self.active),
+                max_active: Arc::clone(&self.max_active),
+                barrier: Arc::clone(&self.barrier),
+            }))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn read_test_reply(peer: &mut tokio::net::UnixStream) -> Vec<u8> {
+        use tokio::io::AsyncReadExt;
+
+        let mut reply = vec![0; crate::OUT_HEADER_SIZE];
+        peer.read_exact(&mut reply)
+            .await
+            .expect("read FUSE reply header");
+        let length = u32::from_le_bytes(reply[..4].try_into().unwrap()) as usize;
+        assert!(length >= crate::OUT_HEADER_SIZE);
+        reply.resize(length, 0);
+        peer.read_exact(&mut reply[crate::OUT_HEADER_SIZE..])
+            .await
+            .expect("read FUSE reply body");
+        reply
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_body(handle: u64) -> Vec<u8> {
+        let mut body = vec![0; 40];
+        body[..8].copy_from_slice(&handle.to_le_bytes());
+        body[16..20].copy_from_slice(&4_u32.to_le_bytes());
+        body
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn positional_reads_run_in_parallel_with_bounded_session_state() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.write(b"data", Some(0)).await.expect("seed file");
+        file.close().await.expect("close seed file");
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_active = Arc::new(AtomicUsize::new(0));
+        let driver = Arc::new(ReadBarrierDriver {
+            inner,
+            active,
+            max_active: Arc::clone(&max_active),
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+        });
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-read-concurrency-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks::default(),
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        assert_eq!(read_test_reply(&mut peer).await.len(), 80);
+
+        peer.write_all(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_reply(&mut peer).await;
+        assert_eq!(i32::from_le_bytes(lookup[4..8].try_into().unwrap()), 0);
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+
+        peer.write_all(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_reply(&mut peer).await;
+        assert_eq!(i32::from_le_bytes(open[4..8].try_into().unwrap()), 0);
+        let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
+
+        let body = read_body(handle);
+        peer.write_all(&test_frame(15, 4, nodeid, &body))
+            .await
+            .expect("send first read");
+        peer.write_all(&test_frame(15, 5, nodeid, &body))
+            .await
+            .expect("send second read");
+        let first = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
+            .await
+            .expect("first parallel read reply");
+        let second = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
+            .await
+            .expect("second parallel read reply");
+        assert_eq!(&first[16..], b"data");
+        assert_eq!(&second[16..], b"data");
+        assert_eq!(max_active.load(Ordering::SeqCst), 2);
+
+        state.request_stop();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop should close the read session")
+            .expect("read session task should finish");
+        assert!(state.closed.load(Ordering::Acquire));
     }
 
     #[test]
