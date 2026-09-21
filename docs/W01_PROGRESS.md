@@ -150,6 +150,14 @@ crash/restart and durability gates remain external. This active-state packet is
 published as `8ddf48febaedbd78dc22d889e8f3c822a4e6ad45`; exact-SHA CI run
 `35649715601` is pending and Fault injection run `35649715727` is queued, so
 W01 stays NO-GO.
+The follow-up FUSE callback packet now reports a forced graceful-unmount
+timeout as one owned `Task` transport error through the existing exactly-once,
+panic-isolated hook, matching the pinned upstream forced-teardown callback
+boundary. The Linux-gated stuck-helper regression checks the callback kind and
+message plus bounded timeout and terminal state; host FUSE tests,
+host/Linux-target strict Clippy, and Linux-target test check pass, while the
+Linux-only callback execution and hosted native forced-unmount/fault,
+crash/restart and durability evidence remain external, so W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
