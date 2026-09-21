@@ -106,6 +106,16 @@ advances time or falls back to a worker's local clock; an unpublished or
 unavailable authority returns an error and leases fail closed. The authority
 still needs an operational clock-skew bound and recovery policy.
 
+Before enabling this mode in production, the deployment must enforce one
+write-capable authority identity per authority prefix, a consumer identity that
+cannot publish or overwrite the authority record, and a monitored clock-skew
+bound for the authority host. Publish on a cadence shorter than the smallest
+lease TTL and republish the current time after authority restart before
+admitting consumers. During authority loss, keep consumers fail-closed or use
+an explicitly reviewed failover authority; never fall back to a worker's local
+clock or to `with_persisted_lease_oracle`. These are deployment controls, not
+claims enforced by this library's `Database` handle.
+
 The crate also exposes an explicit `with_persisted_lease_oracle` option for a
 single trusted authority or development/test cluster. That oracle stores one
 encoded Unix-epoch millisecond value under the volume's `meta/lease-oracle` key

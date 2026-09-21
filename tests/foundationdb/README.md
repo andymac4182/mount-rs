@@ -5,10 +5,11 @@ opens `ChunkedFs` with `mount-rs-foundationdb` as the fenced metadata store and
 `mount-rs-r2::R2BlockStore` against the RustFS S3 endpoint as the immutable
 block store. The test performs multi-chunk binary writes, partial overwrites,
 truncate/extend operations, fresh provider reopen, metadata revision CAS, and
-stale-fence rejection. Because the persisted FoundationDB lease oracle uses a
-host clock, the harness selects it explicitly for this single-authority test
-cluster; ordinary provider construction remains fail closed until a protected
-shared `LeaseOracle` is supplied.
+stale-fence rejection. The real composition path publishes a protected shared
+FoundationDB authority and opens consumer storage through its read-only oracle;
+the deterministic expiry subtest uses an injected clock only to keep the
+boundary reproducible. Ordinary provider construction remains fail closed until
+a protected shared `LeaseOracle` is supplied.
 
 The focused command is:
 
@@ -35,9 +36,10 @@ RUSTFS_COMBO_COMMAND='./scripts/test-foundationdb.sh' \
 
 The FoundationDB script owns its isolated server, cluster file, client library,
 network, and cleanup for that run. In the composed lane it runs the first client
-against the live providers, restarts the owned FoundationDB container, and then
-runs `foundationdb_rustfs_chunked_restart_reopen` in a fresh client process.
-That second process reopens the persisted namespace, reads the RustFS-backed
+against the live providers, restarts the owned FoundationDB container,
+republishes authority time in a separate client process, and then runs
+`foundationdb_rustfs_chunked_restart_reopen` in a fresh client process. That
+second process reopens the persisted namespace, reads the RustFS-backed
 multi-chunk file, reruns metadata CAS/fencing checks, and performs exact
 owned-prefix cleanup. The lane therefore requires an owned disposable server;
 an externally supplied FoundationDB cluster is rejected instead of being

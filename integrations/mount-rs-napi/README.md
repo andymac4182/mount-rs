@@ -73,9 +73,11 @@ single-authority/test mode uses `leaseAuthority: "persisted-single-authority"`.
 For independent production writers, use
 `leaseAuthority: "shared-provider"` with an `authorityPrefix` naming the
 protected provider-time record. Each worker must have read-only access to that
-record; only the authority service may publish provider time. The provider
-retains the process-scoped FoundationDB client network until its filesystem
-handles are dropped.
+record; only the authority service may publish provider time. The N-API option
+does not create that credential boundary, so deployments must enforce it
+outside the addon and must republish authority time after authority restart.
+The provider retains the process-scoped FoundationDB client network until its
+filesystem handles are dropped.
 
 The live Node gate is intentionally opt-in:
 

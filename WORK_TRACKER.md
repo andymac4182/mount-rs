@@ -917,7 +917,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   storage `connect` paths. The hosted native CLI lane now publishes a current
   authority sample in a separate process before running the consumer with the
   shared-provider/read-only configuration. Deployment-level authority
-  credential/clock-skew controls and hosted runtime evidence remain pending,
+  credential/clock-skew controls are now documented as an explicit deployment
+  contract, but their enforcement and hosted runtime evidence remain pending,
   so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
@@ -926,7 +927,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   SDK/CLI and the Node chunked factory now expose FoundationDB selection behind
   opt-in native features with explicit persisted single-authority/test and
   protected shared-provider modes. The latter requires an authority prefix and
-  keeps consumer workers read-only with respect to provider-time publication.
+  uses a read-only consumer API; deployment credentials must still enforce the
+  provider-time publication boundary.
   The hosted FDB lane now builds the feature-enabled addon in the pinned
   libfdb_c client image and runs the live Node chunked factory against the real
   cluster, composing RustFS blocks when that lane is active. The same lane now
