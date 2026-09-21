@@ -314,6 +314,11 @@ session with exact body readback; this is in-process same-driver evidence only.
 The Rust XML boundary accepts the five predefined and bounded numeric
 references used by valid WebDAV owner documents while refusing DTD/custom
 entities.
+The remaining N-API session boundary is explicit: it exposes scalar effective
+options, snapshot `WebdavLockView[]` records, numeric/record-shaped statistics,
+and assertion readback, but not the oracle's injectable `now`, `onError`,
+`onAssertion`, live `DavLockTable` methods, or `Map<string, number>` method
+counters. Those are public-parity gaps, not silently accepted scope.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full

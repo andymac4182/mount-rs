@@ -779,6 +779,11 @@ and [fault-injection run
 cancelled, while [Live Cloudflare R2 run
 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
 failed; no hosted WebDAV acceptance is claimable from that tip.
+The remaining N-API session member boundary is also explicit: scalar options,
+snapshot lock records, assertion readback and record-shaped counters are
+implemented, while the oracle's injectable `now`, `onError`, `onAssertion`,
+live `DavLockTable` methods and `Map`-shaped method counters remain OPEN rather
+than being treated as accepted scope.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
