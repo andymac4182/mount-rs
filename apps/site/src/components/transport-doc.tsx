@@ -206,7 +206,12 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         hosted native-FUSE acceptance is claimed. The subsequent manual run
         <code>35662415701</code> passed ordinary round-trip and backend-panic
         close but still timed out blocked-read unmount and kernel read, so the
-        latest stop-aware terminal-reply fix also remains unaccepted.
+        latest stop-aware terminal-reply fix also remains unaccepted. A newer
+        non-canceling manual run <code>35666436803</code> at
+        <code>ac04a93</code> again passed round-trip and backend-panic
+        callback/close, but blocked-read unmount exceeded the 15-second harness
+        bound; overlapping lazy detach with the stop grace is the current fix,
+        not a hosted lifecycle pass.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
         The no-reply <code>FORGET</code> path follows the pinned session
@@ -225,6 +230,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'W01 FUSE progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_FUSE_PROGRESS.md' },
       { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#native-prerequisites' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
+      { label: 'Latest hosted FUSE diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666436803' },
     ],
   },
   nfs: {
@@ -297,8 +303,9 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         Current-tree Rust and N-API checks retain backend handles across NFSv3
         unlink and NFSv4 rename, expose shared v3/v4 state, and exercise live
         connection/client close and wait behavior. The current complete locked
-        NFS target passed 38 unit, rootless wire 1, transport concurrency 1,
-        transport-error 4, v4 barrier 1, and v4 wire 6 cases; release
+        NFS target passed 39 unit, rootless wire 1, transport concurrency 1,
+        transport-error 4, lifecycle 4, v4 barrier 1, and v4 wire 7 cases;
+        release
         build/typecheck/live server integration and strict Clippy also pass.
         Rootless NFSv4.1 survives an orderly TCP reconnect while the
         server remains alive, and eight pipelined NFSv3 MOUNT NULL calls pass
@@ -309,7 +316,8 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         restart-boundary test confirms
         the old v4 session is rejected with <code>NFS4ERR_BADSESSION</code> by
         a replacement server, proving that session/lease state is process-local
-        rather than crash-durable. The v4 state packet now covers lease,
+        rather than crash-durable; the pre-crash root handle also returns
+        <code>NFS4ERR_STALE</code>. The v4 state packet now covers lease,
         session, fore-slot, COMPOUND, replay-cache, open/lock, and reclaim
         ceilings, including <code>NFS4ERR_TOOSMALL</code>,
         <code>NFS4ERR_NOSPC</code>, refused-session replay, and per-file lock
@@ -435,9 +443,12 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         closes the supported Linux lifecycle scope; automatic recovery after a
         process crash, arbitrary kernel reset, or half-close remains outside
         the library contract and needs supervisor-level evidence. Exact SHA
-        <code>1dcf4dee</code> also passed hosted N-API run
-        <code>35664614270</code>, including automatic, direct
-        <code>./9p</code>, and structural-driver mounted I/O/cleanup. The
+        <code>0ad4928e</code> passed hosted N-API run
+        <code>35668145703</code>, including automatic, direct
+        <code>./9p</code> (with a non-empty mounted <code>source</code>), and
+        structural-driver mounted I/O/cleanup; the Rust job also passed all
+        four ignored native tests. The same pinned packet checks all 124
+        constants and 274 runtime <code>./9p</code> barrel exports. The
         current packet adds live <code>P9Session.driver</code>,
         debug-gated assertion readback/counters, request-error and assertion
         callbacks with Node error revival, and root/<code>./9p</code> factory
@@ -462,7 +473,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
       { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35628187344' },
-      { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35664614270' },
+      { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35668145703' },
     ],
   },
   fskit: {
@@ -642,7 +653,7 @@ curl -H 'Authorization: Bearer demo-memory' \
     name: 'WebDAV',
     eyebrow: 'Transport / HTTP filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, 64-request network and same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
+    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, 256-request network and same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
     summary: (
       <>
         WebDAV makes the filesystem contract available through standard HTTP
@@ -710,9 +721,9 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         stays open. N-API network/hosted concurrency,
         crash/power-loss restart, and provider durability remain open.
         The latest host-enabled N-API network packet also passes one
-        <code>MKCOL</code>, 64 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
-        pairs with 65 PUT/65 GET method counters, chunked stream I/O, Basic
-        authentication, and a live unsupported
+        <code>MKCOL</code>, 256 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
+        pairs with counters matching the requested cardinality, chunked stream
+        I/O, Basic authentication, and a live unsupported
         <code>PATCH</code> that returns <code>405</code> and calls
         <code>onError</code> once. Child-process <code>SIGKILL</code> probes
         for SQLite and rooted NodeFs recovered exact file bytes with zero
@@ -729,10 +740,16 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         typed transport callback with the accepted loopback peer. A malformed
         HTTP request produces one typed callback and clean socket/server
         teardown. Same-driver recreation preserves file bytes while resetting
-        session locks, and 64 parallel direct-session PUTs followed by GETs
+        session locks, and 256 parallel direct-session PUTs followed by GETs
         all return matching bodies. The 64-pair implementation packet had no
         terminal hosted WebDAV result because its exact-SHA workflow was
-        cancelled by subsequent mainline publication. A rooted NodeFs
+        cancelled by subsequent mainline publication. The 128-pair packet had
+        only pending/queued hosted workflow snapshots, and the newer 256-pair
+        ceiling is local-only, so no hosted WebDAV concurrency PASS is
+        claimable. A failed streamed
+        <code>PUT</code> returns <code>500</code> while preserving exactly the
+        bytes already written (<code>partial</code>), matching the pinned
+        oracle's in-place write contract rather than atomic publication. A rooted NodeFs
         replacement-provider test
         also reopens exact bytes with zero replacement-session locks. The
         N-API listener remains blocked in this
@@ -763,6 +780,8 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'W01 WebDAV progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_WEBDAV_PROGRESS.md' },
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted native WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35640746296' },
+      { label: 'Latest hosted WebDAV status snapshot', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35667576642' },
+      { label: '256-request concurrency change', href: 'https://github.com/andymac4182/mount-rs/commit/efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>

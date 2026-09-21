@@ -364,7 +364,12 @@ SQL`,
         construction, so malformed configuration fails closed. The live tests
         verify confirmed writes, ranges, reopen, conditional behavior, and
         owned-prefix cleanup. Those results do not turn every object-store
-        deployment into a universal power-loss claim.
+        deployment into a universal power-loss claim. When the selected driver
+        advertises <code>durable_writes</code>, successful mutations now await
+        its <code>syncfs</code> barrier and return an error if that barrier
+        fails; volatile drivers remain unchanged. This is a local mutation
+        acknowledgment boundary, not proof of provider or power-loss
+        durability.
       </>
     ),
     inspectLabel: 'List, head, range-read, and delete an owned prefix',
@@ -440,6 +445,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'Configuration-driven provider matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/config-pglite-r2.json' },
       { label: 'Budgeted live-R2 workflow', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cloudflare-r2.yml' },
       { label: 'R2 progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w05-progress-ledger.md' },
+      { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
     ],
@@ -820,6 +826,18 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35663914822-1</code>
         with SHA-256
         <code>098ab3a4bb1fd6ae84971cebbb67baf2e50d9cb271accdaa9351ec28e49c3042</code>.
+        The newer current-tip run <code>35666991514</code> at revision
+        <code>5b9af323</code> also passed the same bounded policy, durable
+        three-server composition, five isolated soak rounds, live Node/N-API,
+        native Linux CLI/FUSE mount and reopen, service restart, and RustFS
+        recovery packet. Its base marker recorded <code>p50_us=8101</code>,
+        <code>p95_us=35120</code>, <code>p99_us=35120</code>, and
+        <code>throughput_ops_per_sec=105.73</code>; soak p95/p99 ranged from
+        20,100µs to 21,587µs and throughput from 107.93 to 119.84 ops/s. The
+        retained artifact is
+        <code>foundationdb-production-qualification-35666991514-1</code> with
+        SHA-256
+        <code>7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12</code>.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -831,7 +849,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35663914822' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666991514' },
     ],
   },
   'aws-s3': {
@@ -878,8 +896,9 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       <>
         S3's service durability and visibility behavior belong to the selected
         AWS deployment. The adapter uses signed requests, create-only
-        immutable publication, conditional updates, and completed upload
-        barriers. Streaming PUT, multipart completion, and CopyObject use
+        immutable publication, conditional updates, completed upload barriers,
+        and a durable-driver <code>syncfs</code> acknowledgment when
+        <code>durable_writes</code> is enabled. Streaming PUT, multipart completion, and CopyObject use
         bounded staging with <code>read_chunk_bytes</code>, so a failed
         integrity check or source read does not replace an existing destination
         before the final rename. Multi-writer scope and metadata-provider
@@ -989,6 +1008,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
       { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635498647' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
+      { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },
       { label: 'S3-compatible block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
