@@ -2,8 +2,9 @@
 
 // The native methods deliberately keep their small Promise<void> N-API ABI.
 // This shared facade supplies the upstream server contract at the JavaScript
-// boundary: one cached listen promise, one cached close promise, the original
-// server as the listen result, and AsyncDisposable teardown.
+// boundary: one cached listen promise, one in-flight close promise that can be
+// retried after a failed teardown, the original server as the listen result,
+// and AsyncDisposable teardown.
 const SERVER_WRAPPED = Symbol("mountRsServerLifecycleWrapped")
 const CONNECTION_WRAPPED = Symbol("mountRsConnectionLifecycleWrapped")
 const P9_SERVER_WRAPPED = Symbol("mountRsP9ServerWrapped")
@@ -557,7 +558,7 @@ function wrapServer(Server) {
   function close() {
     const state = serverState(this)
     if (state.close !== undefined) return state.close
-    state.close = cachedPromise(
+    const closePromise = cachedPromise(
       async () => {
         if (state.attachments && state.attachments.size > 0) {
           await Promise.all([...state.attachments].map((connection) => connection._drop()))
@@ -571,6 +572,10 @@ function wrapServer(Server) {
         }
       },
     )
+    state.close = closePromise.catch((error) => {
+      state.close = undefined
+      throw error
+    })
     return state.close
   }
 

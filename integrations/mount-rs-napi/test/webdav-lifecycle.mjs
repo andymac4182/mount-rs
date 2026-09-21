@@ -14,6 +14,14 @@ function portIsReachable(port) {
   })
 }
 
+async function waitUntil(predicate, label) {
+  const deadline = Date.now() + 1000
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`${label} timed out`)
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+}
+
 const filesystem = Filesystem.memory()
 let listeningCount = 0
 
@@ -60,6 +68,48 @@ try {
     } else {
       assert.match(String(listenResult.reason), /server is closed/)
     }
+  }
+
+  const stalledServer = createWebdavServer(filesystem, {
+    host: "127.0.0.1",
+    port: 0,
+    drainTimeout: 25,
+  })
+  let stalledSocket
+  try {
+    await stalledServer.listen()
+    stalledSocket = await new Promise((resolve, reject) => {
+      const socket = net.createConnection({ host: "127.0.0.1", port: stalledServer.port })
+      socket.once("connect", () => resolve(socket))
+      socket.once("error", reject)
+    })
+    stalledSocket.write(
+      `PUT /stalled HTTP/1.1\r\nHost: 127.0.0.1:${stalledServer.port}\r\n` +
+      "Content-Length: 4\r\nConnection: keep-alive\r\n\r\nx",
+    )
+    await waitUntil(() => stalledServer.connections > 0, "WebDAV N-API stalled connection")
+    await waitUntil(
+      () => stalledServer.session.stats.requests > 0,
+      "WebDAV N-API stalled request dispatch",
+    )
+
+    const firstClose = stalledServer.close()
+    assert.strictEqual(firstClose, stalledServer.close(), "failed close is cached while in flight")
+    await assert.rejects(firstClose, /WebDAV close failed.*timed out/i)
+    assert.equal(stalledServer.connections, 1)
+
+    const socketClosed = new Promise((resolve) => stalledSocket.once("close", resolve))
+    stalledSocket.destroy()
+    await socketClosed
+    stalledSocket = undefined
+    await waitUntil(
+      () => stalledServer.connections === 0,
+      "WebDAV N-API stalled connection drain",
+    )
+    await stalledServer.close()
+  } finally {
+    if (stalledSocket && !stalledSocket.destroyed) stalledSocket.destroy()
+    await stalledServer.close().catch(() => {})
   }
 } finally {
   await filesystem.shutdown()
