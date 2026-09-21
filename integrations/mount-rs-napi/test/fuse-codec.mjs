@@ -10,6 +10,32 @@ import {
   encodeLookupIn as namedEncodeLookupIn,
   decodeLookupOut as namedDecodeLookupOut,
   encodeLookupOut as namedEncodeLookupOut,
+  decodeSymlinkIn as namedDecodeSymlinkIn,
+  encodeSymlinkIn as namedEncodeSymlinkIn,
+  decodeSymlinkOut as namedDecodeSymlinkOut,
+  encodeSymlinkOut as namedEncodeSymlinkOut,
+  decodeMknodIn as namedDecodeMknodIn,
+  encodeMknodIn as namedEncodeMknodIn,
+  decodeMknodOut as namedDecodeMknodOut,
+  encodeMknodOut as namedEncodeMknodOut,
+  decodeMkdirIn as namedDecodeMkdirIn,
+  encodeMkdirIn as namedEncodeMkdirIn,
+  decodeMkdirOut as namedDecodeMkdirOut,
+  encodeMkdirOut as namedEncodeMkdirOut,
+  decodeUnlinkIn as namedDecodeUnlinkIn,
+  encodeUnlinkIn as namedEncodeUnlinkIn,
+  decodeRmdirIn as namedDecodeRmdirIn,
+  encodeRmdirIn as namedEncodeRmdirIn,
+  decodeRenameIn as namedDecodeRenameIn,
+  encodeRenameIn as namedEncodeRenameIn,
+  decodeRename2In as namedDecodeRename2In,
+  encodeRename2In as namedEncodeRename2In,
+  decodeLinkIn as namedDecodeLinkIn,
+  encodeLinkIn as namedEncodeLinkIn,
+  decodeLinkOut as namedDecodeLinkOut,
+  encodeLinkOut as namedEncodeLinkOut,
+  decodeAccessIn as namedDecodeAccessIn,
+  encodeAccessIn as namedEncodeAccessIn,
   decodeCreateIn as namedDecodeCreateIn,
   encodeCreateIn as namedEncodeCreateIn,
   decodeCreateOut as namedDecodeCreateOut,
@@ -60,6 +86,12 @@ import {
   encodeBmapIn as namedEncodeBmapIn,
   decodeBmapOut as namedDecodeBmapOut,
   encodeBmapOut as namedEncodeBmapOut,
+  decodeFallocateIn as namedDecodeFallocateIn,
+  encodeFallocateIn as namedEncodeFallocateIn,
+  decodeLseekIn as namedDecodeLseekIn,
+  encodeLseekIn as namedEncodeLseekIn,
+  decodeLseekOut as namedDecodeLseekOut,
+  encodeLseekOut as namedEncodeLseekOut,
   decodeSetxattrIn as namedDecodeSetxattrIn,
   encodeSetxattrIn as namedEncodeSetxattrIn,
   decodeGetxattrIn as namedDecodeGetxattrIn,
@@ -79,6 +111,32 @@ for (const [name, value] of [
   ["encodeLookupIn", namedEncodeLookupIn],
   ["decodeLookupOut", namedDecodeLookupOut],
   ["encodeLookupOut", namedEncodeLookupOut],
+  ["decodeSymlinkIn", namedDecodeSymlinkIn],
+  ["encodeSymlinkIn", namedEncodeSymlinkIn],
+  ["decodeSymlinkOut", namedDecodeSymlinkOut],
+  ["encodeSymlinkOut", namedEncodeSymlinkOut],
+  ["decodeMknodIn", namedDecodeMknodIn],
+  ["encodeMknodIn", namedEncodeMknodIn],
+  ["decodeMknodOut", namedDecodeMknodOut],
+  ["encodeMknodOut", namedEncodeMknodOut],
+  ["decodeMkdirIn", namedDecodeMkdirIn],
+  ["encodeMkdirIn", namedEncodeMkdirIn],
+  ["decodeMkdirOut", namedDecodeMkdirOut],
+  ["encodeMkdirOut", namedEncodeMkdirOut],
+  ["decodeUnlinkIn", namedDecodeUnlinkIn],
+  ["encodeUnlinkIn", namedEncodeUnlinkIn],
+  ["decodeRmdirIn", namedDecodeRmdirIn],
+  ["encodeRmdirIn", namedEncodeRmdirIn],
+  ["decodeRenameIn", namedDecodeRenameIn],
+  ["encodeRenameIn", namedEncodeRenameIn],
+  ["decodeRename2In", namedDecodeRename2In],
+  ["encodeRename2In", namedEncodeRename2In],
+  ["decodeLinkIn", namedDecodeLinkIn],
+  ["encodeLinkIn", namedEncodeLinkIn],
+  ["decodeLinkOut", namedDecodeLinkOut],
+  ["encodeLinkOut", namedEncodeLinkOut],
+  ["decodeAccessIn", namedDecodeAccessIn],
+  ["encodeAccessIn", namedEncodeAccessIn],
   ["decodeCreateIn", namedDecodeCreateIn],
   ["encodeCreateIn", namedEncodeCreateIn],
   ["decodeCreateOut", namedDecodeCreateOut],
@@ -129,6 +187,12 @@ for (const [name, value] of [
   ["encodeBmapIn", namedEncodeBmapIn],
   ["decodeBmapOut", namedDecodeBmapOut],
   ["encodeBmapOut", namedEncodeBmapOut],
+  ["decodeFallocateIn", namedDecodeFallocateIn],
+  ["encodeFallocateIn", namedEncodeFallocateIn],
+  ["decodeLseekIn", namedDecodeLseekIn],
+  ["encodeLseekIn", namedEncodeLseekIn],
+  ["decodeLseekOut", namedDecodeLseekOut],
+  ["encodeLseekOut", namedEncodeLseekOut],
   ["decodeSetxattrIn", namedDecodeSetxattrIn],
   ["encodeSetxattrIn", namedEncodeSetxattrIn],
   ["decodeGetxattrIn", namedDecodeGetxattrIn],
@@ -413,6 +477,59 @@ for (const ctx of [lookupContext, { minor: 39, setxattrExt: false }, { minor: 8,
   assert.deepEqual(fuse.decodeLookupOut(reply, ctx), plusEntry);
 }
 
+const symlinkInput = { name: "alias", target: "../café/target" };
+const symlinkBody = fuse.encodeSymlinkIn(symlinkInput);
+assert.deepEqual(fuse.decodeSymlinkIn(symlinkBody), symlinkInput);
+assert.deepEqual(fuse.decodeSymlinkOut(fuse.encodeSymlinkOut(plusEntry, lookupContext), lookupContext), plusEntry);
+
+const mknodInput = { mode: 0o100640, rdev: 0x01020304, umask: 0o22, name: "device" };
+for (const ctx of [lookupContext, { minor: 8, setxattrExt: false }]) {
+  const body = fuse.encodeMknodIn(mknodInput, ctx);
+  assert.deepEqual(fuse.decodeMknodIn(body, ctx), {
+    ...mknodInput,
+    umask: ctx.minor >= 12 ? mknodInput.umask : 0,
+  });
+  assert.deepEqual(fuse.decodeMknodOut(fuse.encodeMknodOut(plusEntry, ctx), ctx), plusEntry);
+}
+
+const mkdirInput = { mode: 0o40750, umask: 0o27, name: "new-dir" };
+const mkdirBody = fuse.encodeMkdirIn(mkdirInput);
+assert.deepEqual(fuse.decodeMkdirIn(mkdirBody), mkdirInput);
+assert.deepEqual(fuse.decodeMkdirOut(fuse.encodeMkdirOut(plusEntry, lookupContext), lookupContext), plusEntry);
+
+const nameOperations = [
+  ["unlink", fuse.decodeUnlinkIn, fuse.encodeUnlinkIn],
+  ["rmdir", fuse.decodeRmdirIn, fuse.encodeRmdirIn],
+];
+for (const [name, decode, encode] of nameOperations) {
+  const value = { name: `${name}-entry` };
+  assert.deepEqual(decode(encode(value)), value, `${name} request round trip`);
+}
+
+const renameInput = { newdir: 0x0102030405060708n, oldName: "old name", newName: "new name" };
+assert.deepEqual(fuse.decodeRenameIn(fuse.encodeRenameIn(renameInput)), renameInput);
+const rename2Input = { ...renameInput, flags: 0x3 };
+assert.deepEqual(fuse.decodeRename2In(fuse.encodeRename2In(rename2Input)), rename2Input);
+
+const linkInput = { oldnodeid: 0x1112131415161718n, name: "hard-link" };
+assert.deepEqual(fuse.decodeLinkIn(fuse.encodeLinkIn(linkInput)), linkInput);
+assert.deepEqual(fuse.decodeLinkOut(fuse.encodeLinkOut(plusEntry, lookupContext), lookupContext), plusEntry);
+
+const accessInput = { mask: 0x7 };
+assert.deepEqual(fuse.decodeAccessIn(fuse.encodeAccessIn(accessInput)), accessInput);
+
+const fallocateInput = {
+  fh: 0x0102030405060708n,
+  offset: 0x1112131415161718n,
+  length: 0x2122232425262728n,
+  mode: 0x3,
+};
+assert.deepEqual(fuse.decodeFallocateIn(fuse.encodeFallocateIn(fallocateInput)), fallocateInput);
+const lseekInput = { fh: 0x3132333435363738n, offset: 0x4142434445464748n, whence: fuse.SEEK_DATA };
+assert.deepEqual(fuse.decodeLseekIn(fuse.encodeLseekIn(lseekInput)), lseekInput);
+const lseekReply = { offset: 0x5152535455565758n };
+assert.deepEqual(fuse.decodeLseekOut(fuse.encodeLseekOut(lseekReply)), lseekReply);
+
 const emptyRequest = {};
 const readlinkValue = { target: "../café/target" };
 const statfsValue = {
@@ -653,6 +770,42 @@ if (source) {
   const oracleIoctlIsTyped =
     typeof oracle.encodeRequestBody === "function" &&
     !Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(fuse.FUSE_IOCTL);
+
+  const typedRequestCases = [
+    ["SYMLINK", fuse.FUSE_SYMLINK, symlinkInput, undefined, fuse.encodeSymlinkIn, fuse.decodeSymlinkIn],
+    ["MKNOD", fuse.FUSE_MKNOD, mknodInput, lookupContext, fuse.encodeMknodIn, fuse.decodeMknodIn],
+    ["MKDIR", fuse.FUSE_MKDIR, mkdirInput, undefined, fuse.encodeMkdirIn, fuse.decodeMkdirIn],
+    ["UNLINK", fuse.FUSE_UNLINK, { name: "unlink-entry" }, undefined, fuse.encodeUnlinkIn, fuse.decodeUnlinkIn],
+    ["RMDIR", fuse.FUSE_RMDIR, { name: "rmdir-entry" }, undefined, fuse.encodeRmdirIn, fuse.decodeRmdirIn],
+    ["RENAME", fuse.FUSE_RENAME, renameInput, undefined, fuse.encodeRenameIn, fuse.decodeRenameIn],
+    ["RENAME2", fuse.FUSE_RENAME2, rename2Input, undefined, fuse.encodeRename2In, fuse.decodeRename2In],
+    ["LINK", fuse.FUSE_LINK, linkInput, undefined, fuse.encodeLinkIn, fuse.decodeLinkIn],
+    ["ACCESS", fuse.FUSE_ACCESS, accessInput, undefined, fuse.encodeAccessIn, fuse.decodeAccessIn],
+    ["FALLOCATE", fuse.FUSE_FALLOCATE, fallocateInput, undefined, fuse.encodeFallocateIn, fuse.decodeFallocateIn],
+    ["LSEEK", fuse.FUSE_LSEEK, lseekInput, undefined, fuse.encodeLseekIn, fuse.decodeLseekIn],
+  ];
+  for (const [name, opcode, value, ctx, encode, decode] of typedRequestCases) {
+    const actual = ctx === undefined ? encode(value) : encode(value, ctx);
+    const expected = oracle.encodeRequestBody(opcode, value, ctx);
+    assert.deepEqual([...actual], [...expected], `${name} request bytes match oracle`);
+    const decoded = ctx === undefined ? decode(actual) : decode(actual, ctx);
+    assert.deepEqual(decoded, oracle.decodeRequestBody(opcode, expected, ctx), `${name} request decode matches oracle`);
+  }
+
+  for (const [name, opcode, value, ctx, encode, decode] of [
+    ["SYMLINK", fuse.FUSE_SYMLINK, plusEntry, lookupContext, fuse.encodeSymlinkOut, fuse.decodeSymlinkOut],
+    ["MKNOD", fuse.FUSE_MKNOD, plusEntry, lookupContext, fuse.encodeMknodOut, fuse.decodeMknodOut],
+    ["MKDIR", fuse.FUSE_MKDIR, plusEntry, lookupContext, fuse.encodeMkdirOut, fuse.decodeMkdirOut],
+    ["LINK", fuse.FUSE_LINK, plusEntry, lookupContext, fuse.encodeLinkOut, fuse.decodeLinkOut],
+    ["LSEEK", fuse.FUSE_LSEEK, lseekReply, undefined, fuse.encodeLseekOut, fuse.decodeLseekOut],
+  ]) {
+    const actual = ctx === undefined ? encode(value) : encode(value, ctx);
+    const expected = oracle.encodeReplyBody(opcode, value, ctx);
+    assert.deepEqual([...actual], [...expected], `${name} reply bytes match oracle`);
+    const decoded = ctx === undefined ? decode(actual) : decode(actual, ctx);
+    assert.deepEqual(decoded, oracle.decodeReplyBody(opcode, expected, ctx), `${name} reply decode matches oracle`);
+  }
+
   for (const ctx of ioctlContexts) {
     const expectedRequest = encodeIoctlInOracle(ioctlInput);
     const expectedReply = encodeIoctlOutOracle(ioctlReplyValue);

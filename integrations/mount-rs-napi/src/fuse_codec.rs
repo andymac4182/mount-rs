@@ -617,6 +617,176 @@ fn name_in(value: NativeFuseNameIn) -> protocol::FuseNameIn {
 }
 
 #[napi(object)]
+pub struct NativeFuseSymlinkIn {
+    pub name: String,
+    pub target: String,
+}
+
+impl From<protocol::FuseSymlinkIn> for NativeFuseSymlinkIn {
+    fn from(value: protocol::FuseSymlinkIn) -> Self {
+        Self {
+            name: value.name,
+            target: value.target,
+        }
+    }
+}
+
+fn symlink_in(value: NativeFuseSymlinkIn) -> protocol::FuseSymlinkIn {
+    protocol::FuseSymlinkIn {
+        name: value.name,
+        target: value.target,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseMknodIn {
+    pub mode: u32,
+    pub rdev: u32,
+    pub umask: u32,
+    pub name: String,
+}
+
+impl From<protocol::FuseMknodIn> for NativeFuseMknodIn {
+    fn from(value: protocol::FuseMknodIn) -> Self {
+        Self {
+            mode: value.mode,
+            rdev: value.rdev,
+            umask: value.umask,
+            name: value.name,
+        }
+    }
+}
+
+fn mknod_in(value: NativeFuseMknodIn) -> protocol::FuseMknodIn {
+    protocol::FuseMknodIn {
+        mode: value.mode,
+        rdev: value.rdev,
+        umask: value.umask,
+        name: value.name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseMkdirIn {
+    pub mode: u32,
+    pub umask: u32,
+    pub name: String,
+}
+
+impl From<protocol::FuseMkdirIn> for NativeFuseMkdirIn {
+    fn from(value: protocol::FuseMkdirIn) -> Self {
+        Self {
+            mode: value.mode,
+            umask: value.umask,
+            name: value.name,
+        }
+    }
+}
+
+fn mkdir_in(value: NativeFuseMkdirIn) -> protocol::FuseMkdirIn {
+    protocol::FuseMkdirIn {
+        mode: value.mode,
+        umask: value.umask,
+        name: value.name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseRenameIn {
+    pub newdir: BigInt,
+    #[napi(js_name = "oldName")]
+    pub old_name: String,
+    #[napi(js_name = "newName")]
+    pub new_name: String,
+}
+
+impl From<protocol::FuseRenameIn> for NativeFuseRenameIn {
+    fn from(value: protocol::FuseRenameIn) -> Self {
+        Self {
+            newdir: bigint(value.newdir),
+            old_name: value.old_name,
+            new_name: value.new_name,
+        }
+    }
+}
+
+fn rename_in(value: NativeFuseRenameIn) -> protocol::FuseRenameIn {
+    protocol::FuseRenameIn {
+        newdir: u64_from_bigint(&value.newdir),
+        old_name: value.old_name,
+        new_name: value.new_name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseRename2In {
+    pub newdir: BigInt,
+    pub flags: u32,
+    #[napi(js_name = "oldName")]
+    pub old_name: String,
+    #[napi(js_name = "newName")]
+    pub new_name: String,
+}
+
+impl From<protocol::FuseRename2In> for NativeFuseRename2In {
+    fn from(value: protocol::FuseRename2In) -> Self {
+        Self {
+            newdir: bigint(value.newdir),
+            flags: value.flags,
+            old_name: value.old_name,
+            new_name: value.new_name,
+        }
+    }
+}
+
+fn rename2_in(value: NativeFuseRename2In) -> protocol::FuseRename2In {
+    protocol::FuseRename2In {
+        newdir: u64_from_bigint(&value.newdir),
+        flags: value.flags,
+        old_name: value.old_name,
+        new_name: value.new_name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseLinkIn {
+    #[napi(js_name = "oldnodeid")]
+    pub old_nodeid: BigInt,
+    pub name: String,
+}
+
+impl From<protocol::FuseLinkIn> for NativeFuseLinkIn {
+    fn from(value: protocol::FuseLinkIn) -> Self {
+        Self {
+            old_nodeid: bigint(value.oldnodeid),
+            name: value.name,
+        }
+    }
+}
+
+fn link_in(value: NativeFuseLinkIn) -> protocol::FuseLinkIn {
+    protocol::FuseLinkIn {
+        oldnodeid: u64_from_bigint(&value.old_nodeid),
+        name: value.name,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseAccessIn {
+    pub mask: u32,
+}
+
+impl From<protocol::FuseAccessIn> for NativeFuseAccessIn {
+    fn from(value: protocol::FuseAccessIn) -> Self {
+        Self { mask: value.mask }
+    }
+}
+
+fn access_in(value: NativeFuseAccessIn) -> protocol::FuseAccessIn {
+    protocol::FuseAccessIn { mask: value.mask }
+}
+
+#[napi(object)]
 pub struct NativeFuseForgetOne {
     pub nodeid: BigInt,
     pub nlookup: BigInt,
@@ -829,6 +999,78 @@ impl From<protocol::FuseBmapOut> for NativeFuseBmapOut {
 fn bmap_out(value: NativeFuseBmapOut) -> protocol::FuseBmapOut {
     protocol::FuseBmapOut {
         block: u64_from_bigint(&value.block),
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseFallocateIn {
+    pub fh: BigInt,
+    pub offset: BigInt,
+    pub length: BigInt,
+    pub mode: u32,
+}
+
+impl From<protocol::FuseFallocateIn> for NativeFuseFallocateIn {
+    fn from(value: protocol::FuseFallocateIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            offset: bigint(value.offset),
+            length: bigint(value.length),
+            mode: value.mode,
+        }
+    }
+}
+
+fn fallocate_in(value: NativeFuseFallocateIn) -> protocol::FuseFallocateIn {
+    protocol::FuseFallocateIn {
+        fh: u64_from_bigint(&value.fh),
+        offset: u64_from_bigint(&value.offset),
+        length: u64_from_bigint(&value.length),
+        mode: value.mode,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseLseekIn {
+    pub fh: BigInt,
+    pub offset: BigInt,
+    pub whence: u32,
+}
+
+impl From<protocol::FuseLseekIn> for NativeFuseLseekIn {
+    fn from(value: protocol::FuseLseekIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            offset: bigint(value.offset),
+            whence: value.whence,
+        }
+    }
+}
+
+fn lseek_in(value: NativeFuseLseekIn) -> protocol::FuseLseekIn {
+    protocol::FuseLseekIn {
+        fh: u64_from_bigint(&value.fh),
+        offset: u64_from_bigint(&value.offset),
+        whence: value.whence,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseLseekOut {
+    pub offset: BigInt,
+}
+
+impl From<protocol::FuseLseekOut> for NativeFuseLseekOut {
+    fn from(value: protocol::FuseLseekOut) -> Self {
+        Self {
+            offset: bigint(value.offset),
+        }
+    }
+}
+
+fn lseek_out(value: NativeFuseLseekOut) -> protocol::FuseLseekOut {
+    protocol::FuseLseekOut {
+        offset: u64_from_bigint(&value.offset),
     }
 }
 
@@ -1577,6 +1819,353 @@ pub fn fuse_encode_lookup_out(
         mount_rs_fuse::FUSE_LOOKUP,
         &protocol::FuseReplyBody::Entry(entry_out(value)),
         protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+fn decode_entry_reply(
+    opcode: u32,
+    body: &[u8],
+    context: Option<NativeFuseProtocolContext>,
+    expected: &str,
+) -> napi::Result<NativeFuseEntryOut> {
+    match protocol::decode_reply_body(opcode, body, protocol_context(context))
+        .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Entry(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(format!(
+            "{expected} did not decode as an entry reply"
+        )))),
+    }
+}
+
+fn encode_entry_reply(
+    opcode: u32,
+    value: NativeFuseEntryOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        opcode,
+        &protocol::FuseReplyBody::Entry(entry_out(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeSymlinkIn")]
+pub fn fuse_decode_symlink_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseSymlinkIn> {
+    match protocol::decode_request_body(mount_rs_fuse::constants::FUSE_SYMLINK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Symlink(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_SYMLINK did not decode as a symlink request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeSymlinkIn")]
+pub fn fuse_encode_symlink_in(value: NativeFuseSymlinkIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::constants::FUSE_SYMLINK,
+        &protocol::FuseRequestBody::Symlink(symlink_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeSymlinkOut")]
+pub fn fuse_decode_symlink_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseEntryOut> {
+    decode_entry_reply(
+        mount_rs_fuse::constants::FUSE_SYMLINK,
+        body.as_ref(),
+        context,
+        "FUSE_SYMLINK",
+    )
+}
+
+#[napi(js_name = "fuseEncodeSymlinkOut")]
+pub fn fuse_encode_symlink_out(
+    value: NativeFuseEntryOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    encode_entry_reply(mount_rs_fuse::constants::FUSE_SYMLINK, value, context)
+}
+
+#[napi(js_name = "fuseDecodeMknodIn")]
+pub fn fuse_decode_mknod_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseMknodIn> {
+    match protocol::decode_request_body(
+        mount_rs_fuse::FUSE_MKNOD,
+        body.as_ref(),
+        protocol_context(context),
+    )
+    .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Mknod(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_MKNOD did not decode as a mknod request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeMknodIn")]
+pub fn fuse_encode_mknod_in(
+    value: NativeFuseMknodIn,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_MKNOD,
+        &protocol::FuseRequestBody::Mknod(mknod_in(value)),
+        protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeMknodOut")]
+pub fn fuse_decode_mknod_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseEntryOut> {
+    decode_entry_reply(
+        mount_rs_fuse::FUSE_MKNOD,
+        body.as_ref(),
+        context,
+        "FUSE_MKNOD",
+    )
+}
+
+#[napi(js_name = "fuseEncodeMknodOut")]
+pub fn fuse_encode_mknod_out(
+    value: NativeFuseEntryOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    encode_entry_reply(mount_rs_fuse::FUSE_MKNOD, value, context)
+}
+
+#[napi(js_name = "fuseDecodeMkdirIn")]
+pub fn fuse_decode_mkdir_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseMkdirIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_MKDIR, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Mkdir(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_MKDIR did not decode as a mkdir request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeMkdirIn")]
+pub fn fuse_encode_mkdir_in(value: NativeFuseMkdirIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_MKDIR,
+        &protocol::FuseRequestBody::Mkdir(mkdir_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeMkdirOut")]
+pub fn fuse_decode_mkdir_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseEntryOut> {
+    decode_entry_reply(
+        mount_rs_fuse::FUSE_MKDIR,
+        body.as_ref(),
+        context,
+        "FUSE_MKDIR",
+    )
+}
+
+#[napi(js_name = "fuseEncodeMkdirOut")]
+pub fn fuse_encode_mkdir_out(
+    value: NativeFuseEntryOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    encode_entry_reply(mount_rs_fuse::FUSE_MKDIR, value, context)
+}
+
+#[napi(js_name = "fuseDecodeUnlinkIn")]
+pub fn fuse_decode_unlink_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseNameIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_UNLINK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Name(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_UNLINK did not decode as a name request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeUnlinkIn")]
+pub fn fuse_encode_unlink_in(value: NativeFuseNameIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_UNLINK,
+        &protocol::FuseRequestBody::Name(name_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeRmdirIn")]
+pub fn fuse_decode_rmdir_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseNameIn> {
+    match protocol::decode_request_body(mount_rs_fuse::constants::FUSE_RMDIR, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Name(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_RMDIR did not decode as a name request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeRmdirIn")]
+pub fn fuse_encode_rmdir_in(value: NativeFuseNameIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::constants::FUSE_RMDIR,
+        &protocol::FuseRequestBody::Name(name_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeRenameIn")]
+pub fn fuse_decode_rename_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseRenameIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_RENAME, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Rename(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_RENAME did not decode as a rename request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeRenameIn")]
+pub fn fuse_encode_rename_in(value: NativeFuseRenameIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_RENAME,
+        &protocol::FuseRequestBody::Rename(rename_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeRename2In")]
+pub fn fuse_decode_rename2_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseRename2In> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_RENAME2, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Rename2(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_RENAME2 did not decode as a rename2 request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeRename2In")]
+pub fn fuse_encode_rename2_in(value: NativeFuseRename2In) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_RENAME2,
+        &protocol::FuseRequestBody::Rename2(rename2_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLinkIn")]
+pub fn fuse_decode_link_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseLinkIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_LINK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Link(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_LINK did not decode as a link request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLinkIn")]
+pub fn fuse_encode_link_in(value: NativeFuseLinkIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_LINK,
+        &protocol::FuseRequestBody::Link(link_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLinkOut")]
+pub fn fuse_decode_link_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<NativeFuseEntryOut> {
+    decode_entry_reply(
+        mount_rs_fuse::FUSE_LINK,
+        body.as_ref(),
+        context,
+        "FUSE_LINK",
+    )
+}
+
+#[napi(js_name = "fuseEncodeLinkOut")]
+pub fn fuse_encode_link_out(
+    value: NativeFuseEntryOut,
+    context: Option<NativeFuseProtocolContext>,
+) -> napi::Result<Buffer> {
+    encode_entry_reply(mount_rs_fuse::FUSE_LINK, value, context)
+}
+
+#[napi(js_name = "fuseDecodeAccessIn")]
+pub fn fuse_decode_access_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseAccessIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_ACCESS, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Access(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_ACCESS did not decode as an access request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeAccessIn")]
+pub fn fuse_encode_access_in(value: NativeFuseAccessIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_ACCESS,
+        &protocol::FuseRequestBody::Access(access_in(value)),
+        None,
     )
     .map(Buffer::from)
     .map_err(protocol_error)
@@ -2468,6 +3057,81 @@ pub fn fuse_encode_bmap_out(
         mount_rs_fuse::FUSE_BMAP,
         &protocol::FuseReplyBody::Bmap(bmap_out(value)),
         protocol_context(context),
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeFallocateIn")]
+pub fn fuse_decode_fallocate_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseFallocateIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_FALLOCATE, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Fallocate(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_FALLOCATE did not decode as a fallocate request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeFallocateIn")]
+pub fn fuse_encode_fallocate_in(value: NativeFuseFallocateIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_FALLOCATE,
+        &protocol::FuseRequestBody::Fallocate(fallocate_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLseekIn")]
+pub fn fuse_decode_lseek_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseLseekIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_LSEEK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Lseek(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_LSEEK did not decode as a lseek request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLseekIn")]
+pub fn fuse_encode_lseek_in(value: NativeFuseLseekIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_LSEEK,
+        &protocol::FuseRequestBody::Lseek(lseek_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLseekOut")]
+pub fn fuse_decode_lseek_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseLseekOut> {
+    match protocol::decode_reply_body(mount_rs_fuse::FUSE_LSEEK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Lseek(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_LSEEK did not decode as a lseek reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLseekOut")]
+pub fn fuse_encode_lseek_out(value: NativeFuseLseekOut) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_LSEEK,
+        &protocol::FuseReplyBody::Lseek(lseek_out(value)),
+        None,
     )
     .map(Buffer::from)
     .map_err(protocol_error)

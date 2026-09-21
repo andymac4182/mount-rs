@@ -2,6 +2,7 @@
 
 import type { Buffer } from "node:buffer"
 import type {
+  NativeFuseAccessIn,
   NativeFuseAttr,
   NativeFuseAttrOut,
   NativeFuseBmapIn,
@@ -11,6 +12,7 @@ import type {
   NativeFuseCreateOut,
   NativeFuseEmpty,
   NativeFuseEntryOut,
+  NativeFuseFallocateIn,
   NativeFuseFlushIn,
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
@@ -24,6 +26,11 @@ import type {
   NativeFuseIoctlIn,
   NativeFuseIoctlOut,
   NativeFuseListxattrIn,
+  NativeFuseLinkIn,
+  NativeFuseLseekIn,
+  NativeFuseLseekOut,
+  NativeFuseMkdirIn,
+  NativeFuseMknodIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
   NativeFuseNotification,
@@ -39,15 +46,19 @@ import type {
   NativeFuseReadIn,
   NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
+  NativeFuseRename2In,
+  NativeFuseRenameIn,
   NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
+  NativeFuseSymlinkIn,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
   NativeFuseWriteOut,
 } from "../index.js"
 
 export type {
+  NativeFuseAccessIn,
   NativeFuseAttr,
   NativeFuseAttrOut,
   NativeFuseBmapIn,
@@ -57,6 +68,7 @@ export type {
   NativeFuseCreateOut,
   NativeFuseEmpty,
   NativeFuseEntryOut,
+  NativeFuseFallocateIn,
   NativeFuseFlushIn,
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
@@ -70,6 +82,11 @@ export type {
   NativeFuseIoctlIn,
   NativeFuseIoctlOut,
   NativeFuseListxattrIn,
+  NativeFuseLinkIn,
+  NativeFuseLseekIn,
+  NativeFuseLseekOut,
+  NativeFuseMkdirIn,
+  NativeFuseMknodIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
   NativeFuseNotification,
@@ -85,9 +102,12 @@ export type {
   NativeFuseReadIn,
   NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
+  NativeFuseRename2In,
+  NativeFuseRenameIn,
   NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
+  NativeFuseSymlinkIn,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
   NativeFuseWriteOut,
@@ -217,6 +237,32 @@ export declare function decodeLookupIn(body: Uint8Array, context?: NativeFusePro
 export declare function encodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeLookupOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
 export declare function encodeLookupOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeSymlinkIn(body: Uint8Array): NativeFuseSymlinkIn
+export declare function encodeSymlinkIn(value: NativeFuseSymlinkIn): Buffer
+export declare function decodeSymlinkOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeSymlinkOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeMknodIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseMknodIn
+export declare function encodeMknodIn(value: NativeFuseMknodIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeMknodOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeMknodOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeMkdirIn(body: Uint8Array): NativeFuseMkdirIn
+export declare function encodeMkdirIn(value: NativeFuseMkdirIn): Buffer
+export declare function decodeMkdirOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeMkdirOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeUnlinkIn(body: Uint8Array): NativeFuseNameIn
+export declare function encodeUnlinkIn(value: NativeFuseNameIn): Buffer
+export declare function decodeRmdirIn(body: Uint8Array): NativeFuseNameIn
+export declare function encodeRmdirIn(value: NativeFuseNameIn): Buffer
+export declare function decodeRenameIn(body: Uint8Array): NativeFuseRenameIn
+export declare function encodeRenameIn(value: NativeFuseRenameIn): Buffer
+export declare function decodeRename2In(body: Uint8Array): NativeFuseRename2In
+export declare function encodeRename2In(value: NativeFuseRename2In): Buffer
+export declare function decodeLinkIn(body: Uint8Array): NativeFuseLinkIn
+export declare function encodeLinkIn(value: NativeFuseLinkIn): Buffer
+export declare function decodeLinkOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeLinkOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeAccessIn(body: Uint8Array): NativeFuseAccessIn
+export declare function encodeAccessIn(value: NativeFuseAccessIn): Buffer
 export declare function decodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
 export declare function encodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetattrIn
@@ -285,6 +331,12 @@ export declare function decodeBmapIn(body: Uint8Array, context?: NativeFuseProto
 export declare function encodeBmapIn(value: NativeFuseBmapIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeBmapOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseBmapOut
 export declare function encodeBmapOut(value: NativeFuseBmapOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeFallocateIn(body: Uint8Array): NativeFuseFallocateIn
+export declare function encodeFallocateIn(value: NativeFuseFallocateIn): Buffer
+export declare function decodeLseekIn(body: Uint8Array): NativeFuseLseekIn
+export declare function encodeLseekIn(value: NativeFuseLseekIn): Buffer
+export declare function decodeLseekOut(body: Uint8Array): NativeFuseLseekOut
+export declare function encodeLseekOut(value: NativeFuseLseekOut): Buffer
 export declare function decodeGetxattrOut(body: Uint8Array): NativeFuseGetxattrOut
 export declare function encodeGetxattrOut(value: NativeFuseGetxattrOut): Buffer
 export declare function encodeXattrNames(names: Array<string>): Buffer
