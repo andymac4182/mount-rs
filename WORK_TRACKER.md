@@ -814,8 +814,11 @@ skipped without `MOUNTX_SOURCE`; with the pinned source at
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
 differential and source-backed host-enabled server phase pass. The sandbox
 blocks the live N-API loopback bind with `Operation not permitted`, and full
-session/member parity, provider, hosted, native, network-client concurrency,
-and restart/durability gates remain open. The host-enabled WebDAV session
+session/member parity, provider, hosted, network-client concurrency, and
+restart/durability gates remain open. The explicit ignored native WebDAV
+round-trip now passes locally on this macOS arm64 host using
+`/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
+acceptance. The host-enabled WebDAV session
 packet also completes eight parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
