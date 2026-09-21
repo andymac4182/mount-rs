@@ -15,12 +15,14 @@ does not authorize a production rollout.
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
 | Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper and a fail-closed production-config policy verifier are implemented; local unit/Clippy, CLI-schema, policy and hosted compile/guard checks are tracked separately |
-| Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call runbook, canary or release-owner approval is recorded |
+| Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
 The detailed ledger remains the source of truth for percentages, session time,
 evidence boundaries and provisional estimates. This document is the source of
-truth for the deployment contract and rollout sequence. Do not check a gate
+truth for the deployment contract and rollout sequence; the operator procedures
+and timed-drill checklist are in
+[`W08-operations-runbook.md`](W08-operations-runbook.md). Do not check a gate
 from a queued, skipped, cancelled, credential-free, installation-only or
 planning result.
 
@@ -35,7 +37,7 @@ planning result.
 | P05 — observability, SLOs and alerting | Open — 15% | Production collector, health/readiness signals, dashboards, SLO/error-budget thresholds, paging, retention/redaction and an exercised alert route |
 | P06 — capacity, load and soak | Open — 10% | Representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
-| P08 — failure drills, runbooks and on-call | Open — 15% | Timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
+| P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
 | P09 — release provenance, canary and go/no-go | Open — 10% | Immutable signed artifacts, SBOM/provenance, target-platform verification, staged canary, live SLO window, rollback result and explicit release-owner approval |
 
 No P01–P09 item is terminally accepted. P01/P02/P07 implementation progress is
@@ -154,8 +156,10 @@ an aggregate-green release result.
 2. Close P02 and P07 in a staging environment: inject short-lived credentials,
    enforce TLS and certificate verification, run the guarded provider test,
    prove negative IAM/tenant cases, and retain redacted logs.
-3. Close P03–P05 against that same staging topology with restore, upgrade,
-   rollback, collector/paging and measured recovery evidence.
+3. Execute the procedures and timed drills in
+   [`W08-operations-runbook.md`](W08-operations-runbook.md), then close P03–P05
+   against that same staging topology with restore, upgrade, rollback,
+   collector/paging and measured recovery evidence.
 4. Close P06 and P08 with production-shaped workload, soak, fault injection,
    runbook and on-call exercises. Record resource headroom and rollback timing.
 5. Close P09 with immutable artifacts, signatures/SBOM, a held-back canary,

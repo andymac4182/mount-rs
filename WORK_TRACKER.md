@@ -1096,20 +1096,23 @@ The demo and W08 functional acceptance are not production approval. Track the
 following gates separately from implementation, hosted provider, and native
 platform evidence; the detailed ledger and evidence boundaries are in
 `docs/W08-progress-ledger.md`; the deployment contract and rollout sequence
-are in [`docs/W08-production-rollout.md`](docs/W08-production-rollout.md). No
+are in [`docs/W08-production-rollout.md`](docs/W08-production-rollout.md),
+with operator procedures and timed drills in
+[`docs/W08-operations-runbook.md`](docs/W08-operations-runbook.md). No
 production gate is checked until its exit evidence is terminal, owned and
 reproducible in a production-like environment.
 
 - [ ] **W08-P01 (25%) — deployment contract/topology:** choose and document the
   managed or self-hosted TiDB/PD/TiKV and object-storage architecture, HA,
   regions, TLS/network policy, resource limits, versions, tenancy and IaC;
-  prove a staging deployment and smoke/restart gate. The hosted
-  `tidb-tls-compile` job `106298487587` in run `35588858142` confirms that the
-  public consumers can include the TLS client graph, but not a deployment or
-  handshake. The local `verify-w08-production-config.mjs` positive fixture and
-  public CLI schema check pass, while its insecure fixture fails closed; this
-  validates contract shape only. *(Implementation + hosted/provider; target
-  platform not supplied.)*
+  prove a staging deployment and smoke/restart gate. The terminal
+  `tidb-tls-compile` job `106311076905` in run `35592902494` confirms that the
+  public consumers can include the TLS client graph and that the production
+  config policy passes positive/negative checks, but it does not prove a
+  deployment or handshake. The local `verify-w08-production-config.mjs`
+  positive fixture and public CLI schema check also pass, while its insecure
+  fixture fails closed; this validates contract shape only. *(Implementation
+  + hosted/provider; target platform not supplied.)*
 - [ ] **W08-P02 (20%) — secrets/IAM/rotation:** bind production credentials
   through the approved secret manager; prove least privilege, rotation,
   revocation, audit and redaction without data loss. The production-config
@@ -1136,18 +1139,20 @@ reproducible in a production-like environment.
 - [ ] **W08-P07 (20%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
-  + implementation; hosted TLS compile and guard job `106304951579` in run
-  `35590919645` passed, while the actual endpoint, certificates, security
+  + implementation; hosted TLS compile and guard job `106311076905` in run
+  `35592902494` passed, while the actual endpoint, certificates, security
   approval and network controls are external.
   `scripts/test-tidb-tls.sh` now provides the guarded credentialed provider
   gate and rejects missing TLS/CA/hostname verification before connecting;
   `scripts/verify-w08-production-config.mjs` also requires HTTPS block storage
   and TLS-required TiDB input without contacting either provider.)*
-- [ ] **W08-P08 (15%) — failure drills/runbooks/on-call:** exercise client and
+- [ ] **W08-P08 (25%) — failure drills/runbooks/on-call:** exercise client and
   provider loss, stale leases, partitions, partial writes, rolling restart and
-  restore; publish operator runbooks and complete an on-call tabletop/timed
-  drill. *(Hosted/provider + operations; named operators and incident tooling
-  are open.)*
+  restore; the operator procedures and D01–D09 timed-drill matrix now live in
+  [`docs/W08-operations-runbook.md`](docs/W08-operations-runbook.md). Complete
+  the drills, evidence capture and on-call tabletop/acknowledgement before
+  closing the gate. *(Hosted/provider + operations; named operators and
+  incident tooling are open.)*
 - [ ] **W08-P09 (10%) — release/canary/go-no-go:** produce immutable signed
   artifacts and SBOM, verify target-platform packages, run a staged canary with
   live SLO telemetry, rehearse rollback and record explicit approval. *(Release
