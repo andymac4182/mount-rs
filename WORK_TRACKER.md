@@ -16,8 +16,9 @@ coverage. The transport now also broadcasts shutdown safely across the accept
 loop and all connections, closes the active-connection accept-loop race, and
 reaps completed request tasks while reporting task failures. An ignored native
 Linux harness now runs eight concurrent mounted file write/read/rename/read
-round trips before a bounded unmount. Local lifecycle 5/5, transport-error
-8/8, the focused native target, strict 9P Clippy and formatting pass. Hosted
+round trips before a bounded unmount. Session destruction also wakes and drains
+in-flight `Tflush` waiters. Local lifecycle 5/5, transport-error 8/8, the
+focused native target, strict 9P Clippy and formatting pass. Hosted
 run `35616832528` / job `106389895603` passed the prior Linux kernel-client
 mount/read/write/unmount packet; a fresh run is required for this packet and
 the concurrent-I/O harness.
