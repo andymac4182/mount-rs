@@ -109,6 +109,15 @@ PGlite, fencing, restore/reopen, and exact cleanup gates under
 the same source's read-only resource audit passed the account/region,
 public-access, ownership, encryption, versioning, lifecycle, and multipart-
 abort checks.
+The pushed revision `56ef9ab` then passed a fresh scoped packet under
+`mount-rs-tests/aws-s3/20260921T165854Z-84404-217dc2bf24fb46f9e3b96e88ba4fd4a4`:
+sibling-prefix denial, the public SDK/CLI self-test, composed filesystem,
+process reopen, independent PGlite metadata, writer fencing, PGlite
+backup/restore and fresh-server reopen, and exact cleanup all passed. The
+standalone `tests/aws/Cargo.lock` was refreshed for the current
+`mount-rs-fuse` `futures-util` dependency, restoring the harness's `--locked`
+reproducibility. This remains qualification-account and local-metadata
+evidence only.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
@@ -216,7 +225,7 @@ federation grants. It never reads secret values or mutates GitHub or AWS. The
 current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
-result. The fresh read-only audit at current source `32b0609` on 2026-09-22 returned
+result. The fresh read-only audit at pushed source `56ef9ab` on 2026-09-22 returned
 `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
 non-self-approvable reviewer, protected-environment inputs and secret, missing
 GitHub OIDC provider, and missing immutable-subject role trust; it made no
@@ -290,12 +299,12 @@ prefix-scoped runtime and maintenance statements from the reviewable
 CloudFormation contract. It never prints the policy or role values and fails
 closed when the bucket policy is absent or differs from that contract.
 
-The latest read-only qualification-bucket audit at current source `32b0609`
+The latest read-only qualification-bucket audit at pushed source `56ef9ab`
 passed in account `922978963556` with the expected versioning status `None`,
 alongside the existing public-access, ownership, encryption, lifecycle, and
 multipart-abort checks. It did not mutate the bucket or rerun the full service
-qualification. The latest full integrated qualification remains the separate
-`d7ccdc7` run recorded above. This is qualification-account evidence only;
+qualification. The latest full integrated qualification is the separate
+`56ef9ab` run recorded above. This is qualification-account evidence only;
 production resource, metadata, identity, hosted release, and deployment
 operations gates remain open.
 

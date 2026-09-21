@@ -2406,6 +2406,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `mount-rs-tests/aws-s3/20260921T124037Z-88398-91d73f60bde3b905c3af2cc78b38b224`.
   This is current test-account evidence, not production resource or hosted
   deployment acceptance.
+- [x] The pushed W25 revision `56ef9ab` passed a fresh scoped live packet on
+  2026-09-22 under the dedicated role: sibling-prefix denial, public SDK/CLI
+  self-test, composed AWS S3 filesystem, process reopen, independent PGlite
+  metadata, writer fencing, PGlite backup/restore and fresh-server reopen,
+  and exact owned-prefix cleanup. It emitted `AWS_S3_TEST_PASS` for
+  `mount-rs-tests/aws-s3/20260921T165854Z-84404-217dc2bf24fb46f9e3b96e88ba4fd4a4`
+  and `AWS_S3_PGLITE_TEST_PASS` for its child prefix. The standalone
+  `tests/aws/Cargo.lock` was refreshed for the current `mount-rs-fuse`
+  `futures-util` dependency so the harness now passes its `--locked` gate.
+  This remains qualification-account and local-metadata evidence, not
+  production deployment acceptance.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -2564,7 +2575,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   without AWS credentials. The CloudFormation bucket-name constraint and the
   read-only resource audit now reject consecutive dots and invalid length or
   edge characters consistently with the hosted preflight.
-- [x] A fresh read-only resource audit at current source `32b0609` on
+- [x] A fresh read-only resource audit at pushed source `56ef9ab` on
   2026-09-22 again passed the selected `myroot` qualification bucket's
   account/region binding, all four public-access blocks,
   `BucketOwnerEnforced` ownership, AES256 encryption, `None` versioning,
@@ -2658,7 +2669,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   mutating either system; additional or broad GitHub federation trust
   statements fail closed. Its credential-free three-case environment fixture
   test is wired into the hosted preflight. The
-  fresh read-only audit at current source `32b0609` on 2026-09-22 returned
+  fresh read-only audit at pushed source `56ef9ab` on 2026-09-22 returned
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
   non-self-approvable reviewer, protected-environment inputs and secret,
   missing GitHub OIDC provider, and missing immutable-subject role trust; it
