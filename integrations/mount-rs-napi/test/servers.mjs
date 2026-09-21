@@ -935,6 +935,7 @@ async function exerciseWebdav() {
     },
   });
   let listening;
+  let faultSocket;
   try {
     listening = (await listenLifecycle(server, "WebDAV")).listening;
     assert.ok(server.port > 0);
@@ -1163,6 +1164,34 @@ async function exerciseWebdav() {
     assert.equal(emittedFailureChunk, true);
     assert.equal(failedStream.status, 500);
 
+    await filesystem.writeFile(
+      "/peer-fault-webdav.txt",
+      Buffer.alloc(4 * 1024 * 1024, 0x2d),
+    );
+    const faultReplyCount = server.session.stats.replies;
+    faultSocket = (await connectLoopback(server.port)).socket;
+    await writeSocket(
+      faultSocket,
+      Buffer.from(
+        `GET /peer-fault-webdav.txt HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
+      ),
+      "WebDAV JavaScript peer-fault request",
+    );
+    await within(
+      (async () => {
+        while (server.session.stats.replies <= faultReplyCount) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      })(),
+      "WebDAV JavaScript peer-fault response readiness",
+    );
+    faultSocket.destroy(new Error("deliberate WebDAV peer reset"));
+    const faultReport = await waitForTransportError(reports, "WebDAV JavaScript peer fault");
+    assert.ok(faultReport.error instanceof Error);
+    assert.match(faultReport.peer, /^127\.0\.0\.1:\d+$/);
+    assert.equal(reports.length, 1);
+    faultSocket = undefined;
+
     const authServer = createWebdavServer(filesystem, {
       host: "127.0.0.1",
       credentials: { username: "alice", password: "secret" },
@@ -1198,9 +1227,15 @@ async function exerciseWebdav() {
       await authServer.close();
     }
   } finally {
+    if (faultSocket) {
+      await runPhase("WebDAV cleanup: fault socket close", () =>
+        closeSocket(faultSocket, "WebDAV fault socket close"),
+      );
+    }
     await runPhase("WebDAV cleanup: server lifecycle", () =>
       closeLifecycle(server, "WebDAV", listening),
     );
+    assert.equal(reports.length, 1);
   }
 }
 

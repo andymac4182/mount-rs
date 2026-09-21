@@ -9,8 +9,9 @@
 //! power-loss or fsync durability claim.
 
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
-use mount_rs_core::Loopback;
+use mount_rs_core::{ErrorCode, Loopback};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
+use std::fs;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -22,6 +23,7 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SIGNAL_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 const PAYLOAD: &[u8] = b"graceful-pglite-restart-payload";
+const ROLLBACK_CANDIDATE_PAYLOAD: &[u8] = b"bad-release-candidate-payload";
 const LIFECYCLE_ROUNDS: usize = 4;
 
 type PgliteFilesystem = ChunkedFs<PgliteMetadataStore, PgliteBlockStore>;
@@ -248,21 +250,31 @@ fn finish_phase(operation: Result<(), String>, shutdown: Result<(), String>) -> 
 }
 
 async fn write_and_close(url: &str, key: &str) -> Result<(), String> {
-    let opened = open_filesystem(url, key, "pglite-server-first").await?;
+    write_payload_and_close(url, key, "/restart", PAYLOAD, "pglite-server-first").await
+}
+
+async fn write_payload_and_close(
+    url: &str,
+    key: &str,
+    path: &str,
+    payload: &[u8],
+    owner: &str,
+) -> Result<(), String> {
+    let opened = open_filesystem(url, key, owner).await?;
     let operation: Result<(), String> = async {
         let loopback = Loopback::new(opened.filesystem.clone());
         loopback
-            .write_file("/restart", PAYLOAD)
+            .write_file(path, payload)
             .await
-            .map_err(|error| format!("write restart payload: {error}"))?;
+            .map_err(|error| format!("write {path} payload: {error}"))?;
         opened
             .filesystem
             .syncfs()
             .await
-            .map_err(|error| format!("sync PGlite restart payload: {error}"))
+            .map_err(|error| format!("sync {path} payload: {error}"))
     }
     .await;
-    let shutdown = shutdown_filesystem(&opened, "first PGlite filesystem").await;
+    let shutdown = shutdown_filesystem(&opened, owner).await;
     drop(opened);
     finish_phase(operation, shutdown)
 }
@@ -288,6 +300,145 @@ async fn reopen_and_read(url: &str, key: &str) -> Result<(), String> {
     let shutdown = shutdown_filesystem(&opened, "reopened PGlite filesystem").await;
     drop(opened);
     finish_phase(operation, shutdown)
+}
+
+async fn reopen_and_verify_backup(url: &str, key: &str) -> Result<(), String> {
+    let opened = open_filesystem(url, key, "pglite-server-backup-restore").await?;
+    let operation: Result<(), String> = async {
+        let loopback = Loopback::new(opened.filesystem.clone());
+        let payload = loopback
+            .read_file("/restart")
+            .await
+            .map_err(|error| format!("read backup restart payload: {error}"))?;
+        if payload != PAYLOAD {
+            return Err(format!(
+                "backup restart payload mismatch: expected {} bytes, got {}",
+                PAYLOAD.len(),
+                payload.len()
+            ));
+        }
+        match loopback.read_file("/rollback-candidate").await {
+            Ok(payload) => Err(format!(
+                "backup unexpectedly contains rollback candidate ({} bytes)",
+                payload.len()
+            )),
+            Err(error) if error.is(ErrorCode::Enoent) => Ok(()),
+            Err(error) => Err(format!(
+                "backup rollback candidate should be absent with ENOENT: {error}"
+            )),
+        }
+    }
+    .await;
+    let shutdown = shutdown_filesystem(&opened, "backup-restore PGlite filesystem").await;
+    drop(opened);
+    finish_phase(operation, shutdown)
+}
+
+fn copy_directory(source: &Path, destination: &Path) -> Result<(), String> {
+    fs::create_dir_all(destination)
+        .map_err(|error| format!("create backup directory {}: {error}", destination.display()))?;
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("read backup source {}: {error}", source.display()))?
+    {
+        let entry = entry.map_err(|error| format!("read backup entry: {error}"))?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("inspect backup entry {}: {error}", source_path.display()))?;
+        if file_type.is_dir() {
+            copy_directory(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                format!(
+                    "copy backup file {} to {}: {error}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        } else {
+            return Err(format!(
+                "backup contains unsupported non-regular entry {}",
+                source_path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn restore_directory(backup: &Path, destination: &Path) -> Result<(), String> {
+    if destination.exists() {
+        fs::remove_dir_all(destination).map_err(|error| {
+            format!(
+                "remove rollback destination {}: {error}",
+                destination.display()
+            )
+        })?;
+    }
+    copy_directory(backup, destination)
+}
+
+async fn run_backup_restore_rollback() -> Result<(), String> {
+    let data_dir = tempfile::tempdir()
+        .map_err(|error| format!("create backup/rollback PGlite data directory: {error}"))?;
+    let backup_dir = tempfile::tempdir()
+        .map_err(|error| format!("create isolated PGlite backup directory: {error}"))?;
+    let restore_dir = tempfile::tempdir()
+        .map_err(|error| format!("create isolated PGlite restore directory: {error}"))?;
+    let key = format!(
+        "pglite-backup-restore/{}/{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| format!("backup/rollback system clock before Unix epoch: {error}"))?
+            .as_nanos()
+    );
+
+    let mut first = PgliteServer::start(data_dir.path())
+        .await
+        .map_err(|error| format!("start backup/rollback first server: {error}"))?;
+    let write_result = write_and_close(first.connection_string(), &key).await;
+    let stop_result = first.stop().await;
+    write_result.map_err(|error| format!("write pre-backup state: {error}"))?;
+    stop_result.map_err(|error| format!("stop pre-backup server: {error}"))?;
+
+    copy_directory(data_dir.path(), backup_dir.path())?;
+    copy_directory(backup_dir.path(), restore_dir.path())?;
+
+    let mut candidate = PgliteServer::start(data_dir.path())
+        .await
+        .map_err(|error| format!("start bad-release candidate server: {error}"))?;
+    let candidate_result = write_payload_and_close(
+        candidate.connection_string(),
+        &key,
+        "/rollback-candidate",
+        ROLLBACK_CANDIDATE_PAYLOAD,
+        "bad-release candidate PGlite filesystem",
+    )
+    .await;
+    let candidate_stop = candidate.stop().await;
+    candidate_result.map_err(|error| format!("write bad-release candidate state: {error}"))?;
+    candidate_stop.map_err(|error| format!("stop bad-release candidate server: {error}"))?;
+
+    let mut restored = PgliteServer::start(restore_dir.path())
+        .await
+        .map_err(|error| format!("start isolated restore server: {error}"))?;
+    let restored_result = reopen_and_verify_backup(restored.connection_string(), &key).await;
+    let restored_stop = restored.stop().await;
+    restored_result.map_err(|error| format!("verify isolated backup restore: {error}"))?;
+    restored_stop.map_err(|error| format!("stop isolated restore server: {error}"))?;
+
+    restore_directory(backup_dir.path(), data_dir.path())?;
+    let mut rollback = PgliteServer::start(data_dir.path())
+        .await
+        .map_err(|error| format!("start rolled-back server: {error}"))?;
+    let rollback_result = reopen_and_verify_backup(rollback.connection_string(), &key).await;
+    let rollback_stop = rollback.stop().await;
+    rollback_result.map_err(|error| format!("verify bad-release rollback: {error}"))?;
+    rollback_stop.map_err(|error| format!("stop rolled-back server: {error}"))?;
+
+    println!("PGLITE_BACKUP_RESTORE_ROLLBACK_PASS isolated_restore=true candidate_removed=true");
+    Ok(())
 }
 
 async fn run_lifecycle() -> Result<(), String> {
@@ -347,5 +498,21 @@ async fn pglite_disk_server_graceful_restart_preserves_split_store_state() {
     }
     if let Err(error) = run_lifecycle().await {
         panic!("PGlite graceful restart acceptance failed: {error}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Node PGlite dependencies and explicit disk-server opt-in"]
+async fn pglite_disk_server_backup_restore_and_rollback_rehearsal() {
+    assert_eq!(
+        std::env::var(RUN_ENV).as_deref(),
+        Ok("1"),
+        "set {RUN_ENV}=1 to run the local disk-backed PGlite backup/rollback harness"
+    );
+    if !cfg!(any(target_os = "macos", target_os = "linux")) {
+        panic!("PGlite backup/rollback harness supports macOS and Linux only");
+    }
+    if let Err(error) = run_backup_restore_rollback().await {
+        panic!("PGlite backup/restore/rollback rehearsal failed: {error}");
     }
 }
