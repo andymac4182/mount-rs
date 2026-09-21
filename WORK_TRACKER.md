@@ -2579,6 +2579,12 @@ reproducible in a production-like environment.
   positive fixture and public CLI schema check also pass, while its insecure
   fixture fails closed; this validates contract shape only. *(Implementation
   + hosted/provider; target platform not supplied.)*
+  A fresh local `MOUNT_RS_TIDB_TOPOLOGY=single ./scripts/test-tidb.sh` attempt
+  entered the real v8.5.7 PD startup lane but exited 125 when the Docker engine
+  returned `Bad response from Docker engine`; the preceding durable attempt
+  failed closed before launch at `memory_bytes=8232747008` below the required
+  `10737418240`. Neither attempt emitted `TIDB_ACCEPTANCE`, so neither closes
+  P01 or promotes local infrastructure into production evidence.
 - [ ] **W08-P02 (20%) — secrets/IAM/rotation:** bind production credentials
   through the approved secret manager; prove least privilege, rotation,
   revocation, audit and redaction without data loss. The production-config
