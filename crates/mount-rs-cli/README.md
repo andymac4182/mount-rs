@@ -286,6 +286,11 @@ config-driven CLI twice, writes and reopens bytes through FoundationDB
 metadata plus RustFS-compatible blocks, and verifies each native unmount. It
 is separate from the portable CLI suite and does not pass without a matching
 FoundationDB client library and live services.
+The hosted Linux gate first publishes a provider-time sample from a separate
+authority process and runs this CLI case with `shared-provider` plus a
+read-only authority prefix; local runs default to the explicit persisted
+single-authority/test mode unless `MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1`
+and `MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX` are set.
 
 ## macOS three-way shared visibility boundary
 

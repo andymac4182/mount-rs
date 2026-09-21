@@ -381,6 +381,34 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn publish_foundationdb_authority_for_consumers() {
+    let Some(cluster_file) = configured_cluster_file() else {
+        eprintln!(
+            "SKIP publish_foundationdb_authority_for_consumers: set MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE or MOUNT_RS_FOUNDATIONDB_USE_DEFAULT=1"
+        );
+        return;
+    };
+    let Some(prefix) = env::var("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
+        .ok()
+        .filter(|prefix| !prefix.trim().is_empty())
+    else {
+        eprintln!(
+            "SKIP publish_foundationdb_authority_for_consumers: set MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX"
+        );
+        return;
+    };
+    let authority =
+        FoundationDbLeaseAuthority::connect(&cluster_file, &prefix, FoundationDbLimits::default())
+            .expect("connect FoundationDB consumer-gate authority");
+    let published =
+        tokio::time::timeout(Duration::from_secs(15), authority.publish_system_now_ms())
+            .await
+            .expect("FoundationDB authority publication exceeded its bounded timeout")
+            .expect("publish FoundationDB consumer-gate authority time");
+    assert!(published > 0, "published authority time must be non-zero");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn foundationdb_real_cluster_contract() {
     let Some(cluster_file) = configured_cluster_file() else {
         eprintln!(

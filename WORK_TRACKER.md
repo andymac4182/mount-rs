@@ -914,9 +914,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   exercises two independent readers, missing-authority fail-closed behavior,
   backward-sample clamping, forward recovery and stale-writer fencing. Hosted
   runtime evidence now also exercises the process-owned authority, reader and
-  storage `connect` paths. Deployment-level authority credential/clock-skew
-  controls and hosted runtime evidence remain pending, so this item is not yet
-  marked complete.
+  storage `connect` paths. The hosted native CLI lane now publishes a current
+  authority sample in a separate process before running the consumer with the
+  shared-provider/read-only configuration. Deployment-level authority
+  credential/clock-skew controls and hosted runtime evidence remain pending,
+  so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -929,8 +931,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   libfdb_c client image and runs the live Node chunked factory against the real
   cluster, composing RustFS blocks when that lane is active. The same lane now
   has an explicit Linux FUSE prerequisite and runs the config-driven CLI native
-  lifecycle/reopen test inside the client container when `/dev/fuse` is
-  available. Hosted result and macOS NFS acceptance remain open.
+  lifecycle/reopen test inside the client container with a separately
+  published shared-provider authority when `/dev/fuse` is available. Hosted
+  result and macOS NFS acceptance remain open.
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.

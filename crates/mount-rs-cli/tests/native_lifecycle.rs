@@ -478,6 +478,19 @@ fn cli_foundationdb_rustfs_config_binary_mounts_and_reopens() {
             "{name} must be set"
         );
     }
+    let shared_provider =
+        std::env::var("MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER").as_deref() == Ok("1");
+    let authority_prefix = if shared_provider {
+        let prefix = std::env::var("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
+            .expect("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX must be set for shared-provider mode");
+        assert!(
+            !prefix.trim().is_empty(),
+            "shared-provider authority prefix must not be empty"
+        );
+        Some(prefix)
+    } else {
+        None
+    };
 
     let transport = if cfg!(target_os = "linux") {
         "fuse"
@@ -495,6 +508,20 @@ fn cli_foundationdb_rustfs_config_binary_mounts_and_reopens() {
     let mut artifacts = NativeArtifacts::new(mountpoint.clone(), transport);
     artifacts.file(config_path.clone());
     fs::create_dir(&mountpoint).expect("create FoundationDB native mountpoint");
+    let mut metadata = serde_json::json!({
+        "kind": "foundationdb",
+        "cluster_file": cluster_file,
+        "volume_key": volume_key,
+        "durable": true,
+        "lease_authority": if shared_provider {
+            "shared-provider"
+        } else {
+            "persisted-single-authority"
+        }
+    });
+    if let Some(prefix) = authority_prefix.as_deref() {
+        metadata["authority_prefix"] = serde_json::json!(prefix);
+    }
     let config = serde_json::json!({
         "version": 1,
         "mountpoint": mountpoint,
@@ -502,13 +529,7 @@ fn cli_foundationdb_rustfs_config_binary_mounts_and_reopens() {
         "driver": {
             "kind": "splitstore",
             "storage": {
-                "metadata": {
-                    "kind": "foundationdb",
-                    "cluster_file": cluster_file,
-                    "volume_key": volume_key,
-                    "durable": true,
-                    "lease_authority": "persisted-single-authority"
-                },
+                "metadata": metadata,
                 "blocks": {
                     "kind": "r2",
                     "endpoint": r2_endpoint,

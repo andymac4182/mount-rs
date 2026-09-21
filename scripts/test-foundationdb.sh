@@ -208,10 +208,17 @@ if [ "$run_native_cli" -eq 1 ] && [ -z "$rustfs_endpoint" ]; then
   echo "MOUNT_RS_FOUNDATIONDB_NATIVE_CLI requires the composed RustFS lane" >&2
   exit 2
 fi
+authority_prefix=""
+if [ "$run_native_cli" -eq 1 ]; then
+  authority_prefix=${MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX:-}
+  if [ -z "$authority_prefix" ]; then
+    authority_prefix="$test_prefix/lease-authority"
+  fi
+  test_command="${test_command} && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle -- --ignored --nocapture"
+fi
 native_mount_args=""
 if [ "$run_native_cli" -eq 1 ]; then
   native_mount_args="--device /dev/fuse --cap-add SYS_ADMIN"
-  test_command="${test_command} && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle -- --ignored --nocapture"
 fi
 
 napi_build_prefix=""
@@ -256,6 +263,7 @@ if [ -n "$rustfs_endpoint" ]; then
     --env R2_SECRET_ACCESS_KEY \
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
     --env MOUNT_RS_FOUNDATIONDB_NATIVE_CLI \
     --env MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP=1 \
     "$rust_image" sh -c \
@@ -290,6 +298,7 @@ else
     --env RUSTFLAGS=-Lnative=/fdb \
     --env CARGO_TARGET_DIR=/tmp/mount-rs-foundationdb-target \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
     --env MOUNT_RS_FOUNDATIONDB_NATIVE_CLI \
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
