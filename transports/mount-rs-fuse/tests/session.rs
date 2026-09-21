@@ -663,12 +663,30 @@ async fn advanced_operations_fail_closed_and_remain_explicitly_unsupported() {
         .unwrap();
     assert_eq!(errno(&malformed), -22);
 
+    let mut rename2_with_flags = vec![0; 16];
+    rename2_with_flags[..8].copy_from_slice(&1u64.to_le_bytes());
+    rename2_with_flags[8..12].copy_from_slice(&1u32.to_le_bytes());
+    rename2_with_flags.extend(b"old\0new\0");
+    let unsupported = session
+        .handle(&frame(FUSE_RENAME2, 1, &rename2_with_flags))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&unsupported), -38);
+    assert!(fs.lstat("/old").await.is_ok());
+    assert!(fs.lstat("/new").await.is_err());
+
     let mut rename2 = vec![0; 16];
     rename2[..8].copy_from_slice(&1u64.to_le_bytes());
     rename2.extend(b"old\0new\0");
+    let plain = session
+        .handle(&frame(FUSE_RENAME2, 1, &rename2))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&plain), 0);
     for (opcode, body) in [
         (FUSE_FALLOCATE, vec![0; 32]),
-        (FUSE_RENAME2, rename2),
         (FUSE_LSEEK, vec![0; 24]),
         (FUSE_COPY_FILE_RANGE, vec![0; 56]),
     ] {
@@ -680,12 +698,13 @@ async fn advanced_operations_fail_closed_and_remain_explicitly_unsupported() {
         assert_eq!(errno(&reply), -38, "valid {opcode} frame");
     }
 
-    // ENOSYS is a boundary, not a best-effort rename/copy/seek. The
-    // filesystem contents and negotiated session remain unchanged.
-    assert!(fs.lstat("/old").await.is_ok());
-    assert!(fs.lstat("/new").await.is_err());
+    // ENOSYS is a boundary, not a best-effort fallocate/copy/seek. The
+    // successful plain RENAME2 remains visible while the unsupported
+    // operations leave the negotiated session usable.
+    assert!(fs.lstat("/old").await.is_err());
+    assert!(fs.lstat("/new").await.is_ok());
     let lookup = session
-        .handle(&frame(1, 1, b"old\0"))
+        .handle(&frame(1, 1, b"new\0"))
         .await
         .unwrap()
         .unwrap();

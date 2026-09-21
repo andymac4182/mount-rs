@@ -22,6 +22,10 @@ type DirectorySnapshot = Option<Vec<(String, u32)>>;
 const FUSE_IOCTL_IN_SIZE: usize = 32;
 // Keep path-component validation aligned with the `namelen` in STATFS.
 const NAME_MAX: usize = 255;
+// The driver contract currently supports plain rename only.  Match the
+// pinned mountx session: unsupported RENAME2 flag bits get ENOSYS so the
+// kernel can fall back to a plain rename where appropriate.
+const RENAME2_UNSUPPORTED_FLAGS: u32 = 0b111;
 
 async fn stat_of(driver: &dyn FsDriver, path: &str) -> Result<Stats> {
     match driver.lstat(path).await {
@@ -700,7 +704,7 @@ impl FuseSession {
                 Err(FsError::enosys("poll"))
             }
             FUSE_IOCTL => Err(FsError::enosys(crate::constants::opcode_name(FUSE_IOCTL))),
-            FUSE_FALLOCATE | FUSE_RENAME2 | FUSE_LSEEK | FUSE_COPY_FILE_RANGE => {
+            FUSE_FALLOCATE | FUSE_LSEEK | FUSE_COPY_FILE_RANGE => {
                 // These operations have no corresponding FsDriver capability
                 // yet. Their wire bodies were validated before dispatch, so a
                 // well-formed request receives an explicit unsupported result
@@ -792,9 +796,19 @@ impl FuseSession {
                 self.inodes.unbind(&path);
                 Ok(vec![])
             }
-            12 => {
+            12 | FUSE_RENAME2 => {
+                if r.header.opcode == FUSE_RENAME2
+                    && u32_at(r.body, 8)? & RENAME2_UNSUPPORTED_FLAGS != 0
+                {
+                    return Err(FsError::enosys("rename2"));
+                }
                 let parent = u64_at(r.body, 0)?;
-                let (old, rest) = string(&r.body[8..])?;
+                let names = if r.header.opcode == FUSE_RENAME2 {
+                    &r.body[16..]
+                } else {
+                    &r.body[8..]
+                };
+                let (old, rest) = string(names)?;
                 let (new, _) = string(rest)?;
                 let from = self.child(r.header.nodeid, old)?;
                 let to = self.child(parent, new)?;
