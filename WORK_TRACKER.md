@@ -26,10 +26,13 @@ target, strict 9P Clippy and formatting pass. Hosted run `35616832528` / job
 `106389895603` passed the prior Linux kernel-client mount/read/write/unmount
 packet; the later current run `35625437327` / native-9p job `106418844564`
 passed 3/4 ignored tests but exposed a live-mount cleanup failure in the
-server-close test. Corrective run `35626340158` at `c2290b2` was canceled
-before jobs materialized. The local follow-up separates kernel unmount
-coordination from resource teardown and uses cancellation-safe serialization;
-a fresh hosted run is required to verify it and the concurrent-I/O harness.
+server-close test. Corrective runs `35626340158` at `c2290b2` and
+`35626765411` at `6fc9a19` were canceled before jobs materialized. The local
+follow-up separates kernel unmount coordination from resource teardown and
+uses cancellation-safe serialization; a fresh hosted run is required to
+verify it and the concurrent-I/O harness. `wait_closed()` releases server
+resources but does not implicitly detach a live kernel mount; callers must
+invoke `unmount()`.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
@@ -228,6 +231,14 @@ harness covers the callback and state boundary. The macOS all-target FUSE
 suite, strict Clippy, formatting, and Linux-target test type-check passed;
 hosted Linux native fault/crash/restart, callback-event, concurrency, lock and
 durability evidence remain external, so W01 stays NO-GO.
+The follow-up cancellation packet makes the Linux loop observe `request_stop()`
+while a backend request is in flight. The cancellable request future is
+dropped, session cleanup runs, and lifecycle state closes without reporting an
+orderly stop as a transport error; a Linux-gated blocking-driver harness
+covers the bounded close. Local all-target FUSE tests, strict Clippy,
+formatting, and Linux-target test type-check pass, while hosted close races,
+concurrent request behavior, crash/restart, callback-event, lock and
+durability evidence remain external; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -2455,6 +2466,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   tests, S3 gateway tests, SDK/CLI tests, and the current W01/W26 workspace
   changes. Explicitly ignored native/service rows remain separate prerequisites
   and are not promoted to production evidence.
+- [x] The current integrated `origin/main` boundary `75b900f` passed on
+  2026-09-22 after rebase: `cargo fmt --all -- --check`, the full locked
+  offline workspace test gate, and strict workspace Clippy with `-D warnings`
+  using the explicitly isolated Cargo target. The first unprivileged test
+  attempt was refused only because the sandbox denied the 9P loopback listener;
+  the same command rerun with the required local-network permission passed,
+  including the 9P loopback integration and the AWS provider, S3 gateway,
+  SDK/CLI, N-API, W01, W04, W26, and other non-ignored workspace rows.
+  Explicitly ignored native/service rows remain separate prerequisites and are
+  not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

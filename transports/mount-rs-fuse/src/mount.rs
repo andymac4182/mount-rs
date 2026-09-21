@@ -712,15 +712,21 @@ async fn run_session_loop(
                 break;
             }
         };
-        let reply = match session.handle(&frame).await {
-            Ok(reply) => reply,
-            Err(error) => {
-                failure = Some(FuseTransportError::from_message(
-                    FuseTransportErrorKind::Protocol,
-                    error.to_string(),
-                ));
-                break;
-            }
+        if state.stop.load(Ordering::Acquire) {
+            break;
+        }
+        let reply = tokio::select! {
+            _ = state.stop_notify.notified() => break,
+            result = session.handle(&frame) => match result {
+                Ok(reply) => reply,
+                Err(error) => {
+                    failure = Some(FuseTransportError::from_message(
+                        FuseTransportErrorKind::Protocol,
+                        error.to_string(),
+                    ));
+                    break;
+                }
+            },
         };
         if let Some(reply) = reply
             && let Err(error) = device.write_frame(&reply).await
@@ -1695,6 +1701,115 @@ mod tests {
                 .expect("transport error lock")
                 .as_deref(),
             Some("FUSE session task panicked")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    struct BlockingDriver {
+        inner: Arc<mount_rs_core::MemoryFs>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FsDriver for BlockingDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, _path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.entered.notify_one();
+            std::future::pending().await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            self.inner.open(path, flags, mode).await
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stop_cancels_an_inflight_request_and_closes_without_transport_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-cancel-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let driver = Arc::new(BlockingDriver {
+            inner: Arc::new(mount_rs_core::MemoryFs::empty()),
+            entered: Arc::clone(&entered),
+        });
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        peer.write_all(&test_frame(1, 2, 1, b"blocked\0"))
+            .await
+            .expect("send blocking lookup");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("lookup should enter the blocking backend");
+
+        state.request_stop();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop should cancel the in-flight request")
+            .expect("session task should finish after cancellation");
+
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(
+            observed
+                .lock()
+                .expect("callback observation lock")
+                .is_empty()
+        );
+        assert!(
+            state
+                .transport_error
+                .lock()
+                .expect("transport error lock")
+                .is_none()
         );
     }
 

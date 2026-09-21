@@ -56,6 +56,10 @@ unknown fields. The checked fixture under
 deployment configuration. Its negative fixtures prove fail-closed behavior.
 The policy does not connect to PGlite, inspect the server's persistent data
 directory, prove backup consistency, or replace the deployment-owner review.
+The same check runs in `.github/workflows/w04-production-policy.yml`, whose
+non-cancelling concurrency group keeps a terminal policy result independent of
+the long-running provider matrix. A passing policy workflow is still only
+configuration-shape evidence.
 
 ## Evidence record
 
