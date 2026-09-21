@@ -281,8 +281,12 @@ focused two-bucket PUT/GET isolation coverage; see
 [`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L458-L501).
 
 The JavaScript facade now adapts structural drivers in mixed bucket maps before
-the native extractor, with real server isolation coverage. Invalid-name and empty-map behavior
-also needs oracle-backed coverage before this item can be promoted.
+the native extractor, with real server isolation coverage. It now also performs
+the oracle's construction-time source and bucket-name validation, including
+oracle-compatible `TypeError` messages, empty maps, single-bucket options, and
+the UTF-16 bucket-name boundary. The pinned structural-factory differential
+covers those cases; close/restart, native/hosted lifecycle, and complete S3
+session parity remain open.
 
 ### P2 — S3 low-level and streaming parity: PARTIAL
 

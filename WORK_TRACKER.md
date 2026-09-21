@@ -1275,6 +1275,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The S3 structural-factory packet now differentially covers empty maps,
   valid structural-driver maps, and empty/dot/dot-dot/slash/backslash/control/
   overlong bucket-name refusal at construction time against the pinned oracle;
+  the N-API facade preserves the oracle's `TypeError` class/message and the
+  native preflight matches its UTF-16 length/control-character boundary;
   hosted/native lifecycle and complete S3 session parity remain separate.
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file

@@ -582,10 +582,16 @@ fn valid_s3_bucket_name(bucket: &str) -> bool {
     !bucket.is_empty()
         && bucket != "."
         && bucket != ".."
-        && bucket.len() <= 255
+        // The pinned JavaScript oracle measures the public string as UTF-16
+        // code units, not UTF-8 bytes. Keep the native preflight identical so
+        // non-ASCII bucket names do not diverge at the N-API boundary.
+        && bucket.encode_utf16().count() <= 255
         && bucket
             .chars()
-            .all(|character| !character.is_control() && character != '/' && character != '\\')
+            .all(|character| {
+                let code = character as u32;
+                code >= 0x20 && code != 0x7f && character != '/' && character != '\\'
+            })
 }
 
 fn verifier(value: Option<Buffer>) -> Result<Option<[u8; 8]>, Error> {

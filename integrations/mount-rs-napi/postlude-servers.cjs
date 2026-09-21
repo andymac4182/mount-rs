@@ -36,6 +36,54 @@ function installStructuralFactories(binding) {
     }
   }
 
+  function isS3Driver(source) {
+    return source !== null && typeof source === "object" &&
+      typeof source.stat === "function" &&
+      typeof source.readdir === "function" &&
+      typeof source.open === "function"
+  }
+
+  function isS3BucketMap(bindingSource) {
+    return bindingSource !== null && typeof bindingSource === "object" &&
+      !(bindingSource instanceof binding.Filesystem) &&
+      !isS3Driver(bindingSource) &&
+      typeof bindingSource.buckets === "object" &&
+      bindingSource.buckets !== null
+  }
+
+  function isS3BucketName(name) {
+    if (typeof name !== "string" || name === "" || name === "." || name === ".." || name.length > 255) return false
+    for (const character of name) {
+      const code = character.codePointAt(0) ?? 0
+      if (code < 0x20 || code === 0x7f || character === "/" || character === "\\") return false
+    }
+    return true
+  }
+
+  function assertS3BucketName(name) {
+    if (isS3BucketName(name)) return
+    throw new TypeError(
+      `mountx: ${JSON.stringify(name)} cannot be a bucket name — a path-style S3 URL ` +
+      "carries it as one path segment, so it cannot be empty, `.`, `..`, longer than " +
+      "255 characters, or contain a slash, a backslash or a control character.",
+    )
+  }
+
+  function validateS3FactoryInput(source, options) {
+    if (isS3BucketMap(source)) {
+      for (const name of Object.keys(source.buckets)) assertS3BucketName(name)
+      return
+    }
+    if (isS3Driver(source)) {
+      if (options && options.bucket != null) assertS3BucketName(options.bucket)
+      return
+    }
+    throw new TypeError(
+      "mountx: createS3Server() takes an FsDriver (with `stat`, `readdir` and `open`) " +
+      "or `{ buckets: { name: driver } }`, and was given neither.",
+    )
+  }
+
   function inputs(source, buckets = false) {
     const owned = []
     const adapters = new Map()
@@ -50,8 +98,7 @@ function installStructuralFactories(binding) {
     }
     const release = () => Promise.all(owned.map((driver) => driver.shutdown()))
     try {
-      const value = buckets && source && typeof source === "object" && !(source instanceof binding.Filesystem) &&
-        typeof source.stat !== "function" && "buckets" in source
+      const value = buckets && isS3BucketMap(source)
         ? { ...source, buckets: Object.fromEntries(Object.entries(source.buckets).map(
           ([name, driver]) => [name, adapt(driver)],
         )) }
@@ -66,6 +113,7 @@ function installStructuralFactories(binding) {
   for (const name of ["createNfsServer", "createP9Server", "createS3Server", "createWebdavServer"]) {
     const factory = binding[name]
     binding[name] = function (source, ...args) {
+      if (name === "createS3Server") validateS3FactoryInput(source, args[0])
       const { value, release, owned } = inputs(source, name === "createS3Server")
       try {
         const server = factory(value, ...args)
