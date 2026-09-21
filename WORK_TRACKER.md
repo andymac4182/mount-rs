@@ -803,8 +803,9 @@ WebDAV-owned W01 tracking is maintained in
 bounded slices add the low-level `./webdav` barrel and generated declarations,
 the N-API `WebdavSession`/server session view, buffered and pull-based streamed
 request handling, positional response chunks, serializable session and lock
-policy, driver access, Basic-auth challenge and acceptance, and Rust
-transport-hook plumbing. The Rust WebDAV target passed 13/13 tests; the
+policy, driver access, Basic-auth challenge and acceptance, Rust transport
+hooks, and request-level WebDAV error callbacks. The Rust WebDAV target passed
+14/14 tests; the
 isolated locked N-API check, release addon, generated declarations, and direct
 N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
 return, and deliberate body failure. The oracle differential is explicitly
@@ -829,10 +830,10 @@ cancelled, while [Live Cloudflare R2 run
 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
 failed; no hosted WebDAV acceptance is claimable from that tip.
 The remaining N-API session member boundary is also explicit: scalar options,
-snapshot lock records, assertion readback and Map-shaped method counters are
-implemented, while the oracle's injectable `now`, `onError`, `onAssertion`,
-and live `DavLockTable` methods remain OPEN rather than being treated as
-accepted scope.
+snapshot lock records, assertion readback, Map-shaped method counters, and
+request-level `onError(error, head)` are implemented, while the oracle's
+injectable `now`, `onAssertion`, and live `DavLockTable` methods remain OPEN
+rather than being treated as accepted scope.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run

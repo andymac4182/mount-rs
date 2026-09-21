@@ -393,6 +393,10 @@ function checkServerAndKvSubpaths(): void {
     },
     realm: "mount-rs",
     debug: false,
+    onError(error, head) {
+      void error
+      void head
+    },
   }
   const kvOptions: JsUnstorageOptions = {
     uid: 501,

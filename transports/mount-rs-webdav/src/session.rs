@@ -124,6 +124,18 @@ pub struct WebdavSessionStats {
     pub assertions: u64,
 }
 
+/// Synchronous callback used by a session to report one request that ended in
+/// an error reply. The request head is owned by the callback so adapters can
+/// safely hand it to another runtime without borrowing the dispatch future.
+pub type WebdavErrorHook = Arc<dyn Fn(WebdavError, WebdavRequestHead) + Send + Sync + 'static>;
+
+/// Optional request-level hooks for a [`WebdavSession`]. Kept separate from
+/// [`WebdavSessionOptions`] so existing option literals remain compatible.
+#[derive(Clone, Default)]
+pub struct WebdavSessionHooks {
+    pub on_error: Option<WebdavErrorHook>,
+}
+
 #[derive(Debug, Clone)]
 struct Failure {
     path: String,
@@ -157,6 +169,7 @@ pub struct WebdavSession {
     pub driver: Arc<dyn FsDriver>,
     pub locks: Arc<Mutex<DavLockTable>>,
     pub options: WebdavSessionOptions,
+    hooks: WebdavSessionHooks,
     stats: Mutex<WebdavSessionStats>,
     assertions: Mutex<Vec<String>>,
 }
@@ -171,10 +184,19 @@ impl std::fmt::Debug for WebdavSession {
 
 impl WebdavSession {
     pub fn new(driver: Arc<dyn FsDriver>, options: WebdavSessionOptions) -> Self {
+        Self::new_with_hooks(driver, options, WebdavSessionHooks::default())
+    }
+
+    pub fn new_with_hooks(
+        driver: Arc<dyn FsDriver>,
+        options: WebdavSessionOptions,
+        hooks: WebdavSessionHooks,
+    ) -> Self {
         Self {
             driver,
             locks: Arc::new(Mutex::new(DavLockTable::new(options.locks.clone()))),
             options,
+            hooks,
             stats: Mutex::new(WebdavSessionStats::default()),
             assertions: Mutex::new(Vec::new()),
         }
@@ -243,7 +265,10 @@ impl WebdavSession {
         drain_body(&mut body).await;
         let mut response = match result {
             Ok(response) => response,
-            Err(error) => fault_response(&error),
+            Err(error) => {
+                self.report_error(&error, &head);
+                fault_response(&error)
+            }
         };
         if head.method.eq_ignore_ascii_case("HEAD") {
             response.body = None;
@@ -261,9 +286,7 @@ impl WebdavSession {
         B: WebdavRequestBody + Unpin,
     {
         let method = head.method.to_ascii_uppercase();
-        if let Some(response) = self.authorize(head) {
-            return Ok(response);
-        }
+        self.authorize(head)?;
         if method == "OPTIONS" {
             return Ok(self.options_response());
         }
@@ -303,27 +326,38 @@ impl WebdavSession {
         }
     }
 
+    fn report_error(&self, error: &WebdavError, head: &WebdavRequestHead) {
+        let Some(hook) = self.hooks.on_error.as_ref().cloned() else {
+            return;
+        };
+        let error = error.clone();
+        let head = head.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            hook(error, head);
+        }));
+    }
+
     fn now(&self) -> i64 {
         self.options.now.as_ref().map_or_else(now_ms, |now| now())
     }
 
-    fn authorize(&self, head: &WebdavRequestHead) -> Option<WebdavResponse> {
+    fn authorize(&self, head: &WebdavRequestHead) -> Result<(), WebdavError> {
         let Some(credentials) = &self.options.credentials else {
-            return None;
+            return Ok(());
         };
         let valid = head.headers.get("authorization").is_some_and(|header| {
             basic_authorization(header, &credentials.username, &credentials.password)
         });
         if valid {
-            return None;
+            return Ok(());
         }
         let realm = self.options.realm.replace(['"', '\\'], "");
-        let mut response = WebdavResponse::empty(401);
-        response.headers.insert(
-            "www-authenticate".to_owned(),
-            format!("Basic realm=\"{realm}\", charset=\"UTF-8\""),
-        );
-        Some(response)
+        Err(DavFault::new(401)
+            .with_header(
+                "www-authenticate",
+                format!("Basic realm=\"{realm}\", charset=\"UTF-8\""),
+            )
+            .into())
     }
 
     fn options_response(&self) -> WebdavResponse {

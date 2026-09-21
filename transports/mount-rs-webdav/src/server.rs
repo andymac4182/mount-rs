@@ -27,7 +27,7 @@ use tokio::sync::Notify;
 
 use crate::constants::{DEFAULT_HOST, DEFAULT_MAX_REQUEST_BYTES};
 use crate::protocol::{DavFault, WebdavError, WebdavRequestHead, WebdavResponse};
-use crate::session::{WebdavRequestBody, WebdavSession, WebdavSessionOptions};
+use crate::session::{WebdavRequestBody, WebdavSession, WebdavSessionHooks, WebdavSessionOptions};
 
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -182,9 +182,14 @@ impl WebdavServer {
         driver: Arc<dyn FsDriver>,
         options: WebdavServerOptions,
         hooks: WebdavServerHooks,
+        session_hooks: WebdavSessionHooks,
     ) -> Self {
         Self {
-            session: Arc::new(WebdavSession::new(driver, options.session)),
+            session: Arc::new(WebdavSession::new_with_hooks(
+                driver,
+                options.session,
+                session_hooks,
+            )),
             host: options.host,
             requested_port: options.port,
             actual_port: AtomicU16::new(options.port),
@@ -654,10 +659,20 @@ pub fn create_webdav_server_with_hooks(
     options: WebdavServerOptions,
     hooks: WebdavServerHooks,
 ) -> Result<WebdavServer, WebdavBindError> {
+    create_webdav_server_with_session_hooks(driver, options, hooks, WebdavSessionHooks::default())
+}
+
+/// Create a WebDAV server with both transport- and request-level hooks.
+pub fn create_webdav_server_with_session_hooks(
+    driver: Arc<dyn FsDriver>,
+    options: WebdavServerOptions,
+    hooks: WebdavServerHooks,
+    session_hooks: WebdavSessionHooks,
+) -> Result<WebdavServer, WebdavBindError> {
     if let Some(error) = bind_refusal(&options.host, options.session.credentials.is_some()) {
         return Err(error);
     }
-    Ok(WebdavServer::new(driver, options, hooks))
+    Ok(WebdavServer::new(driver, options, hooks, session_hooks))
 }
 
 fn report(hooks: &WebdavServerHooks, error: WebdavTransportError) {

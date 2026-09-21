@@ -7,9 +7,9 @@ use mount_rs_webdav::protocol::{
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavRequestHead, WebdavServer,
-    WebdavServerHooks, WebdavServerOptions, WebdavSessionOptions, WebdavTransportErrorKind,
-    create_webdav_server, create_webdav_server_with_hooks, status_for_error, status_line,
-    status_text,
+    WebdavServerHooks, WebdavServerOptions, WebdavSession, WebdavSessionHooks,
+    WebdavSessionOptions, WebdavTransportErrorKind, create_webdav_server,
+    create_webdav_server_with_hooks, status_for_error, status_line, status_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -89,6 +89,71 @@ async fn transport_connection_failures_are_reported() {
             .is_some_and(|peer| peer.starts_with("127.0.0.1:"))
     );
     server.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn session_errors_are_reported_once_with_the_request_head() {
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let session = WebdavSession::new_with_hooks(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions::default(),
+        WebdavSessionHooks {
+            on_error: Some(Arc::new(move |error, head| {
+                callback_reports
+                    .lock()
+                    .expect("WebDAV request hook lock")
+                    .push((error.to_string(), head));
+            })),
+        },
+    );
+    let unsupported_head = WebdavRequestHead {
+        method: "PATCH".to_owned(),
+        target: "/unsupported".to_owned(),
+        headers: Default::default(),
+    };
+    let unsupported = session
+        .handle_request(unsupported_head.clone(), Vec::<u8>::new())
+        .await;
+    assert_eq!(unsupported.status, 405);
+
+    let authenticated = WebdavSession::new_with_hooks(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions {
+            credentials: Some(mount_rs_webdav::WebdavCredentials {
+                username: "user".to_owned(),
+                password: "secret".to_owned(),
+            }),
+            ..WebdavSessionOptions::default()
+        },
+        WebdavSessionHooks {
+            on_error: Some(Arc::new({
+                let reports = Arc::clone(&reports);
+                move |error, head| {
+                    reports
+                        .lock()
+                        .expect("WebDAV request hook lock")
+                        .push((error.to_string(), head));
+                }
+            })),
+        },
+    );
+    let unauthorized_head = WebdavRequestHead {
+        method: "OPTIONS".to_owned(),
+        target: "/".to_owned(),
+        headers: Default::default(),
+    };
+    let unauthorized = authenticated
+        .handle_request(unauthorized_head.clone(), Vec::<u8>::new())
+        .await;
+    assert_eq!(unauthorized.status, 401);
+
+    let reports = reports.lock().expect("WebDAV request report lock");
+    assert_eq!(reports.len(), 2);
+    assert_eq!(reports[0].1.method, unsupported_head.method);
+    assert_eq!(reports[0].1.target, unsupported_head.target);
+    assert_eq!(reports[1].1.method, unauthorized_head.method);
+    assert_eq!(reports[1].1.target, unauthorized_head.target);
 }
 
 async fn read_http_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {

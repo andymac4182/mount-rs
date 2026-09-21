@@ -1032,6 +1032,7 @@ async function exerciseS3() {
 async function exerciseWebdav() {
   const filesystem = memoryFilesystem();
   const reports = [];
+  const sessionErrors = [];
   const server = createWebdavServer(filesystem, {
     host: "127.0.0.1",
     port: 0,
@@ -1047,6 +1048,9 @@ async function exerciseWebdav() {
     debug: true,
     onTransportError(error, peer) {
       reports.push({ error, peer });
+    },
+    onError(error, head) {
+      sessionErrors.push({ error, head });
     },
   });
   let listening;
@@ -1233,6 +1237,12 @@ async function exerciseWebdav() {
     assert.equal(methodUnlock.status, 204);
     const unsupported = await directRequest("PATCH", "/direct-methods/moved.txt");
     assert.equal(unsupported.status, 405);
+    await new Promise((resolve) => setImmediate(resolve));
+    const sessionError = sessionErrors.at(-1);
+    assert.ok(sessionError);
+    assert.ok(sessionError.error instanceof Error);
+    assert.equal(sessionError.head.method, "PATCH");
+    assert.equal(sessionError.head.target, "/direct-methods/moved.txt");
     const remove = await directRequest("DELETE", "/direct-methods/moved.txt");
     assert.equal(remove.status, 204);
 

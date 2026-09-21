@@ -51,8 +51,10 @@ pub use protocol::{
 pub use server::{
     DEFAULT_DRAIN_TIMEOUT, WebdavBindError, WebdavServer, WebdavServerError, WebdavServerHooks,
     WebdavServerOptions, WebdavTransportError, WebdavTransportErrorHook, WebdavTransportErrorKind,
-    bind_refusal, create_webdav_server, create_webdav_server_with_hooks, is_loopback_host,
+    bind_refusal, create_webdav_server, create_webdav_server_with_hooks,
+    create_webdav_server_with_session_hooks, is_loopback_host,
 };
 pub use session::{
-    WebdavCredentials, WebdavRequestBody, WebdavSession, WebdavSessionOptions, WebdavSessionStats,
+    WebdavCredentials, WebdavErrorHook, WebdavRequestBody, WebdavSession, WebdavSessionHooks,
+    WebdavSessionOptions, WebdavSessionStats,
 };
