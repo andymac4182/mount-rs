@@ -841,8 +841,9 @@ passes. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
-Hosted network concurrency, crash/power-loss restart, provider durability, and
-broader hosted session/member lifecycle remain open.
+Hosted network concurrency, power-loss/live-provider durability, and broader
+hosted session/member lifecycle remain open; local SQLite process-crash
+recovery is covered by the dedicated N-API probe.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
