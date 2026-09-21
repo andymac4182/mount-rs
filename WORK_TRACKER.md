@@ -12,13 +12,17 @@ Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
 attached connection identity/peer/stream/closed state, duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
-coverage. The focused Rust 9P tests, strict affected-crate checks, rebuilt
-declarations, host-enabled N-API server phases, and pinned-oracle package gate
-pass. Native accepted connections deliberately expose no Node stream because
-their Tokio stream is not transferable across the N-API boundary; `attach` is
-the supported Node Duplex seam. Production remains NO-GO pending a fresh
-revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
-native fault/race/crash evidence, and the remaining W01 gates.
+coverage. The transport now also broadcasts shutdown safely across the accept
+loop and all connections, closes the active-connection accept-loop race, and
+reaps completed request tasks while reporting task failures. Local lifecycle
+5/5, transport-error 8/8, strict 9P Clippy and formatting pass. Hosted run
+`35616832528` / job `106389895603` passed the prior Linux kernel-client
+mount/read/write/unmount packet; a fresh run is required for this packet.
+Native accepted connections deliberately expose no Node stream because their
+Tokio stream is not transferable across the N-API boundary; `attach` is the
+supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
+rerun, native reset/half-close/concurrency/crash evidence, and the remaining
+W01 gates.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
@@ -169,6 +173,14 @@ options and lifecycle/error observability while preserving the established
 durable `FLUSH` sync default. Its focused package evidence is mount-free only;
 native Linux FUSE, callback events, hosted platform gates, FSKit activation,
 cancellation, concurrency, crash/restart and durability remain open.
+The follow-up N-API chunk adds the Rust-backed `FuseSession` class and public
+`./fuse` facade with typed options/defaults, negotiated state, inode views,
+request/reply/error counters, assertion/error callbacks, notification encoders,
+destroy-state readback, generated declarations, and raw INIT/LOOKUP/READLINK
+coverage. Its locked N-API check/Clippy, debug addon build, focused session/
+codec/typecheck tests, FUSE tests, formatting and diff checks pass; the full
+`MOUNTX_SOURCE` package suite, native Linux callback events, FSKit, cancellation,
+concurrency, crash/restart and durability remain open.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -1559,6 +1571,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   repository asset-integrity slice only; tag publication, downloaded-release
   inspection, signing/attestation, target-platform parity, canary, rollback
   and approval remain W08-P09 gates.
+- [x] W08.16 **Linux x86_64 and macOS arm64 target-package matrix:**
+  `.github/workflows/w08-release-targets.yml` builds/tests the CLI on
+  `ubuntu-latest` (`x86_64-unknown-linux-gnu`) and `macos-14`
+  (`aarch64-apple-darwin`), generates/verifies each manifest and
+  288-component SBOM, creates three-entry checksums, runs direct/extracted
+  version checks, uploads each four-file asset set and verifies each set after
+  download. Hosted run `35617415427`, source `b0ca8a9`, passed build jobs
+  `106391572292` and `106391572540` plus downloaded-asset jobs
+  `106393402528` and `106393402680`. This closes target-package and hosted
+  artifact-boundary implementation evidence only; tag publication,
+  signing/attestation, release-registry acceptance, canary, rollback and
+  approval remain W08-P09 gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1660,11 +1684,12 @@ reproducible in a production-like environment.
   non-cancelling hosted job `106372777281` from run `35611883547`, source
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
-  not create cryptographic signing/attestation evidence or run a real tag
-  release, and W08.15's hosted three-asset checksum pass does not close the
-  downloaded-release, canary, rollback or approval gates. *(Release
-  implementation + hosted; registry, signing/attestation, deployment
-  controller and approvers are external.)*
+  include W08.15's three-asset checksum pass and W08.16's Linux/macOS
+  target/download matrix, but they do not create cryptographic
+  signing/attestation evidence or run a real tag release, and do not close
+  the canary, rollback or approval gates. *(Release implementation + hosted;
+  registry, signing/attestation, deployment controller and approvers are
+  external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
@@ -2156,6 +2181,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   credentials for all S3 requests and cleanup. It does not create IAM resources
   or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
   run is now recorded above.
+- [x] A fresh end-to-end qualification rerun at audit commit `d7ccdc7` on
+  2026-09-22 passed scoped-role sibling-prefix denial, the public SDK/CLI
+  self-test, composed AWS S3 filesystem, process reopen, independent PGlite
+  metadata, writer fencing, restored-PGlite reopen, and exact owned-prefix
+  cleanup under
+  `mount-rs-tests/aws-s3/20260921T152108Z-66596-90bba238142882ef153e6e3c246d0003`.
+  The read-only resource audit at the same source passed account/region
+  binding, public-access blocks, BucketOwnerEnforced ownership, AES256,
+  versioning readback, seven-day lifecycle, and one-day multipart-abort checks.
+  This remains qualification-account evidence, not production deployment
+  acceptance.
 - [x] Repository qualification after the AWS packet passed on 2026-09-21 at
   local `4a72d85` (an ancestor of current `origin/main` `7488aa8`):
   `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
@@ -2283,10 +2319,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  hosted run `35610661014` at current pushed head `428ce6d` stopped before AWS
-  authentication with `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a
-  successful safety refusal, not acceptance evidence. The preceding hosted run
-  `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
+  observed hosted run `35618187611` at `a83540a` passed the new secret-free
+  validator regression step, then stopped before AWS authentication with
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
+  skipped, so this is a successful safety refusal, not acceptance evidence.
+  The preceding hosted run `35610661014` at `428ce6d` stopped at the same
+  preflight boundary, as did `35608516727` at `8e271cd`. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium

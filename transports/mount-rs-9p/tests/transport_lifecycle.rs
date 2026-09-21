@@ -12,6 +12,7 @@ use mount_rs_9p::{
 };
 use mount_rs_core::MemoryFs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 
 fn frame<F>(type_: u8, tag: u16, write: F) -> Vec<u8>
@@ -128,6 +129,19 @@ async fn wait_for_no_connections(server: &P9Server) {
     .expect("connection task exits");
 }
 
+async fn wait_for_connections(server: &P9Server, expected: usize) {
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if server.connection_count().expect("connection count") == expected {
+                return;
+            }
+            sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await
+    .expect("connection count reaches expected value");
+}
+
 #[tokio::test]
 async fn attached_stream_serves_frames_and_closes_without_a_listener() {
     let server = Arc::new(P9Server::new(MemoryFs::empty(), P9ServerOptions::default()));
@@ -168,6 +182,68 @@ async fn start_then_immediate_close_stops_the_accept_loop() {
         .expect("accept loop stops after close")
         .expect("accept loop joins")
         .expect("accept loop exits cleanly");
+}
+
+#[tokio::test]
+async fn close_stops_accept_loop_with_an_active_connection() {
+    let server = Arc::new(
+        P9Server::bind(MemoryFs::empty(), P9ServerOptions::default())
+            .await
+            .expect("bind TCP listener"),
+    );
+    let task = server.start().expect("start accept loop");
+    let mut client = TcpStream::connect(server.local_addr().expect("server address"))
+        .await
+        .expect("connect TCP listener");
+    wait_for_connections(&server, 1).await;
+
+    server.close().await.expect("close server");
+    timeout(Duration::from_secs(2), task)
+        .await
+        .expect("accept loop stops with active connection")
+        .expect("accept loop joins")
+        .expect("accept loop exits cleanly");
+    wait_for_no_connections(&server).await;
+
+    let mut byte = [0_u8; 1];
+    let read = timeout(Duration::from_secs(2), client.read(&mut byte))
+        .await
+        .expect("closed server reaches TCP peer")
+        .expect("read TCP peer");
+    assert_eq!(read, 0);
+}
+
+#[tokio::test]
+async fn shutdown_broadcasts_to_all_attached_connections() {
+    let server = Arc::new(P9Server::new(MemoryFs::empty(), P9ServerOptions::default()));
+    let mut connections = Vec::new();
+    let mut peers = Vec::new();
+    for index in 0..3 {
+        let (server_stream, client_stream) = tokio::io::duplex(1024);
+        peers.push(client_stream);
+        connections.push(
+            server
+                .attach(
+                    server_stream,
+                    P9AttachOptions {
+                        peer: Some(format!("shutdown-{index}")),
+                        own: false,
+                    },
+                )
+                .expect("attach connection"),
+        );
+    }
+    assert_eq!(server.connection_count().expect("connection count"), 3);
+
+    server.shutdown();
+    for connection in &connections {
+        timeout(Duration::from_secs(2), connection.wait_closed())
+            .await
+            .expect("shutdown closes every connection");
+    }
+    wait_for_no_connections(&server).await;
+    drop(peers);
+    server.close().await.expect("close attach-only server");
 }
 
 #[cfg(unix)]

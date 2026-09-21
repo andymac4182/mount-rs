@@ -92,6 +92,28 @@ export declare class Filesystem {
   mknod(path: string, mode: number, dev: number): Promise<void>
 }
 
+/**
+ * A serialized FUSE request/reply session backed by a mount-rs filesystem
+ * driver. Requests are handled in order behind an async mutex, preserving
+ * the Rust transport's inode and open-handle state across calls.
+ */
+export declare class FuseSession {
+  constructor(filesystem: Filesystem, options?: FuseSessionOptions | undefined | null)
+  readonly options: FuseSessionOptions
+  readonly stats: FuseSessionStats
+  readonly assertions: string[]
+  readonly negotiated: NativeFuseNegotiatedSession | undefined
+  readonly protocol: NativeFuseProtocolContext | undefined
+  readonly destroyed: boolean
+  readonly openHandles: number
+  readonly inodes: FuseSessionInodeTable
+  handle(bytes: Buffer): Promise<Buffer | null>
+  handleMessage(bytes: Buffer): Promise<Buffer | null>
+  destroy(): Promise<void>
+  notifyInvalInode(ino: bigint, off?: bigint, len?: bigint): Buffer
+  notifyInvalEntry(parent: bigint, name: string, flags?: number): Buffer
+}
+
 export declare class JsDirEntry {
   get name(): string
   get parentPath(): string
@@ -1228,6 +1250,22 @@ export interface NativeFuseInitOut {
   maxStackDepth: number
 }
 
+export interface NativeFuseInitPreferences {
+  minor?: number
+  maxWrite?: number
+  maxReadahead?: number
+  maxBackground?: number
+  congestionThreshold?: number
+  timeGran?: number
+  maxStackDepth?: number
+  flags?: bigint
+  extraFlags?: bigint
+  withoutFlags?: bigint
+  readdirplus?: boolean
+  writebackCache?: boolean
+  cacheSymlinks?: boolean
+}
+
 export interface NativeFuseInode {
   nodeid: bigint
   key?: string
@@ -1334,6 +1372,29 @@ export interface NativeFuseNameIn {
   name: string
 }
 
+export interface NativeFuseNegotiatedSession {
+  major: number
+  minor: number
+  flags: bigint
+  maxWrite: number
+  maxPages: number
+  maxReadahead: number
+  maxBackground: number
+  congestionThreshold: number
+  timeGran: number
+  readdirplus: boolean
+  writebackCache: boolean
+  atomicOTrunc: boolean
+  parallelDirops: boolean
+  posixLocks: boolean
+  flockLocks: boolean
+  cacheSymlinks: boolean
+  exportSupport: boolean
+  setxattrExt: boolean
+  maxStackDepth: number
+  protocol: NativeFuseProtocolContext
+}
+
 export interface NativeFuseNotification {
   code: number
   body: Uint8Array
@@ -1419,6 +1480,45 @@ export interface NativeFuseRenameIn {
   newdir: bigint
   oldName: string
   newName: string
+}
+
+export interface NativeFuseSessionError {
+  code: string
+  errno: number
+  syscall?: string
+  path?: string
+  dest?: string
+  message: string
+}
+
+export interface NativeFuseSessionInode {
+  nodeid: bigint
+  key?: string
+  nlookup: bigint
+  paths: Array<string>
+}
+
+export interface NativeFuseSessionObservation {
+  reply?: Buffer
+  error?: NativeFuseSessionError
+}
+
+export interface NativeFuseSessionOptions {
+  maxRequest?: number
+  useDriverIno?: boolean
+  attrTimeout?: number
+  entryTimeout?: number
+  negativeTimeout?: number
+  keepCache?: boolean
+  flushMechanism?: string
+  init?: NativeFuseInitPreferences
+}
+
+export interface NativeFuseSessionState {
+  destroyed: boolean
+  openHandles: number
+  negotiated?: NativeFuseNegotiatedSession
+  inodes: Array<NativeFuseSessionInode>
 }
 
 export interface NativeFuseSetattrIn {
@@ -2084,6 +2184,53 @@ export interface WebdavSessionStats {
   errors: number
   methods: Record<string, number>
   assertions: number
+}
+
+export type FuseFlushMechanism = "sync" | "enosys" | "noflush"
+export const DEFAULT_ATTR_TIMEOUT: 10
+export const DEFAULT_ENTRY_TIMEOUT: 10
+export const DEFAULT_FLUSH_MECHANISM: FuseFlushMechanism
+export function createFuseSession(filesystem: Filesystem, options?: FuseSessionOptions | undefined | null): FuseSession
+
+export interface FuseRequest {
+  header: NativeFuseInHeader
+  payload: Buffer
+  extensions: Buffer
+  body: unknown
+}
+
+export type FuseSessionOptions = Omit<NativeFuseSessionOptions, "flushMechanism"> & {
+  flushMechanism?: FuseFlushMechanism
+  debug?: boolean
+  onError?: (error: unknown, request?: FuseRequest) => void
+  onAssertion?: (message: string) => void
+}
+
+export interface FuseSessionStats {
+  requests: number
+  replies: number
+  errors: number
+  noReply: number
+  dropped: number
+  assertions: number
+}
+
+export interface FuseSessionInode {
+  readonly nodeid: bigint
+  readonly key: string | undefined
+  readonly nlookup: bigint
+  readonly paths: Set<string>
+}
+
+export interface FuseSessionInodeTable {
+  readonly root: FuseSessionInode | undefined
+  readonly size: number
+  readonly pathCount: number
+  get(nodeid: bigint): FuseSessionInode | undefined
+  at(path: string): FuseSessionInode | undefined
+  require(nodeid: bigint): FuseSessionInode
+  pathOf(inode: FuseSessionInode): string
+  requirePath(nodeid: bigint): string
 }
 
 import type { FsError, FsErrorOptions } from "./types/root.js"

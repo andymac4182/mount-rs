@@ -43,6 +43,9 @@ impl InodeTable {
     pub fn get(&self, nodeid: u64) -> Option<&Inode> {
         self.nodes.get(&nodeid)
     }
+    pub fn entries(&self) -> impl Iterator<Item = &Inode> {
+        self.nodes.values()
+    }
     pub fn at(&self, path: &str) -> Option<&Inode> {
         self.paths.get(path).and_then(|id| self.get(*id))
     }

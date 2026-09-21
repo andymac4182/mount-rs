@@ -139,6 +139,150 @@ export interface InodeTableOptions {
   useDriverIno?: boolean
 }
 
+export interface NativeFuseInitPreferences {
+  minor?: number
+  maxWrite?: number
+  maxReadahead?: number
+  maxBackground?: number
+  congestionThreshold?: number
+  timeGran?: number
+  maxStackDepth?: number
+  flags?: bigint
+  extraFlags?: bigint
+  withoutFlags?: bigint
+  readdirplus?: boolean
+  writebackCache?: boolean
+  cacheSymlinks?: boolean
+}
+
+export interface NativeFuseSessionOptions {
+  maxRequest?: number
+  useDriverIno?: boolean
+  attrTimeout?: number
+  entryTimeout?: number
+  negativeTimeout?: number
+  keepCache?: boolean
+  flushMechanism?: "sync" | "enosys" | "noflush"
+  init?: NativeFuseInitPreferences
+}
+
+export type FuseFlushMechanism = "sync" | "enosys" | "noflush"
+
+export interface FuseRequest {
+  header: NativeFuseInHeader
+  payload: Buffer
+  extensions: Buffer
+  body: unknown
+}
+
+export type FuseSessionOptions = Omit<NativeFuseSessionOptions, "flushMechanism"> & {
+  flushMechanism?: FuseFlushMechanism
+  debug?: boolean
+  onError?: (error: unknown, request?: FuseRequest) => void
+  onAssertion?: (message: string) => void
+}
+
+export interface FuseSessionStats {
+  requests: number
+  replies: number
+  errors: number
+  noReply: number
+  dropped: number
+  assertions: number
+}
+
+export interface FuseSessionInode {
+  readonly nodeid: bigint
+  readonly key: string | undefined
+  readonly nlookup: bigint
+  readonly paths: Set<string>
+}
+
+export interface FuseSessionInodeTable {
+  readonly root: FuseSessionInode | undefined
+  readonly size: number
+  readonly pathCount: number
+  get(nodeid: bigint): FuseSessionInode | undefined
+  at(path: string): FuseSessionInode | undefined
+  require(nodeid: bigint): FuseSessionInode
+  pathOf(inode: FuseSessionInode): string
+  requirePath(nodeid: bigint): string
+}
+
+export interface NativeFuseSessionError {
+  code: string
+  errno: number
+  syscall?: string
+  path?: string
+  dest?: string
+  message: string
+}
+
+export interface NativeFuseSessionObservation {
+  reply?: Buffer
+  error?: NativeFuseSessionError
+}
+
+export interface NativeFuseNegotiatedSession {
+  major: number
+  minor: number
+  flags: bigint
+  maxWrite: number
+  maxPages: number
+  maxReadahead: number
+  maxBackground: number
+  congestionThreshold: number
+  timeGran: number
+  readdirplus: boolean
+  writebackCache: boolean
+  atomicOTrunc: boolean
+  parallelDirops: boolean
+  posixLocks: boolean
+  flockLocks: boolean
+  cacheSymlinks: boolean
+  exportSupport: boolean
+  setxattrExt: boolean
+  maxStackDepth: number
+  protocol: NativeFuseProtocolContext
+}
+
+export interface NativeFuseSessionInode {
+  nodeid: bigint
+  key?: string
+  nlookup: bigint
+  paths: string[]
+}
+
+export interface NativeFuseSessionState {
+  destroyed: boolean
+  openHandles: number
+  negotiated?: NativeFuseNegotiatedSession
+  inodes: NativeFuseSessionInode[]
+}
+
+/** Serialized Rust-backed FUSE requests; it never opens a native device. */
+export declare class FuseSession {
+  constructor(filesystem: import("../index.js").Filesystem, options?: FuseSessionOptions | null)
+  readonly options: FuseSessionOptions
+  readonly stats: FuseSessionStats
+  readonly assertions: string[]
+  readonly negotiated: NativeFuseNegotiatedSession | undefined
+  readonly protocol: NativeFuseProtocolContext | undefined
+  readonly destroyed: boolean
+  readonly openHandles: number
+  readonly inodes: FuseSessionInodeTable
+  handle(bytes: Uint8Array): Promise<Buffer | null>
+  handleMessage(bytes: Uint8Array): Promise<Buffer | null>
+  destroy(): Promise<void>
+  notifyInvalInode(ino: bigint, off?: bigint, len?: bigint): Buffer
+  notifyInvalEntry(parent: bigint, name: string, flags?: number): Buffer
+}
+
+export declare const DEFAULT_ATTR_TIMEOUT: 10
+export declare const DEFAULT_ENTRY_TIMEOUT: 10
+export declare const DEFAULT_FLUSH_MECHANISM: FuseFlushMechanism
+export declare function createFuseSession(filesystem: import("../index.js").Filesystem, options?: FuseSessionOptions | null): FuseSession
+
 export declare const INODE_GENERATION: bigint
 
 /** Rust-backed path/nodeid state used by the FUSE session. */
