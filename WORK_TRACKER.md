@@ -286,6 +286,12 @@ session to close, asserts exactly one owned `Task` transport callback, and
 completes bounded unmount and mountpoint cleanup. Local focused tests and
 Linux-target strict Clippy pass; hosted execution is still required for native
 callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
+The automatic named-FUSE harness now routes the same read-only backend panic
+through `AutoMountHooks.fuse`; it asserts one owned `Task` callback at the
+facade boundary, observes `active == false`, and completes bounded unmount and
+cleanup. Locked host compilation and Linux-target strict Clippy pass; hosted
+execution is still required for root automatic callback-event acceptance, so
+W01 remains NO-GO.
 The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
 non-Linux mount regression returns `UnsupportedPlatform` without touching its
 requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
@@ -2769,6 +2775,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   protected-environment fixture (`AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`).
   These are credential-free fail-closed safeguards only; they do not approve
   the external GitHub environment, IAM trust, or production parameters.
+- [x] The exact pushed S3 observability source
+  `eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed on 2026-09-22:
+  `cargo fmt --all -- --check`, the full locked offline workspace/all-target
+  test gate, and strict workspace Clippy with `-D warnings` using the isolated
+  Cargo target and required local loopback permission. The gate includes the
+  streamed request/response byte accounting tests in the 17-case S3 gateway
+  suite. Explicitly ignored native/service rows remain separate prerequisites
+  and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -3135,6 +3149,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
   reportable findings. The PASS is declaration-only; customer topology,
   certificates/IAM/rotation, hosted provider evidence, measured SLO/RPO/RTO and
   backup/DR remain external or pending.
+- [x] W26.14 Make the one-revision W26 Ozone evidence packet cover every wired
+  end-to-end surface. `scripts/verify-w26-ozone-evidence-packet.mjs` now
+  requires gateway health/ready/restart, SQLite/PGlite composition and bounded
+  listing, the live Rust CLI, Node provider matrix and Node CLI, remote HTTP
+  CLI, TiDB Rust composition plus N-API seed/reopen, and FoundationDB Rust
+  composition/restart plus N-API seed/reopen markers. The synthetic packet
+  test proves a missing Node CLI marker fails closed. Local benchmark/evidence
+  tests, Node/shell syntax, YAML parsing and diff checks passed. Commit
+  `20a06b8` was reconciled with concurrent mainline changes and published at
+  `0e0454d`; focused security diff scan
+  `e4ce1aab-c6cd-44e4-b20d-3130ca357412` found zero reportable findings.
+  Terminal hosted provider/aggregate results, native/mount qualification,
+  customer secure-runtime evidence and measured SLO/RPO/RTO remain open.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
@@ -3214,6 +3241,7 @@ PASS is declaration-only. W26 has CI only and no staging environment.
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
 | P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 76% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`. The credential-free Ozone policy gate covers all four metadata-provider shapes, HTTPS R2, scoped prefixes, durable settings, external secret references and TiDB TLS options with local positive/negative execution; expanded fixtures independently reject inline credentials, unsafe FoundationDB authority and TLS verification downgrade. Standard scan `5ad61e60-20e3-4223-885a-d4b516d49bb1`, focused IOPS diff scans `5fc5a943-07bb-4979-9f37-efd87a7f505e`, `60269206-bb22-4b78-aaf7-f05d16ffcca0` and `1d97028f-e153-4b49-9fac-c3a8c1fc1117`, retention scan `18010cad-ed69-4da3-b0a9-57163091e878`, production-config diff scan `d74e3e86-2e0a-45cf-9819-e31f428eb5d4` and expanded negative-path scan `7addeeb5-4601-4951-aca9-becffb9bd4b9` all found zero reportable findings; their hosted/provider coverage is partial or deferred. The artifact verifier rejects malformed/weak profiles without printing artifact contents, and missing IOPS artifacts now fail CI. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred; latest published head `12ba117` has CI/W08 policy/W08 targets pending, Fault injection queued and unrelated W04 policy succeeded, with no terminal W26 provider result |
 | P11 — end-to-end client/platform matrix | HTTP path and built-in/KV/durable-provider bounded-listing contracts added to Ozone CI; full matrix open | 46% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition tests assert provider-backed bounded success and `EOVERFLOW`; the feature-built FoundationDB and TiDB Node/N-API Ozone lanes from `b80c19c` and `ef6a876` assert the same contract with scoped cleanup prefixes; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; TiDB test compilation/Clippy and FoundationDB `cargo check --tests` pass locally, but live provider/Ozone execution is hosted-only and FoundationDB local linking lacks `libfdb_c`; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
+| P11 follow-up — complete-surface packet enforcement | Implemented; terminal hosted packet remains open | 60% W26-owned implementation/qualification | Published `20a06b8` at `0e0454d`; the aggregate verifier now requires the currently wired Ozone gateway, composition, Rust/Node/HTTP CLI, TiDB N-API and FoundationDB N-API/restart markers. This closes the local evidence-contract gap but not hosted execution, native mounts or customer runtime proof |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
 | P14 — final W26 integration-readiness review | Not started | 0% | One-revision all-provider/performance/security/end-to-end audit and explicit handoff decision |

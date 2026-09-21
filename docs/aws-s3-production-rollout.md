@@ -46,11 +46,12 @@ is available for a completed run or a safe preflight refusal; it does not substi
 successful AWS authentication, acceptance, or production deployment evidence.
 
 The latest tested integrated repository boundary
-`0bb628b0323901a1632b05dd8321c32fcabca7d8` passed formatting, the full locked
+`eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed formatting, the full locked
 offline workspace/all-target test gate, and strict workspace Clippy with
-`-D warnings` on an explicitly isolated Cargo target after the documentation
-chunk was rebased onto and pushed to `origin/main`, with the required local
-loopback permission. The isolated target was used because concurrent
+`-D warnings` on an explicitly isolated Cargo target after the S3 observability
+code was pushed to `origin/main`, with the required local loopback permission.
+The gate includes the streamed request/response byte accounting tests in the
+17-case S3 gateway suite. The isolated target was used because concurrent
 worktrees share the normal Cargo target and can expose cross-worktree artifact
 races; this gate therefore binds to the checked-out source rather than another
 thread's compiled metadata. Ignored native/service rows remain explicit
