@@ -243,6 +243,8 @@ support while keeping unsupported flags fail-closed; 16 focused FUSE tests,
 strict Clippy and formatting passed. FALLOCATE, LSEEK and COPY_FILE_RANGE
 remain explicit unsupported boundaries, and Linux hosted FUSE remains a
 separate acceptance gate.
+The follow-up `7183778` strengthens the same native gate by asserting that
+both Rust- and Node-written payloads remain in the backing root after unmount.
 
 The third W01 implementation rotation was validated locally and published
 sequentially to `origin/main` (verified remote ref
