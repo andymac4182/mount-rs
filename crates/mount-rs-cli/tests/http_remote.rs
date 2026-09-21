@@ -22,6 +22,7 @@ struct HttpResponse {
 struct HttpChild {
     child: Child,
     stdout: Receiver<String>,
+    stderr: Receiver<String>,
     readers: Vec<JoinHandle<()>>,
     root: PathBuf,
 }
@@ -52,13 +53,10 @@ impl HttpChild {
                 let _ = stderr_sender.send(line);
             }
         });
-        // Keep draining stderr so a provider failure cannot block the child,
-        // but do not retain or print its contents: remote diagnostics must not
-        // accidentally expose credential-bearing provider errors.
-        drop(stderr_receiver);
         Self {
             child,
             stdout: stdout_receiver,
+            stderr: stderr_receiver,
             readers: vec![stdout_reader, stderr_reader],
             root,
         }
@@ -117,18 +115,42 @@ impl HttpChild {
                 let _ = self.kill_owned();
                 panic!("remote HTTP CLI graceful shutdown exceeded 60 seconds");
             });
-        assert!(
-            status.success(),
-            "remote HTTP CLI graceful shutdown failed: {status}"
-        );
         for reader in self.readers.drain(..) {
             reader.join().expect("join remote HTTP output reader");
         }
+        let diagnostics = self
+            .stderr
+            .try_iter()
+            .map(|line| redact_remote_diagnostic(&line))
+            .take(32)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            status.success(),
+            "remote HTTP CLI graceful shutdown failed: {status}; stderr={diagnostics}"
+        );
         assert!(
             self.stdout.try_iter().any(|line| line == "http stopped"),
             "remote HTTP CLI did not report graceful shutdown"
         );
     }
+}
+
+fn redact_remote_diagnostic(line: &str) -> String {
+    let mut redacted = mount_rs_cli::config::redact_diagnostic(line);
+    for name in [
+        "R2_ENDPOINT",
+        "R2_BUCKET",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY",
+    ] {
+        if let Ok(value) = std::env::var(name)
+            && !value.is_empty()
+        {
+            redacted = redacted.replace(&value, "[REDACTED]");
+        }
+    }
+    redacted
 }
 
 impl Drop for HttpChild {

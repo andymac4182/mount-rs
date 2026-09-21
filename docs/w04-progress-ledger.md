@@ -10,12 +10,13 @@ gate required by W04.2.
 
 | Field | Current value |
 | --- | --- |
-| Snapshot base revision | `d4f7281f2ab2570fc096e25aeabab54d89967d0a` (origin/main immediately before the ledger commit) |
-| Ledger commit | `8501c1dd4b3742eecb64289a3300330a0e628e8d` (published to `origin/main`) |
-| Snapshot time | 2026-09-21 17:44 AEST / 2026-09-21 07:44 UTC |
+| Snapshot base revision | `fac9c7e004b4eb1d9e742c180f967c97f3d89648` (origin/main immediately before this ledger update) |
+| Ledger publication | This current ledger revision is committed and pushed to `origin/main`; the exact commit is recorded in Git history |
+| Current-head local evidence revision | `5424080afbc2027d5dcb0ab79a09ca9a4a32fdc8` (the docs-only `fac9c7e` sync landed after the gate) |
+| Snapshot time | 2026-09-21 17:54 AEST / 2026-09-21 07:54 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
 | Checklist completion | **87.5%**: 7 of 8 W04 checklist items are checked; W04.2 remains open |
-| Implementation/local qualification | **Complete for the recorded packet**; current-head rerun is not implied by historical evidence |
+| Implementation/local qualification | **Complete for the recorded packet**; a fresh current-head local gate also passed at `5424080` |
 | Hosted/native/provider acceptance | **Incomplete**: hosted Linux Node evidence is green; hosted macOS Node evidence is still queued; R2/TiDB rows are explicit local skips |
 | Overall release decision | **Not complete** until W04.2's post-fix macOS and Linux Node logs pass |
 | Current external blocker | GitHub Actions jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) have remained `queued` with no `started_at` |
@@ -31,8 +32,8 @@ fully working.
 | Land real socket-server integration and provider/factory coverage | Complete — implementation | 100% | W04 tracker checkbox; current tree contains the PGlite socket server, provider, factory, and integration test surfaces under `integrations/mount-rs-pglite/` and `tests/pglite/`. | None for this item. Keep regressions covered by the W04 gate. | 0h remaining |
 | Fix transaction cleanup before releasing a connection slot | Complete — implementation and regression | 100% | Tracker records `29ffb3b`; deterministic slot-release suite passed during the recorded W04 local gate. | None for this item. | 0h remaining |
 | Add injected cleanup-failure regression and fail closed | Complete — implementation and regression | 100% | Tracker records `cfce82a`; `server_cleanup_failure.mjs` reported `pglite cleanup failure fail-closed: ok`; the expected injected error was retained as diagnostic evidence. | None for this item. | 0h remaining |
-| W04.1 full `scripts/test-pglite.sh` local gate | Complete — local qualification | 100% | The recorded current-tree run exited 0 and passed slot cleanup, injected failure, provider parity, reconnect, fencing, cancellation, disk restart, mixed stores, Node factories, and userspace FUSE. Upstream and R2-only rows retained explicit skips. | No further local W04.1 action unless W04.2 exposes a regression. A fresh current-head rerun would strengthen evidence but is not required to reinterpret the recorded pass. | 0–1h optional recheck |
-| Fresh current-tree rerun, SDK/CLI users, upstream, and trace lanes | Complete — local qualification | 100% | Recorded result: Rust SDK 4/4, Node SDK 5/5, CLI 6/6, upstream 1,194 passed/88 skipped, and 40/40 PGlite-inclusive trace lanes; R2-only rows were explicit skips. Hosted/provider claims are not inferred from this result. | None for the recorded local result. | 0h remaining |
+| W04.1 full `scripts/test-pglite.sh` local gate | Complete — local qualification | 100% | The current-head rerun at `5424080afbc2027d5dcb0ab79a09ca9a4a32fdc8` exited 0 and passed slot cleanup, injected failure, provider parity, reconnect, fencing, cancellation, disk restart, mixed stores, Node factories, chunked mounts, and userspace FUSE. R2 and TiDB/RustFS rows retained explicit skips. | No further local W04.1 action unless W04.2 exposes a regression. | 0h remaining |
+| Fresh current-tree rerun, SDK/CLI users, upstream, and trace lanes | Complete — local qualification | 100% | The current-head `scripts/test-pglite.sh` run exited 0 after rebuilding the ignored N-API addon against the checked-out source. Results included Rust SDK `pass=6 skip=3 fail=0`, Node SDK `pass=5 skip=3 fail=0`, and CLI `pass=12 skip=2 fail=0`; the focused chunked N-API test also passed. The run did not execute upstream/trace lanes because `MOUNTX_SOURCE` was unset, and credential/service-gated rows remained explicit skips. Historical upstream/trace passes remain recorded separately; hosted/provider claims are not inferred from this local result. | None for the current local result; hosted W04.2 remains separate. | 0h remaining |
 | Teardown-race fix and bounded close/reopen safety | Complete — implementation and local regression | 100% | Tracker records the PostgreSQL Terminate-frame cleanup path, I/O-turn barrier, listener restoration, and tracked cleanup barrier. Readiness passed 10/10; bounded close/reopen passed 5/5 in the recorded gate; focused current-tree runs also passed the bounded regression repeatedly. | None unless hosted macOS reproduces the historical `Eio` failure. | 0h remaining; 2–6h contingency if hosted failure reproduces |
 | W04.2 hosted macOS/Linux reconnect acceptance | **Open — external hosted gate** | **0% of this item** | Required run: [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894). Linux Node job [106211636722](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636722) completed successfully; direct logs include slot-release success, cleanup-failure fail-closed success, `mount-rs N-API PGlite integration: PASS`, Rust SDK `pass=6 skip=3 fail=0`, Node SDK `pass=5 skip=2 fail=0`, and CLI `pass=12 skip=2 fail=0`. macOS jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) remain queued, so their required `Verify PGlite integration and restart recovery` logs do not yet exist. | Keep monitoring the two queued jobs. When each completes, inspect its log for the exact PGlite recovery step. If both pass, update W04.2 and the dashboard, run formatting/diff checks, commit, rebase if needed, and push. If either fails, isolate the failure, fix it, rerun the focused and full relevant gates, and publish that fix as the next chunk. | 0.25–0.5h log audit once runners start; 0.5–1h tracker/publish work if green; 2–6h if a code regression requires remediation. External queue time is unknown and is not engineering time. |
 | W04.3 versioning, mount-free VFS, and native SQLite-hosting tests | Complete — implementation and local qualification | 100% | Tracker records the rebased packet published through `90c33949`; durable PGlite version metadata, reconnect/version history, mount-free SQLite VFS, native SQLite-hosting tests, and the configuration-driven gate are present. Focused versioning/VFS, locked compilation, formatting, Clippy, and script checks passed in the recorded evidence. | None for W04.3; hosted reconnect remains W04.2's separate gate. | 0h remaining |
@@ -52,10 +53,14 @@ fully working.
   without R2 credentials, and TiDB/RustFS rows were skipped without the actual
   services. These are not converted to passes by the surrounding green local
   stages.
-- The current checkout was rebased onto `d4f7281` before this ledger was
-  written. The historical test results above are tied to their recorded
-  revisions; this document does not silently relabel them as a fresh
-  current-head run.
+- The fresh current-head local run was executed at `5424080` immediately before
+  the docs-only `fac9c7e` W08 ledger sync. It is therefore valid local
+  qualification for the W04 code, but it is not hosted macOS evidence.
+- The first attempt at that rerun used a stale ignored `.node` addon and
+  stopped at the chunked default-identity assertion. Rebuilding the current
+  addon with the shared Cargo target made the focused chunked test and the
+  complete local gate pass; no source change was needed for that environment
+  mismatch.
 
 ### Hosted/native/provider boundary
 
@@ -112,11 +117,12 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 | 2026-09-21 — provider-matrix lockfile packet | Diagnosed `--locked` metadata failure, regenerated the standalone provider-matrix lockfile offline, reran the full gate, and published the lockfile update. | Published as `d0202fb`; local gate exited 0. | Engineering, ~0.75h |
 | 2026-09-21 — hosted Linux evidence | Inspected run `35560240894`, confirmed Linux Node completion, and retrieved direct job logs. | Job `106211636722` success; PGlite/SDK/CLI/trace evidence recorded above. | Hosted verification, ~0.5h |
 | 2026-09-21 — hosted macOS monitoring | Repeatedly polled jobs `106211636737` and `106211636695`; created the quiet heartbeat monitor after the queue persisted. | Both jobs still queued; no macOS log exists yet. | External wait/monitoring, ongoing; excluded from engineering estimate |
-| 2026-09-21 17:41 AEST | Synced clean checkout to `d4f7281` and created this ledger. | Ledger added under `docs/w04-progress-ledger.md`; commit/push is the next documentation chunk. | Engineering/documentation, ~0.25h so far |
+| 2026-09-21 17:41–17:44 AEST | Synced the clean checkout and created the ledger. | Ledger published under `docs/w04-progress-ledger.md` through `5424080`; W04.2 remained explicitly open. | Engineering/documentation, ~0.25h |
+| 2026-09-21 17:45–17:54 AEST | Rebuilt the current N-API addon after the first rerun exposed a stale ignored binary, ran the focused chunked test, and reran `scripts/test-pglite.sh`. | Focused chunked integration passed; the full gate exited 0 with Rust SDK `6/3/0`, Node SDK `5/3/0`, and CLI `12/2/0` pass/skip/fail summaries. | Engineering/verification, ~0.25h |
 
 ## Publication note
 
-This ledger itself is a documentation chunk. It must be reviewed with
-`git diff --check`, committed, rebased if `origin/main` advances, and pushed
-to `origin/main`. It does **not** close W04.2; that requires the missing
-hosted macOS log evidence described above.
+This ledger revision is a documentation chunk. It was reviewed with
+`git diff --check`, committed, and pushed to `origin/main`. It does **not**
+close W04.2; that requires the missing hosted macOS log evidence described
+above.
