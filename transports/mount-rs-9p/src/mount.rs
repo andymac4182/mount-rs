@@ -170,6 +170,8 @@ pub struct P9Mount {
 struct MountState {
     stopping: AtomicBool,
     teardown_started: AtomicBool,
+    unmount_started: AtomicBool,
+    unmount_changed: Notify,
     done: AtomicBool,
     complete: Notify,
     failure: Mutex<Option<String>>,
@@ -203,13 +205,17 @@ impl P9Mount {
     /// Unmount idempotently. A failed unmount leaves the server alive so the
     /// operation can be retried, matching the upstream lifecycle contract.
     pub async fn unmount(&self) -> io::Result<()> {
-        if self
-            .state
-            .teardown_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
-            return self.wait_result().await;
+        loop {
+            let changed = self.state.unmount_changed.notified();
+            if self
+                .state
+                .unmount_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+            changed.await;
         }
         self.state.stopping.store(true, Ordering::Release);
         let result = self.unmount_once().await;
@@ -218,11 +224,14 @@ impl P9Mount {
             // The mount is still live, so keep answering it and allow a later
             // call to retry after the process holding the mount lets go.
             self.state.stopping.store(false, Ordering::Release);
-            self.state.teardown_started.store(false, Ordering::Release);
+            self.state.unmount_started.store(false, Ordering::Release);
+            self.state.unmount_changed.notify_waiters();
             return Err(io::Error::other(error.to_string()));
         }
         self.state.done.store(true, Ordering::Release);
         self.state.complete.notify_waiters();
+        self.state.unmount_started.store(false, Ordering::Release);
+        self.state.unmount_changed.notify_waiters();
         result
     }
 
@@ -263,15 +272,6 @@ impl P9Mount {
     async fn wait_completion(&self) {
         while !self.state.done.load(Ordering::Acquire) {
             self.state.complete.notified().await;
-        }
-    }
-
-    async fn wait_result(&self) -> io::Result<()> {
-        self.wait_completion().await;
-        if let Some(error) = self.state.failure.lock().await.clone() {
-            Err(io::Error::other(error))
-        } else {
-            Ok(())
         }
     }
 }
@@ -630,6 +630,8 @@ where
     let state = Arc::new(MountState {
         stopping: AtomicBool::new(false),
         teardown_started: AtomicBool::new(false),
+        unmount_started: AtomicBool::new(false),
+        unmount_changed: Notify::new(),
         done: AtomicBool::new(false),
         complete: Notify::new(),
         failure: Mutex::new(None),
