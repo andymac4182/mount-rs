@@ -2450,6 +2450,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   qualification bucket. The current pushed audit at `0010246` repeated the
   same read-only checks and additionally enforced the reviewed versioning
   status (`None`) before reporting pass; no production resource was changed.
+  A fresh current-source audit at pushed head `74b5150` repeated those
+  account/region, public-access, ownership, encryption, lifecycle, multipart,
+  and expected-versioning checks without mutating the qualification bucket.
   The
   reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
   contract now expresses retained state, versioning, encryption choice,
@@ -2576,9 +2579,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   statements fail closed. Its credential-free three-case environment fixture
   test is wired into the hosted preflight. The
   fresh read-only audit on 2026-09-22 returned
-  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
-  secret, missing GitHub OIDC provider, and missing immutable-subject role
-  trust; it made no changes. The
+  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
+  non-self-approvable reviewer, protected-environment inputs and secret,
+  missing GitHub OIDC provider, and missing immutable-subject role trust; it
+  made no changes. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free seven-case regression matrix covers valid, missing,

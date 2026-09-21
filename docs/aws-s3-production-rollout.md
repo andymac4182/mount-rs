@@ -216,9 +216,10 @@ current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
 result. The fresh read-only audit on 2026-09-22 returned
-`AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
-secret, missing GitHub OIDC provider, and missing immutable-subject role trust;
-it made no changes.
+`AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
+non-self-approvable reviewer, protected-environment inputs and secret, missing
+GitHub OIDC provider, and missing immutable-subject role trust; it made no
+changes.
 
 ## Rollout sequence
 
@@ -288,7 +289,7 @@ prefix-scoped runtime and maintenance statements from the reviewable
 CloudFormation contract. It never prints the policy or role values and fails
 closed when the bucket policy is absent or differs from that contract.
 
-The latest read-only qualification-bucket audit at pushed head `0010246`
+The latest read-only qualification-bucket audit at pushed head `74b5150`
 passed in account `922978963556` with the expected versioning status `None`,
 alongside the existing public-access, ownership, encryption, lifecycle, and
 multipart-abort checks. It did not mutate the bucket or rerun the full service
