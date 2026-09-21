@@ -6,17 +6,23 @@
 
 import { readFile } from "node:fs/promises";
 
+const rawArgs = process.argv.slice(2);
+const requireGo = rawArgs.includes("--require-go");
+const pathArgs = rawArgs.filter((argument) => argument !== "--require-go");
 const [
   trackerPath = "WORK_TRACKER.md",
   rolloutPath = "docs/W08-production-rollout.md",
   runbookPath = "docs/W08-operations-runbook.md",
   ledgerPath = "docs/W08-progress-ledger.md",
-] = process.argv.slice(2);
+] = pathArgs;
 
-if (process.argv.length > 6) {
+if (
+  pathArgs.length > 4 ||
+  rawArgs.some((argument) => argument.startsWith("--") && argument !== "--require-go")
+) {
   console.error(
     "usage: verify-w08-rollout-ledger.mjs [WORK_TRACKER.md] " +
-      "[rollout.md] [runbook.md] [progress-ledger.md]",
+      "[rollout.md] [runbook.md] [progress-ledger.md] [--require-go]",
   );
   process.exit(2);
 }
@@ -50,8 +56,11 @@ if (decisionMatches.length !== 1) {
   fail("rollout-decision-must-be-exactly-one-go-or-no-go");
 }
 const decision = decisionMatches[0][1];
+if (requireGo && decision !== "GO") {
+  fail("production-admission-requires-go");
+}
 
-const functionalItems = 32;
+const functionalItems = 33;
 for (let item = 1; item <= functionalItems; item += 1) {
   requireMatch(
     tracker,

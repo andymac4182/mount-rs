@@ -2411,6 +2411,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   run `35646848615` was cancelled before creating jobs (`jobs=[]`) and is not
   evidence. *(Implementation/static qualification; production evidence and
   approval remain external.)*
+- [x] W08.33 **Production-candidate GO admission guard:** extended
+  `scripts/verify-w08-rollout-ledger.mjs` with `--require-go`, added the
+  NO-GO admission-negative and simulated-complete-GO cases to
+  `scripts/test-w08-rollout-ledger.mjs`, and placed the fail-closed check in
+  the `admission` job of `.github/workflows/w08-production-release.yml` before
+  either target can build. A production-candidate tag therefore cannot reach
+  artifact generation or publication while the authoritative tracker remains
+  NO-GO or any P01–P09 checkbox is open. This is a release safety control only;
+  it does not create topology, provider, secret, canary, rollback or owner
+  approval evidence. *(Implementation/static qualification; production
+  evidence and approval remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

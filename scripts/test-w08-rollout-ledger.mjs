@@ -85,6 +85,7 @@ const cases = [
     name: "complete-go-ledger",
     expectedStatus: 0,
     expectedOutput: "W08_ROLLOUT_LEDGER_POLICY_PASS decision=GO",
+    args: ["--require-go"],
     documents: {
       tracker: source.tracker.replaceAll(
         /- \[ \] \*\*W08-P0([1-9])\b/g,
@@ -105,6 +106,13 @@ const cases = [
         "production rollout decision is currently\n**GO**",
       ),
     },
+  },
+  {
+    name: "production-admission-no-go",
+    expectedStatus: 1,
+    expectedOutput: "reason=production-admission-requires-go",
+    args: ["--require-go"],
+    documents: source,
   },
 ];
 
@@ -131,6 +139,7 @@ try {
       process.execPath,
       [
         verifierPath,
+        ...(testCase.args ?? []),
         paths.tracker,
         paths.rollout,
         paths.runbook,
