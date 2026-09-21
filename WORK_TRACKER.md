@@ -1278,6 +1278,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the N-API facade preserves the oracle's `TypeError` class/message and the
   native preflight matches its UTF-16 length/control-character boundary;
   hosted/native lifecycle and complete S3 session parity remain separate.
+- [x] The S3 multipart lifecycle packet now proves staged state survives a
+  replacement session, close sweeps every bucket idempotently while the
+  session remains usable, and Complete/Abort has one terminal winner across
+  concurrent session calls; the filesystem-visible exclusive finalization
+  marker returns `NoSuchUpload` to the loser and late part writes.
+- [x] The same multipart replacement flow is exercised through the generated
+  N-API S3 facade: release build/declarations, direct session create/part/list/
+  complete/GET, streamed traffic, cancellation, bucket isolation, connection
+  cleanup, and a typed peer-fault callback all pass in the host-enabled server
+  integration; this remains non-native and non-provider evidence.
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API

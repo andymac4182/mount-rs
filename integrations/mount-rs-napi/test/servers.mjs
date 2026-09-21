@@ -822,6 +822,19 @@ async function fetchBody(url, init, label) {
   return { response, body: Buffer.from(body) };
 }
 
+function xmlField(body, name) {
+  const match = Buffer.from(body).toString().match(new RegExp(`<${name}>([^<]*)</${name}>`));
+  assert.ok(match, `missing S3 XML field ${name}`);
+  return match[1];
+}
+
+function bufferedS3(session, method, target, body = Buffer.alloc(0)) {
+  const headers = body.length === 0
+    ? []
+    : [{ name: "content-length", value: String(body.length) }];
+  return session.handleRequest({ method, target, headers }, body);
+}
+
 async function exerciseS3() {
   const photos = memoryFilesystem();
   const notes = memoryFilesystem();
@@ -933,6 +946,50 @@ async function exerciseS3() {
       streamedObject,
     );
 
+    const initiated = await bufferedS3(server.session, "POST", "/photos/restarted-s3.bin?uploads");
+    assert.equal(initiated.status, 200);
+    const uploadId = xmlField(initiated.body, "UploadId");
+    const part = await bufferedS3(
+      server.session,
+      "PUT",
+      `/photos/restarted-s3.bin?uploadId=${uploadId}&partNumber=1`,
+      Buffer.from("N-API replacement-session bytes"),
+    );
+    assert.equal(part.status, 200);
+    const partEtag = part.headers.find(({ name }) => name === "etag")?.value;
+    assert.ok(partEtag, "replacement-session part ETag");
+
+    // Rebuild the server facade over the same native Filesystem. Multipart
+    // state is represented by the driver tree, not a session-local registry.
+    const replacement = createS3Server({ buckets: { photos } }, { debug: true });
+    try {
+      const listed = await bufferedS3(
+        replacement.session,
+        "GET",
+        `/photos/restarted-s3.bin?uploadId=${uploadId}`,
+      );
+      assert.equal(listed.status, 200);
+      assert.match(Buffer.from(listed.body).toString(), /<PartNumber>1<\/PartNumber>/);
+      const completed = await bufferedS3(
+        replacement.session,
+        "POST",
+        `/photos/restarted-s3.bin?uploadId=${uploadId}`,
+        Buffer.from(
+          `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>${partEtag}</ETag></Part></CompleteMultipartUpload>`,
+        ),
+      );
+      assert.equal(completed.status, 200);
+      const restartedObject = await bufferedS3(
+        replacement.session,
+        "GET",
+        "/photos/restarted-s3.bin",
+      );
+      assert.equal(restartedObject.status, 200);
+      assert.deepEqual(restartedObject.body, Buffer.from("N-API replacement-session bytes"));
+    } finally {
+      await replacement.close();
+    }
+
     const emptyRequest = () => new ReadableStream({
       start(controller) {
         controller.close();
@@ -984,8 +1041,8 @@ async function exerciseS3() {
     assert.equal(failedStream.status, 400);
 
     const streamedStats = await server.session.stats();
-    assert.equal(streamedStats.requests, beforeStreamStats.requests + 4);
-    assert.equal(streamedStats.replies, beforeStreamStats.replies + 4);
+    assert.equal(streamedStats.requests, beforeStreamStats.requests + 6);
+    assert.equal(streamedStats.replies, beforeStreamStats.replies + 6);
     assert.equal(streamedStats.errors, beforeStreamStats.errors + 1);
     assert.equal(
       streamedStats.operations.PutObject,

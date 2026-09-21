@@ -43,6 +43,10 @@ const DEFAULT_MAX_BODY: usize = 512 * 1024 * 1024;
 const DEFAULT_MULTIPART_STAGING_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 const DEFAULT_MULTIPART_STAGING_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const MANIFEST_NAME: &str = "upload.json";
+// The marker is created with exclusive-open so Complete and Abort have one
+// filesystem-visible terminal winner even when different session instances
+// share the same driver.
+const FINALIZATION_MARKER: &str = ".finalizing";
 
 struct ListObjectsRequest<'a> {
     bucket: &'a str,
@@ -1431,6 +1435,7 @@ impl S3Session {
     ) -> S3Result<S3Response> {
         reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
+        ensure_upload_not_finalizing(&driver, upload_id).await?;
         if !aws_chunked_body(&request.head.headers) {
             validate_declared_length(&request.head.headers, request.body.len())?;
         }
@@ -1452,6 +1457,7 @@ impl S3Session {
             body.len() as u64,
         )
         .await?;
+        ensure_upload_not_finalizing(&driver, upload_id).await?;
         write_bytes(&driver, &path, &body, false)
             .await
             .map_err(|error| match error {
@@ -1465,6 +1471,7 @@ impl S3Session {
                 }
                 other => other,
             })?;
+        ensure_upload_not_finalizing(&driver, upload_id).await?;
         let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
         Ok(S3Response::empty(200)
             .header("etag", protocol::etag_header(&object_etag(&stats)))
@@ -1481,6 +1488,7 @@ impl S3Session {
     ) -> S3Result<S3StreamResponse> {
         reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
+        ensure_upload_not_finalizing(&driver, upload_id).await?;
         let path = part_path(upload_id, part_number);
         let staging_quota = staging_quota(
             &driver,
@@ -1518,6 +1526,7 @@ impl S3Session {
             }
             other => other,
         })?;
+        ensure_upload_not_finalizing(&driver, upload_id).await?;
         let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
         Ok(S3StreamResponse::from(
             S3Response::empty(200)
@@ -1545,103 +1554,113 @@ impl S3Session {
             self.options.credentials.as_ref(),
         )?;
         let requested = parse_complete_document(&body, self.options.max_xml_bytes)?;
-        let manifest = read_manifest(&driver, upload_id, &target.key).await?;
-        let mut previous = 0_u32;
-        let mut parts = Vec::new();
-        for (index, (number, etag)) in requested.iter().enumerate() {
-            if *number <= previous {
-                return Err(S3Failure::s3("InvalidPartOrder"));
-            }
-            previous = *number;
-            let path = part_path(upload_id, *number);
-            let stats = driver.stat(&path).await.map_err(|error| {
-                if matches!(
-                    error.code,
-                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
-                ) {
-                    S3Failure::s3("InvalidPart")
-                } else {
-                    S3Failure::Fs(error)
+        let marker = claim_multipart_finalization(&driver, upload_id, &target.key).await?;
+        let mut published = false;
+        let result: S3Result<S3Response> = async {
+            let manifest = read_manifest(&driver, upload_id, &target.key).await?;
+            let mut previous = 0_u32;
+            let mut parts = Vec::new();
+            for (index, (number, etag)) in requested.iter().enumerate() {
+                if *number <= previous {
+                    return Err(S3Failure::s3("InvalidPartOrder"));
                 }
-            })?;
-            if !stats.is_file() || unquote_etag(etag) != object_etag(&stats) {
-                return Err(S3Failure::s3("InvalidPart"));
-            }
-            if index + 1 < requested.len() && stats.size < MIN_PART_SIZE {
-                return Err(S3Failure::s3("EntityTooSmall"));
-            }
-            parts.push((path, stats.size));
-        }
-        let assembled_size = parts
-            .iter()
-            .fold(0_u64, |total, (_, size)| total.saturating_add(*size));
-        ensure_staging_capacity(
-            &driver,
-            self.options.multipart_staging_max_bytes,
-            None,
-            assembled_size,
-        )
-        .await?;
-        require_atomic_rename(&driver)?;
-        ensure_parent(&driver, &target.path).await?;
-        // Assemble through a private staging file instead of collecting all
-        // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
-        // the existing destination unchanged if a part read or metadata update
-        // fails before the final rename.
-        let staging_path = format!(
-            "{}/complete-{}",
-            upload_directory(upload_id),
-            new_upload_id()
-        );
-        let assemble_result: S3Result<()> = async {
-            let destination = driver
-                .open(&staging_path, "w", 0o666)
-                .await
-                .map_err(S3Failure::Fs)?;
-            let mut position = 0_u64;
-            let copy_result: S3Result<()> = async {
-                for (path, size) in &parts {
-                    copy_file_between_drivers(
-                        &driver,
-                        path,
-                        &destination,
-                        *size,
-                        self.options.read_chunk_bytes,
-                        &mut position,
-                    )
-                    .await?;
+                previous = *number;
+                let path = part_path(upload_id, *number);
+                let stats = driver.stat(&path).await.map_err(|error| {
+                    if matches!(
+                        error.code,
+                        mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                    ) {
+                        S3Failure::s3("InvalidPart")
+                    } else {
+                        S3Failure::Fs(error)
+                    }
+                })?;
+                if !stats.is_file() || unquote_etag(etag) != object_etag(&stats) {
+                    return Err(S3Failure::s3("InvalidPart"));
                 }
-                Ok(())
+                if index + 1 < requested.len() && stats.size < MIN_PART_SIZE {
+                    return Err(S3Failure::s3("EntityTooSmall"));
+                }
+                parts.push((path, stats.size));
+            }
+            let assembled_size = parts
+                .iter()
+                .fold(0_u64, |total, (_, size)| total.saturating_add(*size));
+            ensure_staging_capacity(
+                &driver,
+                self.options.multipart_staging_max_bytes,
+                None,
+                assembled_size,
+            )
+            .await?;
+            require_atomic_rename(&driver)?;
+            ensure_parent(&driver, &target.path).await?;
+            // Assemble through a private staging file instead of collecting all
+            // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
+            // the existing destination unchanged if a part read or metadata update
+            // fails before the final rename.
+            let staging_path = format!(
+                "{}/complete-{}",
+                upload_directory(upload_id),
+                new_upload_id()
+            );
+            let assemble_result: S3Result<()> = async {
+                let destination = driver
+                    .open(&staging_path, "w", 0o666)
+                    .await
+                    .map_err(S3Failure::Fs)?;
+                let mut position = 0_u64;
+                let copy_result: S3Result<()> = async {
+                    for (path, size) in &parts {
+                        copy_file_between_drivers(
+                            &driver,
+                            path,
+                            &destination,
+                            *size,
+                            self.options.read_chunk_bytes,
+                            &mut position,
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                }
+                .await;
+                let close_result = destination.close().await.map_err(S3Failure::Fs);
+                copy_result.and(close_result)?;
+                if let Some(mtime) = manifest.mtime_ms {
+                    apply_mtime(&driver, &staging_path, mtime).await?;
+                }
+                driver
+                    .rename(&staging_path, &target.path)
+                    .await
+                    .map_err(S3Failure::Fs)
             }
             .await;
-            let close_result = destination.close().await.map_err(S3Failure::Fs);
-            copy_result.and(close_result)?;
-            if let Some(mtime) = manifest.mtime_ms {
-                apply_mtime(&driver, &staging_path, mtime).await?;
+            if let Err(error) = assemble_result {
+                let _ = driver.unlink(&staging_path).await;
+                return Err(error);
             }
-            driver
-                .rename(&staging_path, &target.path)
-                .await
-                .map_err(S3Failure::Fs)
+            published = true;
+            let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
+            remove_tree(&driver, &upload_directory(upload_id)).await?;
+            let location = object_location(request.head, &target.bucket, &target.key);
+            Ok(xml_response(
+                200,
+                protocol::complete_multipart_xml(
+                    &location,
+                    &target.bucket,
+                    &target.key,
+                    &object_etag(&stats),
+                ),
+                "",
+            ))
         }
         .await;
-        if let Err(error) = assemble_result {
-            let _ = driver.unlink(&staging_path).await;
-            return Err(error);
+        if result.is_err() && !published {
+            let _ = release_multipart_finalization(&driver, &marker).await;
         }
-        let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
-        remove_tree(&driver, &upload_directory(upload_id)).await?;
-        let location = object_location(request.head, &target.bucket, &target.key);
-        Ok(xml_response(
-            200,
-            protocol::complete_multipart_xml(
-                &location,
-                &target.bucket,
-                &target.key,
-                &object_etag(&stats),
-            ),
-            "",
-        ))
+        result
     }
 
     async fn abort_multipart(
@@ -1651,8 +1670,11 @@ impl S3Session {
         upload_id: &str,
     ) -> S3Result<S3Response> {
         reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
-        let _ = read_manifest(&driver, upload_id, &target.key).await?;
-        remove_tree(&driver, &upload_directory(upload_id)).await?;
+        let marker = claim_multipart_finalization(&driver, upload_id, &target.key).await?;
+        if let Err(error) = remove_tree(&driver, &upload_directory(upload_id)).await {
+            let _ = release_multipart_finalization(&driver, &marker).await;
+            return Err(error);
+        }
         Ok(S3Response::empty(204))
     }
 
@@ -3679,6 +3701,53 @@ fn chunk_signature(signing: &ChunkSigning<'_>, previous: &str, payload_hash: &st
         previous,
         payload_hash,
     )
+}
+
+async fn claim_multipart_finalization(
+    driver: &Arc<dyn FsDriver>,
+    upload_id: &str,
+    key: &str,
+) -> S3Result<String> {
+    let _ = read_manifest(driver, upload_id, key).await?;
+    let marker = format!("{}/{FINALIZATION_MARKER}", upload_directory(upload_id));
+    let handle = driver.open(&marker, "wx", 0o600).await.map_err(|error| {
+        if matches!(
+            error.code,
+            mount_rs_core::ErrorCode::Eexist
+                | mount_rs_core::ErrorCode::Enoent
+                | mount_rs_core::ErrorCode::Enotdir
+        ) {
+            S3Failure::s3("NoSuchUpload")
+        } else {
+            S3Failure::Fs(error)
+        }
+    })?;
+    handle.close().await.map_err(S3Failure::Fs)?;
+    Ok(marker)
+}
+
+async fn ensure_upload_not_finalizing(driver: &Arc<dyn FsDriver>, upload_id: &str) -> S3Result<()> {
+    let marker = format!("{}/{FINALIZATION_MARKER}", upload_directory(upload_id));
+    match driver.stat(&marker).await {
+        Ok(_) => Err(S3Failure::s3("NoSuchUpload")),
+        Err(error)
+            if matches!(
+                error.code,
+                mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+            ) =>
+        {
+            Ok(())
+        }
+        Err(error) => Err(S3Failure::Fs(error)),
+    }
+}
+
+async fn release_multipart_finalization(driver: &Arc<dyn FsDriver>, marker: &str) -> S3Result<()> {
+    match driver.unlink(marker).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == mount_rs_core::ErrorCode::Enoent => Ok(()),
+        Err(error) => Err(S3Failure::Fs(error)),
+    }
 }
 
 async fn read_manifest(
