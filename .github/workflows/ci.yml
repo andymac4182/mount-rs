@@ -61,7 +61,20 @@ jobs:
         env:
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
           MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
+          MOUNT_RS_OZONE_IOPS: '1'
+          MOUNT_RS_OZONE_IOPS_OUTPUT: artifacts/ozone-iops.json
+          MOUNT_RS_OZONE_IOPS_MIN: '1000'
+          MOUNT_RS_OZONE_IOPS_ITERATIONS: '400'
+          MOUNT_RS_OZONE_IOPS_CONCURRENCY: '64'
+          MOUNT_RS_OZONE_IOPS_PAYLOAD_BYTES: '4096'
         run: sh scripts/test-ozone-compositions.sh
+      - name: Preserve Ozone IOPS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ozone-iops
+          path: artifacts/ozone-iops.json
+          if-no-files-found: warn
 
   ozone-tidb:
     # W26.3 needs the real Ozone gateway and the durable TiDB topology in the

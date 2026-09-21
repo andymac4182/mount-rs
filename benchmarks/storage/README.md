@@ -77,6 +77,29 @@ runs combined and split-provider smoke workloads, and stops the server. These
 results are explicitly volatile, not durable-disk benchmark evidence. CI runs
 this check on the Node platform matrix and uploads its JSON separately.
 
+### Ozone IOPS qualification
+
+The same runner can measure a small, concurrent split-provider lifecycle over
+the real Ozone S3 Gateway and fail below a requested threshold:
+
+```sh
+node benchmarks/storage/runner.mjs \
+  --providers mount-rs-split-pglite-r2 \
+  --sizes 1 --payload-bytes 4096 \
+  --iterations 400 --concurrency 64 --min-iops 1000 \
+  --output artifacts/ozone-iops.json
+```
+
+One lifecycle is one successful write, full read/verification and delete, so
+the reported IOPS is three successful storage operations per completed
+lifecycle divided by the measured lifecycle wall time. The payload-size
+selector remains in the JSON for schema compatibility, while
+`payloadSizesBytes`, `summary.iops`, `summary.iopsTarget` and
+`summary.iopsTargetMet` record the actual workload and result. This is a
+controlled CI/provider qualification measurement; it is not proof that every
+customer Ozone deployment can sustain 1,000 IOPS or meet the customer's
+99.99%/RPO/RTO objectives.
+
 ## Provider matrix and evidence boundaries
 
 | Provider id | Implementation/binding | Metadata | Blocks | Topology | Configuration |
