@@ -1635,6 +1635,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Direct AWS tests now construct the public `AwsS3Config` path rather than a
   parallel raw client, and version-aware cleanup completed with
   `AWS_S3_TEST_PASS`.
+- [x] The current pushed-head rerun at `da4d36c` refreshed the same evidence
+  under the selected `myroot` account: the read-only audit passed for
+  `mount-rs-integration-922978963556-ap-southeast-2` in `ap-southeast-2`
+  (`BucketOwnerEnforced`, `AES256`, versioning `None`, seven-day lifecycle,
+  one-day incomplete-multipart abort), the scoped role denied a sibling
+  prefix, the public CLI SDK self-test reopened successfully, the composed
+  AWS block test passed, and the cross-process reopen test passed. The run
+  cleaned its owned prefix and emitted `AWS_S3_TEST_PASS` at
+  `mount-rs-tests/aws-s3/20260921T120543Z-65309-0663df4c1d84504983babd5ff88f4e02`.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -1665,6 +1674,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   this macOS runner does not provide native `libfdb_c`; the site typecheck also
   needs a network-backed dependency install and is not claimed from the
   offline run.
+- [x] The current pushed head `da4d36c` also passed the full locked offline
+  workspace test gate and strict workspace Clippy with `-D warnings`. The
+  passing run includes the 14-test S3 gateway suite, 13 AWS-provider unit
+  tests, both signed HTTP interop tests, and the public SDK/CLI tests; the
+  workspace's explicitly ignored native/service rows remain separate gates.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -1673,7 +1687,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   qualification controls without mutation. It passed the `myroot` test bucket
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
-  incomplete-multipart abort; the W25 bucket and role are test resources, so
+  incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
+  role are test resources, so
   production resource review remains open. The audit now fails closed on
   inherited endpoint/service-profile overrides, requires an expected caller
   account, and verifies the bucket location before reporting controls.
@@ -1690,9 +1705,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
-  references; both code and workflow-reference remediations are now landed
-  at the current head, pending a fresh scan. Hosted OIDC trust, the protected
-  versioning-status input, and the deployment evidence remain open. The
+  references. Both remediations are landed at current head `da4d36c`; the
+  follow-up Standard scan reports zero reportable findings in the 20 directly
+  reviewed W25 surfaces, with partial repository coverage (590 files, 20
+  closed review rows). Hosted OIDC trust, the protected versioning-status
+  input, and the deployment evidence remain open. The latest hosted run
+  `35597712935` failed before acceptance because the `aws-s3-ci` environment
+  has no variables or secrets, leaving `aws-region` empty. The existing test
+  role trust policy allows only the selected SSO administrator role and does
+  not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
+  protected environment configuration are required before rerunning hosted
+  evidence. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
@@ -1810,10 +1833,10 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P4 — durability/storage failure contract | Partial qualification | 10% | CI client recovery/error evidence plus customer Ozone replication/storage requirements |
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
 | P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |
-| P7 — integration observability and error contract | Local HTTP/OTLP telemetry evidence passed; production integration open | 25% | `mount-rs-http` passed 8 unit and 8 integration tests; OTLP-enabled HTTP passed 9 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection behavior; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
+| P7 — integration observability and error contract | Local HTTP/OTLP telemetry evidence passed; production integration open | 30% | `mount-rs-http` passed 8 unit and 10 integration tests; OTLP-enabled HTTP passed 11 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection/listing behavior; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
 | P8 — 1,000 IOPS per-drive CI workload | CI gate implemented; hosted result pending | 10% | Existing benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000; Ozone composition CI is wired for 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live evidence is blocked by missing PGlite/N-API prerequisites. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
-| P10 — security, privacy, tenancy and audit | Threat-model checkpoint and local controls recorded; final review open | 30% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap and stalled-request tests pass locally; strict workspace Clippy is green; standard scan `943a7c01-e25f-48ee-952f-040b7421e80d` remains running on older revision `f54dff8`, and provenance, secure Ozone auth/rotation and final security evidence remain open |
+| P10 — security, privacy, tenancy and audit | Threat-model checkpoint and local controls recorded; final review open | 35% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and directory entry/response-byte limit tests pass locally; strict workspace Clippy is green; the core `FsDriver::readdir` API remains vector-based and provider-side pagination is still open; standard scan `943a7c01-e25f-48ee-952f-040b7421e80d` remains running on older revision `f54dff8`, and provenance, secure Ozone auth/rotation and final security evidence remain open |
 | P11 — end-to-end client/platform matrix | HTTP path added to Ozone CI; full matrix open | 25% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; native mounts, every advertised platform, and terminal hosted evidence remain open |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |

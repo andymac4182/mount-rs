@@ -31,7 +31,9 @@ multi-range requests. Uploads and JSON requests are bounded by
 `HttpServerOptions::max_request_bytes`; streamed reads use a bounded channel and
 `read_chunk_bytes`. The listener also enforces `max_connections`, applies a
 bounded header and request timeout, and closes excess connections before they
-reach request handling.
+reach request handling. Directory listings are bounded by
+`max_directory_entries` and `max_response_bytes`; oversized listings fail
+closed before a response is sent.
 
 `PUT` is a bounded streaming write, not an atomic publish. The current driver
 contract has no portable temporary-file/atomic-publish operation, so a request

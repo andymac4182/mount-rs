@@ -25,9 +25,11 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify, Semaphore};
 
 pub const DEFAULT_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 pub const DEFAULT_READ_CHUNK_BYTES: usize = 64 * 1024;
 pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 pub const DEFAULT_MAX_CONNECTIONS: usize = 256;
+pub const DEFAULT_MAX_DIRECTORY_ENTRIES: usize = 4096;
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -160,6 +162,8 @@ pub struct HttpServerOptions {
     pub host: String,
     pub port: u16,
     pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+    pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
     pub drain_timeout: Duration,
     pub max_connections: usize,
@@ -174,6 +178,8 @@ impl Default for HttpServerOptions {
             host: "127.0.0.1".to_owned(),
             port: 0,
             max_request_bytes: DEFAULT_MAX_REQUEST_BYTES,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            max_directory_entries: DEFAULT_MAX_DIRECTORY_ENTRIES,
             read_chunk_bytes: DEFAULT_READ_CHUNK_BYTES,
             drain_timeout: DEFAULT_DRAIN_TIMEOUT,
             max_connections: DEFAULT_MAX_CONNECTIONS,
@@ -227,6 +233,8 @@ struct AppState {
 #[derive(Clone)]
 struct RequestConfig {
     max_request_bytes: usize,
+    max_response_bytes: usize,
+    max_directory_entries: usize,
     read_chunk_bytes: usize,
     request_timeout: Duration,
     control: RuntimeControl,
@@ -315,6 +323,8 @@ impl HttpServer {
                 registry: Arc::new(registry),
                 config: RequestConfig {
                     max_request_bytes: options.max_request_bytes.max(1),
+                    max_response_bytes: options.max_response_bytes.max(1),
+                    max_directory_entries: options.max_directory_entries.max(1),
                     read_chunk_bytes: options.read_chunk_bytes.max(1),
                     request_timeout: positive_duration(options.request_timeout),
                     control,
@@ -707,6 +717,18 @@ impl RequestError {
         }
     }
 
+    fn response_too_large() -> Self {
+        Self::Client {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: ErrorCode::Eoverflow,
+            message: "directory response exceeds the configured limit".to_owned(),
+            close: true,
+            content_range: None,
+            allow: None,
+            authenticate: false,
+        }
+    }
+
     fn request_timeout() -> Self {
         Self::Client {
             status: StatusCode::REQUEST_TIMEOUT,
@@ -967,7 +989,9 @@ async fn handle_request_uninstrumented(
             )
             .await
         }
-        Route::Entries { path, .. } => handle_entries(parts.method, drive, path).await,
+        Route::Entries { path, .. } => {
+            handle_entries(parts.method, drive, path, state.config.clone()).await
+        }
         Route::Operation { operation, .. } => {
             handle_operation(parts.method, body, drive, operation, state.config.clone()).await
         }
@@ -1071,12 +1095,18 @@ async fn handle_file_read(
             .readdir(&path)
             .await
             .map_err(RequestError::Fs)?;
+        if entries.len() > config.max_directory_entries {
+            return Err(RequestError::response_too_large());
+        }
         let payload = serde_json::to_vec(&DirectoryPayload {
             path: &path,
             stats: &stats,
             entries,
         })
         .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory metadata")))?;
+        if payload.len() > config.max_response_bytes {
+            return Err(RequestError::response_too_large());
+        }
         return Ok(json_response(StatusCode::OK, Bytes::from(payload), head));
     }
     if stats.file_type() != FileType::File && stats.file_type() != FileType::Symlink {
@@ -1235,6 +1265,7 @@ async fn handle_entries(
     method: Method,
     drive: DriveConfig,
     path: String,
+    config: RequestConfig,
 ) -> Result<Response<HttpBody>, RequestError> {
     if method != Method::GET && method != Method::HEAD {
         return Err(RequestError::method_not_allowed("GET, HEAD"));
@@ -1244,8 +1275,14 @@ async fn handle_entries(
         .readdir(&path)
         .await
         .map_err(RequestError::Fs)?;
+    if entries.len() > config.max_directory_entries {
+        return Err(RequestError::response_too_large());
+    }
     let payload = serde_json::to_vec(&entries)
         .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
+    if payload.len() > config.max_response_bytes {
+        return Err(RequestError::response_too_large());
+    }
     Ok(json_response(
         StatusCode::OK,
         Bytes::from(payload),

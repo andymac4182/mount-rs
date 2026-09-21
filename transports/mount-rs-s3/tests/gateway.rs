@@ -790,6 +790,26 @@ async fn multipart_staging_is_bounded_reaped_and_deleted_honestly() {
     driver
         .utimes(&upload_directory, 0, 0)
         .await
+        .expect("set unavailable mtime");
+    let active_parts = session
+        .handle(request(
+            "GET",
+            &format!("/mountx/reap.bin?uploadId={reap_upload_id}"),
+            [],
+            &[],
+        ))
+        .await;
+    assert_eq!(active_parts.status, 200);
+    assert!(driver.stat(&upload_directory).await.is_ok());
+
+    let old_mtime = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis() as i64
+        - 120_000;
+    driver
+        .utimes(&upload_directory, old_mtime, old_mtime)
+        .await
         .expect("age multipart staging");
     let parts = session
         .handle(request(
