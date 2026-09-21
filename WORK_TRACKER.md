@@ -74,6 +74,15 @@ upstream suite 1,200 passed/82 skipped, and all 40 seeded oracle lanes passed.
 R2 factory/runtime rows remained explicit credential-gated skips; this is not
 live R2 acceptance.
 
+The latest published tree `f07579e` was rerun with the oracle-enabled N-API
+package suite on 2026-09-21 and exited 0. Harness, factory, lifecycle, server,
+JS-driver, FUSE/NFS/9P codecs, Unstorage, chunked, differential, restart and
+distribution/artifact packets all passed; PGlite/R2 factories and native-mount
+opt-ins remained explicit skips. The authorized macOS native NFS N-API gate
+then passed real mounted write/read/unmount, and the Node CLI native gate passed
+with independent Rust and Node clients writing to the same mount, Rust reading
+Node bytes, clean unmount, and both payloads retained in the backing root.
+
 The follow-up PGlite CLI consumer check in `dcc3aa4` also exited 0: the Rust
 CLI now performs the same configured PGlite split-store write, shutdown,
 reopen and readback that the Node CLI already performed. The live CLI matrix
