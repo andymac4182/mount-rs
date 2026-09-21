@@ -54,6 +54,7 @@ import type {
   NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
+  NativeFuseSyncfsIn,
   NativeFuseSymlinkIn,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
@@ -113,6 +114,7 @@ export type {
   NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
+  NativeFuseSyncfsIn,
   NativeFuseSymlinkIn,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
@@ -452,6 +454,8 @@ export declare function decodeFlushIn(body: Uint8Array): NativeFuseFlushIn
 export declare function encodeFlushIn(value: NativeFuseFlushIn): Buffer
 export declare function decodeFsyncIn(body: Uint8Array): NativeFuseFsyncIn
 export declare function encodeFsyncIn(value: NativeFuseFsyncIn): Buffer
+export declare function decodeSyncfsIn(body: Uint8Array): NativeFuseSyncfsIn
+export declare function encodeSyncfsIn(value: NativeFuseSyncfsIn): Buffer
 export declare function decodeLkIn(body: Uint8Array): NativeFuseLkIn
 export declare function encodeLkIn(value: NativeFuseLkIn): Buffer
 export declare function decodeLkOut(body: Uint8Array): NativeFuseLkOut

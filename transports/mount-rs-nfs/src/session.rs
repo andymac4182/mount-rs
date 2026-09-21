@@ -6,6 +6,7 @@
 //! the boundary used by the TCP server.
 
 use std::collections::{HashMap, VecDeque};
+use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -126,10 +127,52 @@ impl Nfs4IdMap {
     }
 }
 
+/// Clock used by the NFSv4 lease table.
+///
+/// The default uses the process monotonic clock. Rust callers can inject a
+/// deterministic clock for lease and expiry tests without making the wire
+/// session depend on wall-clock time; the N-API boundary always uses the
+/// default monotonic clock.
+#[derive(Clone)]
+pub struct Nfs4Clock(Arc<dyn Fn() -> Instant + Send + Sync + 'static>);
+
+impl Nfs4Clock {
+    /// Use the process monotonic clock.
+    pub fn system() -> Self {
+        Self::from_fn(Instant::now)
+    }
+
+    /// Construct a clock from a thread-safe monotonic time source.
+    pub fn from_fn<F>(now: F) -> Self
+    where
+        F: Fn() -> Instant + Send + Sync + 'static,
+    {
+        Self(Arc::new(now))
+    }
+
+    pub(crate) fn now(&self) -> Instant {
+        (self.0)()
+    }
+}
+
+impl Default for Nfs4Clock {
+    fn default() -> Self {
+        Self::system()
+    }
+}
+
+impl fmt::Debug for Nfs4Clock {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Nfs4Clock(<injected monotonic source>)")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Nfs4StateOptions {
     /// Lease length reported by FATTR4_LEASE_TIME.
     pub lease_seconds: u32,
+    /// Monotonic source used to enforce the NFSv4 client lease.
+    pub clock: Nfs4Clock,
     /// Upper 32 bits folded into NFSv4 client and session identities.
     ///
     /// A stable non-zero value keeps identities from separate process
@@ -160,6 +203,7 @@ impl Default for Nfs4StateOptions {
     fn default() -> Self {
         Self {
             lease_seconds: DEFAULT_NFS4_LEASE_SECONDS,
+            clock: Nfs4Clock::default(),
             seed: 0,
             max_sessions: DEFAULT_NFS4_MAX_SESSIONS,
             max_fore_slots: DEFAULT_NFS4_MAX_FORE_SLOTS,

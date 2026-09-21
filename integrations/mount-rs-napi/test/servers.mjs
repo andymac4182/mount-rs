@@ -319,6 +319,7 @@ async function exerciseNfs() {
     assert.equal(server.session.stats.requests, 2);
     assert.equal(server.session.stats.procedures["NFS4:NULL"], 1);
     assert.equal(server.session.v4.stats.requests, 2);
+    assert.equal(await server.session.v4.sweepExpired(), 0);
     const rootHandle = [{ id: 1n, fileid: 1n, path: "/" }];
     assert.deepEqual(server.session.handles, rootHandle);
     assert.deepEqual(server.session.v4.handles, rootHandle);

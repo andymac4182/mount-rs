@@ -73,9 +73,11 @@ open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
 options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
 an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
 refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
-`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Upstream
-callback ID-map, injectable clock/lease, and session `onError` parity remain
-explicit gaps; deterministic seeded identities are now covered.
+`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Rust
+`Nfs4Clock` now drives automatic and explicit lease expiry sweeps with a
+rootless wire test covering both paths; N-API clock injection, callback ID-map,
+and session `onError` parity remain explicit gaps. Deterministic seeded
+identities are covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -252,6 +254,15 @@ codec and routes the native request to the existing `FsDriver::syncfs` barrier.
 Success, backend failure, malformed/trailing bodies and empty replies are
 covered by focused tests; hosted kernel syncfs and the remaining native
 lifecycle/crash/durability gates remain external, so W01 stays NO-GO.
+The follow-up N-API FUSE packet exposes the same request as typed
+`NativeFuseSyncfsIn` `decodeSyncfsIn`/`encodeSyncfsIn` bindings, with explicit
+`./fuse` CommonJS/ESM aliases and regenerated declarations. Exact eight-byte,
+truncated and trailing-body checks pass alongside the release addon rebuild,
+focused codec test, generated typecheck and locked N-API Rust check. The
+pinned mountx oracle still classifies `SYNCFS` as unimplemented, so no oracle
+differential is claimed for this operation; hosted kernel syncfs behavior and
+the remaining native lifecycle, callback, crash/restart and durability gates
+remain open, and W01 stays NO-GO.
 The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
 session destroy in unwind isolation. A backend or cleanup panic now becomes
 one owned `Task` transport error, still closes the session, marks the mount
@@ -704,7 +715,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35636591071`/`97b63aed` after the FUSE abort/shutdown fix; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest exact-current-main Linux Node/CLI/native-FUSE qualification is green at `35638932960`/`3817efc9` after the FUSE sync-barrier and blocked-read changes; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1163,9 +1174,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The pinned oracle upstream NFS gate passed 266 cases with 18 explicit
   capability/root skips, the N-API NFS codec differential passed, and the
   focused NFS target passed 33 unit, rootless wire 1, pipelined concurrency 1,
-  transport errors 4, v4 barrier 1, and v4 wire 4 tests; richer `onError` and
-  NFSv4 lease/ID-map/state-limit/reclaim knobs plus native/hosted/crash gates
-  remain explicitly open.
+  transport errors 4, v4 barrier 1, and v4 wire 4 tests; upstream `onError`,
+  callback ID maps, N-API clock injection, and native/hosted/crash gates remain
+  explicitly open.
 - [x] The NFSv4 lock-cap follow-up applies `maxLocksPerFile` to extensions of
   existing lock state, preserves conflict-before-cap ordering, and adds a
   rootless wire assertion for the additional-range rejection. The complete
@@ -1185,9 +1196,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
   `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
   release addon/typecheck, live N-API server integration, and strict affected
-  Clippy pass. Callback-based maps, injectable clock/lease controls, and
-  session `onError` remain explicit parity gaps; deterministic seeded
-  identities are covered by the rootless wire test.
+  Clippy pass. Callback-based maps, N-API clock injection, and session
+  `onError` remain explicit parity gaps; deterministic seeded identities are
+  covered by the rootless wire test.
+- [x] The NFSv4 lease packet adds deterministic Rust `Nfs4Clock` control,
+  automatic expiry before COMPOUND dispatch, explicit `sweep_expired`, and
+  release of expired sessions, locks, open states, and pinned backend handles;
+  the v4 wire test covers automatic and explicit expiry. N-API clock injection,
+  callback maps, `onError`, native Linux/hosted lifecycle, and crash/durability
+  gates remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1744,7 +1761,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   The p95/p99 outlier is retained as qualification telemetry, not production
   capacity evidence; production identity/ACL/TLS, backup/recovery, capacity,
   observability, macOS and release-owner gates remain open.
-  The latest post-FUSE-abort-fix hosted run
+  The previous post-FUSE-abort-fix hosted run
   [35636591071](https://github.com/andymac4182/mount-rs/actions/runs/35636591071)
   (job
   [106455406713](https://github.com/andymac4182/mount-rs/actions/runs/35636591071/job/106455406713))
@@ -1761,6 +1778,26 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `97b63aed2236696a8d397054b3c04c824e89c229`, run `35636591071`, attempt `1`
   and runner `GitHub Actions 1000020918`; the artifact SHA-256 is
   `123c2c5ece757fda141342d2b8e415e34269fff4246f5c3a8c147902415c137d`.
+  This is terminal hosted Linux qualification for the tested revision only;
+  production identity/ACL/TLS, backup/recovery, capacity, observability,
+  macOS and release-owner gates remain open.
+  The latest exact-current-main hosted run
+  [35638932960](https://github.com/andymac4182/mount-rs/actions/runs/35638932960)
+  (job
+  [106463213777](https://github.com/andymac4182/mount-rs/actions/runs/35638932960/job/106463213777))
+  tested current-main revision `3817efc9` on `ubuntu-24.04` and completed
+  green in 11m33s after the FUSE sync-barrier and blocked-read changes. Its
+  retained artifact `foundationdb-production-qualification-35638932960-1`
+  reported `qualification-pass`, `FOUNDATIONDB_CLI_PASS
+  mode=foundationdb-rustfs-fuse`, five soak rounds,
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9751
+  p95_us=28824 p99_us=28824 total_ms=151 throughput_ops_per_sec=99.31`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. The schema-2 provenance summary records source
+  revision `3817efc9999cc9d77e2c597873193d56206adb08`, run `35638932960`,
+  attempt `1` and runner `GitHub Actions 1000021113`; the artifact SHA-256 is
+  `c474b5ef9275ef88daf73e7fe90e36bd25eba8d149ac6849edfc672217ef4bd0`.
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
@@ -1804,9 +1841,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35636591071` recorded
-    `operations=15 p50_us=9640 p95_us=27896 p99_us=27896 total_ms=157
-    throughput_ops_per_sec=95.52` at revision `97b63aed`. This remains bounded
+    latency and throughput; latest hosted run `35638932960` recorded
+    `operations=15 p50_us=9751 p95_us=28824 p99_us=28824 total_ms=151
+    throughput_ops_per_sec=99.31` at revision `3817efc9`. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -1819,8 +1856,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `97b63aed` in run
-    `35636591071` on `ubuntu-24.04`, with the retained schema-2
+    Node, CLI/native Linux checkpoint is green for revision `3817efc9` in run
+    `35638932960` on `ubuntu-24.04`, with the retained schema-2
     `qualification-pass` artifact and provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
