@@ -161,6 +161,16 @@ module.exports = function install(binding) {
   const Mounted = binding.Mounted
   if (Mounted) {
     wrapAsync(Mounted.prototype, "unmount")
+    if (typeof Symbol.asyncDispose === "symbol") {
+      Object.defineProperty(Mounted.prototype, Symbol.asyncDispose, {
+        configurable: true,
+        enumerable: false,
+        writable: true,
+        value() {
+          return this.unmount()
+        },
+      })
+    }
   }
 
   // Free N-API functions are exported separately from the Filesystem class.
