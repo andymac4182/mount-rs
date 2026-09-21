@@ -82,6 +82,55 @@ jobs:
       - name: Verify real RustFS block contract and restart persistence
         run: ./scripts/test-rustfs.sh
 
+  tidb:
+    # The durable topology requires at least 10 GiB and four CPUs. Use the
+    # larger stable Ubuntu image so a capacity pass is meaningful rather than
+    # silently downgrading to a single-node or underprovisioned diagnostic.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify durable TiDB, PD, and TiKV restart acceptance
+        run: ./scripts/test-tidb.sh
+
+  tidb-rustfs:
+    # This job keeps the real RustFS service alive while test-tidb.sh owns the
+    # TiDB/PD/TiKV topology. The second composition phase reopens the scoped
+    # fixture after the durable TiDB component restarts.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: Swatinem/rust-cache@v2
+      - name: Install real PGlite and Node factory prerequisites
+        run: |
+          pnpm --dir tests/pglite install --frozen-lockfile
+          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - name: Build the N-API addon with the locked Rust graph
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
+      - name: Verify durable TiDB metadata over RustFS chunks
+        env:
+          MOUNT_RS_TIDB_VERSION: v8.5.7
+          MOUNT_RS_TIDB_RUSTFS_PREFIX: mount-rs-ci/tidb-rustfs/${{ github.run_id }}/${{ github.run_attempt }}
+          MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY: mount-rs-ci-tidb-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
+          MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE: ${{ runner.temp }}/mount-rs-tidb-rustfs-${{ github.run_id }}-${{ github.run_attempt }}.fixture
+        run: ./scripts/test-tidb-rustfs.sh
+
   native-webdav:
     strategy:
       fail-fast: false

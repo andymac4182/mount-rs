@@ -85,26 +85,31 @@ three-TiKV test cluster; PingCAP's quick-start guidance recommends at least
 images, run this script from a clean checkout with `cargo test --locked`, and
 retain the script's unique-resource cleanup behavior.
 
-This is a manual/local lane today. No workflow under `.github/workflows/` and
-no `scripts/test-all.sh` invocation currently runs `test-tidb.sh` or sets
-`MOUNT_RS_TIDB_*`; a green Node, native, or generic Rust job is therefore not
-TiDB evidence.
+The CI workflow runs the durable provider lane on `ubuntu-24.04` through
+`./scripts/test-tidb.sh` and runs the durable TiDB/RustFS composition through
+`./scripts/test-tidb-rustfs.sh`. Both jobs keep the official v8.5.7 images
+and the RustFS endpoint pinned by their harnesses; a job is evidence only when
+the final `TIDB_ACCEPTANCE` line reports
+`evidence=durable-multinode-restart`. The composition job also retains the
+scoped fixture until the TiDB restart phase and verifies the fresh-client
+reopen before cleanup.
 
 ## Consumer and evidence boundary
 
 This packet records what the current repository can actually qualify. TiDB is
-a workspace Rust crate with ignored, service-backed tests. It is not currently
-a selectable provider in the Rust CLI/SDK, N-API/Node CLI, or native-mount
-consumer paths.
+a workspace Rust crate with ignored, service-backed tests. The Rust SDK,
+N-API factory, and Rust/Node CLI configuration have explicit TiDB selection
+paths; native-mount selection remains a separate evidence boundary.
 
 ### Runnable lanes
 
 | Lane | Exact command | Accepts as evidence | Does not accept as evidence |
 | --- | --- | --- | --- |
-| Durable real-component gate | `./scripts/test-tidb.sh` | Official pinned PD/TiKV/TiDB images, TiDB identity, the ignored provider contract, and sequential PD/TiDB/TiKV restart/reopen checks. Count it only when the final line says `TIDB_ACCEPTANCE evidence=durable-multinode-restart`. | Power-loss, host-filesystem fsync, production capacity, CI, Node, CLI, or native-mount support. |
+| Durable real-component gate | `./scripts/test-tidb.sh` | Official pinned PD/TiKV/TiDB images, TiDB identity, the ignored provider contract, and sequential PD/TiDB/TiKV restart/reopen checks. Count it only when the final line says `TIDB_ACCEPTANCE evidence=durable-multinode-restart`. | Power-loss, host-filesystem fsync, production capacity, Node, CLI, or native-mount support. |
+| Durable TiDB/RustFS composition | `./scripts/test-tidb-rustfs.sh` | The RustFS harness owns a loopback S3 endpoint while the TiDB harness runs direct provider, ambiguous-commit, restart, and ChunkedFs seed/reopen/cleanup phases. | Cloudflare R2, power-loss, or native-mount support. |
 | Single-node real TiDB smoke | `MOUNT_RS_TIDB_TOPOLOGY=single ./scripts/test-tidb.sh` | Actual TiDB identity and provider contract against one PD and one TiKV. | Replicated/durable topology, quorum recovery, or restart acceptance; the result is labeled `single-node-smoke-not-replicated-acceptance`. |
 | Underprovisioned diagnostic | `MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED=1 ./scripts/test-tidb.sh` | A diagnostic attempt when the Docker host is below the durable resource floor. | Durable acceptance; the result is labeled `diagnostic-underprovisioned-not-durable-acceptance`. |
-| Direct TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' cargo test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture` | A reachable server that passes `SELECT tidb_version(), VERSION()` before provider schemas are opened, then schema, UTF-8/trailing-space, provider-clock, fencing, concurrent-CAS, reconnect, block, and flush checks. | Docker topology or component restart evidence. A `mysql://` URL is only a protocol URL; MySQL or another compatible server is rejected by the identity check. |
+| Direct TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' ./scripts/cargo-shared test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture` | A reachable server that passes `SELECT tidb_version(), VERSION()` before provider schemas are opened, then schema, UTF-8/trailing-space, provider-clock, fencing, concurrent-CAS, reconnect, block, and flush checks. | Docker topology or component restart evidence. A `mysql://` URL is only a protocol URL; MySQL or another compatible server is rejected by the identity check. |
 | TLS TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@host:4000/test' cargo test --locked -p mount-rs-tidb --features rustls --test tidb -- --ignored --nocapture` | The same direct provider contract for a TLS-required endpoint, subject to the endpoint's certificate/URL configuration. | Any proof that the public CLI, Node, or native mount can select TiDB. |
 | TiDB plus RustFS ChunkedFs | Use the opt-in command in [TiDB metadata plus RustFS chunks](#tidb-metadata-plus-rustfs-chunks). | Real TiDB identity, RustFS-backed immutable blocks, partial writes/truncate, close/reopen, fencing/CAS, and scoped block/metadata cleanup. A successful reopen prints `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`. | Node/N-API, CLI, FUSE/NFS/9P/WebDAV, FSKit, or hosted-CI acceptance. RustFS is not TiDB and S3-compatible evidence is not Cloudflare R2 evidence. |
 
@@ -115,40 +120,38 @@ is:
 
 ```sh
 MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' \
-  cargo test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+  ./scripts/cargo-shared test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
 ```
 
 That lane uses a plaintext MySQL-wire proxy, lets TiDB finish `COMMIT`, drops
 the response, and verifies an unknown outcome without automatic replay. It is
 commit-outcome evidence only; callers must reconcile state before retrying. It
-is not in any current CI job.
+runs as part of both TiDB CI harnesses.
 
 ### Provider-selection audit
 
 The following paths are the audited selection points for consumers:
 
-- `crates/mount-rs-cli/src/config.rs` accepts `memory`, `sqlite`, `pglite`, and
-  block-only `r2`; `crates/mount-rs-cli/src/parser.rs` exposes only the
+- `crates/mount-rs-cli/src/config.rs` accepts `memory`, `sqlite`, `pglite`,
+  `tidb`, and block-only `r2`; `crates/mount-rs-cli/src/parser.rs` exposes the
   `memory`, `host`, `sqlite`, and `splitstore` driver choices.
-- `crates/mount-rs-sdk` has no TiDB store variant or `mount-rs-tidb`
-  dependency.
-- `integrations/mount-rs-napi/src/lib.rs` accepts only `memory`, `sqlite`,
-  `pglite`, and block-only `r2` for `createChunkedDriver`; unknown backend kinds
+- `crates/mount-rs-sdk` owns the public split-store facade and depends on the
+  TiDB integration behind its provider selection boundary.
+- `integrations/mount-rs-napi/src/lib.rs` accepts `memory`, `sqlite`, `pglite`,
+  `tidb`, and block-only `r2` for `createChunkedDriver`; unknown backend kinds
   fail rather than falling back to memory.
-- `examples/node-cli/index.mjs` mirrors that same closed set. Its native
-  integration uses a host-backed driver, so a passing Node native mount does
-  not exercise TiDB or RustFS.
-- `.github/workflows/ci.yml` has generic Rust, Node, FUSE/NFS/9P/WebDAV, and
-  macOS/Linux matrices, but no TiDB service, `test-tidb.sh`, or
-  `MOUNT_RS_TIDB_*` wiring. The ignored TiDB tests therefore do not run in the
-  generic `cargo test --workspace --all-targets --all-features --locked` job.
+- `examples/node-cli/index.mjs` mirrors that provider set for mount-free SDK
+  use. Its existing native integration uses a host-backed driver, so a passing
+  Node native mount does not exercise TiDB or RustFS.
+- `.github/workflows/ci.yml` now has dedicated `tidb` and `tidb-rustfs` jobs.
+  The generic workspace job still does not run ignored service tests; the
+  dedicated jobs are the service evidence boundary.
 
-Consequently, there is no runnable Node/CLI/native-mount command for TiDB in
-this revision. Do not turn a passing `cargo test`, provider-matrix row,
-Node/N-API factory, native transport test, or macOS/Linux compile into TiDB
-consumer acceptance. Closing that boundary requires an explicit TiDB provider
-factory/configuration path, consumer tests that select it, and revision-matched
-service-backed CI on each claimed platform.
+The Rust SDK, N-API factory, and Rust/Node CLI now provide runnable mount-free
+TiDB/RustFS consumer rows. Do not turn those rows, a generic native transport
+test, or a macOS/Linux compile into TiDB native-mount acceptance; that remaining
+boundary requires a revision-matched service-backed native test on each claimed
+platform.
 
 The provider's `durable(true)` flag remains caller-declared. The `flush` hook
 is an acknowledged TiDB round trip, not proof of storage-engine fsync, and a
@@ -168,12 +171,7 @@ Run it through Hooke's RustFS orchestration with a real TiDB SQL URL:
 
 ```sh
 MOUNT_RS_TIDB_URL='mysql://root@127.0.0.1:4000' \
-MOUNT_RS_TIDB_CHUNKED_RUSTFS=1 \
-MOUNT_RS_TIDB_CHUNKED_RUSTFS_REOPEN=1 \
-RUSTFS_COMBO_NAME=tidb-metadata-rustfs-chunks \
-RUSTFS_COMBO_TIMEOUT_SECONDS=900 \
-RUSTFS_COMBO_COMMAND='cargo test --locked -p mount-rs-tidb --test chunked_rustfs -- --ignored --nocapture' \
-  ./scripts/test-rustfs.sh
+  ./scripts/test-tidb-rustfs.sh
 ```
 
 The test writes binary data across seven-byte chunks, performs partial writes

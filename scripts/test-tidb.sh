@@ -546,8 +546,26 @@ begin_phase() {
   echo "TiDB phase=$phase_name timeout=${startup_timeout_seconds}s" >&2
 }
 
+run_direct_provider_test() {
+  persistence_expectation=$1
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
+  MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture
+}
+
 run_provider_test() {
   persistence_expectation=$1
+  # A composition test must not replace direct TiDB identity, schema,
+  # fencing, ambiguous-commit, or reconnect evidence for the metadata
+  # provider itself.
+  if run_direct_provider_test "$persistence_expectation"; then
+    :
+  else
+    direct_status=$?
+    echo "test-tidb.sh: direct provider contract failed before composition" >&2
+    return "$direct_status"
+  fi
   if [ -n "${MOUNT_RS_TIDB_COMPOSITION_COMMAND:-}" ]; then
     # The caller owns the block service and supplies a complete, explicit
     # command for a split-provider composition. Keep the TiDB URL and the
@@ -557,17 +575,12 @@ run_provider_test() {
     MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
     MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
       sh -c "$MOUNT_RS_TIDB_COMPOSITION_COMMAND"
-    return $?
   fi
-  MOUNT_RS_TIDB_URL="$tidb_url" \
-  MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
-  MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
-    cargo test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture
 }
 
 run_ambiguous_commit_test() {
   MOUNT_RS_TIDB_URL="$tidb_url" \
-    cargo test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
 }
 
 echo "Starting actual TiDB/TiKV test topology=$topology version=$image_version platform=$docker_platform docker_cpus=$docker_cpu_count docker_mem_bytes=$docker_mem_bytes" >&2

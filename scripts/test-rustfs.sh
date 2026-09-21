@@ -790,22 +790,22 @@ bootstrap_bucket() {
 bootstrap_bucket
 echo "RUSTFS_READY endpoint=$rustfs_endpoint image=$rustfs_image"
 
-cargo test \
+"$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
   -- "real_rustfs_block_contract" --exact --test-threads=1 --nocapture
 
-cargo test \
+"$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
   -- "real_rustfs_sqlite_metadata_round_trip" --exact --test-threads=1 --nocapture
 
-cargo test \
+"$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
   -- "real_rustfs_pglite_metadata_round_trip" --exact --test-threads=1 --nocapture
 
-cargo test \
+"$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
   -- "real_rustfs_block_benchmark" --exact --test-threads=1 --nocapture
@@ -817,7 +817,7 @@ node "$repo_dir/tests/rustfs/napi-factories.mjs"
 sh "$repo_dir/scripts/test-cli-remote-rustfs.sh"
 
 echo "RUSTFS_SQLITE_VFS_START"
-cargo test \
+"$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/Cargo.toml" \
   --locked -p mount-rs-sqlite-vfs --features remote-harness \
   --test remote_storage_bridge -- \
@@ -865,7 +865,7 @@ run_combo_command() {
 
 run_combo_command
 
-RUSTFS_VFS_RESTART_PHASE=prepare cargo test \
+RUSTFS_VFS_RESTART_PHASE=prepare "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/Cargo.toml" \
   --locked -p mount-rs-sqlite-vfs --features remote-harness \
   --test remote_storage_bridge -- \
@@ -895,7 +895,7 @@ bootstrap_bucket
 echo "RUSTFS_FAULT_RECOVERY_PASS endpoint=$rustfs_endpoint"
 echo "RUSTFS_RESTART_READY endpoint=$rustfs_endpoint"
 
-RUSTFS_VFS_RESTART_PHASE=reopen cargo test \
+RUSTFS_VFS_RESTART_PHASE=reopen "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/Cargo.toml" \
   --locked -p mount-rs-sqlite-vfs --features remote-harness \
   --test remote_storage_bridge -- \
@@ -910,14 +910,14 @@ echo "PGLITE_VFS_STOPPED"
 pglite_log="$run_dir/pglite-restarted.log"
 start_pglite_server
 echo "PGLITE_VFS_RESTART_READY endpoint=127.0.0.1:$pglite_port"
-RUSTFS_VFS_RESTART_PHASE=reopen cargo test \
+RUSTFS_VFS_RESTART_PHASE=reopen "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/Cargo.toml" \
   --locked -p mount-rs-sqlite-vfs --features remote-harness \
   --test remote_storage_bridge -- \
   remote_vfs_survives_rustfs_restart --exact --ignored --nocapture
 echo "PGLITE_VFS_RESTART_PASS"
 
-cargo test \
+"$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/tests/rustfs/Cargo.toml" \
   --locked \
   -- "real_rustfs_reopen_after_service_restart" --exact --test-threads=1 --nocapture
