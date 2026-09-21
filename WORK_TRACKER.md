@@ -773,13 +773,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  The fresh post-fix run [35586624564](https://github.com/andymac4182/mount-rs/actions/runs/35586624564)
+  The latest published-revision run [35587575994](https://github.com/andymac4182/mount-rs/actions/runs/35587575994)
   is running on `bdfcb11`: Linux Node job
-  [106291476004](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476004),
+  [106294483397](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483397),
   macOS-latest Node job
-  [106291476024](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476024),
+  [106294483486](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483486),
   and macOS-15-intel Node job
-  [106291476265](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476265)
+  [106294483435](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483435)
   have started. The historical run [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894)
   is not closure evidence: macOS-latest passed its PGlite step, but
   macOS-15-intel failed earlier in `test-http-early-rejection.mjs` with
