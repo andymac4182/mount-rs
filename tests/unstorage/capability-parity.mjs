@@ -55,6 +55,10 @@ class RawStore {
     );
   }
 
+  getKeysBounded(prefix, maxKeys) {
+    return this.getKeys(prefix).slice(0, maxKeys + 1);
+  }
+
   getMeta(key) {
     return this.metadata.get(key) ?? {};
   }
@@ -273,6 +277,22 @@ try {
   assert.equal(nativeMetadataStats.ctimeMs, fileMetadata.ctime.getTime());
   assert.equal(nativeMetadataStats.birthtimeMs, fileMetadata.birthtime.getTime());
   native.store.metadata.delete("file");
+
+  const boundedStore = new RawStore();
+  boundedStore.values.set("one", new Uint8Array([1]));
+  boundedStore.values.set("two", new Uint8Array([2]));
+  boundedStore.values.set("three", new Uint8Array([3]));
+  const bounded = binding.createUnstorageDriver(boundedStore, options);
+  try {
+    await assert.rejects(
+      () => bounded.readdirBounded("/", 2),
+      (error) => error.code === "EOVERFLOW",
+    );
+    assert.equal((await bounded.readdirBounded("/", 3)).length, 3);
+  } finally {
+    await bounded.shutdown();
+  }
+
   capabilityRowCount = capabilityRows.length + 1;
   for (const row of capabilityRows) {
     const supported = expectedCapabilities[row.capability] === true;
