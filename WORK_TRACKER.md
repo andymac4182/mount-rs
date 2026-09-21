@@ -360,6 +360,31 @@ requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
 macOS native path remains NFS, with no FSKit or macFUSE FUSE-protocol claim.
 This closes the macOS platform-scope decision but does not qualify any Linux
 hosted or lifecycle gate, so W01 remains NO-GO.
+The macOS FSKit boundary was refreshed locally: the locked Rust bridge target
+passed 12 tests, formatting and strict Clippy, the arm64 bridge build passed,
+the standalone Swift delegate seam and in-process XPC lifecycle test passed,
+and unsigned arm64 `MountRsFSKit`, `MountRsXPCService`, and `MountRsHost`
+Xcode schemes produced the expected extension/XPC artifacts. The diagnostic
+activation gate skipped its mount attempt and reported zero valid signing
+identities, an ad-hoc host bundle, and an unavailable `fskitd` connection;
+it ended `FSKIT_ACTIVATION=BLOCKED`. This is compile/in-process evidence only:
+signed installation, FSClient enablement, mounted read/write, hosted Linux
+FUSE, callback/lifecycle, crash/restart, concurrency, locks, and durability
+remain open, so W01 stays NO-GO.
+The latest mount-free N-API FUSE public-surface packet closes a verified
+barrel gap: all 185 pinned wire constants are statically discoverable through
+CommonJS and ESM named imports with `./fuse` declarations, and the facade now
+exposes opcode body dispatch plus complete request/reply framing, 8-byte
+extension validation, raw/unknown handling, and current `SYNCFS` support.
+`npm run build:debug`, oracle-enabled `test/fuse-codec.mjs`,
+`test/fuse-session.mjs`, `test/fuse-inodes.mjs`, generated `test/typecheck.mjs`,
+and `CARGO_TARGET_DIR=/private/tmp/mount-rs-napi-public-20260922
+./scripts/cargo-shared test -p mount-rs-napi --all-targets --locked` (16/16)
+pass. The pinned oracle still marks `SYNCFS` unimplemented, so no oracle
+differential is claimed for that extension. The oracle-enabled package suite
+reached NFS and stopped on this environment's `Operation not permitted` socket
+bind; hosted Linux FUSE, callback/lifecycle, close/crash/restart, concurrency,
+locks, and durability remain open, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -398,6 +423,29 @@ and BMAP support remains unadvertised and unimplemented.
 The subsequent native read-interrupt packet is also compiled against this
 context-aware validator, so `FUSE_INTERRUPT` retains its fixed-body boundary
 while known read workers can be aborted independently.
+After that repair, the published-tip verification passed formatting and diff
+checks, the locked FUSE/N-API all-target tests, isolated warning-denied Clippy,
+and the `x86_64-unknown-linux-gnu` FUSE test-target compile. Rebuilding the
+debug N-API addon followed by generated typecheck, the mount-free FUSE session
+test, and the pinned codec and inode oracle tests also passed. Hosted CI run
+`35632382070` was cancelled by a later concurrent push, so it provides no
+Linux `/dev/fuse` evidence; native mount/callback, FSKit, close/crash/restart,
+mutation/write concurrency, locks, and durability remain open and W01 stays
+NO-GO.
+The local FUSE checkpoint was then rebased onto current `origin/main`, which
+includes the eight-client native concurrency and read-panic callback-fault
+harnesses. The locked FUSE target, strict Clippy, Linux test-target compile,
+locked N-API target, rebuilt debug addon, generated typecheck, mount-free
+session, pinned codec oracle, and inode oracle all passed. The ignored native
+harnesses were not executable on this macOS host, so hosted `/dev/fuse`,
+callback delivery, panic/cleanup, close/crash/restart, mutation/write
+concurrency, locks, durability, and FSKit remain external; W01 stays NO-GO.
+The subsequent hosted CI run `35645669363` / native-FUSE job `106485735709`
+passed the Linux FUSE prerequisite probe but was cancelled during the actual
+rootless kernel file-operation step, so it supplies no native acceptance
+evidence. The exact branch tip still requires a non-canceling manual hosted
+qualification before any Linux mount, callback, lifecycle, concurrency, lock,
+crash/restart, or durability result can be promoted; W01 remains NO-GO.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -908,11 +956,12 @@ hosted/native acceptance. At exact scope-packet SHA
 successful `native-webdav (macos-latest)` job `106469172312` and
 `native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
 native WebDAV I/O for that packet only, not the overall CI run or production
-acceptance. The focused N-API SQLite provider/reopen probe now also preserves
-exact file bytes across orderly provider/server recreation and observes zero
-replacement-session locks, classifying bytes as durable and locks as
-process-local for that provider; it does not qualify crash/power-loss or live
-remote-provider durability. A read-only status check for the published tip
+acceptance. The focused N-API NodeFs and SQLite provider/reopen probes now also
+preserve exact file bytes across orderly provider/server recreation and observe
+zero replacement-session locks, classifying bytes as durable and locks as
+process-local for those local providers; the SQLite process-crash probe adds
+abrupt-death recovery, but none of these local results qualify power-loss or
+live remote-provider durability. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -1398,6 +1447,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   server/provider shutdown and a replacement-session zero-lock check. This
   classifies local SQLite byte persistence and process-local WebDAV locks only;
   crash/power-loss and live-provider durability remain open.
+- [x] The focused N-API NodeFs WebDAV provider/reopen probe is now part of the
+  package test sequence: `node test/typecheck.mjs && node
+  test/webdav-node-fs.mjs` passed exact PUT-byte readback after orderly
+  server/provider shutdown and a replacement-session zero-lock check. This
+  classifies local NodeFs byte persistence and process-local WebDAV locks only;
+  power-loss ordering and live-provider durability remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -4354,6 +4409,14 @@ cross-drive isolation.
 | `2026-09-22 FUSE frame-floor and API-scope packet` | Reject native `max_frame` below the modern `FUSE_WRITE` header plus one page (`4176` bytes), and record explicit supported-scope decisions for the remaining upstream FUSE mount options, callbacks, root members, and crash/restart ownership in `transports/mount-rs-fuse/README.md` | Host all-target FUSE tests (14 unit, 6 INIT, 0 native, 6 notify/record, 11 protocol, 20 session, 4 sync-barrier), host strict Clippy, Linux-target check/strict Clippy, formatting, and diff checks pass; the Linux-only validation regression is compile-checked but not runnable on Darwin, while hosted `/dev/fuse` callback, lifecycle, crash/restart and durability evidence remain open |
 | `2026-09-22 FUSE forced-unmount cancellation ordering` | After graceful native unmount reaches its deadline, request session cancellation before the lazy-detach helper so blocked backend work cannot deadlock forced teardown; add a Linux-gated helper-ordering regression | Prior hosted native-FUSE job `106523259210` in run `35657075892` passed the panic callback case but timed out both round-trip and blocked-read unmounts; host FUSE tests, host/Linux-target strict Clippy, Linux-target check, formatting and diff checks pass for the fix, while the corrected hosted native run remains required and W01 stays NO-GO |
 | `2026-09-22 FUSE forced-unmount descriptor-drain ordering` | Drain or abort the stopped FUSE session task before starting lazy detach, preserving one shared forced-teardown deadline so the helper cannot wait on an owned device descriptor | Hosted job `106530560678` in run `35659287961` still timed out both unmount cases after the first ordering fix; host FUSE tests, host/Linux-target strict Clippy, Linux-target check, formatting, and diff checks pass for this follow-up, while a new hosted native rerun remains required and W01 stays NO-GO |
+| `2026-09-22 FUSE hosted callback qualification` | Manual run `35650347479` at `0d06abb` passed the FUSE prerequisite and backend-panic callback/close scenario, but ordinary and blocked-read native unmount timed out in job `106500945410` while the unrelated matrix was still in progress; no native acceptance is promoted | The current destroy-boundary packet is the locally verified follow-up for the two remaining hosted unmount failures; exact-tip hosted close-race, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE native destroy teardown packet` | Treat Linux kernel `FUSE_DESTROY` as a terminal no-reply boundary, abort and drain in-flight positional-read workers, and update the Unix-stream regression to require bounded session close | Hosted run `35647249560` / native-FUSE job `106491113021` reached all three native scenarios but failed their `Mounted::unmount()` deadlines before overall cancellation; host all-target tests/Clippy and Linux-target test compilation pass for the fix, while exact-tip hosted unmount, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE bounded terminal drain packet` | Bound the terminal positional-read worker drain to one second after aborting workers, allowing native device release even if a backend future is not cancellation-cooperative; add a Linux-gated blocking-worker regression | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test compilation, formatting and diff checks pass; exact-tip hosted unmount, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE session cleanup bound packet` | Bound kernel-initiated `FUSE_DESTROY` handle cleanup by the configured unmount timeout and report a single owned `Task` transport error when backend `close()` or terminal read-worker cancellation does not finish | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test compilation, formatting and diff checks pass; exact-tip hosted unmount, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE saturated read control-plane packet` | Replace the unbounded native read-permit wait with a bounded pending queue and `EAGAIN` overflow so `FUSE_DESTROY` and `FUSE_INTERRUPT` remain serviceable at the 16-worker concurrency limit; add a Linux-gated datagram regression for 16 blocked reads plus a queued 17th read | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test compilation, formatting and diff checks pass; exact-tip hosted unmount, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE targeted interrupt packet` | Cancel only the requested positional-read worker on `FUSE_INTERRUPT`, leaving unrelated blocked reads and the session alive; extend the Linux-gated interrupt regression to prove this control-plane behavior | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test compilation, formatting and diff checks pass; exact-tip hosted interrupt, unmount, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE unconditional terminal drain packet` | Always abort and boundedly drain registered positional-read workers after loop termination, retaining the first transport error instead of skipping cleanup when another worker or protocol path already failed | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test compilation, formatting and diff checks pass; exact-tip hosted interrupt, unmount, callback, crash/restart, concurrency, locks and durability evidence remain open |
+| `2026-09-22 FUSE forced-unmount mount-presence packet` | Recheck `/proc/self/mounts` after forced `umount`/lazy-detach and preserve `mounted=true` when the kernel mount remains present; keep the closed session inactive and retryable instead of falsely reporting an absent mount; add a Linux-gated stuck-helper regression against `/` | Host FUSE all-target tests (14 unit, 6 INIT, 0 native, 6 notify/record, 11 protocol, 20 session, 4 sync-barrier), formatting/diff checks, and Linux-target strict Clippy pass; the Linux-only regression is compiled but not run on this macOS host, while hosted forced-unmount, callback, crash/restart, concurrency, locks and durability evidence remain external |
 | `2026-09-22 FUSE native mount-object packet` (published as `4fd3e25e`) | Restore root N-API `Mounted[Symbol.asyncDispose]()` and record the supported-scope decision for transport-specific FUSE `session`, device `fd`, and invalidation members | Runtime/type coverage and the source audit are local PASS; final remote verification is `HEAD=origin/main=4fd3e25e`; exact-SHA CI run `35646646162` is pending and Fault injection run `35646646113` is in progress, so hosted Linux mount/callback/lifecycle evidence remains open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |

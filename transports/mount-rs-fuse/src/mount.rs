@@ -26,6 +26,8 @@ use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use futures_util::FutureExt;
+#[cfg(target_os = "linux")]
+use mount_rs_core::ErrorCode;
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{S_IFDIR, S_IFMT};
@@ -35,6 +37,8 @@ use tokio::sync::Notify;
 use crate::device::DEFAULT_MAX_FRAME;
 #[cfg(target_os = "linux")]
 use crate::device::FuseDevice;
+#[cfg(target_os = "linux")]
+use crate::session::PreparedRead;
 #[cfg(target_os = "linux")]
 use crate::session::{FuseSession, FuseSessionOptions};
 
@@ -337,7 +341,12 @@ impl FuseMount {
                     // retryable. Publish that fact so a later attempt does
                     // not leave an otherwise healthy mount permanently
                     // reported as inactive.
-                    operation_state.active.store(true, Ordering::Release);
+                    // A forced teardown has already closed the session task,
+                    // so a still-present kernel mount must remain inactive
+                    // until a later unmount retry removes it.
+                    if !operation_state.closed.load(Ordering::Acquire) {
+                        operation_state.active.store(true, Ordering::Release);
+                    }
                 }
                 *operation_state
                     .unmount_result
@@ -654,6 +663,7 @@ impl MountState {
     async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
         let timeout = self.options.unmount_timeout;
         let mut forced_deadline = None;
+        let mut forced_mount_present = None;
         let result = match attempt_unmount(&self, timeout).await {
             UnmountAttempt::Done => Ok(()),
             UnmountAttempt::TimedOut => {
@@ -680,13 +690,23 @@ impl MountState {
                 }
                 force.await;
                 forced_deadline = Some(deadline);
+                let mount_still_present = mounted_at(&self.mountpoint);
+                forced_mount_present = Some(mount_still_present);
                 self.record_transport_error(FuseTransportError::from_message(
                     FuseTransportErrorKind::Task,
-                    format!(
-                        "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested",
-                        self.mountpoint.display(),
-                        timeout.as_millis()
-                    ),
+                    if mount_still_present {
+                        format!(
+                            "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested but the mount remains present",
+                            self.mountpoint.display(),
+                            timeout.as_millis()
+                        )
+                    } else {
+                        format!(
+                            "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested",
+                            self.mountpoint.display(),
+                            timeout.as_millis()
+                        )
+                    },
                 ));
                 Err(MountError::Timeout {
                     operation: "unmount",
@@ -710,7 +730,8 @@ impl MountState {
         // Make the terminal state idempotent so wait_closed() is guaranteed
         // to complete after every bounded teardown path.
         self.mark_closed();
-        self.mounted.store(false, Ordering::Release);
+        self.mounted
+            .store(forced_mount_present.unwrap_or(false), Ordering::Release);
         result
     }
 
@@ -771,17 +792,32 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
         )),
     };
 
-    if std::panic::AssertUnwindSafe(session.destroy())
-        .catch_unwind()
-        .await
-        .is_err()
-    {
-        failure.get_or_insert_with(|| {
-            FuseTransportError::from_message(
-                FuseTransportErrorKind::Task,
-                "FUSE session cleanup panicked".to_owned(),
-            )
-        });
+    let cleanup = tokio::time::timeout(
+        state.options.unmount_timeout,
+        std::panic::AssertUnwindSafe(session.destroy()).catch_unwind(),
+    )
+    .await;
+    match cleanup {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => {
+            failure.get_or_insert_with(|| {
+                FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    "FUSE session cleanup panicked".to_owned(),
+                )
+            });
+        }
+        Err(_) => {
+            failure.get_or_insert_with(|| {
+                FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    format!(
+                        "FUSE session cleanup did not finish within {}ms",
+                        state.options.unmount_timeout.as_millis()
+                    ),
+                )
+            });
+        }
     }
 
     if let Some(error) = failure {
@@ -792,6 +828,12 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
 
 #[cfg(target_os = "linux")]
 const MAX_PARALLEL_READS: usize = 16;
+
+#[cfg(target_os = "linux")]
+const MAX_PENDING_READS: usize = 16;
+
+#[cfg(target_os = "linux")]
+const READ_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_os = "linux")]
 type ReadTaskResult = (u64, Result<(), FuseTransportError>);
@@ -834,10 +876,47 @@ fn read_task_join_error(error: tokio::task::JoinError) -> FuseTransportError {
 }
 
 #[cfg(target_os = "linux")]
+fn read_worker_drain_timeout_error() -> FuseTransportError {
+    FuseTransportError::from_message(
+        FuseTransportErrorKind::Task,
+        format!(
+            "FUSE read worker did not cancel within {}ms",
+            READ_TASK_DRAIN_TIMEOUT.as_millis()
+        ),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_prepared_read(
+    read_tasks: &mut tokio::task::JoinSet<ReadTaskResult>,
+    in_flight: &mut std::collections::HashMap<u64, tokio::task::AbortHandle>,
+    prepared: PreparedRead,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    device: &Arc<FuseDevice>,
+    writer: &Arc<tokio::sync::Mutex<()>>,
+    state: &Arc<MountState>,
+) {
+    let unique = prepared.unique();
+    let device = Arc::clone(device);
+    let writer = Arc::clone(writer);
+    let state = Arc::clone(state);
+    let abort = read_tasks.spawn(async move {
+        let _permit = permit;
+        let reply = prepared.reply().await;
+        (
+            unique,
+            write_reply_until_stop(device, writer, state, reply).await,
+        )
+    });
+    in_flight.insert(unique, abort);
+}
+
+#[cfg(target_os = "linux")]
 async fn drain_read_tasks(
     read_tasks: &mut tokio::task::JoinSet<ReadTaskResult>,
     in_flight: &mut std::collections::HashMap<u64, tokio::task::AbortHandle>,
 ) -> Option<FuseTransportError> {
+    let mut failure = None;
     while let Some(task) = read_tasks.join_next().await {
         match task {
             Ok((unique, Ok(()))) => {
@@ -845,16 +924,16 @@ async fn drain_read_tasks(
             }
             Ok((unique, Err(error))) => {
                 in_flight.remove(&unique);
-                return Some(error);
+                failure.get_or_insert(error);
             }
             Err(error) if error.is_cancelled() => {}
             Err(error) => {
                 in_flight.clear();
-                return Some(read_task_join_error(error));
+                failure.get_or_insert(read_task_join_error(error));
             }
         }
     }
-    None
+    failure
 }
 
 #[cfg(target_os = "linux")]
@@ -867,8 +946,31 @@ async fn run_session_loop(
     let writer = Arc::new(tokio::sync::Mutex::new(()));
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_READS));
     let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
-    let mut in_flight = std::collections::HashMap::new();
+    let mut in_flight: std::collections::HashMap<u64, tokio::task::AbortHandle> =
+        std::collections::HashMap::new();
+    let mut pending_reads = std::collections::VecDeque::<PreparedRead>::new();
     loop {
+        if state.stop.load(Ordering::Acquire) {
+            break;
+        }
+        while let Some(prepared) = pending_reads.pop_front() {
+            let permit = match Arc::clone(&permits).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    pending_reads.push_front(prepared);
+                    break;
+                }
+            };
+            spawn_prepared_read(
+                &mut read_tasks,
+                &mut in_flight,
+                prepared,
+                permit,
+                &device,
+                &writer,
+                &state,
+            );
+        }
         if state.stop.load(Ordering::Acquire) {
             break;
         }
@@ -910,55 +1012,71 @@ async fn run_session_loop(
         if state.stop.load(Ordering::Acquire) {
             break;
         }
+        let destroy = match session.is_destroy_frame(&frame) {
+            Ok(destroy) => destroy,
+            Err(error) => {
+                failure = Some(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Protocol,
+                    error.to_string(),
+                ));
+                break;
+            }
+        };
+        if destroy {
+            // FUSE_DESTROY is a terminal request with no reply. The kernel
+            // waits for the userspace device to close, so continuing through
+            // ordinary dispatch would leave fusermount blocked waiting for a
+            // frame that can never arrive. Abort read workers here; the
+            // bounded terminal drain below prevents an uncooperative backend
+            // future from keeping the device open forever, while
+            // run_session() performs the final session-owned cleanup.
+            for abort in in_flight.drain().map(|(_, abort)| abort) {
+                abort.abort();
+            }
+            pending_reads.clear();
+            state.request_stop();
+            break;
+        }
         match session.prepare_read(&frame) {
             Ok(Some(prepared)) => {
-                let unique = prepared.unique();
-                let permit = tokio::select! {
-                    _ = state.stop_notify.notified() => break,
-                    result = Arc::clone(&permits).acquire_owned() => match result {
-                        Ok(permit) => permit,
-                        Err(_) => break,
-                    },
-                };
-                let device = Arc::clone(&device);
-                let writer = Arc::clone(&writer);
-                let state = Arc::clone(&state);
-                let abort = read_tasks.spawn(async move {
-                    let _permit = permit;
-                    let reply = prepared.reply().await;
-                    (
-                        unique,
-                        write_reply_until_stop(device, writer, state, reply).await,
+                if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
+                    spawn_prepared_read(
+                        &mut read_tasks,
+                        &mut in_flight,
+                        prepared,
+                        permit,
+                        &device,
+                        &writer,
+                        &state,
+                    );
+                } else if pending_reads.len() < MAX_PENDING_READS {
+                    pending_reads.push_back(prepared);
+                } else {
+                    let reply = crate::error_reply(prepared.unique(), ErrorCode::Eagain).to_vec();
+                    if let Err(error) = write_reply_until_stop(
+                        Arc::clone(&device),
+                        Arc::clone(&writer),
+                        Arc::clone(&state),
+                        reply,
                     )
-                });
-                in_flight.insert(unique, abort);
+                    .await
+                    {
+                        failure = Some(error);
+                        break;
+                    }
+                }
                 continue;
             }
             Ok(None) => {
-                match session.is_destroy_frame(&frame) {
-                    Ok(true) => {
-                        // DESTROY is a lifecycle boundary rather than a
-                        // stateful operation. Do not wait for a backend read
-                        // that the kernel is already trying to tear down.
-                        for abort in in_flight.drain().map(|(_, abort)| abort) {
+                match session.interrupt_target(&frame) {
+                    Ok(Some(target)) => {
+                        if let Some(abort) = in_flight.remove(&target) {
                             abort.abort();
+                        } else {
+                            pending_reads.retain(|prepared| prepared.unique() != target);
                         }
                     }
-                    Ok(false) => match session.interrupt_target(&frame) {
-                        Ok(Some(target)) => {
-                            if let Some(abort) = in_flight.remove(&target) {
-                                abort.abort();
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            failure = Some(FuseTransportError::from_message(
-                                FuseTransportErrorKind::Protocol,
-                                error.to_string(),
-                            ));
-                            break;
-                        }
-                    },
+                    Ok(None) => {}
                     Err(error) => {
                         failure = Some(FuseTransportError::from_message(
                             FuseTransportErrorKind::Protocol,
@@ -967,10 +1085,11 @@ async fn run_session_loop(
                         break;
                     }
                 }
-                if let Some(error) = drain_read_tasks(&mut read_tasks, &mut in_flight).await {
-                    failure = Some(error);
-                    break;
-                }
+                // Positional read workers do not borrow mutable session
+                // state, so interrupting one does not require draining
+                // unrelated reads. Leaving their join results in the set
+                // keeps the control plane responsive while those workers
+                // continue or are canceled independently.
             }
             Err(error) => {
                 failure = Some(FuseTransportError::from_message(
@@ -1009,23 +1128,24 @@ async fn run_session_loop(
             state.ready_notify.notify_waiters();
         }
     }
+    pending_reads.clear();
     read_tasks.abort_all();
-    while let Some(task) = read_tasks.join_next().await {
-        if failure.is_none() {
-            match task {
-                Ok((unique, Ok(()))) => {
-                    in_flight.remove(&unique);
-                }
-                Ok((unique, Err(error))) => {
-                    in_flight.remove(&unique);
-                    failure = Some(error);
-                }
-                Err(error) if error.is_panic() => {
-                    in_flight.clear();
-                    failure = Some(read_task_join_error(error));
-                }
-                Err(_) => {}
-            }
+    match tokio::time::timeout(
+        READ_TASK_DRAIN_TIMEOUT,
+        drain_read_tasks(&mut read_tasks, &mut in_flight),
+    )
+    .await
+    {
+        Ok(Some(error)) => {
+            failure.get_or_insert(error);
+        }
+        Ok(None) => {}
+        Err(_) => {
+            failure.get_or_insert_with(read_worker_drain_timeout_error);
+            // Dropping the JoinSet releases any worker that did not honor
+            // cancellation within the bound. The native device must be
+            // released even when a backend future is not cancellation
+            // cooperative.
         }
     }
     in_flight.clear();
@@ -2121,6 +2241,273 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    struct BlockingCloseHandle {
+        inner: Arc<dyn mount_rs_core::FileHandle>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FileHandle for BlockingCloseHandle {
+        fn fd(&self) -> Option<u64> {
+            self.inner.fd()
+        }
+
+        async fn read(
+            &self,
+            buffer: &mut [u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.read(buffer, position).await
+        }
+
+        async fn write(
+            &self,
+            buffer: &[u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn sync(&self) -> mount_rs_core::Result<()> {
+            self.inner.sync().await
+        }
+
+        async fn datasync(&self) -> mount_rs_core::Result<()> {
+            self.inner.datasync().await
+        }
+
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            std::future::pending().await
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    struct BlockingCloseDriver {
+        inner: Arc<mount_rs_core::MemoryFs>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FsDriver for BlockingCloseDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            let inner = self.inner.open(path, flags, mode).await?;
+            Ok(Arc::new(BlockingCloseHandle { inner }))
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn destroy_bounds_backend_handle_cleanup_and_reports_task_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.close().await.expect("close seed file");
+        let driver = Arc::new(BlockingCloseDriver { inner });
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-blocking-close-test"),
+            MountOptions {
+                unmount_timeout: Duration::from_millis(25),
+                ..MountOptions::default()
+            },
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        let _ = read_test_reply(&mut peer).await;
+        peer.write_all(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_reply(&mut peer).await;
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+        peer.write_all(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_reply(&mut peer).await;
+        assert_eq!(i32::from_le_bytes(open[4..8].try_into().unwrap()), 0);
+
+        peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 4, 0, &[]))
+            .await
+            .expect("send destroy");
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("blocking close must not keep the session alive")
+            .expect("session task should finish after bounded cleanup");
+
+        assert!(state.closed.load(Ordering::Acquire));
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
+        assert!(observed[0].message.contains("session cleanup"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn destroy_remains_readable_when_read_concurrency_is_saturated() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::sync::atomic::AtomicUsize;
+        use tokio::net::UnixDatagram;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.write(b"data", Some(0)).await.expect("seed file");
+        file.close().await.expect("close seed file");
+        let active = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let driver = Arc::new(ReadBarrierDriver {
+            inner,
+            active: Arc::clone(&active),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            barrier: Arc::new(tokio::sync::Barrier::new(MAX_PARALLEL_READS + 1)),
+            entered: Arc::clone(&entered),
+        });
+
+        let (device_socket, mut peer) = UnixDatagram::pair().expect("datagram pair");
+        let standard = device_socket.into_std().expect("standard Unix datagram");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("datagram descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-saturated-read-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.send(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        let _ = read_test_datagram(&mut peer).await;
+        peer.send(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_datagram(&mut peer).await;
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+        peer.send(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_datagram(&mut peer).await;
+        let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
+
+        for (index, unique) in (4_u64..).take(MAX_PARALLEL_READS).enumerate() {
+            peer.send(&test_frame(15, unique, nodeid, &read_body(handle)))
+                .await
+                .expect("send saturated read");
+            let expected = index + 1;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active.load(Ordering::SeqCst) < expected {
+                    entered.notified().await;
+                }
+            })
+            .await
+            .expect("saturated read should enter its worker");
+        }
+
+        // The next read exhausts the bounded pending queue's first slot. The
+        // terminal DESTROY must still be read from the device while all
+        // sixteen active workers remain blocked.
+        peer.send(&test_frame(
+            15,
+            4 + MAX_PARALLEL_READS as u64,
+            nodeid,
+            &read_body(handle),
+        ))
+        .await
+        .expect("send pending read");
+        peer.send(&test_frame(crate::constants::FUSE_DESTROY, 100, 0, &[]))
+            .await
+            .expect("send destroy");
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("destroy must remain serviceable at the read limit")
+            .expect("saturated session task should finish");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(
+            observed
+                .lock()
+                .expect("callback observation lock")
+                .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn stop_cancels_an_inflight_request_and_closes_without_transport_error() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
@@ -2317,6 +2704,15 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    async fn read_test_datagram(peer: &mut tokio::net::UnixDatagram) -> Vec<u8> {
+        let mut reply = vec![0; DEFAULT_MAX_FRAME];
+        let length = peer.recv(&mut reply).await.expect("read FUSE datagram");
+        reply.truncate(length);
+        assert!(reply.len() >= crate::OUT_HEADER_SIZE);
+        reply
+    }
+
+    #[cfg(target_os = "linux")]
     fn read_body(handle: u64) -> Vec<u8> {
         let mut body = vec![0; 40];
         body[..8].copy_from_slice(&handle.to_le_bytes());
@@ -2457,7 +2853,7 @@ mod tests {
             inner,
             active: Arc::new(AtomicUsize::new(0)),
             max_active: Arc::new(AtomicUsize::new(0)),
-            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            barrier: Arc::new(tokio::sync::Barrier::new(3)),
             entered: Arc::new(tokio::sync::Notify::new()),
         });
 
@@ -2515,6 +2911,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .expect("read should enter the worker");
+
+        let second_entered = entered.notified();
+        peer.write_all(&test_frame(15, 6, nodeid, &read_body(handle)))
+            .await
+            .expect("send unrelated blocking read");
+        tokio::time::timeout(Duration::from_secs(1), second_entered)
+            .await
+            .expect("unrelated read should enter the worker");
 
         peer.write_all(&test_frame(
             crate::constants::FUSE_INTERRUPT,
@@ -2623,16 +3027,9 @@ mod tests {
         peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 5, 0, &[]))
             .await
             .expect("send destroy");
-        let destroy = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
-            .await
-            .expect("destroy reply");
-        assert_eq!(i32::from_le_bytes(destroy[4..8].try_into().unwrap()), 0);
-        assert_eq!(u64::from_le_bytes(destroy[8..16].try_into().unwrap()), 5);
-
-        state.request_stop();
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
-            .expect("stop should close the destroyed session")
+            .expect("FUSE_DESTROY should close the session")
             .expect("destroyed session task should finish");
         assert!(state.closed.load(Ordering::Acquire));
         assert!(
@@ -2641,6 +3038,37 @@ mod tests {
                 .expect("callback observation lock")
                 .is_empty()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_read_drain_is_bounded_for_blocking_workers() {
+        let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let abort = read_tasks.spawn_blocking(move || {
+            let _ = started_sender.send(());
+            std::thread::sleep(Duration::from_millis(1_250));
+            (7, Ok(()))
+        });
+        let mut in_flight = std::collections::HashMap::from([(7, abort)]);
+
+        started_receiver
+            .await
+            .expect("blocking read worker should start");
+        for abort in in_flight.drain().map(|(_, abort)| abort) {
+            abort.abort();
+        }
+
+        let result = tokio::time::timeout(
+            READ_TASK_DRAIN_TIMEOUT,
+            drain_read_tasks(&mut read_tasks, &mut in_flight),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "terminal cleanup must not wait indefinitely for a blocking worker"
+        );
+        drop(read_tasks);
     }
 
     #[test]
@@ -2872,6 +3300,64 @@ mod tests {
         let _ = std::fs::remove_file(&helper);
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(forced_marker);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn forced_unmount_preserves_state_when_kernel_mount_remains_present() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-stuck-present-unmount-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::write(&helper, b"#!/bin/sh\nwhile :; do :; done\n").expect("write stuck helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("stuck helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make stuck helper executable");
+
+        let timeout = Duration::from_millis(100);
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                unmount_timeout: timeout,
+                ..MountOptions::default()
+            },
+            Some(helper.clone()),
+            FuseMountHooks::default(),
+        ));
+        state.set_task(tokio::spawn(std::future::pending::<()>()));
+
+        assert!(mounted_at(Path::new("/")));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/"),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), mount.unmount())
+            .await
+            .expect("forced unmount should settle within its bounded phases");
+        let _ = std::fs::remove_file(&helper);
+
+        assert!(result.is_err());
+        assert!(
+            state.mounted.load(Ordering::Acquire),
+            "forced teardown must not claim a still-present kernel mount is gone"
+        );
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.unmount_started.load(Ordering::Acquire));
+
+        // This synthetic test deliberately leaves `/` mounted. Prevent the
+        // mount object's Drop fallback from starting another helper attempt.
+        state.mounted.store(false, Ordering::Release);
     }
 
     #[cfg(target_os = "linux")]
