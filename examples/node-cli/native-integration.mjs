@@ -292,7 +292,8 @@ async function run() {
     console.log("PASS Node SDK CLI unmounted cleanly");
 
     assert.equal(await readFile(join(backing, filename), "utf8"), second);
-    console.log("PASS backing root retained Node client bytes after unmount");
+    assert.equal(await readFile(join(backing, rustFilename), "utf8"), rustPayload);
+    console.log("PASS backing root retained Rust and Node client bytes after unmount");
   } catch (error) {
     failure = error;
   } finally {
