@@ -1499,10 +1499,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   provider, `TIDB_CHUNKED_RUSTFS_SEED_PASS`, and its ambiguous-commit phase,
   then hit the same frontend restart timeout. The published 30-second
   graceful shutdown change (`63dbdbd`) did not resolve this boundary. W26.3
-  therefore remains open; the next bounded attempt moves the deliberate
-  dropped-COMMIT failure injection after durable restart/reopen so the
-  restart gate is not contaminated by that test's intentionally unknown
-  client outcome.
+  therefore remained open. The bounded isolation patch was committed as
+  `ecc1106`, moving the deliberate dropped-COMMIT failure injection after
+  durable restart/reopen so the restart gate is not contaminated by that
+  test's intentionally unknown client outcome. Its first rerun
+  `35582936271` was canceled when concurrent main commit `210c9cd` landed;
+  replacement run `35583109781` is the active W26 acceptance attempt and no
+  result from the canceled run is treated as evidence.
 - [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
   revision CAS and stale-writer fencing. SQLite, PGlite, single-node TiDB and
