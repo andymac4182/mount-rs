@@ -14,10 +14,13 @@ attached connection identity/peer/stream/closed state, duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. The transport now also broadcasts shutdown safely across the accept
 loop and all connections, closes the active-connection accept-loop race, and
-reaps completed request tasks while reporting task failures. Local lifecycle
-5/5, transport-error 8/8, strict 9P Clippy and formatting pass. Hosted run
-`35616832528` / job `106389895603` passed the prior Linux kernel-client
-mount/read/write/unmount packet; a fresh run is required for this packet.
+reaps completed request tasks while reporting task failures. An ignored native
+Linux harness now runs eight concurrent mounted file write/read/rename/read
+round trips before a bounded unmount. Local lifecycle 5/5, transport-error
+8/8, the focused native target, strict 9P Clippy and formatting pass. Hosted
+run `35616832528` / job `106389895603` passed the prior Linux kernel-client
+mount/read/write/unmount packet; a fresh run is required for this packet and
+the concurrent-I/O harness.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
@@ -2257,8 +2260,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   components, the revised template also passed the read-only validation API
   on 2026-09-22 without creating a stack or change set. The audit still fails
   closed on inherited endpoint/service-profile
-  overrides, requires an expected caller account, and verifies bucket
-  location before reporting controls; approved production parameters, role
+  overrides, requires an expected caller account, verifies bucket location,
+  and checks noncurrent-version retention whenever versioning is enabled
+  before reporting controls; approved production parameters, role
   trust, change-set review, and live production audit remain open. The bucket
   policy transport-deny resource now covers every object key in the bucket,
   not only the owned prefix; the revised template passed the read-only
@@ -2338,8 +2342,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   protected environment configuration are required before rerunning hosted
   evidence. The read-only
   [`scripts/audit-aws-s3-ci-oidc.sh`](scripts/audit-aws-s3-ci-oidc.sh) now
-  checks the immutable GitHub subject, OIDC provider, exact role trust, protected
-  environment, and required input names without mutating either system. The
+  checks the immutable GitHub subject, OIDC provider, exact single GitHub
+  federation trust statement, protected environment, and required input names
+  without mutating either system; additional or broad GitHub federation trust
+  statements fail closed. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free six-case regression matrix covers valid, missing,

@@ -178,9 +178,10 @@ AWS_S3_CI_ROLE_ARN=<approved-ci-role-arn> \
 
 The audit verifies the repository's immutable owner/repository subject shape,
 the protected environment and main-branch policy, the required variable and
-secret names, the AWS OIDC provider and `sts.amazonaws.com` audience, and an
-exact `AssumeRoleWithWebIdentity` trust statement. It never reads secret
-values or mutates GitHub or AWS. The current account audit is expected to fail
+secret names, the AWS OIDC provider and `sts.amazonaws.com` audience, and one
+exact `AssumeRoleWithWebIdentity` trust statement without additional broad
+GitHub federation grants. It never reads secret values or mutates GitHub or
+AWS. The current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
 result.
@@ -225,7 +226,8 @@ AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID=<approved-audit-account-id> \
 The command fails closed on inherited AWS endpoint or service-profile overrides,
 checks the caller account and bucket region, then checks all four Block Public
 Access settings, BucketOwnerEnforced ownership, default server-side encryption,
-the configured lifecycle expiry and multipart-abort days, and reports rather
+the configured current-object lifecycle expiry, matching noncurrent-version
+expiry when versioning is enabled, and multipart-abort days. It reports rather
 than changes bucket versioning. It is safe to run during review, but a passing
 qualification-bucket audit does not close the production-resource gate.
 
