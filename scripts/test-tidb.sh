@@ -18,10 +18,22 @@ if ! command -v curl >/dev/null 2>&1; then
   echo "test-tidb.sh: curl is required for local readiness checks" >&2
   exit 2
 fi
-if ! docker info >/dev/null 2>&1; then
-  echo "test-tidb.sh: Docker daemon is unavailable; actual TiDB/PD/TiKV acceptance cannot run" >&2
+# Query the server once, before any topology resources are created. A Docker
+# Desktop daemon can accept a plain `docker info` probe and then fail while
+# rendering a later field (for example during an engine restart); keep that
+# transient CLI/engine failure as a prerequisite boundary rather than leaking
+# a panic or starting a partially configured topology.
+docker_server_info=""
+if ! docker_server_info=$(docker info --format '{{.Architecture}}|{{.NCPU}}|{{.MemTotal}}' 2>/dev/null); then
+  echo "test-tidb.sh: Docker daemon did not return usable server capacity; actual TiDB/PD/TiKV acceptance cannot run" >&2
   exit 2
 fi
+old_ifs=$IFS
+IFS='|'
+read -r docker_arch docker_cpu_count docker_mem_bytes <<EOF
+$docker_server_info
+EOF
+IFS=$old_ifs
 
 startup_timeout_seconds=${MOUNT_RS_TIDB_STARTUP_TIMEOUT_SECONDS:-300}
 case "$startup_timeout_seconds" in
@@ -74,7 +86,6 @@ esac
 
 docker_platform=${MOUNT_RS_TIDB_DOCKER_PLATFORM:-}
 if [ -z "$docker_platform" ]; then
-  docker_arch=$(docker info --format '{{.Architecture}}')
   case "$docker_arch" in
     aarch64|arm64) docker_platform=linux/arm64 ;;
     amd64|x86_64) docker_platform=linux/amd64 ;;
@@ -132,8 +143,6 @@ case "$docker_platform" in
     ;;
 esac
 
-docker_mem_bytes=$(docker info --format '{{.MemTotal}}')
-docker_cpu_count=$(docker info --format '{{.NCPU}}')
 case "$docker_mem_bytes" in
   ''|*[!0-9]*)
     echo "test-tidb.sh: Docker reported an invalid memory limit: $docker_mem_bytes" >&2

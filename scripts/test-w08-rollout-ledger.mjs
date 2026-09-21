@@ -60,12 +60,12 @@ const cases = [
   {
     name: "premature-functional-item",
     expectedStatus: 1,
-    expectedOutput: "reason=w08-32-must-be-checked",
+    expectedOutput: "reason=w08-35-must-be-checked",
     documents: {
       ...source,
       tracker: source.tracker.replace(
-        "- [x] W08.32 **Production rollout ledger",
-        "- [ ] W08.32 **Production rollout ledger",
+        "- [x] W08.35 **Docker server-capacity preflight",
+        "- [ ] W08.35 **Docker server-capacity preflight",
       ),
     },
   },
