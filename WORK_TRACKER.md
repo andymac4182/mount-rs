@@ -1840,6 +1840,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   HTTPS RustFS blocks and external credential references. This is static policy
   evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
   replication, recovery, capacity, telemetry or release approval.
+  The hosted workflow also runs `scripts/verify-w07-rollout-ledger.mjs`, which
+  fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
+  production gates or external-drill boundary. This is an internal tracking
+  invariant, not production acceptance.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove

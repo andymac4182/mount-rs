@@ -234,6 +234,13 @@ evidence: the verifier does not open FoundationDB or RustFS, cannot prove
 ACLs, certificate trust, replication, backups, capacity, monitoring or owner
 approval, and does not change the **NO-GO** decision.
 
+The same workflow also runs
+`scripts/verify-w07-rollout-ledger.mjs`. Its
+`W07_ROLLOUT_LEDGER_POLICY_PASS` marker is an internal consistency guard: while
+the rollout is **NO-GO**, it requires W07.7 and all seven nested production
+gates to remain open, and it requires the runbook's external-drill boundary.
+It does not check any production environment and cannot close a gate by itself.
+
 The real composition test now emits
 `FOUNDATIONDB_LATENCY_PASS workload=composition` with operation count,
 p50/p95/p99 microsecond latency, total duration and aggregate operation
