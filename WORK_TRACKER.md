@@ -1132,10 +1132,15 @@ reproducible in a production-like environment.
   budgets; configure metrics/logs/traces, health checks, dashboards, paging,
   retention and redaction; exercise an alert end to end. *(Implementation +
   hosted/provider; collector and on-call route are not configured.)*
-- [ ] **W08-P06 (10%) — capacity/load/soak:** run representative baseline,
+- [ ] **W08-P06 (20%) — capacity/load/soak:** run representative baseline,
   peak, saturation, failover and multi-hour soak workloads; record latency,
-  throughput, errors, headroom and scaling limits. *(Hosted/provider +
-  implementation; workload and production-sized capacity are open.)*
+  throughput, errors, headroom and scaling limits. The bounded public-N-API
+  TiDB/RustFS soak harness in
+  `tests/provider_matrix/tidb-rustfs-soak.mjs` is enabled in the hosted
+  `tidb-rustfs` composition at 64 operations, concurrency 8 and 65,536-byte
+  payloads, and emits p50/p95/p99/throughput markers. *(Hosted/provider +
+  implementation; workload representativeness, resource telemetry and
+  production-sized capacity are open.)*
 - [ ] **W08-P07 (20%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider

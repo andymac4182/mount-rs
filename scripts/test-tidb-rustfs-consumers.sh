@@ -31,6 +31,7 @@ export MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$phase_run_id"
   --test chunked_rustfs -- --ignored --nocapture
 node "$repo_dir/tests/provider_matrix/node-sdk.mjs"
 node "$repo_dir/tests/provider_matrix/cli.mjs"
+node "$repo_dir/tests/provider_matrix/tidb-rustfs-soak.mjs"
 
 MOUNT_RS_NODE_CLI_NATIVE_INTEGRATION=1 \
 MOUNT_RS_NODE_CLI_TIDB_RUSTFS_NATIVE=1 \
