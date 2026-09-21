@@ -899,6 +899,7 @@ async fn drain_read_tasks(
     read_tasks: &mut tokio::task::JoinSet<ReadTaskResult>,
     in_flight: &mut std::collections::HashMap<u64, tokio::task::AbortHandle>,
 ) -> Option<FuseTransportError> {
+    let mut failure = None;
     while let Some(task) = read_tasks.join_next().await {
         match task {
             Ok((unique, Ok(()))) => {
@@ -906,16 +907,16 @@ async fn drain_read_tasks(
             }
             Ok((unique, Err(error))) => {
                 in_flight.remove(&unique);
-                return Some(error);
+                failure.get_or_insert(error);
             }
             Err(error) if error.is_cancelled() => {}
             Err(error) => {
                 in_flight.clear();
-                return Some(read_task_join_error(error));
+                failure.get_or_insert(read_task_join_error(error));
             }
         }
     }
-    None
+    failure
 }
 
 #[cfg(target_os = "linux")]
@@ -1112,22 +1113,22 @@ async fn run_session_loop(
     }
     pending_reads.clear();
     read_tasks.abort_all();
-    if failure.is_none() {
-        match tokio::time::timeout(
-            READ_TASK_DRAIN_TIMEOUT,
-            drain_read_tasks(&mut read_tasks, &mut in_flight),
-        )
-        .await
-        {
-            Ok(Some(error)) => failure = Some(error),
-            Ok(None) => {}
-            Err(_) => {
-                failure = Some(read_worker_drain_timeout_error());
-                // Dropping the JoinSet aborts any worker that did not honor
-                // cancellation within the bound. The native device must be
-                // released even when a backend future is not cancellation
-                // cooperative.
-            }
+    match tokio::time::timeout(
+        READ_TASK_DRAIN_TIMEOUT,
+        drain_read_tasks(&mut read_tasks, &mut in_flight),
+    )
+    .await
+    {
+        Ok(Some(error)) => {
+            failure.get_or_insert(error);
+        }
+        Ok(None) => {}
+        Err(_) => {
+            failure.get_or_insert_with(read_worker_drain_timeout_error);
+            // Dropping the JoinSet releases any worker that did not honor
+            // cancellation within the bound. The native device must be
+            // released even when a backend future is not cancellation
+            // cooperative.
         }
     }
     in_flight.clear();
