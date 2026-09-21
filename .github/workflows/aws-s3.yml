@@ -15,10 +15,13 @@ on:
       - 'integrations/mount-rs-pglite/**'
       - 'integrations/mount-rs-r2/**'
       - 'infra/aws-s3-production.yaml'
+      - 'scripts/audit-aws-s3-bucket-policy.sh'
       - 'scripts/audit-aws-s3-ci-oidc.sh'
       - 'scripts/audit-aws-s3-resource.sh'
       - 'scripts/cargo-shared*'
+      - 'scripts/check-aws-s3-bucket-policy.jq'
       - 'scripts/test-aws-s3.sh'
+      - 'scripts/test-aws-s3-bucket-policy.sh'
       - 'scripts/test-aws-s3-ci-config.sh'
       - 'scripts/test-aws-s3-pglite.sh'
       - 'scripts/validate-aws-s3-ci-config.sh'
@@ -58,8 +61,27 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
 
+      - name: Capture locked AWS S3 qualification provenance
+        run: |
+          mkdir -p artifacts/aws-s3
+          {
+            printf 'source_sha='; git rev-parse HEAD
+            printf 'source_commit='; git log -1 --format=%s
+            printf 'rustc='; rustc --version
+            printf 'cargo='; cargo --version
+            printf 'working_tree='; git status --porcelain=v1
+          } > artifacts/aws-s3/provenance.txt
+          cargo metadata --locked --no-deps --format-version 1 > artifacts/aws-s3/cargo-metadata.json
+          sha256sum Cargo.lock infra/aws-s3-production.yaml \
+            scripts/validate-aws-s3-ci-config.sh \
+            scripts/check-aws-s3-bucket-policy.jq \
+            .github/workflows/aws-s3.yml > artifacts/aws-s3/input-sha256sums.txt
+
       - name: Test protected AWS S3 CI configuration validator
         run: ./scripts/test-aws-s3-ci-config.sh
+
+      - name: Test production AWS S3 bucket policy contract
+        run: ./scripts/test-aws-s3-bucket-policy.sh
 
       - name: Validate protected AWS S3 CI configuration
         env:
@@ -79,4 +101,15 @@ jobs:
           aws sts get-caller-identity
 
       - name: Run bounded AWS S3 acceptance
-        run: ./scripts/test-aws-s3.sh
+        run: |
+          set -o pipefail
+          ./scripts/test-aws-s3.sh 2>&1 | tee artifacts/aws-s3/acceptance.log
+
+      - name: Upload AWS S3 qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: aws-s3-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/aws-s3
+          if-no-files-found: ignore
+          retention-days: 14

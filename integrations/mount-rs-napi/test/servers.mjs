@@ -779,6 +779,99 @@ async function exerciseS3() {
     );
     assert.equal(isolated.response.status, 404);
     assert.deepEqual(Buffer.from(await photos.readFile("/servers-s3.txt")), object);
+
+    const beforeStreamStats = await server.session.stats();
+    const streamedObject = Buffer.alloc(300 * 1024, 0x37);
+    let requestChunks = 0;
+    async function* streamedRequestBody() {
+      for (const start of [0, 100 * 1024, 200 * 1024]) {
+        requestChunks += 1;
+        await new Promise((resolve) => setImmediate(resolve));
+        yield streamedObject.subarray(start, start + 100 * 1024);
+      }
+    }
+    const streamedPut = await within(
+      server.session.handleRequestStream(
+        {
+          method: "PUT",
+          target: "/photos/streamed-s3.txt",
+          headers: [{ name: "content-length", value: String(streamedObject.length) }],
+        },
+        streamedRequestBody(),
+      ),
+      "S3 streamed PUT",
+    );
+    assert.equal(streamedPut.status, 200);
+    assert.ok(streamedPut.body);
+    for await (const _chunk of streamedPut.body) {}
+    assert.equal(requestChunks, 3);
+    assert.deepEqual(
+      Buffer.from(await photos.readFile("/streamed-s3.txt")),
+      streamedObject,
+    );
+
+    const emptyRequest = () => new ReadableStream({
+      start(controller) {
+        controller.close();
+      },
+    });
+    const streamedGet = await within(
+      server.session.handleRequestStream(
+        { method: "GET", target: "/photos/streamed-s3.txt", headers: [] },
+        emptyRequest(),
+      ),
+      "S3 streamed GET",
+    );
+    assert.equal(streamedGet.status, 200);
+    assert.ok(streamedGet.body);
+    const streamedChunks = [];
+    for await (const chunk of streamedGet.body) streamedChunks.push(Buffer.from(chunk));
+    assert.ok(streamedChunks.length >= 3);
+    assert.deepEqual(Buffer.concat(streamedChunks), streamedObject);
+
+    const cancelledGet = await within(
+      server.session.handleRequestStream(
+        { method: "GET", target: "/photos/streamed-s3.txt", headers: [] },
+        emptyRequest(),
+      ),
+      "S3 streamed cancellation setup",
+    );
+    const cancelledIterator = cancelledGet.body[Symbol.asyncIterator]();
+    const firstCancelledChunk = await cancelledIterator.next();
+    assert.equal(firstCancelledChunk.done, false);
+    assert.ok(firstCancelledChunk.value.length > 0);
+    await cancelledIterator.return();
+    assert.equal((await cancelledIterator.next()).done, true);
+
+    async function* failingRequestBody() {
+      yield Buffer.from("partial");
+      throw new Error("deliberate S3 request stream failure");
+    }
+    const failedStream = await within(
+      server.session.handleRequestStream(
+        {
+          method: "PUT",
+          target: "/photos/streamed-failure.txt",
+          headers: [{ name: "content-length", value: "7" }],
+        },
+        failingRequestBody(),
+      ),
+      "S3 streamed request failure",
+    );
+    assert.equal(failedStream.status, 400);
+
+    const streamedStats = await server.session.stats();
+    assert.equal(streamedStats.requests, beforeStreamStats.requests + 4);
+    assert.equal(streamedStats.replies, beforeStreamStats.replies + 4);
+    assert.equal(streamedStats.errors, beforeStreamStats.errors + 1);
+    assert.equal(
+      streamedStats.operations.PutObject,
+      (beforeStreamStats.operations.PutObject ?? 0) + 2,
+    );
+    assert.equal(
+      streamedStats.operations.GetObject,
+      (beforeStreamStats.operations.GetObject ?? 0) + 2,
+    );
   } finally {
     await runPhase("S3 cleanup: server lifecycle", () =>
       closeLifecycle(server, "S3", listening),

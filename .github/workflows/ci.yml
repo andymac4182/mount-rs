@@ -30,6 +30,23 @@ jobs:
           cargo test --locked -p mount-rs-cli r2_endpoint_validation_rejects_unsafe_url_shapes
           node examples/node-cli/index.mjs \
             --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
+      - name: Verify W26 Ozone production config policy without credentials or network
+        run: |
+          export MOUNT_RS_TIDB_TLS_URL='mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true&verify_ca=true&verify_identity=true&built_in_roots=true'
+          for config in \
+            tests/ozone/production-config-policy-sqlite.json \
+            tests/ozone/production-config-policy-pglite.json \
+            tests/ozone/production-config-policy-tidb.json \
+            tests/ozone/production-config-policy-foundationdb.json
+          do
+            node scripts/verify-w26-ozone-production-config.mjs "$config"
+          done
+          if node scripts/verify-w26-ozone-production-config.mjs \
+            tests/ozone/production-config-policy.invalid.json
+          then
+            echo 'W26 Ozone production config policy accepted an insecure fixture' >&2
+            exit 1
+          fi
       - name: Verify real Apache Ozone block contract and restart recovery
         run: sh scripts/test-ozone.sh
 

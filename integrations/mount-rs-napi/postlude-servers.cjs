@@ -10,6 +10,7 @@ const P9_SERVER_WRAPPED = Symbol("mountRsP9ServerWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
 const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
+const S3_STREAM_WRAPPED = Symbol("mountRsS3StreamWrapped")
 
 function installStructuralFactories(binding) {
   if (binding[FACTORIES_WRAPPED]) return
@@ -589,6 +590,104 @@ function wrapNfsConnection(NfsConnection) {
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
 }
 
+function toReadableStream(value) {
+  const ReadableStreamConstructor = globalThis.ReadableStream
+  if (typeof ReadableStreamConstructor !== "function") {
+    throw new TypeError("S3 streaming requires globalThis.ReadableStream")
+  }
+  if (value === null || value === undefined) {
+    return new ReadableStreamConstructor({
+      start(controller) {
+        controller.close()
+      },
+    })
+  }
+  if (typeof value.getReader === "function") return value
+  const asyncIterator = value[Symbol.asyncIterator]
+  if (typeof asyncIterator !== "function") {
+    throw new TypeError("S3 request body must be an AsyncIterable or ReadableStream")
+  }
+  const iterator = asyncIterator.call(value)
+  return new ReadableStreamConstructor({
+    async pull(controller) {
+      const next = await iterator.next()
+      if (next.done) {
+        controller.close()
+        return
+      }
+      if (!(next.value instanceof Uint8Array)) {
+        throw new TypeError("S3 request body chunks must be Uint8Array values")
+      }
+      controller.enqueue(Buffer.from(next.value))
+    },
+    async cancel(reason) {
+      if (typeof iterator.return === "function") await iterator.return(reason)
+    },
+  })
+}
+
+function bodyAsyncIterator(nativeBody) {
+  let done = false
+  return {
+    async next() {
+      if (done) return { value: undefined, done: true }
+      try {
+        const chunk = await nativeBody.readChunk()
+        if (chunk === null) {
+          done = true
+          return { value: undefined, done: true }
+        }
+        return { value: chunk, done: false }
+      } catch (error) {
+        done = true
+        throw error
+      }
+    },
+    async return(value) {
+      if (!done) {
+        done = true
+        await nativeBody.close()
+      }
+      return { value, done: true }
+    },
+    async throw(error) {
+      await this.return()
+      throw error
+    },
+    [Symbol.asyncIterator]() {
+      return this
+    },
+  }
+}
+
+function wrapS3Session(S3Session) {
+  if (!S3Session || !S3Session.prototype || S3Session.prototype[S3_STREAM_WRAPPED]) {
+    return
+  }
+  const prototype = S3Session.prototype
+  const nativeHandleRequestStream = prototype.handleRequestStream
+  if (typeof nativeHandleRequestStream !== "function") return
+  Object.defineProperty(prototype, "handleRequestStream", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value(head, body) {
+      try {
+        const request = nativeHandleRequestStream.call(this, head, toReadableStream(body))
+        return Promise.resolve(request.run()).then((response) => {
+          if (response === null || response.body === null || response.body === undefined) {
+            return response
+          }
+          return { status: response.status, headers: response.headers, body: bodyAsyncIterator(response.body) }
+        })
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    },
+  })
+  Object.defineProperty(prototype, S3_STREAM_WRAPPED, { value: true })
+}
+
 module.exports = function installServers(binding) {
   wrapP9Server(binding && binding.P9Server)
   for (const name of ["NfsServer", "P9Server", "S3Server", "WebdavServer"]) {
@@ -596,6 +695,7 @@ module.exports = function installServers(binding) {
   }
   wrapP9Connection(binding && binding.P9Connection)
   wrapNfsConnection(binding && binding.NfsConnection)
+  wrapS3Session(binding && binding.S3Session)
   installStructuralFactories(binding)
   return binding
 }

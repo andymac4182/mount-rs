@@ -53,6 +53,7 @@ import {
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
+  type P9AttachOptions,
   type P9Connection,
   type P9Server,
   type P9ServerOptions,
@@ -61,6 +62,12 @@ import {
   createS3Server,
   type S3Server,
   type S3ServerOptions,
+  type S3RequestHead,
+  type S3RequestStreamBody,
+  type S3Response,
+  type S3Session,
+  type S3SessionStats,
+  type S3StreamResponse,
 } from "@mount-rs/core/s3"
 import {
   createWebdavServer,
@@ -292,6 +299,13 @@ function checkServerAndKvSubpaths(): void {
     socketMode: 0o600,
     readOnly: true,
   }
+  const p9AttachOptions: P9AttachOptions = {
+    peer: "attached-types",
+    own: false,
+    maxFrame: 8192,
+    maxInFlight: 2,
+  }
+  void p9AttachOptions
   const s3Options: S3ServerOptions = {
     host: "127.0.0.1",
     port: 0,
@@ -349,6 +363,18 @@ function checkServerAndKvSubpaths(): void {
   const p9Close: Promise<void> = p9Server.close()
   const s3Url: string = s3Server.url
   const s3Buckets: Array<string> = s3Server.buckets
+  const s3Session: S3Session = s3Server.session
+  const s3Head: S3RequestHead = { method: "GET", target: "/", headers: [] }
+  const s3RequestBody: S3RequestStreamBody = (async function* () {})()
+  const s3Buffered: Promise<S3Response> = s3Session.handleRequest(s3Head)
+  const s3Streamed: Promise<S3StreamResponse> = s3Session.handleRequestStream(
+    s3Head,
+    s3RequestBody,
+  )
+  const s3Stats: Promise<S3SessionStats> = s3Session.stats()
+  void s3Buffered
+  void s3Streamed
+  void s3Stats
   const s3Listen: Promise<S3Server> = s3Server.listen()
   const s3Close: Promise<void> = s3Server.close()
   const webdavUrl: string = webdavServer.url

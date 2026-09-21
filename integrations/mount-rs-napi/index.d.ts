@@ -484,7 +484,7 @@ export declare class P9Server {
   listen(): Promise<P9Server>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
-  attach(stream: Duplex, options?: { peer?: string; own?: boolean }): P9Connection
+  attach(stream: Duplex, options?: P9AttachOptions): P9Connection
 }
 
 export declare class P9Session {
@@ -515,7 +515,28 @@ export declare class PathLock {
   write<T>(callback: () => T | Promise<T>): Promise<T>
 }
 
+/**
+ * A pull-based S3 response body retained by the JavaScript facade. Buffered
+ * protocol responses and file-backed object streams share the same async
+ * iterator shape, while stream variants remain owned by the transport until
+ * JavaScript asks for each next chunk.
+ */
+export declare class S3BodyStream {
+  /**
+   * Read one response chunk, or `null` after EOF. A single mutex prevents
+   * concurrent JavaScript pulls from advancing the transport stream twice.
+   */
+  readChunk(): Promise<Buffer | null>
+  /**
+   * Close an unread or partially-read response body. The JavaScript
+   * async-iterator facade calls this from `return()` on cancellation;
+   * dropping the transport stream also signals file-reader cancellation.
+   */
+  close(): Promise<void>
+}
+
 export declare class S3Server {
+  get session(): S3Session
   get host(): string
   get port(): number
   get url(): string
@@ -523,6 +544,39 @@ export declare class S3Server {
   listen(): Promise<S3Server>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
+}
+
+/**
+ * Read-only N-API view of the in-process S3 session shared by a server.
+ * Request dispatch remains owned by the Rust session; this view exposes the
+ * streaming boundary without taking ownership of the underlying drivers.
+ */
+export declare class S3Session {
+  /** Handle one in-process, buffered S3 request without an HTTP socket. */
+  handleRequest(head: S3RequestHead, body?: Buffer | undefined | null): Promise<S3Response>
+  /**
+   * Capture one in-process S3 request body stream without entering the
+   * async N-API future while it still owns a JavaScript stream wrapper.
+   */
+  handleRequestStream(head: S3RequestHead, body: S3RequestStreamBody): Promise<S3StreamResponse>
+  get bucketNames(): Array<string>
+  /** Read a coherent snapshot of the transport-owned session metrics. */
+  stats(): Promise<S3SessionStats>
+}
+
+/**
+ * The synchronous N-API entrypoint safely captures the JavaScript stream
+ * reader. The transport future runs through `run` after that non-Send JS
+ * wrapper has left the N-API call frame.
+ */
+export declare class S3StreamRequest {
+  run(): Promise<S3StreamResponse>
+}
+
+export declare class S3StreamResponse {
+  get status(): number
+  get headers(): Array<S3Header>
+  get body(): AsyncIterable<Uint8Array> | null
 }
 
 export declare class WebdavServer {
@@ -2052,6 +2106,13 @@ export declare function nfsXdrPad(length: number): number
 
 export declare function normalizePath(path: string): string
 
+export interface P9AttachOptions {
+  peer?: string
+  own?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+}
+
 export interface P9ServerOptions {
   port?: number
   host?: string
@@ -2112,6 +2173,23 @@ export interface S3Credentials {
   secretAccessKey: string
 }
 
+export interface S3Header {
+  name: string
+  value: string
+}
+
+export interface S3RequestHead {
+  method: string
+  target: string
+  headers: Array<S3Header>
+}
+
+export interface S3Response {
+  status: number
+  headers: Array<S3Header>
+  body: Buffer
+}
+
 export interface S3ServerOptions {
   bucket?: string
   host?: string
@@ -2122,6 +2200,18 @@ export interface S3ServerOptions {
   maxXmlBytes?: number
   readChunkBytes?: number
   drainTimeout?: number
+}
+
+export interface S3SessionStats {
+  requests: number
+  replies: number
+  errors: number
+  operations: Record<string, number>
+  durationMsTotal: number
+  durationMsMax: number
+  requestBytes: number
+  responseBytes: number
+  errorClasses: Record<string, number>
 }
 
 export declare function splitPath(path: string): Array<string>
@@ -2244,6 +2334,8 @@ export interface FuseSessionInodeTable {
   pathOf(inode: FuseSessionInode): string
   requirePath(nodeid: bigint): string
 }
+
+export type S3RequestStreamBody = AsyncIterable<Uint8Array> | ReadableStream<Uint8Array>
 
 import type { FsError, FsErrorOptions } from "./types/root.js"
 export type { ErrnoCode, FsError, FsErrorOptions } from "./types/root.js"

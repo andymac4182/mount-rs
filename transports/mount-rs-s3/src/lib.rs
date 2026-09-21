@@ -34,7 +34,8 @@ pub use server::{
     S3TransportErrorHook, S3TransportErrorKind, create_s3_server, create_s3_server_with_hooks,
 };
 pub use session::{
-    S3ErrorClass, S3Request, S3RequestHead, S3Session, S3SessionOptions, S3SessionStats,
+    S3ErrorClass, S3Request, S3RequestBody, S3RequestHead, S3ResponseBodyStream, S3Session,
+    S3SessionOptions, S3SessionStats, S3StreamBody, S3StreamResponse,
 };
 pub use sigv4::{
     AuthorizationHeader, CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HEADER_AUTHORIZATION,

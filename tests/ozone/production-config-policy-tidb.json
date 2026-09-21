@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "tidb",
+        "connection": {
+          "env": "MOUNT_RS_TIDB_TLS_URL"
+        },
+        "volume_key": "mount-rs-production-w26-tidb",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "https://ozone-policy.invalid",
+        "bucket": "mount-rs-production-w26",
+        "prefix": "volumes/tidb",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 4194304,
+      "owner": "mount-rs-production-w26-tidb"
+    }
+  }
+}

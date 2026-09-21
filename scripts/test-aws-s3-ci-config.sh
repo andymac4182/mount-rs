@@ -19,6 +19,7 @@ run_validator() {
   endpoint=
   access_key=
   secret_key=
+  profile=
 
   case "$case_name" in
     valid) ;;
@@ -30,6 +31,7 @@ run_validator() {
       access_key=AKIAEXAMPLE123456789
       secret_key=synthetic-secret-only
       ;;
+    profile_override) profile=synthetic-profile ;;
     *)
       echo "unknown test case: $case_name" >&2
       return 2
@@ -48,6 +50,7 @@ run_validator() {
     AWS_S3_ENDPOINT="$endpoint" \
     AWS_ACCESS_KEY_ID="$access_key" \
     AWS_SECRET_ACCESS_KEY="$secret_key" \
+    AWS_PROFILE="$profile" \
     "$validator"
 }
 
@@ -82,5 +85,6 @@ expect_blocked role_account_mismatch role_account_mismatch
 expect_blocked endpoint_override endpoint_override_detected
 expect_blocked unsafe_prefix unsafe_test_prefix
 expect_blocked static_credentials preconfigured_credentials_detected
+expect_blocked profile_override profile_override_detected
 
-echo "AWS_S3_CI_CONFIG_TEST_PASS cases=6"
+echo "AWS_S3_CI_CONFIG_TEST_PASS cases=7"
