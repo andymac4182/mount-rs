@@ -522,11 +522,17 @@ async function run(configuration) {
   };
   const mounted = await mount(driver, configuration.mountpoint, mountOptions);
   const closeMount = cleanupFunction(mounted);
-  let closed = false;
+  let mountClosed = false;
+  let driverClosed = false;
   const closeOnce = async () => {
-    if (closed) return;
-    closed = true;
-    await closeMount();
+    if (!mountClosed) {
+      await closeMount();
+      mountClosed = true;
+    }
+    if (!driverClosed) {
+      await driver.shutdown();
+      driverClosed = true;
+    }
   };
 
   try {
