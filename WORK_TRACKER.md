@@ -34,11 +34,14 @@ shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
-NFSv3 calls under bounded in-flight dispatch. The opt-in macOS native NFSv3
+NFSv3 calls under bounded in-flight dispatch. A restart-boundary test also
+proves that a replacement server rejects the old v4 session with
+`NFS4ERR_BADSESSION`, classifying session/lease/replay state as process-local.
+The opt-in macOS native NFSv3
 loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
 remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
 stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-and crash/durable-restart qualification.
+backend durability, crash injection, and durable-restart qualification.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
