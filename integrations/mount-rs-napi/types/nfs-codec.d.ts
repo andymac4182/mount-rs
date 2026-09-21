@@ -1,7 +1,7 @@
 /** NFS XDR and ONC-RPC codec surface exposed by the ./nfs subpath. */
 
-export { Nfs4Session, NfsConnection, NfsServer, NfsSession, createNfsServer } from "../index.js"
-export type { Nfs4IdMap, Nfs4StateKnobs, NfsHandleEntry, NfsServerOptions, NfsSessionStats } from "../index.js"
+export { Nfs3Session, Nfs4Session, NfsConnection, NfsServer, NfsSession, createNfsServer } from "../index.js"
+export type { Nfs4IdMap, Nfs4StateKnobs, Nfs4StateOptionsView, NfsHandleEntry, NfsServerOptions, NfsSessionOptionsView, NfsSessionStats } from "../index.js"
 
 export class XdrError extends Error {
   readonly code: "ERR_NFS_XDR"

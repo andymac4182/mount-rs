@@ -40,7 +40,8 @@ use mount_rs_nfs::{
     NfsConnection as TransportNfsConnection, NfsRequestContext as TransportNfsRequestContext,
     NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
     NfsServerOptions as TransportNfsServerOptions, NfsSessionError as TransportNfsSessionError,
-    NfsSessionErrorHook as TransportNfsSessionErrorHook, NfsTransportError as TransportNfsError,
+    NfsSessionErrorHook as TransportNfsSessionErrorHook,
+    NfsSessionOptions as TransportNfsSessionOptions, NfsTransportError as TransportNfsError,
     NfsTransportErrorHook as TransportNfsErrorHook, RpcCall as TransportNfsRpcCall,
 };
 use mount_rs_s3::{
@@ -1388,6 +1389,68 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
     ))
 }
 
+/// Effective scalar NFSv4 policy exposed by a server-owned session view.
+/// Callback functions are retained by the server hook boundary and therefore
+/// are represented only by the fact that an ID map was configured.
+#[napi(object)]
+pub struct Nfs4StateOptionsView {
+    pub lease_seconds: f64,
+    pub seed: f64,
+    pub max_sessions: f64,
+    pub max_fore_slots: f64,
+    pub max_operations: f64,
+    pub max_request_size: f64,
+    pub max_cached_response_size: f64,
+    pub max_opens_per_file: f64,
+    pub max_locks_per_file: f64,
+    pub require_reclaim_complete: bool,
+    pub idmap_configured: bool,
+}
+
+/// Effective scalar policy exposed by a server-owned NFS session view.
+/// `onError`, ID-map callbacks, and the injected clock are intentionally not
+/// reflected as callable values because their lifetimes belong to the server.
+#[napi(object)]
+pub struct NfsSessionOptionsView {
+    pub use_driver_ino: bool,
+    #[napi(ts_type = "Uint8Array | null")]
+    pub verifier: Option<Buffer>,
+    pub max_handles: Option<f64>,
+    pub rtmax: f64,
+    pub wtmax: f64,
+    pub dtpref: f64,
+    pub snapshot_cache: f64,
+    pub claim_ownership: bool,
+    pub nfs4: Nfs4StateOptionsView,
+}
+
+fn nfs_options_view(options: &TransportNfsSessionOptions) -> NfsSessionOptionsView {
+    let nfs4 = &options.nfs4;
+    NfsSessionOptionsView {
+        use_driver_ino: options.use_driver_ino,
+        verifier: options.verifier.map(|value| Buffer::from(value.to_vec())),
+        max_handles: options.max_handles.map(|value| value as f64),
+        rtmax: options.rtmax as f64,
+        wtmax: options.wtmax as f64,
+        dtpref: options.dtpref as f64,
+        snapshot_cache: options.snapshot_cache as f64,
+        claim_ownership: options.claim_ownership,
+        nfs4: Nfs4StateOptionsView {
+            lease_seconds: nfs4.lease_seconds as f64,
+            seed: nfs4.seed as f64,
+            max_sessions: nfs4.max_sessions as f64,
+            max_fore_slots: nfs4.max_fore_slots as f64,
+            max_operations: nfs4.max_operations as f64,
+            max_request_size: nfs4.max_request_size as f64,
+            max_cached_response_size: nfs4.max_cached_response_size as f64,
+            max_opens_per_file: nfs4.max_opens_per_file as f64,
+            max_locks_per_file: nfs4.max_locks_per_file as f64,
+            require_reclaim_complete: nfs4.require_reclaim_complete,
+            idmap_configured: nfs4.idmap.is_some(),
+        },
+    }
+}
+
 #[napi]
 pub struct NfsSession {
     inner: TransportNfsSession,
@@ -1424,6 +1487,87 @@ fn nfs_handle_entries(table: &TransportNfsHandleTable) -> Vec<NfsHandleEntry> {
         .collect()
 }
 
+/// Read-only N-API view of the NFSv3/MOUNT session routed by an [`NfsServer`].
+/// It shares the transport's handle table, counters, driver, and destruction
+/// state with the unified session view.
+#[napi]
+pub struct Nfs3Session {
+    inner: TransportNfsSession,
+}
+
+#[napi]
+impl Nfs3Session {
+    /// Handle one unframed NFSv3 or MOUNTv3 RPC record. Malformed records
+    /// return `null`; decoded calls return one encoded RPC reply.
+    #[napi]
+    pub async fn handle_call(&self, bytes: Buffer) -> Option<Buffer> {
+        self.inner
+            .handle_call(bytes.as_ref(), TransportNfsRequestContext::default())
+            .await
+            .map(Buffer::from)
+    }
+
+    /// Read-only N-API wrapper for the session-owned filesystem driver. The
+    /// server retains the authoritative driver lifetime.
+    #[napi(getter)]
+    pub fn driver(&self) -> Filesystem {
+        Filesystem::from_driver(Arc::clone(&self.inner.driver.driver), None, None)
+    }
+
+    #[napi(getter)]
+    pub fn options(&self) -> NfsSessionOptionsView {
+        nfs_options_view(&self.inner.options)
+    }
+
+    #[napi(getter)]
+    pub fn write_verifier(&self) -> Buffer {
+        Buffer::from(self.inner.write_verifier.to_vec())
+    }
+
+    #[napi(getter)]
+    pub fn stats(&self) -> NfsSessionStats {
+        let stats = self.inner.stats();
+        NfsSessionStats {
+            requests: stats.requests as f64,
+            replies: stats.replies as f64,
+            errors: stats.errors as f64,
+            dropped: stats.dropped as f64,
+            procedures: stats
+                .procedures
+                .into_iter()
+                .map(|(name, count)| (name, count as f64))
+                .collect(),
+        }
+    }
+
+    #[napi(getter)]
+    pub fn mounts(&self) -> Vec<Vec<String>> {
+        self.inner
+            .mounts()
+            .into_iter()
+            .map(|(hostname, directory)| vec![hostname, directory])
+            .collect()
+    }
+
+    /// Stable read-only snapshots of the shared v3/v4 file-handle table.
+    /// Handles are BigInts because the transport identity is u64.
+    #[napi(getter)]
+    pub fn handles(&self) -> Vec<NfsHandleEntry> {
+        nfs_handle_entries(&self.inner.handles)
+    }
+
+    #[napi(getter)]
+    pub fn destroyed(&self) -> bool {
+        self.inner.destroyed()
+    }
+
+    /// Destroy the NFSv3/MOUNT session and release its process-local state.
+    #[napi]
+    pub async fn destroy(&self) {
+        self.inner.destroy().await;
+    }
+}
+
 /// Read-only N-API view of the versioned NFS sessions owned by a server.
 #[napi]
 impl NfsSession {
@@ -1440,6 +1584,15 @@ impl NfsSession {
         reply.map(Buffer::from)
     }
 
+    /// The NFSv3/MOUNT session routed by this server. Its state is read-only
+    /// at the N-API boundary and shares the server-owned driver lifetime.
+    #[napi(getter)]
+    pub fn v3(&self) -> Nfs3Session {
+        Nfs3Session {
+            inner: self.inner.clone(),
+        }
+    }
+
     /// The NFSv4.1 session routed by this server. Its state is read-only at the
     /// N-API boundary and shares the server-owned driver lifetime.
     #[napi(getter)]
@@ -1447,6 +1600,26 @@ impl NfsSession {
         Nfs4Session {
             inner: self.v4_inner.clone(),
         }
+    }
+
+    /// Read-only N-API wrapper for the session-owned filesystem driver. The
+    /// server retains the authoritative driver lifetime.
+    #[napi(getter)]
+    pub fn driver(&self) -> Filesystem {
+        Filesystem::from_driver(Arc::clone(&self.inner.driver.driver), None, None)
+    }
+
+    /// Effective scalar policy. Callback values are retained by the server
+    /// hook boundary and are intentionally not returned as new JS functions.
+    #[napi(getter)]
+    pub fn options(&self) -> NfsSessionOptionsView {
+        nfs_options_view(&self.inner.options)
+    }
+
+    /// The write verifier shared by NFSv3 and NFSv4 replies for this server.
+    #[napi(getter)]
+    pub fn write_verifier(&self) -> Buffer {
+        Buffer::from(self.inner.write_verifier.to_vec())
     }
 
     #[napi(getter)]
@@ -1510,6 +1683,26 @@ impl Nfs4Session {
             .handle_call(bytes.as_ref(), TransportNfsRequestContext::default())
             .await
             .map(Buffer::from)
+    }
+
+    /// Read-only N-API wrapper for the session-owned filesystem driver. The
+    /// server retains the authoritative driver lifetime.
+    #[napi(getter)]
+    pub fn driver(&self) -> Filesystem {
+        Filesystem::from_driver(Arc::clone(&self.inner.driver.driver), None, None)
+    }
+
+    /// Effective scalar policy. Callback values are retained by the server
+    /// hook boundary and are intentionally not returned as new JS functions.
+    #[napi(getter)]
+    pub fn options(&self) -> NfsSessionOptionsView {
+        nfs_options_view(&self.inner.options)
+    }
+
+    /// The NFSv4.1 write verifier carried by WRITE and COMMIT replies.
+    #[napi(getter)]
+    pub fn write_verifier(&self) -> Buffer {
+        Buffer::from(self.inner.write_verifier.to_vec())
     }
 
     /// Sweep expired NFSv4 client leases and release their process-local state.

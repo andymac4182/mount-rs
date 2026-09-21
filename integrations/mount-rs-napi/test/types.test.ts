@@ -50,12 +50,15 @@ import {
 import {
   createNfsServer,
   type NfsConnection,
+  type Nfs3Session,
   type Nfs4Session,
   type Nfs4IdMap,
+  type Nfs4StateOptionsView,
   type Nfs4StateKnobs,
   type NfsServer,
   type NfsServerOptions,
   type NfsSession,
+  type NfsSessionOptionsView,
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
@@ -473,7 +476,17 @@ function checkServerAndKvSubpaths(): void {
 
   const nfsServer: NfsServer = createNfsServer(filesystem, nfsOptions)
   const nfsSession: NfsSession = nfsServer.session
+  const nfsV3Session: Nfs3Session = nfsSession.v3
   const nfsV4Session: Nfs4Session = nfsSession.v4
+  const nfsDriver: Filesystem = nfsSession.driver
+  const nfsV3Driver: Filesystem = nfsV3Session.driver
+  const nfsV4Driver: Filesystem = nfsV4Session.driver
+  const nfsOptionsView: NfsSessionOptionsView = nfsSession.options
+  const nfsV4OptionsView: NfsSessionOptionsView = nfsV4Session.options
+  const nfsV4StateOptionsView: Nfs4StateOptionsView = nfsOptionsView.nfs4
+  const nfsWriteVerifier: Uint8Array = nfsSession.writeVerifier
+  const nfsV3WriteVerifier: Uint8Array = nfsV3Session.writeVerifier
+  const nfsV4WriteVerifier: Uint8Array = nfsV4Session.writeVerifier
   const nfsSessionDestroy: Promise<void> = nfsSession.destroy()
   const nfsV4SessionDestroy: Promise<void> = nfsV4Session.destroy()
   const p9Server: P9Server = createP9Server(filesystem, p9Options)
@@ -585,7 +598,17 @@ function checkServerAndKvSubpaths(): void {
   void nfsHost
   void nfsPort
   void nfsSession
+  void nfsV3Session
   void nfsV4Session
+  void nfsDriver
+  void nfsV3Driver
+  void nfsV4Driver
+  void nfsOptionsView
+  void nfsV4OptionsView
+  void nfsV4StateOptionsView
+  void nfsWriteVerifier
+  void nfsV3WriteVerifier
+  void nfsV4WriteVerifier
   void nfsSessionDestroy
   void nfsV4SessionDestroy
   void nfsConnections

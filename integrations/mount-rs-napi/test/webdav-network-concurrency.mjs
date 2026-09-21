@@ -48,8 +48,42 @@ try {
     assert.equal(status, 200)
     assert.deepEqual(body, expected)
   }
-  assert.equal(server.session.stats.methods.get("PUT"), 16)
-  assert.equal(server.session.stats.methods.get("GET"), 16)
+
+  const streamedObject = Buffer.concat([
+    Buffer.alloc(7 * 1024, 0x31),
+    Buffer.alloc(13 * 1024, 0x32),
+    Buffer.alloc(23 * 1024, 0x33),
+  ])
+  const streamedChunks = [
+    streamedObject.subarray(0, 7 * 1024),
+    streamedObject.subarray(7 * 1024, 20 * 1024),
+    streamedObject.subarray(20 * 1024),
+  ]
+  const streamedPut = await fetch(`${server.url}/concurrent-http/streamed.bin`, {
+    method: "PUT",
+    body: new ReadableStream({
+      async pull(controller) {
+        const chunk = streamedChunks.shift()
+        if (chunk === undefined) {
+          controller.close()
+          return
+        }
+        await new Promise((resolve) => setImmediate(resolve))
+        controller.enqueue(chunk)
+      },
+    }),
+    duplex: "half",
+    signal: AbortSignal.timeout(10_000),
+  })
+  assert.ok([200, 201, 204].includes(streamedPut.status))
+  await streamedPut.arrayBuffer()
+  const streamedGet = await fetch(`${server.url}/concurrent-http/streamed.bin`, {
+    signal: AbortSignal.timeout(10_000),
+  })
+  assert.equal(streamedGet.status, 200)
+  assert.deepEqual(Buffer.from(await streamedGet.arrayBuffer()), streamedObject)
+  assert.equal(server.session.stats.methods.get("PUT"), 17)
+  assert.equal(server.session.stats.methods.get("GET"), 17)
 
   authServer = createWebdavServer(filesystem, {
     host: "127.0.0.1",
@@ -81,4 +115,4 @@ try {
   await filesystem.shutdown()
 }
 
-console.log("mount-rs N-API WebDAV network concurrency/auth: PASS (16 concurrent HTTP PUT/GET pairs)")
+console.log("mount-rs N-API WebDAV network concurrency/auth/streaming: PASS (16 concurrent HTTP PUT/GET pairs)")

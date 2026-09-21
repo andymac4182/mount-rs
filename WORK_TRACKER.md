@@ -838,7 +838,8 @@ clears a failed close promise so a timed-out WebDAV close can be retried after
 the peer exits. The focused wrapper race test passes 40 alternating
 real-loopback iterations, its stalled-request timeout/retry regression passes,
 and the focused network-concurrency/auth test passes 16 concurrent HTTP
-PUT/GET pairs plus live Basic-auth challenge/acceptance. The opt-in
+PUT/GET pairs, a chunked streamed PUT/GET, and live Basic-auth
+challenge/acceptance. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
