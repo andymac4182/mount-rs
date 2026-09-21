@@ -117,13 +117,13 @@ jobs:
 
       - name: Generate artifact provenance attestation
         id: provenance-attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.artifact }}
 
       - name: Generate CycloneDX SBOM attestation
         id: sbom-attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.artifact }}
           sbom-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.sbom }}

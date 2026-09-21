@@ -112,9 +112,16 @@ tag ref and hosted-runner policy, then records `signature=verified` and
 `sbom=verified` in the finalized manifest before rebuilding `SHA256SUMS`. The
 target matrix has an explicit manual `attest=true` path that performs the same
 per-target qualification. Local YAML/embedded-Bash validation and the local
-GitHub CLI flag-surface check passed. No approved tag or manual attestation
-dispatch has run, so no Sigstore bundle, attestation ID/URL or production
-release signature is claimed.
+GitHub CLI flag-surface check passed. No approved tag or successful manual
+attestation dispatch has run, so no Sigstore bundle, attestation ID/URL or
+production release signature is claimed.
+
+The first live target qualification (`35620932700`, source `11a7b22`) passed
+both target builds and both downloaded-asset checks. Its two attestation jobs
+failed during setup because GitHub rejected the shortened action ref; no action
+step, OIDC token or Sigstore bundle was created. The workflow now uses the
+full verified v4.2.2 SHA and requires a rerun before treating the attestation
+path as hosted-qualified.
 
 The first explicit target-matrix dispatch (`35620392878`, source `0a4de6f`)
 was accepted but cancelled before job creation because concurrent `main` pushes

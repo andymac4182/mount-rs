@@ -1597,7 +1597,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
 - [x] W08.17 **Hosted cryptographic provenance and SBOM attestation wiring:**
   `.github/workflows/cli-release.yml` now grants OIDC/attestation permissions
   only to the tag-release job, invokes pinned
-  `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d` (`v4.2.2`) for the
+  `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6` (`v4.2.2`) for the
   exact CLI tarball and CycloneDX SBOM, and verifies both with
   `gh attestation verify` against the repository, signer workflow, source
   commit, tag ref and hosted-runner identity. After those checks it rewrites
@@ -1605,11 +1605,14 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   three-entry `SHA256SUMS`. `.github/workflows/w08-release-targets.yml` also
   exposes a manual `attest=true` path that performs the same per-target
   provenance/SBOM qualification. Local YAML, embedded-Bash and `gh` flag
-  checks pass. The tag workflow and manual attestation dispatch have not yet
-  run; no Sigstore bundle, attestation ID/URL, release-registry result, canary,
-  rollback or approval is claimed. *(Release implementation slice; GitHub
-  OIDC/attestation availability, release owner and production approvers are
-  external gates.)*
+  checks pass. Manual run `35620932700` reached terminal target-build and
+  downloaded-asset PASS jobs, but both attestation jobs failed during setup
+  because GitHub rejected the shortened action ref; no action step, OIDC token
+  or Sigstore bundle was created. The full v4.2.2 SHA correction is now in the
+  workflow and requires a rerun. No attestation ID/URL, release-registry
+  result, canary, rollback or approval is claimed. *(Release implementation
+  slice; GitHub OIDC/attestation availability, release owner and production
+  approvers are external gates.)*
 - [x] W08.18 **Attestation dispatch concurrency isolation:**
   `.github/workflows/w08-release-targets.yml` now keys its concurrency group by
   event type and ref, separating the explicit manual `workflow_dispatch`
@@ -1621,6 +1624,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   target attestations, tag publication, canary, rollback and approval remain
   W08-P09 gates. *(Release workflow implementation; hosted concurrency and
   GitHub OIDC/attestation service are external gates.)*
+- [x] W08.19 **Full SHA pin correction after hosted setup failure:** both
+  `actions/attest` references now use the full immutable
+  `1e69f48acb82d1966a394da916b4c1698aa569d6` commit for `v4.2.2`. Hosted run
+  `35620932700` passed both target builds and downloaded-asset checks, but its
+  attestation jobs `106406881524` and `106406881625` failed before any action
+  step because GitHub rejected the shortened ref; no OIDC token or Sigstore
+  bundle was created. The correction is implementation-complete but requires a
+  fresh `attest=true` hosted run; target attestation, tag publication, canary,
+  rollback and approval remain W08-P09 gates. *(Release implementation fix;
+  GitHub action resolution and hosted attestation are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1723,8 +1736,8 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.18's pinned attestation wiring and
-  dispatch isolation, but they do not create executed cryptographic
+  target/download matrix and W08.17–W08.19's pinned attestation wiring,
+  dispatch isolation and full-pin correction, but they do not create executed cryptographic
   signing/attestation evidence or run a real tag release, and do not close the
   canary, rollback or approval gates.
   *(Release implementation + hosted;
