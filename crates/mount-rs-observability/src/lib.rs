@@ -1341,7 +1341,9 @@ mod otlp {
             .with_scheduled_delay(EXPORT_INTERVAL)
             .build();
         let tracer_provider = SdkTracerProvider::builder()
-            .with_sampler(Sampler::TraceIdRatioBased(sample_ratio))
+            .with_sampler(Sampler::ParentBased(Box::new(Sampler::TraceIdRatioBased(
+                sample_ratio,
+            ))))
             .with_span_processor(
                 BatchSpanProcessor::builder(span_exporter)
                     .with_batch_config(trace_batch_config)

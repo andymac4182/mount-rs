@@ -130,10 +130,14 @@ impl From<FsError> for CliError {
 #[derive(Clone)]
 struct DriverRuntime {
     filesystem: Filesystem,
+    #[cfg(feature = "observability")]
+    telemetry: Telemetry,
 }
 
 impl DriverRuntime {
     async fn open(options: &CliOptions, uid: u32, gid: u32) -> Result<Self, CliError> {
+        #[cfg(feature = "observability")]
+        let telemetry = mount_rs_observability::global();
         let filesystem = match options.driver {
             DriverChoice::Memory => Filesystem::memory(MemoryOptions {
                 uid,
@@ -167,16 +171,30 @@ impl DriverRuntime {
         };
 
         if options.driver == DriverChoice::Sqlite {
-            configure_sqlite_root_owner(&filesystem.driver(), options, uid, gid).await?;
+            let driver = {
+                #[cfg(feature = "observability")]
+                {
+                    filesystem.driver_with_telemetry(telemetry.clone())
+                }
+                #[cfg(not(feature = "observability"))]
+                {
+                    filesystem.driver()
+                }
+            };
+            configure_sqlite_root_owner(&driver, options, uid, gid).await?;
         }
-        Ok(Self { filesystem })
+        Ok(Self {
+            filesystem,
+            #[cfg(feature = "observability")]
+            telemetry,
+        })
     }
 
     fn driver(&self) -> Arc<dyn FsDriver> {
         #[cfg(feature = "observability")]
         {
             self.filesystem
-                .driver_with_telemetry(mount_rs_observability::global())
+                .driver_with_telemetry(self.telemetry.clone())
         }
         #[cfg(not(feature = "observability"))]
         {
@@ -190,6 +208,11 @@ impl DriverRuntime {
 
     fn is_memory(&self) -> bool {
         self.filesystem.kind() == FilesystemKind::Memory
+    }
+
+    #[cfg(feature = "observability")]
+    fn telemetry(&self) -> Telemetry {
+        self.telemetry.clone()
     }
 }
 
@@ -353,7 +376,7 @@ where
     S: Into<std::ffi::OsString>,
 {
     #[cfg(feature = "observability")]
-    set_global_telemetry(Telemetry::from_env("mount-rs-cli"));
+    initialize_telemetry();
 
     match parse_args(args)? {
         Command::Help => {
@@ -384,6 +407,17 @@ where
             let options = resolve_cli_options(options)?;
             mount_command(options).await
         }
+    }
+}
+
+#[cfg(feature = "observability")]
+fn initialize_telemetry() {
+    if mount_rs_observability::global().is_enabled() {
+        return;
+    }
+    let telemetry = Telemetry::from_env("mount-rs-cli");
+    if telemetry.is_enabled() {
+        set_global_telemetry(telemetry);
     }
 }
 
@@ -509,6 +543,8 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
         ))
     })?;
     let (uid, gid) = effective_identity();
+    #[cfg(feature = "observability")]
+    let telemetry = mount_rs_observability::global();
     let mut runtimes = Vec::with_capacity(http.drives.len());
     let mut registry = DriveRegistry::new();
 
@@ -558,6 +594,9 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
         }
     }
 
+    #[cfg(feature = "observability")]
+    let server_options = http_server_options(http, telemetry);
+    #[cfg(not(feature = "observability"))]
     let server_options = http_server_options(http);
     let mut ctrl_c = match CtrlCHandler::install().await {
         Ok(handler) => handler,
@@ -598,7 +637,10 @@ async fn serve_http_command(config_path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
-fn http_server_options(config: &HttpServiceConfig) -> HttpServerOptions {
+fn http_server_options(
+    config: &HttpServiceConfig,
+    #[cfg(feature = "observability")] telemetry: Telemetry,
+) -> HttpServerOptions {
     HttpServerOptions {
         host: config.host.clone(),
         port: config.port,
@@ -610,7 +652,7 @@ fn http_server_options(config: &HttpServiceConfig) -> HttpServerOptions {
         max_connections: config.max_connections,
         request_timeout: Duration::from_millis(config.request_timeout_ms),
         #[cfg(feature = "observability")]
-        telemetry: mount_rs_observability::global(),
+        telemetry,
     }
 }
 
@@ -640,6 +682,8 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     let mountpoint = resolve_mountpoint(options.mountpoint.as_deref())?;
     let (uid, gid) = effective_identity();
     let runtime = DriverRuntime::open(&options, uid, gid).await?;
+    #[cfg(feature = "observability")]
+    let telemetry = runtime.telemetry();
 
     let bare_driver = runtime.driver();
     if !options.empty && runtime.is_memory() {
@@ -682,7 +726,7 @@ async fn mount_command(options: CliOptions) -> Result<(), CliError> {
     #[cfg(feature = "observability")]
     let mount_result = {
         let mount_path = mountpoint.to_string_lossy().into_owned();
-        mount_rs_observability::global()
+        telemetry
             .observe_result("mount", "mount", Some(&mount_path), mount_future, |_| {
                 Some("mount_error")
             })

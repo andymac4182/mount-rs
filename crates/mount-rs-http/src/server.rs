@@ -882,15 +882,7 @@ async fn handle_request(
     request: Request<Incoming>,
     state: Arc<AppState>,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
-    match tokio::time::timeout(
-        state.config.request_timeout,
-        handle_request_instrumented(request, state),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(_) => Ok(error_response(RequestError::request_timeout())),
-    }
+    handle_request_instrumented(request, state).await
 }
 
 async fn handle_request_instrumented(
@@ -912,7 +904,7 @@ async fn handle_request_instrumented(
                 &parent_context,
                 async move {
                     HttpResponseFailure::from_response(
-                        handle_request_uninstrumented(request, state).await,
+                        handle_request_with_timeout(request, state).await,
                     )
                 },
                 |failure| Some(failure.error_code),
@@ -926,7 +918,7 @@ async fn handle_request_instrumented(
                 Some(&path),
                 async move {
                     HttpResponseFailure::from_response(
-                        handle_request_uninstrumented(request, state).await,
+                        handle_request_with_timeout(request, state).await,
                     )
                 },
                 |failure| Some(failure.error_code),
@@ -938,7 +930,22 @@ async fn handle_request_instrumented(
         });
     }
 
-    Ok(handle_request_uninstrumented(request, state).await)
+    Ok(handle_request_with_timeout(request, state).await)
+}
+
+async fn handle_request_with_timeout(
+    request: Request<Incoming>,
+    state: Arc<AppState>,
+) -> Response<HttpBody> {
+    match tokio::time::timeout(
+        state.config.request_timeout,
+        handle_request_uninstrumented(request, state),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => error_response(RequestError::request_timeout()),
+    }
 }
 
 async fn handle_request_uninstrumented(
