@@ -11,6 +11,7 @@ const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
 const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
 const S3_STREAM_WRAPPED = Symbol("mountRsS3StreamWrapped")
+const WEBDAV_STREAM_WRAPPED = Symbol("mountRsWebdavStreamWrapped")
 
 function installStructuralFactories(binding) {
   if (binding[FACTORIES_WRAPPED]) return
@@ -590,10 +591,10 @@ function wrapNfsConnection(NfsConnection) {
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
 }
 
-function toReadableStream(value) {
+function toReadableStream(value, label = "S3") {
   const ReadableStreamConstructor = globalThis.ReadableStream
   if (typeof ReadableStreamConstructor !== "function") {
-    throw new TypeError("S3 streaming requires globalThis.ReadableStream")
+    throw new TypeError(`${label} streaming requires globalThis.ReadableStream`)
   }
   if (value === null || value === undefined) {
     return new ReadableStreamConstructor({
@@ -605,7 +606,7 @@ function toReadableStream(value) {
   if (typeof value.getReader === "function") return value
   const asyncIterator = value[Symbol.asyncIterator]
   if (typeof asyncIterator !== "function") {
-    throw new TypeError("S3 request body must be an AsyncIterable or ReadableStream")
+    throw new TypeError(`${label} request body must be an AsyncIterable or ReadableStream`)
   }
   const iterator = asyncIterator.call(value)
   return new ReadableStreamConstructor({
@@ -688,6 +689,34 @@ function wrapS3Session(S3Session) {
   Object.defineProperty(prototype, S3_STREAM_WRAPPED, { value: true })
 }
 
+function wrapWebdavSession(WebdavSession) {
+  if (!WebdavSession || !WebdavSession.prototype || WebdavSession.prototype[WEBDAV_STREAM_WRAPPED]) {
+    return
+  }
+  const prototype = WebdavSession.prototype
+  const nativeHandleRequestStream = prototype.handleRequestStream
+  if (typeof nativeHandleRequestStream !== "function") return
+  Object.defineProperty(prototype, "handleRequestStream", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value(head, body) {
+      try {
+        const request = nativeHandleRequestStream.call(this, head, toReadableStream(body, "WebDAV"))
+        return Promise.resolve(request.run()).then((response) => {
+          if (response === null || response.body === null || response.body === undefined) {
+            return response
+          }
+          return { status: response.status, headers: response.headers, body: bodyAsyncIterator(response.body) }
+        })
+      } catch (error) {
+        return Promise.reject(error)
+      }
+    },
+  })
+  Object.defineProperty(prototype, WEBDAV_STREAM_WRAPPED, { value: true })
+}
+
 module.exports = function installServers(binding) {
   wrapP9Server(binding && binding.P9Server)
   for (const name of ["NfsServer", "P9Server", "S3Server", "WebdavServer"]) {
@@ -696,6 +725,7 @@ module.exports = function installServers(binding) {
   wrapP9Connection(binding && binding.P9Connection)
   wrapNfsConnection(binding && binding.NfsConnection)
   wrapS3Session(binding && binding.S3Session)
+  wrapWebdavSession(binding && binding.WebdavSession)
   installStructuralFactories(binding)
   return binding
 }

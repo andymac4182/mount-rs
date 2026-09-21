@@ -257,7 +257,6 @@ jobs:
           signer_workflow="$GITHUB_REPOSITORY/.github/workflows/w08-release-targets.yml"
           common_args=(
             --repo "$GITHUB_REPOSITORY"
-            --signer-repo "$GITHUB_REPOSITORY"
             --signer-workflow "$signer_workflow"
             --source-digest "$SOURCE_COMMIT"
             --source-ref "$GITHUB_REF"

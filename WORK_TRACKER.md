@@ -10,15 +10,18 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
-attached connection identity/peer/stream/closed state, duplicate-attach and
+attached connection identity/peer/stream/closed state (including the native
+`null` versus attached-stream `undefined` peer boundary), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. The transport now also broadcasts shutdown safely across the accept
 loop and all connections, closes the active-connection accept-loop race, and
-reaps completed request tasks while reporting task failures. An ignored native
+reaps completed request tasks while reporting task failures; its in-flight
+permit acquisition now also observes connection/server shutdown instead of
+wedging close behind a slow request. An ignored native
 Linux harnesses now run eight concurrent mounted file write/read/rename/read
 round trips before a bounded unmount, and close the server side while verifying
 kernel-connection teardown. Session destruction also wakes and drains in-flight
-`Tflush` waiters. Local lifecycle 5/5, transport-error 8/8, the focused native
+`Tflush` waiters. Local lifecycle 6/6, transport-error 8/8, the focused native
 target, strict 9P Clippy and formatting pass. Hosted
 run `35616832528` / job `106389895603` passed the prior Linux kernel-client
 mount/read/write/unmount packet; a fresh run is required for this packet and
@@ -653,15 +656,18 @@ transport tracker together.
 
 WebDAV-owned W01 tracking is maintained in
 [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md). The current
-bounded slice adds the low-level `./webdav` barrel and generated declarations,
-the N-API `WebdavSession`/server session view, buffered request handling,
-serializable session and lock policy, driver access, Basic-auth challenge and
-acceptance, and Rust transport-hook plumbing. The Rust WebDAV target passed
-13/13 tests and the isolated locked N-API check plus release generation passed;
-the oracle differential is explicitly skipped without `MOUNTX_SOURCE`, the
-sandbox blocks the live N-API loopback bind with `Operation not permitted`, and
-streaming, peer-fault, restart/durability, provider, hosted, and native gates
-remain open. W01 and production status remain **NO-GO**.
+bounded slices add the low-level `./webdav` barrel and generated declarations,
+the N-API `WebdavSession`/server session view, buffered and pull-based streamed
+request handling, positional response chunks, serializable session and lock
+policy, driver access, Basic-auth challenge and acceptance, and Rust
+transport-hook plumbing. The Rust WebDAV target passed 13/13 tests; the
+isolated locked N-API check, release addon, generated declarations, and direct
+N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
+return, and deliberate body failure. The oracle differential is explicitly
+skipped without `MOUNTX_SOURCE`, the sandbox blocks the live N-API loopback
+bind with `Operation not permitted`, and complete member parity, peer-fault,
+restart/durability, provider, hosted, and native gates remain open. W01 and
+production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1671,6 +1677,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   fresh `attest=true` hosted run; target attestation, tag publication, canary,
   rollback and approval remain W08-P09 gates. *(Release implementation fix;
   GitHub action resolution and hosted attestation are external gates.)*
+- [x] W08.20 **Hosted attestation verifier identity-flag correction:** the
+  target qualification `35622899242` at source `2f43721` passed both target
+  builds, both downloaded-asset checks and both provenance/SBOM attestation
+  generation steps. Its final `gh attestation verify` steps failed because
+  GitHub CLI rejects simultaneous `--signer-repo` and `--signer-workflow`
+  options. Both release workflows now use the precise `--signer-workflow`
+  identity without the redundant repository option. The correction is ready
+  for a fresh `attest=true` run; terminal verifier acceptance, tag publication,
+  canary, rollback and approval remain W08-P09 gates. *(Release implementation
+  fix; hosted verifier behavior, OIDC/attestation availability and release
+  approval are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1773,8 +1790,8 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.19's pinned attestation wiring,
-  dispatch isolation and full-pin correction, but they do not create executed cryptographic
+  target/download matrix and W08.17–W08.20's pinned attestation wiring,
+  dispatch isolation, full-pin correction and verifier identity fix, but they do not create executed cryptographic
   signing/attestation evidence or run a real tag release, and do not close the
   canary, rollback or approval gates.
   *(Release implementation + hosted;
@@ -2337,7 +2354,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   --all-targets --locked --offline`, and strict workspace Clippy with
   `--all-targets --locked --offline -- -D warnings`. The passing test gate
   includes the AWS provider, SDK/CLI, S3 gateway, policy/preflight support, and
-  current integrated source. Current `origin/main` is `beee06f`; the
+  current integrated source. Current `origin/main` is `2a711e9`; the
   intervening changes are documentation/workflow updates and do not change the
   provider source covered by that gate. Explicitly ignored native/service rows
   remain separate prerequisites and are not promoted to production evidence.
@@ -2389,7 +2406,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   transport deny and exact prefix-scoped runtime/maintenance statements from
   the CloudFormation contract; its synthetic valid/tampered policy tests are
   wired into the hosted preflight. No production bucket policy has been
-  changed or claimed as audited.
+  changed or claimed as audited. The credential-free
+  `scripts/test-aws-s3-production-template.rb` gate now structurally asserts
+  the retained bucket controls, KMS/versioning rules, lifecycle, and all five
+  policy statements; it is wired into the hosted preflight and passed locally
+  without AWS credentials.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -2443,19 +2464,21 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  observed hosted run `35622312798` at `4242c24` passed provenance capture,
-  the seven-case validator and bucket-policy contract tests, then stopped
+  observed hosted run `35624389197` at `2a711e9` passed provenance capture,
+  the seven-case validator, bucket-policy, and CloudFormation contract tests,
+  then stopped
   before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
   skipped, so this is a successful safety refusal, not acceptance evidence.
   The run uploaded the non-expired artifact
-  `aws-s3-qualification-35622312798-1` (6,338 bytes). The preceding hosted
-  run `35620404949` at `0010246` stopped at the same preflight boundary, as
-  did `35619552809` at `a84fa3e`. A fresh
-  provenance-hash expansion now binds the policy, preflight, resource/OIDC
-  audit, acceptance, PGlite harness, and AWS test manifest inputs in the next
-  hosted artifact; this improves evidence integrity but does not create AWS
-  authentication or deployment evidence. A fresh
+  `aws-s3-qualification-35624389197-1` (6,797 bytes). The preceding hosted
+  runs `35623711876` at `8b7502a`, `35622312798` at `4242c24`, and
+  `35620404949` at `0010246` stopped at the same preflight boundary, as did
+  `35619552809` at `a84fa3e`. The provenance-hash expansion now binds the
+  policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
+  PGlite harness, and AWS test manifest inputs in this artifact; this improves
+  evidence integrity but does not create AWS authentication or deployment
+  evidence. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium

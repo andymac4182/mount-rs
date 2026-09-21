@@ -124,6 +124,19 @@ types = types.replace(
     return `export declare class P9Server {${body}\n}`
   },
 )
+if (!types.includes("export interface P9AttachOptions {")) {
+  types = types.replace(
+    "export interface P9ServerOptions {",
+    `export interface P9AttachOptions {
+  peer?: string
+  own?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+}
+
+export interface P9ServerOptions {`,
+  )
+}
 // The FUSE postlude wraps the native async class with the public
 // mount-free/session facade. Keep generated declarations aligned with that
 // runtime layer after every clean `napi build`.
@@ -248,4 +261,12 @@ const harnessTypes = 'export { createLoopback, resolveCapabilities } from "./typ
 if (!types.includes(harnessTypes)) {
   types += `\n${harnessTypes}\nexport type { Loopback, ResolvedCapabilities } from "./types/harness.js"\n`
 }
+const webdavRequestStreamTypes = `
+export type WebdavRequestStreamBody = AsyncIterable<Uint8Array> | ReadableStream<Uint8Array>
+`
+types = types.replace(
+  /handleRequestStream\(head: WebdavRequestHead, body: ReadableStream<Buffer>\): WebdavStreamRequest/g,
+  "handleRequestStream(head: WebdavRequestHead, body: WebdavRequestStreamBody): Promise<WebdavStreamResponse>",
+)
+if (!types.includes("export type WebdavRequestStreamBody =")) types += webdavRequestStreamTypes
 await writeFile(declarations, types)

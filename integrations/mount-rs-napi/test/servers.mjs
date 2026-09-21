@@ -943,6 +943,82 @@ async function exerciseWebdav() {
     assert.equal(get.response.status, 200);
     assert.deepEqual(get.body, object);
 
+    const streamedObject = Buffer.alloc(40 * 1024, 0x5a);
+    let requestChunks = 0;
+    async function* streamedRequestBody() {
+      for (const start of [0, 7 * 1024, 23 * 1024]) {
+        requestChunks += 1;
+        await new Promise((resolve) => setImmediate(resolve));
+        yield streamedObject.subarray(
+          start,
+          start === 0 ? 7 * 1024 : start === 7 * 1024 ? 23 * 1024 : undefined,
+        );
+      }
+    }
+    const streamedPut = await within(
+      server.session.handleRequestStream(
+        { method: "PUT", target: "/streamed-webdav.txt", headers: [] },
+        streamedRequestBody(),
+      ),
+      "WebDAV streamed PUT",
+    );
+    assert.ok([200, 201, 204].includes(streamedPut.status));
+    assert.equal(streamedPut.body ?? null, null);
+    assert.equal(requestChunks, 3);
+    assert.deepEqual(
+      Buffer.from(await filesystem.readFile("/streamed-webdav.txt")),
+      streamedObject,
+    );
+
+    const emptyRequest = () => new ReadableStream({
+      start(controller) {
+        controller.close();
+      },
+    });
+    const streamedGet = await within(
+      server.session.handleRequestStream(
+        { method: "GET", target: "/streamed-webdav.txt", headers: [] },
+        emptyRequest(),
+      ),
+      "WebDAV streamed GET",
+    );
+    assert.equal(streamedGet.status, 200);
+    assert.ok(streamedGet.body);
+    const streamedChunks = [];
+    for await (const chunk of streamedGet.body) streamedChunks.push(Buffer.from(chunk));
+    assert.ok(streamedChunks.length >= 3);
+    assert.deepEqual(Buffer.concat(streamedChunks), streamedObject);
+
+    const cancelledGet = await within(
+      server.session.handleRequestStream(
+        { method: "GET", target: "/streamed-webdav.txt", headers: [] },
+        emptyRequest(),
+      ),
+      "WebDAV streamed cancellation setup",
+    );
+    const cancelledIterator = cancelledGet.body[Symbol.asyncIterator]();
+    const firstCancelledChunk = await cancelledIterator.next();
+    assert.equal(firstCancelledChunk.done, false);
+    assert.ok(firstCancelledChunk.value.length > 0);
+    await cancelledIterator.return();
+    assert.equal((await cancelledIterator.next()).done, true);
+
+    let emittedFailureChunk = false;
+    async function* failingRequestBody() {
+      emittedFailureChunk = true;
+      yield Buffer.from("partial");
+      throw new Error("deliberate WebDAV request stream failure");
+    }
+    const failedStream = await within(
+      server.session.handleRequestStream(
+        { method: "PUT", target: "/streamed-failure.txt", headers: [] },
+        failingRequestBody(),
+      ),
+      "WebDAV streamed request failure",
+    );
+    assert.equal(emittedFailureChunk, true);
+    assert.equal(failedStream.status, 500);
+
     const authServer = createWebdavServer(filesystem, {
       host: "127.0.0.1",
       credentials: { username: "alice", password: "secret" },

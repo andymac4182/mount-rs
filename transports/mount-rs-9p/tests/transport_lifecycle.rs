@@ -1,5 +1,7 @@
+use std::future::Future;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 #[cfg(unix)]
@@ -13,6 +15,7 @@ use mount_rs_9p::{
 use mount_rs_core::MemoryFs;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
 use tokio::time::{sleep, timeout};
 
 fn frame<F>(type_: u8, tag: u16, write: F) -> Vec<u8>
@@ -142,6 +145,75 @@ async fn wait_for_connections(server: &P9Server, expected: usize) {
     .expect("connection count reaches expected value");
 }
 
+struct BlockingStatDriver {
+    inner: MemoryFs,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl mount_rs_core::FsDriver for BlockingStatDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<
+        Box<dyn Future<Output = mount_rs_core::Result<mount_rs_core::Stats>> + Send + 'async_trait>,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            self.entered.notify_one();
+            self.release.notified().await;
+            self.inner.stat(path).await
+        })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = mount_rs_core::Result<Vec<mount_rs_core::DirEntry>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>>>
+                + Send
+                + 'async_trait,
+        >,
+    >
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+}
+
 #[tokio::test]
 async fn attached_stream_serves_frames_and_closes_without_a_listener() {
     let server = Arc::new(P9Server::new(MemoryFs::empty(), P9ServerOptions::default()));
@@ -244,6 +316,69 @@ async fn shutdown_broadcasts_to_all_attached_connections() {
     wait_for_no_connections(&server).await;
     drop(peers);
     server.close().await.expect("close attach-only server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_interrupts_permit_wait_without_waiting_for_a_slow_request() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let server = Arc::new(P9Server::new(
+        BlockingStatDriver {
+            inner: MemoryFs::empty(),
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        },
+        P9ServerOptions {
+            max_in_flight: 1,
+            ..P9ServerOptions::default()
+        },
+    ));
+    let (server_stream, mut client_stream) = tokio::io::duplex(64 * 1024);
+    let connection = server
+        .attach(
+            server_stream,
+            P9AttachOptions {
+                peer: Some("slow-permit".to_owned()),
+                own: false,
+            },
+        )
+        .expect("attach slow-permit stream");
+
+    client_stream
+        .write_all(&version_request())
+        .await
+        .expect("send version");
+    let version = read_frame(&mut client_stream).await;
+    assert_eq!(
+        decode_message(&version).expect("version response").0.type_,
+        P9_RVERSION
+    );
+
+    let mut burst = attach_request();
+    burst.extend_from_slice(&attach_request());
+    client_stream
+        .write_all(&burst)
+        .await
+        .expect("send blocked attach burst");
+    timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("first attach reaches the blocked driver");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let server_for_close = Arc::clone(&server);
+    let mut close_task = tokio::spawn(async move { server_for_close.close().await });
+    let close_result = timeout(Duration::from_millis(250), &mut close_task).await;
+    if close_result.is_err() {
+        release.notify_waiters();
+        let _ = timeout(Duration::from_secs(2), close_task).await;
+        panic!("server close remained blocked on the in-flight permit");
+    }
+    release.notify_waiters();
+    close_result
+        .expect("close completed within the bounded shutdown window")
+        .expect("close task joins")
+        .expect("close succeeds");
+    assert!(connection.is_closed());
 }
 
 #[cfg(unix)]
