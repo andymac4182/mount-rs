@@ -1916,6 +1916,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
   This remains qualification-account and isolated-metadata evidence, not
   production deployment acceptance.
+- [x] The integrated W25 evidence boundary `e168315` passed
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings` on 2026-09-22. This rerun
+  covered the AWS provider, public SDK/CLI, S3 gateway, and the other
+  workstream changes already on that commit; the later unrelated `de6514c`
+  N-API test-only change landed after the gate and requires a post-rebase
+  verification before it can be included in current-head release evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
