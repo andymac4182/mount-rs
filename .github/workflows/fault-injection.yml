@@ -4,6 +4,10 @@ on:
   push:
   pull_request:
 
+concurrency:
+  group: fault-injection-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   storage-faults:
     strategy:
