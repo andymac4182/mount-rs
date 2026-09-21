@@ -73,6 +73,9 @@ single-authority clocks are rejected when the storage handle opens. The
 declaration is an application trust boundary, not a conversion of a local
 clock into a distributed authority.
 
+The authority prefix is checked against FoundationDB's hard key-size limit at
+construction time, so an oversized prefix fails before the first transaction.
+
 For a FoundationDB-hosted authority, `FoundationDbLeaseAuthority` is the
 write-side publisher and `FoundationDbSharedLeaseOracle` is the read-only
 consumer view:

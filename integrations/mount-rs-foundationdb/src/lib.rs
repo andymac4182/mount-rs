@@ -313,10 +313,7 @@ fn lease_oracle_parts(
     limits: FoundationDbLimits,
 ) -> Result<(Arc<Database>, Vec<u8>, FoundationDbLimits)> {
     let prefix = prefix.as_ref();
-    if prefix.is_empty() || prefix.contains(&0) {
-        return Err(FsError::new(ErrorCode::Einval)
-            .with_message("FoundationDB lease authority prefix is invalid"));
-    }
+    validate_lease_authority_prefix(prefix)?;
     Ok((db, Keyspace::new(prefix).lease_oracle(), limits.validate()?))
 }
 
@@ -1064,6 +1061,23 @@ fn validate_prefix(prefix: &[u8]) -> Result<()> {
     if prefix.len() + block_key_bytes > FOUNDATIONDB_MAX_KEY_BYTES {
         return Err(FsError::new(ErrorCode::Enametoolong)
             .with_message("FoundationDB volume prefix is too long"));
+    }
+    Ok(())
+}
+
+fn validate_lease_authority_prefix(prefix: &[u8]) -> Result<()> {
+    if prefix.is_empty() || prefix.contains(&0) {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("FoundationDB lease authority prefix is invalid"));
+    }
+    let key_bytes = prefix
+        .len()
+        .checked_add(KEY_SEPARATOR.len())
+        .and_then(|bytes| bytes.checked_add(LEASE_ORACLE_SUFFIX.len()))
+        .ok_or_else(|| FsError::new(ErrorCode::Eoverflow))?;
+    if key_bytes > FOUNDATIONDB_MAX_KEY_BYTES {
+        return Err(FsError::new(ErrorCode::Enametoolong)
+            .with_message("FoundationDB lease authority prefix is too long"));
     }
     Ok(())
 }
@@ -1981,6 +1995,17 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn authority_prefix_limit_accounts_for_the_oracle_key() {
+        let overhead = KEY_SEPARATOR.len() + LEASE_ORACLE_SUFFIX.len();
+        let accepted = "p".repeat(FOUNDATIONDB_MAX_KEY_BYTES - overhead);
+        assert!(validate_lease_authority_prefix(accepted.as_bytes()).is_ok());
+        let rejected = "p".repeat(FOUNDATIONDB_MAX_KEY_BYTES - overhead + 1);
+        let error = validate_lease_authority_prefix(rejected.as_bytes()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Enametoolong);
+        assert!(validate_lease_authority_prefix(b"authority\0suffix").is_err());
     }
 
     #[test]
