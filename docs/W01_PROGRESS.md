@@ -136,7 +136,9 @@ stuck-helper regression checks the bounded `Timeout` result and terminal
 inactive/closed state; host all-target FUSE tests, host/Linux-target strict
 Clippy, Linux-target test check, formatting and diff checks pass. The timing
 test itself and real hosted `/dev/fuse` forced-unmount, callback, crash/restart
-and durability execution remain external, so W01 stays NO-GO.
+and durability execution remain external. This packet is published as
+`987c593bc08adfb161a55a7a9eee27ff82606310`; exact-SHA CI run `35648821996`
+and Fault injection run `35648821873` are pending, so W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
