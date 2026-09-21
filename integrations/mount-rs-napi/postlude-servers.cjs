@@ -440,9 +440,11 @@ class AttachedP9Connection {
 function wrapP9Server(P9Server) {
   if (!P9Server || !P9Server.prototype || P9Server.prototype[P9_SERVER_WRAPPED]) return
   const prototype = P9Server.prototype
-  const nativeClients = prototype.clients
+  const nativeClientsDescriptor = Object.getOwnPropertyDescriptor(prototype, "clients")
+  const nativeClients = nativeClientsDescriptor && nativeClientsDescriptor.value
+  const nativeClientsGetter = nativeClientsDescriptor && nativeClientsDescriptor.get
   const nativeConnections = Object.getOwnPropertyDescriptor(prototype, "connections")
-  if (typeof nativeClients !== "function") return
+  if (typeof nativeClients !== "function" && typeof nativeClientsGetter !== "function") return
 
   function stateFor(server) {
     const state = serverState(server)
@@ -486,10 +488,12 @@ function wrapP9Server(P9Server) {
   Object.defineProperty(prototype, "clients", {
     configurable: true,
     enumerable: false,
-    writable: true,
-    value() {
+    get() {
       const state = stateFor(this)
-      return [...nativeClients.call(this), ...state.attachments]
+      const clients = typeof nativeClientsGetter === "function"
+        ? nativeClientsGetter.call(this)
+        : nativeClients.call(this)
+      return [...clients, ...state.attachments]
     },
   })
 

@@ -466,7 +466,7 @@ function checkServerAndKvSubpaths(): void {
   const nfsConnectionClose: Promise<void> = nfsConnection.close()
   const nfsConnectionWaitClosed: Promise<void> = nfsConnection.waitClosed()
   const p9Address: string | null = p9Server.address()
-  const p9Connections: Array<P9Connection> = p9Server.clients()
+  const p9Connections: Array<P9Connection> = p9Server.clients
   const p9Configured: P9ServerOptions = p9Server.options
   const p9Path: string | null = p9Server.path
   const p9Listen: Promise<P9Server> = p9Server.listen()

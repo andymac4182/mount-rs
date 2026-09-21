@@ -2917,46 +2917,10 @@ impl Filesystem {
             Either::A(data) => data.into_bytes(),
             Either::B(data) => data.to_vec(),
         };
-        let handle = self
-            .driver()?
-            .open_flags(
-                &path,
-                OpenFlags {
-                    read: false,
-                    write: true,
-                    create: true,
-                    truncate: true,
-                    append: false,
-                    exclusive: false,
-                },
-                0o666,
-            )
+        self.driver()?
+            .write_file(&path, &data)
             .await
-            .map_err(to_js_error)?;
-        let operation = async {
-            let mut written = 0_usize;
-            while written < data.len() {
-                let count = handle
-                    .write(&data[written..], Some(written as u64))
-                    .await
-                    .map_err(to_js_error)?;
-                if count == 0 || count > data.len() - written {
-                    return Err(to_js_error(
-                        FsError::new(ErrorCode::Eio)
-                            .with_syscall("write")
-                            .with_path(&path),
-                    ));
-                }
-                written += count;
-            }
-            Ok(())
-        }
-        .await;
-        let close = handle.close().await.map_err(to_js_error);
-        match (operation, close) {
-            (_, Err(error)) => Err(error),
-            (result, Ok(())) => result,
-        }
+            .map_err(to_js_error)
     }
 
     /// Return the first path created by a recursive mkdir, or `undefined` when

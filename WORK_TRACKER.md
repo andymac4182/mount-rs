@@ -22,8 +22,9 @@ fid ordering, qid identity/cursor helpers, detached clunk snapshots, and
 retained open-handle enumeration, with focused hardlink/release and live-open
 evidence. The session now also exposes its retained `Filesystem` driver,
 debug-gated assertion readback/counters, and request-error/assertion callbacks
-with Node error/header semantics for attached and native sessions. Lock-table
-option injection, the property-shaped `clients` contract, and 9P mount helpers
+with Node error/header semantics for attached and native sessions. The server
+now exposes a live property-shaped `P9Server.clients` array combining native
+and attached connections. Lock-table option injection and 9P mount helpers
 remain open rather than being silently narrowed away. The `./9p` constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
 exports differentially checked. The transport
@@ -685,6 +686,7 @@ patch):
 | Main | W01 napi-rs FUSE GETLK/SETLK/SETLKW codecs | `integrations/mount-rs-napi/**` | Current packet: generated bindings/declarations, explicit ESM/CommonJS exports, typecheck, pinned-oracle request/reply/error-boundary differential, release build, focused locked FUSE tests and full oracle-enabled N-API suite passed; native FUSE session/mount remains open |
 | Main | W01 N-API 9P fid table/session parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: Rust-backed `FidTable`/live `P9Session.fids`, qid/cursor/open-handle views, hardlink/release and live-open coverage; generated typecheck, build, 124-constant/44-codec differentials, focused N-API tests, 30 ordinary 9P tests, and strict Clippy passed; driver/assertion/debug, lock-option, property-shaped clients, mount-helper and hosted revision gates remain open |
 | Main | W01 N-API 9P driver and observability parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: live `P9Session.driver`, debug-gated assertion readback/counters, request-error/assertion callbacks, Node error revival, and root/`./9p` factory identity; release build, generated typecheck, focused N-API tests, 31 ordinary 9P tests, formatting, and strict Clippy passed; lock-option, property-shaped clients, mount-helper, and hosted revision gates remain open |
+| Main | W01 N-API 9P property-shaped clients parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Server.clients` is now a generated/property-shaped live array combining native and attached connections; release build, generated typecheck, host-enabled server integration, P9 runtime checks, focused Rust tests, formatting, and strict Clippy passed; lock-option, mount-helper, and hosted revision gates remain open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -2003,7 +2005,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     revision and result. Failed, skipped, cancelled or unavailable evidence
     remains open.
 
-  The current-main source gate on 2026-09-22 tested revision `3cd4377` and
+  The previous current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
   Clippy with `-D warnings`, and the locked
   `./scripts/cargo-shared test --workspace --all-targets --locked` suite,
@@ -2013,6 +2015,14 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   source qualification only; it does not close the hosted platform matrix or
   any production deployment gate. Earlier source checkpoints at `9d3a6e5`,
   `29365e9` and `717a0ab` remain historical evidence in the rollout ledger.
+
+  The latest shared-tip source gate on 2026-09-22 tested revision
+  `2641962a6a65179abf4b8d785345fbe6af4be9b8` and passed formatting, strict
+  locked workspace Clippy and the locked all-target workspace test suite.
+  Current FUSE sync-barrier/session, NFS, transport, SDK, CLI and provider unit
+  coverage passed; provider, native-mount and external-service rows remained
+  explicitly ignored where their required harnesses were unavailable. This is
+  source qualification only, not hosted or production acceptance.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only

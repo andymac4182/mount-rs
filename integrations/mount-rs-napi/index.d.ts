@@ -560,7 +560,7 @@ export declare class P9Server {
   get port(): number
   get connections(): number
   address(): string | null
-  clients(): Array<P9Connection>
+  get clients(): Array<P9Connection>
   listen(): Promise<P9Server>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
