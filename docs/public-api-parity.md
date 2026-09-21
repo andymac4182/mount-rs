@@ -293,7 +293,9 @@ Current focused behavior:
   now pass the privileged native NFSv3/NFSv4.1 and SQLite-over-NFS checks;
   the host-backed NFSv3 process-crash/restart test rejects the old file handle
   with `NFS3ERR_STALE` and then recovers a `FILE_SYNC` payload through a
-  replacement server. Rootless NFSv4.1 wire coverage also drives two
+  replacement server. A forced-crash NFSv4.1 child-process test also rejects
+  the old session with `NFS4ERR_BADSESSION` before dispatch. Rootless NFSv4.1
+  wire coverage also drives two
   independent sessions through concurrent distinct-file OPEN/WRITE/READ
   round trips. NFSv4 lease/replay/file-handle recovery, cross-process/native
   concurrency, power-loss durability, and whole-workflow release acceptance

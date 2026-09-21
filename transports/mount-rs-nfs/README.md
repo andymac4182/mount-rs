@@ -37,8 +37,11 @@ The rootless process-restart gate also starts a real child server over a
 and recovers the file through MOUNT/LOOKUP/READ from a replacement server.
 The replacement also rejects the pre-crash file handle with `NFS3ERR_STALE`,
 making the boundary explicit: backend data is recoverable, while handles remain
-process-local. This is process-crash evidence; it does not claim power-loss
-durability or persistent NFSv4 lease, replay, or file-handle state.
+process-local. A companion NFSv4.1 child-process case establishes a session,
+force-terminates the child, and verifies that a replacement rejects the old
+session with `NFS4ERR_BADSESSION`. These are process-crash classification
+checks; they do not claim power-loss durability or persistent NFSv4 lease,
+replay, or file-handle state.
 
 The shared file-handle table accepts `max_handles` through
 `NfsSessionOptions`/`NfsServerOptions` (and `maxHandles` through the N-API
