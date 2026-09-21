@@ -25,12 +25,19 @@ CI job, installation-only evidence, or a local qualification report.
 | Run | Result | Boundary |
 | --- | --- | --- |
 | `foundationdb-soak-durable`, 2026-09-21, arm64, tested tree `3b64a98` (published as `39a20b6`) | **PASS** — three pinned FoundationDB 7.4.7 servers with `double`/SSD configuration; one bounded composition soak round; replicated-node restart; authority republish; fresh-client RustFS reopen; owned cleanup | Disposable loopback/non-secure Docker qualification only. It does not prove production identity/ACL/TLS, power-loss or backup recovery, capacity/cost, multi-day soak, hosted CI, native platform support or operator readiness. |
+| Hosted attempt `35591729423`, revision `1ea183e`, Linux `foundationdb-rustfs` | **NO HOSTED PASS** — FoundationDB configured/readiness/image-match markers passed, then the client failed to reach the published RustFS endpoint at `host.docker.internal:32768`; the workflow was later superseded | This is a recorded blocker, not acceptance. The endpoint portability fix is in `6d2a5d4`; a terminal rerun is still required. |
 
 The run is retained as qualification evidence for the restart/fencing and
 harness gates, not as production acceptance. Its markers were
 `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=1`,
 `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
 `FOUNDATIONDB_TEST_PASS topology=durable`.
+
+The hosted failure identified the Linux container-network boundary rather than
+an FDB transaction failure. The fix attaches the owned RustFS container to the
+FoundationDB client network under `mount-rs-rustfs` and disconnects it during
+owned cleanup; until a terminal hosted rerun passes the composition, N-API,
+native CLI and restart phases, hosted acceptance remains open.
 
 ## Production gate ledger
 

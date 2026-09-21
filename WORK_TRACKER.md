@@ -978,6 +978,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   published on main as `39a20b6`. This is local loopback/non-secure
   qualification evidence only: hosted acceptance, production identity/TLS,
   power-loss/backup recovery, capacity and operational gates remain open.
+  Hosted run `35591729423` at revision `1ea183e` reached the durable
+  FoundationDB configuration, transaction readiness, image match and cluster
+  readiness markers, then failed before the composition client could start:
+  `curl: (7) Failed to connect to host.docker.internal port 32768` and
+  `FoundationDB client container could not reach the composed block endpoint`.
+  The workflow was later superseded, so it is not hosted PASS evidence. This
+  exposed the Linux loopback-publish portability gap fixed in `6d2a5d4`, which
+  now attaches the owned RustFS container to the FoundationDB client network;
+  a terminal hosted rerun of that fix remains required.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
