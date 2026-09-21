@@ -2364,10 +2364,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   --all-targets --locked --offline`, and strict workspace Clippy with
   `--all-targets --locked --offline -- -D warnings`. The passing test gate
   includes the AWS provider, SDK/CLI, S3 gateway, policy/preflight support, and
-  current integrated source. Current `origin/main` is `2a711e9`; the
-  intervening changes are documentation/workflow updates and do not change the
-  provider source covered by that gate. Explicitly ignored native/service rows
-  remain separate prerequisites and are not promoted to production evidence.
+  current integrated source. Subsequent W25 workflow and evidence-documentation
+  commits do not change the provider source covered by that gate. Explicitly
+  ignored native/service rows remain separate prerequisites and are not promoted
+  to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2506,6 +2506,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   federation trust statement, protected environment, and required input names
   without mutating either system; additional or broad GitHub federation trust
   statements fail closed. The
+  fresh read-only audit on 2026-09-22 returned
+  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
+  secret, missing GitHub OIDC provider, and missing immutable-subject role
+  trust; it made no changes. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free seven-case regression matrix covers valid, missing,

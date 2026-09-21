@@ -40,9 +40,8 @@ successful AWS authentication, acceptance, or production deployment evidence.
 
 The latest tested repository boundary `8004999` also passed formatting, the
 full locked offline workspace test gate, and strict workspace Clippy with
-`-D warnings`. Current `origin/main` is `2a711e9`; the intervening changes are
-documentation/workflow updates and do not change the provider source covered
-by that gate.
+`-D warnings`. Subsequent W25 workflow and evidence-documentation commits do
+not change the provider source covered by that gate.
 Ignored native/service rows remain explicit prerequisites and are not treated
 as production acceptance.
 
@@ -210,7 +209,10 @@ GitHub federation grants. It never reads secret values or mutates GitHub or
 AWS. The current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
-result.
+result. The fresh read-only audit on 2026-09-22 returned
+`AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
+secret, missing GitHub OIDC provider, and missing immutable-subject role trust;
+it made no changes.
 
 ## Rollout sequence
 
