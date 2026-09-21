@@ -2902,6 +2902,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `/private/tmp/mount-rs-w25-current-shared-gate`. The gate included the 18-case
   S3 gateway suite and the current W01/S3 source. Ignored native/service rows
   remain explicit prerequisites and are not promoted to production evidence.
+- [x] The latest pushed current-source boundary
+  `43a34d28c2173c2429bcfa1f653dd048dc150b22` passed on 2026-09-22:
+  `./scripts/cargo-shared fmt --all -- --check`, the full locked offline
+  workspace/all-target test gate with the required local loopback permission,
+  and strict workspace Clippy with `-D warnings` on the isolated Cargo target
+  `/private/tmp/mount-rs-w25-current-stats-gate`. The gate included the 9P
+  loopback integration, the 16-case R2 provider suite including the new
+  bounded block-store diagnostics test, the 18-case S3 gateway suite, and all
+  other non-ignored workspace rows. Explicitly ignored native/service rows
+  remain separate prerequisites and are not production acceptance.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

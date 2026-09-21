@@ -52,16 +52,17 @@ account, versioning, and role inputs were blank. This is a current safety
 refusal rather than an implementation failure or AWS acceptance result.
 
 The latest tested integrated repository boundary
-`984e070b1568e50c7e30962a7064049a7c95f846` passed formatting, the full locked
+`43a34d28c2173c2429bcfa1f653dd048dc150b22` passed formatting, the full locked
 offline workspace/all-target test gate with the required local loopback
 permission, and strict workspace Clippy with `-D warnings` on the explicitly
-isolated Cargo target `/private/tmp/mount-rs-w25-current-shared-gate`. The gate
-included the 18-case S3 gateway suite and the current W01/S3 source. The
-isolated target was used because concurrent worktrees share the normal Cargo
-target and can expose cross-worktree artifact races; this gate therefore binds
-to the checked-out source rather than another thread's compiled metadata.
-Ignored native/service rows remain explicit prerequisites and are not treated
-as production acceptance.
+isolated Cargo target `/private/tmp/mount-rs-w25-current-stats-gate`. The gate
+included the 9P loopback integration, the 16-case R2 provider suite including
+the bounded block-store diagnostics test, the 18-case S3 gateway suite, and
+the other non-ignored workspace rows. The isolated target was used because
+concurrent worktrees share the normal Cargo target and can expose cross-
+worktree artifact races; this gate therefore binds to the checked-out source
+rather than another thread's compiled metadata. Ignored native/service rows
+remain explicit prerequisites and are not treated as production acceptance.
 
 ## Deployment contract
 
