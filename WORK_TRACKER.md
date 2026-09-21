@@ -1930,6 +1930,19 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   acceptance, canary, rollback or owner approval. *(Hosted/provider
   qualification; release approval and production deployment are external
   gates.)*
+- [x] W08.25 **Current shared-main workspace verification after the FUSE session
+  fix:** on source `f16eec2a6a1f79a5543ba345c67b86eaae837312`, the full locked
+  workspace test command and strict workspace Clippy command both exited 0
+  using fresh bounded target `/private/tmp/mount-rs-w08-current-cargo-target`.
+  All non-ignored tests passed and Clippy reported no diagnostics with
+  `-D warnings`; TiDB, RustFS, PGlite, R2, FUSE, NFS and other capability-gated
+  rows remained explicit skips/ignores. Two attempts against the configured
+  shared target failed before tests because dependency metadata/artifacts were
+  missing, and are not counted as source failures or passing evidence. This
+  is source-health evidence only; it does not close live provider,
+  native-kernel or W08-P01–P09 production gates. *(Implementation
+  verification; provider, native and production environments remain
+  external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
