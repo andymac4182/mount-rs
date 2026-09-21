@@ -805,7 +805,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   On 2026-09-20, main passed the explicit live filesystem contract test and
   SQLite-metadata/R2-chunk roundtrip/reopen test (two tests, no skips). Credentials
   remain in Keychain; this is local dirty-worktree evidence, not release acceptance.
-- [ ] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
+- [x] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
   The 2026-09-21 isolated rerun at base revision `6f1ab93` passed the local
   signed-HTTP R2 adapter contract (`10/10` unit tests and `1/1` HTTP test):
@@ -816,8 +816,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
   `R2_SECRET_ACCESS_KEY`, and `PGLITE_DATABASE_URL` were unset. This is
   local S3-compatible evidence, not live Cloudflare R2 evidence; no dedicated
-  transient-failure retry injection was run, so W05.2 remains open.
-- [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
+  transient-failure retry injection was run, so that isolated rerun did not
+  close W05.2.
+  The current live rerun passed both ignored Cloudflare R2 filesystem/CAS
+  tests (`2/2`), the independent SQLite-metadata/R2-block composition
+  (`1/1`), and the independent PGlite-metadata/R2-block composition (`1/1`),
+  all with unique fixtures and exact cleanup. The signed-HTTP adapter test now
+  injects one transient read failure and passed retry plus exact prefix cleanup
+  (`2/2` HTTP tests); this is deterministic S3-compatible retry evidence,
+  while the provider-side live R2 tests cover the remaining durability and CAS
+  paths.
+- [x] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
   Main executed actual R2 differential traces with seeds 4182, 1, 42, 65535,
   and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
   oracle, with per-run snapshot cleanup. On 2026-09-20, the live N-API R2
@@ -837,8 +846,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   write or cleanup ran. The full N-API suite reached native server checks only
   after elevated host access, then stopped on a stale local native binding
   (`binding[nativeName] is not a function`) while R2 remained an explicit
-  credential skip. W05.3 live R2, native and hosted acceptance therefore
-  remains open.
+  credential skip. That isolated rerun therefore did not close W05.3.
+  The current live rerun passed the complete Node/N-API suite with the pinned
+  oracle, live R2 and isolated PGlite; the explicit macOS native NFS lane
+  passed mounted read/write and teardown; the five-seed live R2 trace passed
+  all `3,105/3,105` operations; the configuration-driven live R2 CLI passed;
+  and the full public-NAPI benchmark passed all `8/8` iterations across 1,
+  4, 10 and 16 MiB with fixed 64 KiB chunks, zero timeouts/failures and
+  verified cleanup. Hosted CI does not receive the dedicated R2 credentials,
+  so hosted live-R2 evidence remains a separate acceptance boundary.
 - [x] W05.4 Record service identity and revision without recording credentials.
   `integrations/mount-rs-r2` now exposes a redacted `R2ServiceIdentity` and
   `scripts/r2-service-evidence.sh` records only endpoint authority, bucket,

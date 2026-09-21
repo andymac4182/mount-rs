@@ -1,13 +1,120 @@
 //! The R2 adapter's real signed S3 HTTP client against our driver-backed gateway.
 //! This is interoperability evidence, deliberately not live Cloudflare proof.
+use async_trait::async_trait;
 use mount_rs_core::storage::BlockStore;
-use mount_rs_core::{ErrorCode, Loopback, MemoryFs};
+use mount_rs_core::{Capabilities, ErrorCode, FileHandle, FsDriver, FsError, Loopback, MemoryFs};
 use mount_rs_persist::PersistedFs;
 use mount_rs_r2::{R2BlockStore, R2Config, R2Store};
 use mount_rs_s3::{Credentials, S3Server, S3ServerOptions, S3Session, S3SessionOptions};
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Clone)]
+struct FlakyReadOpenDriver {
+    inner: Arc<MemoryFs>,
+    remaining_read_failures: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl FsDriver for FlakyReadOpenDriver {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(
+        &self,
+        path: &str,
+        flags: &str,
+        mode: u32,
+    ) -> mount_rs_core::Result<Arc<dyn FileHandle>> {
+        if flags == "r"
+            && self
+                .remaining_read_failures
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    if remaining > 0 {
+                        Some(remaining - 1)
+                    } else {
+                        None
+                    }
+                })
+                .is_ok()
+        {
+            return Err(FsError::backend("transient injected read failure"));
+        }
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn mkdir(
+        &self,
+        path: &str,
+        options: mount_rs_core::MkdirOptions,
+    ) -> mount_rs_core::Result<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+
+    async fn unlink(&self, path: &str) -> mount_rs_core::Result<()> {
+        self.inner.unlink(path).await
+    }
+}
+
+#[tokio::test]
+async fn signed_r2_client_retries_transient_read_over_http() {
+    let remaining_read_failures = Arc::new(AtomicUsize::new(1));
+    let session = S3Session::new_with_options(
+        FlakyReadOpenDriver {
+            inner: Arc::new(MemoryFs::empty()),
+            remaining_read_failures: Arc::clone(&remaining_read_failures),
+        },
+        S3SessionOptions {
+            credentials: Some(Credentials::new("fixture-key", "fixture-secret")),
+            region: Some("auto".to_owned()),
+            ..Default::default()
+        },
+    );
+    let server = S3Server::start(Arc::new(session), S3ServerOptions::default())
+        .await
+        .unwrap();
+    let config = R2Config {
+        endpoint: format!("http://{}", server.address()),
+        bucket: "mountx".to_owned(),
+        access_key_id: "fixture-key".to_owned(),
+        secret_access_key: "fixture-secret".to_owned(),
+        state_key: "http-retry/state.json".to_owned(),
+    };
+    let blocks = R2BlockStore::from_config(&config, "http-retry/blocks").unwrap();
+    let object_store = config.build_store().unwrap();
+    let payload = b"retryable R2 block";
+    let id = blocks.put(payload).await.unwrap();
+
+    assert_eq!(blocks.get(&id).await.unwrap(), payload);
+    assert_eq!(remaining_read_failures.load(Ordering::Acquire), 0);
+
+    blocks.delete(&id).await.unwrap();
+    let remaining = object_store
+        .list_with_delimiter(Some(&ObjectPath::from("http-retry/blocks")))
+        .await
+        .unwrap();
+    let unexpected_objects = remaining
+        .objects
+        .iter()
+        .filter(|object| object.location.as_ref() != "http-retry/blocks")
+        .collect::<Vec<_>>();
+    assert!(
+        unexpected_objects.is_empty() && remaining.common_prefixes.is_empty(),
+        "HTTP retry objects remained after exact cleanup: {unexpected_objects:?}"
+    );
+    server.close().await.unwrap();
+}
 
 #[tokio::test]
 async fn signed_r2_client_reopens_and_rejects_stale_writes_over_http() {
