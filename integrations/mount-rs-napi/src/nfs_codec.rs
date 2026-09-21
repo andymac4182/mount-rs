@@ -559,7 +559,7 @@ pub struct NfsRpcCall {
     pub verf: NfsOpaqueAuth,
 }
 
-fn from_call(value: rpc::RpcCall) -> NfsRpcCall {
+pub(crate) fn from_call(value: rpc::RpcCall) -> NfsRpcCall {
     NfsRpcCall {
         xid: value.xid,
         rpc_version: value.rpc_version,

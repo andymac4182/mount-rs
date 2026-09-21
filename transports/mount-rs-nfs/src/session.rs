@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -254,6 +255,71 @@ pub struct NfsRequestContext {
     pub peer: Option<String>,
 }
 
+/// One request-level failure reported by an NFS session.
+///
+/// Driver and protocol-status failures do not have a single Rust error value
+/// at the session boundary, so they carry a stable message and no XDR offset.
+/// Decode failures retain their byte offset for diagnostics. The optional RPC
+/// call is present when the call header decoded successfully, matching the
+/// upstream `onError(error, call | undefined)` contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NfsSessionError {
+    pub message: String,
+    pub offset: Option<usize>,
+}
+
+impl NfsSessionError {
+    pub(crate) fn status(status: u32) -> Self {
+        Self {
+            message: format!("NFS request returned status {status}"),
+            offset: None,
+        }
+    }
+
+    pub(crate) fn generic(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            offset: None,
+        }
+    }
+}
+
+impl From<XdrError> for NfsSessionError {
+    fn from(error: XdrError) -> Self {
+        Self {
+            message: error.message,
+            offset: Some(error.offset),
+        }
+    }
+}
+
+/// Synchronous callback used by a session to report one request-level error.
+///
+/// The hook owns both values and may therefore cross an embedding boundary
+/// without borrowing the dispatch future. Implementations must remain quick;
+/// adapters that need another runtime should enqueue the owned event.
+pub type NfsSessionErrorHook =
+    Arc<dyn Fn(NfsSessionError, Option<RpcCall>) + Send + Sync + 'static>;
+
+/// Optional request-level hooks for an [`Nfs3Session`] or [`Nfs4Session`].
+/// Kept separate from [`NfsSessionOptions`] so existing option literals remain
+/// source-compatible.
+#[derive(Clone, Default)]
+pub struct NfsSessionHooks {
+    pub on_error: Option<NfsSessionErrorHook>,
+}
+
+impl NfsSessionHooks {
+    pub(crate) fn report(&self, error: NfsSessionError, call: Option<RpcCall>) {
+        let Some(hook) = self.on_error.as_ref().cloned() else {
+            return;
+        };
+        // A diagnostic callback must not turn one failed request into a
+        // failed transport task or take down the process.
+        let _ = catch_unwind(AssertUnwindSafe(|| hook(error, call)));
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct NfsSessionStats {
     pub requests: u64,
@@ -370,13 +436,13 @@ impl ExclusiveCreates {
 
 #[derive(Debug)]
 enum DispatchError {
-    Xdr,
+    Xdr(XdrError),
     ProcedureUnavailable,
 }
 
 impl From<XdrError> for DispatchError {
-    fn from(_: XdrError) -> Self {
-        Self::Xdr
+    fn from(error: XdrError) -> Self {
+        Self::Xdr(error)
     }
 }
 
@@ -396,6 +462,7 @@ pub struct Nfs3Session {
     stats: SharedStats,
     destroyed: Arc<Mutex<bool>>,
     path_lock: Arc<tokio::sync::RwLock<()>>,
+    hooks: NfsSessionHooks,
 }
 
 impl Nfs3Session {
@@ -415,10 +482,37 @@ impl Nfs3Session {
         Self::from_loopback_shared(driver, options, &shared)
     }
 
+    /// Construct a session with a request-level error hook.
+    pub fn new_with_hooks<D>(driver: D, options: NfsSessionOptions, hooks: NfsSessionHooks) -> Self
+    where
+        D: FsDriver + 'static,
+    {
+        Self::from_loopback_with_hooks(Loopback::new(driver), options, hooks)
+    }
+
+    /// Construct a loopback session with a request-level error hook.
+    pub fn from_loopback_with_hooks(
+        driver: Loopback,
+        options: NfsSessionOptions,
+        hooks: NfsSessionHooks,
+    ) -> Self {
+        let shared = SharedNfsState::new(&options);
+        Self::from_loopback_shared_with_hooks(driver, options, &shared, hooks)
+    }
+
     pub(crate) fn from_loopback_shared(
         driver: Loopback,
         options: NfsSessionOptions,
         shared: &SharedNfsState,
+    ) -> Self {
+        Self::from_loopback_shared_with_hooks(driver, options, shared, NfsSessionHooks::default())
+    }
+
+    pub(crate) fn from_loopback_shared_with_hooks(
+        driver: Loopback,
+        options: NfsSessionOptions,
+        shared: &SharedNfsState,
+        hooks: NfsSessionHooks,
     ) -> Self {
         let handles = shared.handles.clone();
         let write_verifier = handles.verifier();
@@ -434,7 +528,13 @@ impl Nfs3Session {
             stats: shared.stats.clone(),
             destroyed: Arc::new(Mutex::new(false)),
             path_lock: Arc::clone(&shared.path_lock),
+            hooks,
         }
+    }
+
+    pub(crate) fn with_hooks(mut self, hooks: NfsSessionHooks) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     pub(crate) fn shared_state(&self) -> SharedNfsState {
@@ -501,8 +601,9 @@ impl Nfs3Session {
         };
         let reply = match self.dispatch(&call, &mut args, &context).await {
             Ok(reply) => reply,
-            Err(DispatchError::Xdr) => {
-                self.record_error();
+            Err(DispatchError::Xdr(error)) => {
+                self.record_stat_error();
+                self.hooks.report(error.into(), Some(call.clone()));
                 encode_accept_error(call.xid, RPC_GARBAGE_ARGS, None)
             }
             Err(DispatchError::ProcedureUnavailable) => {
@@ -736,9 +837,17 @@ impl Nfs3Session {
         nfs_status_of(error)
     }
 
-    fn record_error(&self) {
+    fn record_stat_error(&self) {
         let mut stats = self.stats.0.lock().expect("NFS stats lock");
         stats.errors = stats.errors.saturating_add(1);
+    }
+
+    fn record_error(&self) {
+        self.record_stat_error();
+        self.hooks.report(
+            NfsSessionError::generic("NFS request returned an error"),
+            None,
+        );
     }
 
     fn invalidate(&self, path: &str) {
@@ -2620,6 +2729,8 @@ fn access_bits3(rights: AccessRights) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
     use mount_rs_core::{MemoryFs, MemoryOptions};
 
@@ -2768,5 +2879,42 @@ mod tests {
         assert_eq!(reply.reject_stat, Some(crate::rpc::RPC_AUTH_ERROR));
         assert_eq!(reply.auth_stat, Some(AUTH_TOOWEAK));
         results.end("AUTH_TOOWEAK reply").unwrap();
+    }
+
+    #[tokio::test]
+    async fn status_errors_report_without_an_rpc_call() {
+        let observed = Arc::new(Mutex::new(Vec::<(String, Option<u32>)>::new()));
+        let callback_observed = Arc::clone(&observed);
+        let session = Nfs3Session::new_with_hooks(
+            MemoryFs::new(MemoryOptions::default()),
+            NfsSessionOptions::default(),
+            NfsSessionHooks {
+                on_error: Some(Arc::new(move |error, call| {
+                    callback_observed
+                        .lock()
+                        .expect("NFS session error lock")
+                        .push((error.message, call.map(|call| call.xid)));
+                })),
+            },
+        );
+        let call = crate::rpc::encode_call(
+            6,
+            NFS_PROGRAM,
+            NFS_V3,
+            NFSPROC3_GETATTR,
+            None,
+            None,
+            &crate::xdr::encode_xdr(|writer| writer.var_opaque(&[0_u8; FH_SIZE])),
+        );
+        let reply = session
+            .handle_call(&call, NfsRequestContext::default())
+            .await
+            .expect("status failure still receives a reply");
+        assert_eq!(session.stats().errors, 1);
+        let observed = observed.lock().expect("NFS session error lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].1, None);
+        assert_eq!(observed[0].0, "NFS request returned an error");
+        assert!(!reply.is_empty());
     }
 }

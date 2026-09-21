@@ -36,7 +36,9 @@ use mount_rs_nfs::{
     Nfs4Session as TransportNfs4Session, NfsConnection as TransportNfsConnection,
     NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
     NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
-    NfsTransportError as TransportNfsError, NfsTransportErrorHook as TransportNfsErrorHook,
+    NfsSessionError as TransportNfsSessionError,
+    NfsSessionErrorHook as TransportNfsSessionErrorHook, NfsTransportError as TransportNfsError,
+    NfsTransportErrorHook as TransportNfsErrorHook, RpcCall as TransportNfsRpcCall,
 };
 use mount_rs_s3::{
     Credentials as TransportS3Credentials, HeaderEntry as TransportS3HeaderEntry,
@@ -67,6 +69,7 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Status, sys};
 use napi_derive::napi;
 
+use super::nfs_codec::{NfsRpcCall, from_call as from_nfs_call};
 use super::p9_codec::NativeP9Qid;
 use super::{FileHandle, FileHandle as JsFileHandle, Filesystem, MountDriver};
 
@@ -310,12 +313,118 @@ impl Drop for TransportErrorCallback {
     }
 }
 
-pub(crate) fn nfs_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportNfsServerHooks {
+pub(crate) type JsNfsErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type NfsErrorCall = FnArgs<(Error, Option<NfsRpcCall>)>;
+type NfsErrorTsfn =
+    ThreadsafeFunction<NfsErrorEvent, Unknown<'static>, NfsErrorCall, Status, false, false>;
+
+#[derive(Clone)]
+struct NfsErrorEvent {
+    message: String,
+    call: Option<TransportNfsRpcCall>,
+}
+
+/// Owns the JavaScript callback for request-level NFS errors.
+pub(crate) struct NfsErrorCallback {
+    callback: Mutex<Option<Arc<NfsErrorTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl NfsErrorCallback {
+    pub(crate) fn new(function: JsNfsErrorCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<NfsErrorEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| {
+                let event = context.value;
+                Ok(FnArgs::from((
+                    Error::new(Status::GenericFailure, event.message),
+                    event.call.map(from_nfs_call),
+                )))
+            })?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn report(&self, error: TransportNfsSessionError, call: Option<TransportNfsRpcCall>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        let message = match error.offset {
+            Some(offset) => format!("{} at byte {offset}", error.message),
+            None => error.message,
+        };
+        let event = NfsErrorEvent { message, call };
+        let _ = callback.call_with_return_value(
+            event,
+            ThreadsafeFunctionCallMode::NonBlocking,
+            |result, _env| {
+                let _ = result;
+                Ok(())
+            },
+        );
+    }
+
+    pub(crate) fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for NfsErrorCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub(crate) fn nfs_hooks(
+    transport_callback: Option<&Arc<TransportErrorCallback>>,
+    session_callback: Option<&Arc<NfsErrorCallback>>,
+) -> TransportNfsServerHooks {
     TransportNfsServerHooks {
-        on_transport_error: callback.map(|callback| {
+        on_transport_error: transport_callback.map(|callback| {
             let callback = Arc::clone(callback);
             Arc::new(move |error: TransportNfsError| callback.report(error.into()))
                 as TransportNfsErrorHook
+        }),
+        on_error: session_callback.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(
+                move |error: TransportNfsSessionError, call: Option<TransportNfsRpcCall>| {
+                    callback.report(error, call);
+                },
+            ) as TransportNfsSessionErrorHook
         }),
     }
 }
@@ -559,19 +668,19 @@ pub struct NfsServerOptions {
     pub nfs4: Option<Nfs4StateKnobs>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
+    #[napi(ts_type = "(error: unknown, call: NfsRpcCall | undefined) => void")]
+    pub on_error: Option<JsNfsErrorCallback>,
 }
 
-fn nfs_options(
-    options: Option<NfsServerOptions>,
-) -> Result<
-    (
-        String,
-        u16,
-        TransportNfsServerOptions,
-        Option<JsTransportErrorCallback>,
-    ),
-    Error,
-> {
+type ParsedNfsOptions = (
+    String,
+    u16,
+    TransportNfsServerOptions,
+    Option<JsTransportErrorCallback>,
+    Option<JsNfsErrorCallback>,
+);
+
+fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Error> {
     let options = options.unwrap_or(NfsServerOptions {
         port: None,
         host: None,
@@ -588,8 +697,10 @@ fn nfs_options(
         claim_ownership: None,
         nfs4: None,
         on_transport_error: None,
+        on_error: None,
     });
     let on_transport_error = options.on_transport_error;
+    let on_error = options.on_error;
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
     let mut output = TransportNfsServerOptions {
@@ -663,7 +774,7 @@ fn nfs_options(
         output.session.nfs4.require_reclaim_complete =
             nfs4.require_reclaim_complete.unwrap_or(true);
     }
-    Ok((host, port, output, on_transport_error))
+    Ok((host, port, output, on_transport_error, on_error))
 }
 
 #[napi]
@@ -878,6 +989,7 @@ pub struct NfsServer {
     requested_port: u16,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
+    session_error: Option<Arc<NfsErrorCallback>>,
 }
 
 #[napi]
@@ -936,6 +1048,9 @@ impl NfsServer {
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
+        if let Some(callback) = &self.session_error {
+            callback.release();
+        }
         self.inner
             .close()
             .await
@@ -948,14 +1063,15 @@ pub fn create_nfs_server(
     driver: &Filesystem,
     options: Option<NfsServerOptions>,
 ) -> napi::Result<NfsServer> {
-    let (host, requested_port, options, on_transport_error) = nfs_options(options)?;
+    let (host, requested_port, options, on_transport_error, on_error) = nfs_options(options)?;
     let transport_error = on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;
+    let session_error = on_error.map(NfsErrorCallback::new).transpose()?;
     let inner = TransportNfsServer::new_with_hooks(
         MountDriver(Arc::clone(&driver.driver)),
         options,
-        nfs_hooks(transport_error.as_ref()),
+        nfs_hooks(transport_error.as_ref(), session_error.as_ref()),
     );
     Ok(NfsServer {
         inner: Arc::new(inner),
@@ -963,6 +1079,7 @@ pub fn create_nfs_server(
         requested_port,
         closed: AtomicBool::new(false),
         transport_error,
+        session_error,
     })
 }
 

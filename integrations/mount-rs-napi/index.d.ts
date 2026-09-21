@@ -2266,6 +2266,7 @@ export interface NfsServerOptions {
   claimOwnership?: boolean
   nfs4?: Nfs4StateKnobs
   onTransportError?: (error: unknown, peer: string | undefined) => void
+  onError?: (error: unknown, call: NfsRpcCall | undefined) => void
 }
 
 export interface NfsSessionStats {

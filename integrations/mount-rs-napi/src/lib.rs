@@ -3311,7 +3311,7 @@ pub fn mount(
                     .map(|_| p9_hooks(transport_error.as_ref())),
                 nfs: transport_error
                     .as_ref()
-                    .map(|_| nfs_hooks(transport_error.as_ref())),
+                    .map(|_| nfs_hooks(transport_error.as_ref(), None)),
             },
         )
         .await

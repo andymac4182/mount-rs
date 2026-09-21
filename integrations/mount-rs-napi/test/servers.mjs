@@ -255,6 +255,7 @@ function nfsRecord(record) {
 async function exerciseNfs() {
   const filesystem = memoryFilesystem();
   const reports = [];
+  const sessionErrors = [];
   const server = createNfsServer(filesystem, {
     host: "127.0.0.1",
     port: 0,
@@ -280,6 +281,9 @@ async function exerciseNfs() {
     onTransportError(error, peer) {
       reports.push({ error, peer });
       throw new Error("NFS hook callback deliberately threw");
+    },
+    onError(error, call) {
+      sessionErrors.push({ error, call });
     },
   });
   let socket;
@@ -320,6 +324,15 @@ async function exerciseNfs() {
     assert.equal(server.session.stats.procedures["NFS4:NULL"], 1);
     assert.equal(server.session.v4.stats.requests, 2);
     assert.equal(await server.session.v4.sweepExpired(), 0);
+    const malformedV4 = nfsV4NullCall(45);
+    malformedV4.writeUInt32BE(1, 20);
+    const malformedV4Reply = await server.session.v4.handleCall(malformedV4);
+    assert.ok(Buffer.isBuffer(malformedV4Reply));
+    assert.equal(malformedV4Reply.readUInt32BE(20), 4, "malformed COMPOUND is RPC garbage args");
+    await waitUntil(() => sessionErrors.length === 1, "NFS session error callback");
+    assert.ok(sessionErrors[0].error instanceof Error);
+    assert.match(sessionErrors[0].error.message, /COMPOUND|truncated|byte/i);
+    assert.equal(sessionErrors[0].call.xid, 45);
     const rootHandle = [{ id: 1n, fileid: 1n, path: "/" }];
     assert.deepEqual(server.session.handles, rootHandle);
     assert.deepEqual(server.session.v4.handles, rootHandle);

@@ -20,7 +20,9 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::rpc::{DEFAULT_RECORD_LIMIT, RecordAssembler, decode_call, frame_record};
-use crate::session::{Nfs3Session, NfsRequestContext, NfsSessionOptions};
+use crate::session::{
+    Nfs3Session, NfsRequestContext, NfsSessionErrorHook, NfsSessionHooks, NfsSessionOptions,
+};
 use crate::v4::{NFS_V4, NFS4_PROGRAM, Nfs4Session};
 
 pub const DEFAULT_NFS_PORT: u16 = 2049;
@@ -55,6 +57,7 @@ pub type NfsTransportErrorHook = Arc<dyn Fn(NfsTransportError) + Send + Sync + '
 #[derive(Clone, Default)]
 pub struct NfsServerHooks {
     pub on_transport_error: Option<NfsTransportErrorHook>,
+    pub on_error: Option<NfsSessionErrorHook>,
 }
 
 impl NfsTransportError {
@@ -229,11 +232,17 @@ impl NfsServer {
         options: NfsServerOptions,
         hooks: NfsServerHooks,
     ) -> Self {
+        let session = session.with_hooks(NfsSessionHooks {
+            on_error: hooks.on_error.clone(),
+        });
         let shared = session.shared_state();
-        let v4_session = Nfs4Session::from_loopback_shared(
+        let v4_session = Nfs4Session::from_loopback_shared_with_hooks(
             session.driver.clone(),
             options.session.clone(),
             &shared,
+            NfsSessionHooks {
+                on_error: hooks.on_error.clone(),
+            },
         );
         Self {
             session,
@@ -819,6 +828,7 @@ mod tests {
                         .push(error);
                     callback_notify.notify_waiters();
                 })),
+                on_error: None,
             };
             (Self { values, notify }, hooks)
         }
