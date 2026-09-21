@@ -7,7 +7,9 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const packageRoot = fileURLToPath(new URL("..", import.meta.url));
-const napiCommand = fileURLToPath(new URL("../node_modules/.bin/napi", import.meta.url));
+const napiCommand = fileURLToPath(
+  new URL(`../node_modules/.bin/napi${process.platform === "win32" ? ".cmd" : ""}`, import.meta.url),
+);
 
 /**
  * The five native artifacts uploaded by the CI node matrix. Keep this list in
@@ -84,6 +86,9 @@ async function run(command, args, cwd) {
       cwd,
       encoding: "utf8",
       maxBuffer: 16 * 1024 * 1024,
+      // pnpm exposes package binaries as .cmd shims on Windows. They need the
+      // platform shell to be executable through child_process.execFile.
+      shell: process.platform === "win32",
     });
   } catch (error) {
     const stdout = typeof error.stdout === "string" ? error.stdout.trim() : "";
