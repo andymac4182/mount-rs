@@ -241,11 +241,16 @@ Current focused behavior:
   The `./9p` barrel now exposes the complete upstream constants surface,
   including message names, masks, qid bits, wire sizes, version values, and
   Linux open flags where applicable; all 124 upstream constants/functions are
-  differentially checked. The upstream `driver`, `fids`, assertion/debug
-  callbacks, full fid object graph, and lock-table injection through
-  session/server option bags remain unresolved rather than being treated as
-  intentionally out of scope. The server's property-shaped `clients`
-  contract and the 9P mount helpers are also still open.
+  differentially checked. It also exposes the Rust-backed `FidTable` alias,
+  live `P9Session.fids`, mutable path/open/iounit/cursor views, qid/cursor
+  helpers, detached clunk snapshots, and retained open-handle enumeration;
+  focused tests cover the oracle lifecycle, hardlink/release identity,
+  large-inode input, and a real opened session fid. Direct table mutation is a
+  low-level inspection/testing seam; protocol clunk or session destroy remains
+  the orderly production teardown path. The upstream `driver`, assertion/debug
+  callbacks, lock-table injection through session/server option bags, the
+  server's property-shaped `clients` contract, and the 9P mount helpers remain
+  unresolved rather than being treated as intentionally out of scope.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the

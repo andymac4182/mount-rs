@@ -141,6 +141,14 @@ lifecycle tests at exact SHA `431affd`. Native listener connections expose
 stream is not transferable to a Node `Duplex`; crash/reset/half-close recovery
 remains supervisor-owned rather than a library claim.
 
+The follow-up 9P fid packet adds the Rust-backed `FidTable` alias and live
+`P9Session.fids` view, mutable path/open/iounit/cursor state, deterministic
+fid ordering, qid identity/cursor helpers, detached clunk snapshots, and
+retained open-handle enumeration. Focused N-API and Rust tests pass, including
+hardlink/release identity, large inode values, and a real opened session fid;
+the remaining driver/assertion/debug/lock-option/member and mount-helper gaps
+remain explicit, and production remains **NO-GO**.
+
 ## Detailed work items
 
 ### W01.1 — Applicable public exports and behavior ledger
@@ -357,6 +365,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Refreshed the current pinned FUSE oracle lane: `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/fuse-codec.mjs` passed all listed protocol differential families and `node test/fuse-inodes.mjs` passed inode parity | — | 80% planning view | This closes focused mount-free codec/inode evidence only; the full N-API package matrix, hosted Linux `/dev/fuse`, callback/lifecycle, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-22 | W01-FUSE | Hardened the mount-free unsupported-operation boundary: codec-backed `BMAP`, legacy/extended `SETXATTR`, `GETXATTR`, `LISTXATTR`, and `REMOVEXATTR` bodies are validated with negotiated context before valid requests return explicit `ENOSYS`; malformed forms return `EINVAL`; the complete locked FUSE target passed 20 session tests plus the existing unit/INIT/protocol/notify/sync-barrier suites and strict Clippy | — | 80% planning view | This does not advertise or implement native xattrs/BMAP; hosted Linux/native lifecycle, callback events, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-22 | W01-FUSE | Added the protocol 7.34 eight-byte `SYNCFS` body codec and routed the native request to the existing `FsDriver::syncfs` barrier; success, backend failure, malformed/trailing bodies and empty replies are covered by focused tests | — | 80% planning view | Hosted kernel syncfs behavior and the remaining native lifecycle, callback, crash/restart and durability evidence remain open |
+| 2026-09-22 | W01-FUSE | Added typed napi-rs `NativeFuseSyncfsIn` request bindings, explicit `./fuse` CommonJS/ESM aliases, generated declarations, and exact eight-byte/truncated/trailing codec coverage; the release addon rebuild, focused codec test, generated typecheck, and locked N-API Rust check passed | — | 80% planning view | The pinned mountx oracle still classifies `SYNCFS` as unimplemented, so no oracle differential is claimed for this operation; hosted kernel syncfs behavior and the remaining native lifecycle, callback, crash/restart and durability evidence remain open |
 | 2026-09-21 | Baseline | Created this ledger from the current W01 tracker and evidence | — | 61% planning view | Hosted/native/live-provider gates remain open |
 | 2026-09-21 | W01.1 / W01.4 | Added shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source`, package-level signal teardown, `Mounted.port` readback, and `Mounted[Symbol.asyncDispose]()` to the N-API auto facade; 16 N-API unit tests, affected Rust crates, strict Clippy, Linux-target transport check, build/typecheck, authorized macOS NFS lifecycle, and the opt-in child-process signal lane passed | — | 65% planning view | Automatic error/transport callbacks, shared-server handles, remaining option/session members, hosted Linux native lanes, FSKit, PGlite, and live R2 remain open |
 | 2026-09-21 | W01.2 / W01.3 | Refreshed the pinned PGlite-enabled upstream suite (4 files, 1,200 passed, 82 skipped), the bounded PGlite provider/CLI packet (Rust SDK 6/6, Node SDK 5/5, CLI 11/11 with R2 skips), and all 40 seeded trace lanes across eight local backends at the pinned oracle revision | — | 65% planning view | Root-only skip rows, live R2, hosted platforms, and native transport acceptance remain open |

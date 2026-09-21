@@ -49,6 +49,11 @@ and lock-range limits are enforced by the v4 state machine. When enabled,
 until the client sends `RECLAIM_COMPLETE`. The defaults match the pinned
 oracle's 90-second lease, 64 fore slots/operations, 1 MiB request ceiling,
 64 KiB replay cache, 256 opens per file, and 1024 lock ranges per file.
+Lease expiry is enforced at NFSv4 request boundaries: an expired client loses
+its sessions, locks, open states, and pinned backend handles before the next
+COMPOUND is dispatched. Rust callers can also invoke
+`Nfs4Session::sweep_expired`; `Nfs4Clock` provides deterministic monotonic
+time injection for Rust tests, while N-API uses the default system clock.
 `idmap` is a deterministic static map: Rust callers use `Nfs4IdMap`'s
 `with_user`/`with_group` builders, while N-API callers provide `domain`,
 `users`, and `groups` name-to-id records. Mapped names are qualified with the
@@ -141,7 +146,8 @@ process-local. Backend crash recovery and durability behavior remains outside
 the supported local scope until a separate qualification lane is accepted.
 
 The pinned upstream API still exposes `onError`, dynamic NFSv4 ID-map
-callbacks, and deterministic `now` state control. Static ID maps and the
-`nfs4.seed` identity control are supported as described above; callback maps,
-injectable clocks, and session `onError` remain explicit parity work until
-their behavior has dedicated wire tests and supported N-API plumbing.
+callbacks, and a JavaScript `now` callback. Static ID maps, Rust
+`Nfs4Clock`, lease enforcement, and the `nfs4.seed` identity control are
+supported as described above; callback maps, N-API clock injection, and
+session `onError` remain explicit parity work until their behavior has
+dedicated wire tests and supported N-API plumbing.

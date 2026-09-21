@@ -25,7 +25,10 @@ pub mod session;
 pub mod wire;
 
 pub use constants::*;
-pub use fids::{Fid, FidOpenState, FidTable, qid_type, qid_version, walk_step};
+pub use fids::{
+    DirCursor, Fid, FidCursorView, FidOpenState, FidOpenView, FidTable, FidView, qid_type,
+    qid_version, walk_step,
+};
 pub use locks::{
     P9Lock, P9LockClient, P9LockHolder, P9LockRequest, P9LockTable, P9LockTableOptions,
 };

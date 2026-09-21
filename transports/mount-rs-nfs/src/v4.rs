@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use mount_rs_core::{
     ErrorCode, FileHandle, FsDriver, FsError, Loopback, MkdirOptions, OpenFlags, S_IFBLK, S_IFCHR,
@@ -627,6 +628,7 @@ struct ClientState {
     id: u64,
     confirmed: bool,
     sequence: u32,
+    renewed: Instant,
     reclaim_complete: bool,
     create_session_replay: Option<CreateSessionReplay>,
 }
@@ -1655,6 +1657,69 @@ impl Nfs4Session {
         *self.destroyed.lock().expect("NFSv4 destroyed lock")
     }
 
+    fn now(&self) -> Instant {
+        self.options.nfs4.clock.now()
+    }
+
+    fn lease_duration(&self) -> Duration {
+        Duration::from_secs(u64::from(self.options.nfs4.lease_seconds.max(1)))
+    }
+
+    fn expired(&self, renewed: Instant, now: Instant) -> bool {
+        now.saturating_duration_since(renewed) >= self.lease_duration()
+    }
+
+    /// Remove clients whose leases have expired, including their sessions,
+    /// locks, open states, and pinned backend handles.
+    async fn expire_expired_clients(&self) -> usize {
+        let (removed, handles) = {
+            let mut state = self.state.lock().expect("NFSv4 state lock");
+            let now = self.now();
+            let expired = state
+                .clients
+                .iter()
+                .filter_map(|(clientid, client)| {
+                    self.expired(client.renewed, now).then_some(*clientid)
+                })
+                .collect::<Vec<_>>();
+            let mut handles = Vec::new();
+            let mut removed = 0;
+            for clientid in expired {
+                if state.clients.remove(&clientid).is_none() {
+                    continue;
+                }
+                state.owners.retain(|_, owner| *owner != clientid);
+                state
+                    .sessions
+                    .retain(|_, session| session.clientid != clientid);
+                state.locks.retain(|_, lock| lock.clientid != clientid);
+                let open_ids = state
+                    .opens
+                    .iter()
+                    .filter_map(|(other, open)| (open.clientid == clientid).then_some(*other))
+                    .collect::<Vec<_>>();
+                for other in open_ids {
+                    if let Some(open) = state.opens.remove(&other) {
+                        handles.push((open.handle_id, open.handle));
+                    }
+                }
+                removed += 1;
+            }
+            (removed, handles)
+        };
+        for (handle_id, handle) in handles {
+            self.handles.unpin(handle_id);
+            let _ = handle.close().await;
+        }
+        removed
+    }
+
+    /// Sweep expired NFSv4 clients and release their process-local state.
+    pub async fn sweep_expired(&self) -> usize {
+        let _guard = self.path_lock.write().await;
+        self.expire_expired_clients().await
+    }
+
     pub async fn destroy(&self) {
         *self.destroyed.lock().expect("NFSv4 destroyed lock") = true;
         self.handles.clear();
@@ -1801,6 +1866,9 @@ impl Nfs4Session {
             return Some(encode_accept_error(call.xid, RPC_PROC_UNAVAIL, None));
         }
         let credentials = credentials_of(&call.cred);
+        let expiry_guard = self.path_lock.write().await;
+        self.expire_expired_clients().await;
+        drop(expiry_guard);
         let _guard = self.path_lock.read().await;
         match self
             .dispatch_compound(&mut args, &credentials, peer, call.xid)
@@ -1922,7 +1990,7 @@ impl Nfs4Session {
         };
         let session = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
-            let Some(session) = state.sessions.get_mut(sessionid) else {
+            let Some(session) = state.sessions.get(sessionid) else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_BADSESSION, 0, false);
                 return Ok(compound_body(NFS4ERR_BADSESSION, &tag, &[]));
             };
@@ -1932,14 +2000,33 @@ impl Nfs4Session {
                 return Ok(compound_body(NFS4ERR_BADSLOT, &tag, &[]));
             }
             let expected = session.next_sequence[slot_index];
+            let clientid = session.clientid;
             if *sequence == expected {
-                session.next_sequence[slot_index] = expected.saturating_add(1);
-                session.clone()
-            } else if let Some(cached) = session.cached[slot_index].as_ref()
-                && cached.sequence == *sequence
+                state
+                    .sessions
+                    .get_mut(sessionid)
+                    .expect("validated session while holding state lock")
+                    .next_sequence[slot_index] = expected.saturating_add(1);
+                if let Some(client) = state.clients.get_mut(&clientid) {
+                    client.renewed = self.now();
+                }
+                state
+                    .sessions
+                    .get(sessionid)
+                    .expect("validated session while holding state lock")
+                    .clone()
+            } else if let Some(body) = state
+                .sessions
+                .get(sessionid)
+                .and_then(|session| session.cached[slot_index].as_ref())
+                .filter(|cached| cached.sequence == *sequence)
+                .map(|cached| cached.body.clone())
             {
-                v4_trace_body_reply(peer, xid, &cached.body, true);
-                return Ok(cached.body.clone());
+                if let Some(client) = state.clients.get_mut(&clientid) {
+                    client.renewed = self.now();
+                }
+                v4_trace_body_reply(peer, xid, &body, true);
+                return Ok(body);
             } else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_MISORDERED, 0, false);
                 return Ok(compound_body(NFS4ERR_SEQ_MISORDERED, &tag, &[]));
@@ -2167,6 +2254,7 @@ impl Nfs4Session {
                         id,
                         confirmed: false,
                         sequence: 1,
+                        renewed: self.now(),
                         reclaim_complete: false,
                         create_session_replay: None,
                     },
@@ -2261,6 +2349,7 @@ impl Nfs4Session {
                 .expect("validated client while holding state lock");
             client.confirmed = true;
             client.sequence = client.sequence.wrapping_add(1);
+            client.renewed = self.now();
             let counter = state.next_session;
             state.next_session = state.next_session.saturating_add(1).max(1);
             let id = session_id(self.options.nfs4.seed, &self.write_verifier, counter);

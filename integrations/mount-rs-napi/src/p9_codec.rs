@@ -88,6 +88,7 @@ fn u32_len(value: usize, what: &str) -> napi::Result<u32> {
 }
 
 #[napi(object)]
+#[derive(Clone)]
 pub struct NativeP9Qid {
     #[napi(js_name = "type")]
     pub type_: u8,

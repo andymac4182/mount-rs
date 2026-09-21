@@ -16,14 +16,16 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use mount_rs_9p::{
-    P9Lock as TransportP9Lock, P9LockClient as TransportP9LockClient,
-    P9LockHolder as TransportP9LockHolder, P9LockRequest as TransportP9LockRequest,
-    P9LockTable as TransportP9LockTable, P9LockTableOptions as TransportP9LockTableOptions,
-    P9Server as TransportP9Server, P9ServerHooks as TransportP9ServerHooks,
-    P9ServerOptions as TransportP9ServerOptions, P9TransportError as TransportP9Error,
-    P9TransportErrorHook as TransportP9ErrorHook,
+    DirCursor as TransportP9DirCursor, FidCursorView as TransportP9FidCursorView,
+    FidOpenState as TransportP9FidOpenState, FidOpenView as TransportP9FidOpenView,
+    FidTable as TransportP9FidTable, FidView as TransportP9FidView, P9Lock as TransportP9Lock,
+    P9LockClient as TransportP9LockClient, P9LockHolder as TransportP9LockHolder,
+    P9LockRequest as TransportP9LockRequest, P9LockTable as TransportP9LockTable,
+    P9LockTableOptions as TransportP9LockTableOptions, P9Server as TransportP9Server,
+    P9ServerHooks as TransportP9ServerHooks, P9ServerOptions as TransportP9ServerOptions,
+    P9TransportError as TransportP9Error, P9TransportErrorHook as TransportP9ErrorHook,
 };
-use mount_rs_core::{ErrorCode, FileHandle, FsDriver, FsError};
+use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
 use mount_rs_fuse::{
     FuseMountHooks as TransportFuseMountHooks, FuseTransportError as TransportFuseError,
     FuseTransportErrorHook as TransportFuseErrorHook,
@@ -65,7 +67,8 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Status, sys};
 use napi_derive::napi;
 
-use super::{Filesystem, MountDriver};
+use super::p9_codec::NativeP9Qid;
+use super::{FileHandle, FileHandle as JsFileHandle, Filesystem, MountDriver};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
@@ -780,6 +783,12 @@ impl Nfs4Session {
             .map(Buffer::from)
     }
 
+    /// Sweep expired NFSv4 client leases and release their process-local state.
+    #[napi]
+    pub async fn sweep_expired(&self) -> f64 {
+        self.inner.sweep_expired().await as f64
+    }
+
     #[napi(getter)]
     pub fn stats(&self) -> NfsSessionStats {
         let stats = self.inner.stats();
@@ -1162,6 +1171,699 @@ impl P9LockClient {
 }
 
 #[napi(object)]
+pub struct P9FidTableOptions {
+    pub use_driver_ino: Option<bool>,
+}
+
+#[napi(object)]
+pub struct P9FidOffset {
+    pub offset: BigInt,
+    pub index: f64,
+}
+
+#[napi(object)]
+pub struct P9FidCursor {
+    pub entries: Vec<String>,
+    pub offsets: Vec<P9FidOffset>,
+}
+
+#[napi]
+#[derive(Clone)]
+pub struct P9FidOpenState {
+    flags: f64,
+    handle: Option<FileHandle>,
+    directory: bool,
+    qid: Option<NativeP9Qid>,
+}
+
+#[napi]
+impl P9FidOpenState {
+    #[napi(constructor)]
+    pub fn new(
+        flags: Option<f64>,
+        handle: Option<&FileHandle>,
+        directory: Option<bool>,
+        qid: Option<NativeP9Qid>,
+    ) -> napi::Result<Self> {
+        let flags = u32_number("flags", flags, 0)? as f64;
+        Ok(Self {
+            flags,
+            handle: handle.cloned(),
+            directory: directory.unwrap_or(false),
+            qid,
+        })
+    }
+
+    #[napi(getter)]
+    pub fn flags(&self) -> f64 {
+        self.flags
+    }
+
+    #[napi(getter)]
+    pub fn handle(&self) -> Option<FileHandle> {
+        self.handle.clone()
+    }
+
+    #[napi(getter)]
+    pub fn directory(&self) -> bool {
+        self.directory
+    }
+
+    #[napi(getter)]
+    pub fn qid(&self) -> Option<NativeP9Qid> {
+        self.qid.clone()
+    }
+}
+
+#[napi(object)]
+pub struct P9DirResume {
+    pub entries: Vec<String>,
+    pub index: f64,
+}
+
+#[napi(object)]
+pub struct P9StatsLike {
+    pub dev: f64,
+    pub ino: f64,
+    pub mode: u32,
+    pub mtime_ms: f64,
+}
+
+#[derive(Clone)]
+enum P9FidTableTarget {
+    Standalone(Arc<Mutex<TransportP9FidTable>>),
+    Session(mount_rs_9p::P9Session),
+}
+
+fn p9_fid_error(fid: u32) -> Error {
+    super::to_js_error(FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}")))
+}
+
+fn p9_qid(value: mount_rs_9p::P9Qid) -> NativeP9Qid {
+    NativeP9Qid {
+        type_: value.type_,
+        version: value.version,
+        path: BigInt::from(value.path),
+    }
+}
+
+fn p9_open_state(value: TransportP9FidOpenView) -> P9FidOpenState {
+    P9FidOpenState {
+        flags: value.flags as f64,
+        handle: value.handle.map(|handle| JsFileHandle { inner: handle }),
+        directory: value.directory,
+        qid: value.qid.map(p9_qid),
+    }
+}
+
+fn p9_transport_qid(value: NativeP9Qid) -> napi::Result<mount_rs_9p::P9Qid> {
+    Ok(mount_rs_9p::P9Qid {
+        type_: value.type_,
+        version: value.version,
+        path: p9_u64(value.path, "qid.path")?,
+    })
+}
+
+fn p9_transport_open_state(value: P9FidOpenState) -> napi::Result<TransportP9FidOpenState> {
+    let wire_flags = u32_number("flags", Some(value.flags), 0)?;
+    Ok(TransportP9FidOpenState {
+        flags: OpenFlags::from_bits(u64::from(wire_flags)),
+        wire_flags,
+        handle: value.handle.map(|handle| handle.inner),
+        directory: value.directory,
+        qid: value.qid.map(p9_transport_qid).transpose()?,
+    })
+}
+
+fn p9_transport_cursor(value: P9FidCursor) -> napi::Result<TransportP9DirCursor> {
+    let mut offsets = HashMap::with_capacity(value.offsets.len());
+    for offset in value.offsets {
+        let index = number("index", Some(offset.index), 0)?;
+        offsets.insert(p9_u64(offset.offset, "offset")?, index);
+    }
+    Ok(TransportP9DirCursor {
+        entries: value.entries,
+        offsets,
+    })
+}
+
+fn p9_cursor(value: TransportP9FidCursorView) -> P9FidCursor {
+    P9FidCursor {
+        entries: value.entries,
+        offsets: value
+            .offsets
+            .into_iter()
+            .map(|(offset, index)| P9FidOffset {
+                offset: BigInt::from(offset),
+                index: index as f64,
+            })
+            .collect(),
+    }
+}
+
+fn p9_cursor_view(value: TransportP9DirCursor) -> TransportP9FidCursorView {
+    TransportP9FidCursorView {
+        entries: value.entries,
+        offsets: value.offsets.into_iter().collect(),
+    }
+}
+
+#[derive(Clone)]
+#[napi]
+pub struct P9Fid {
+    table: P9FidTableTarget,
+    fid: u32,
+    detached: Option<TransportP9FidView>,
+}
+
+impl P9Fid {
+    fn live(table: P9FidTableTarget, fid: u32) -> Self {
+        Self {
+            table,
+            fid,
+            detached: None,
+        }
+    }
+
+    fn detached(table: P9FidTableTarget, value: TransportP9FidView) -> Self {
+        Self {
+            table,
+            fid: value.fid,
+            detached: Some(value),
+        }
+    }
+
+    fn view(&self) -> napi::Result<TransportP9FidView> {
+        if let Some(value) = &self.detached {
+            return Ok(value.clone());
+        }
+        p9_target_view(&self.table, self.fid)
+    }
+}
+
+#[napi]
+impl P9Fid {
+    #[napi(getter)]
+    pub fn fid(&self) -> u32 {
+        self.fid
+    }
+
+    #[napi(getter)]
+    pub fn path(&self) -> napi::Result<String> {
+        Ok(self.view()?.path)
+    }
+
+    #[napi(setter)]
+    pub fn set_path(&mut self, path: String) -> napi::Result<()> {
+        if let Some(value) = self.detached.as_mut() {
+            let normalized = mount_rs_core::path::normalize_path(&path);
+            if normalized != value.path {
+                value.path = normalized;
+                value.cursor = None;
+            }
+            return Ok(());
+        }
+        p9_target_set_path(&self.table, self.fid, &path).map_err(super::to_js_error)
+    }
+
+    #[napi(getter)]
+    pub fn open(&self) -> napi::Result<Option<P9FidOpenState>> {
+        Ok(self.view()?.open.map(p9_open_state))
+    }
+
+    #[napi(setter)]
+    pub fn set_open(&mut self, open: Option<&P9FidOpenState>) -> napi::Result<()> {
+        let open = open.cloned().map(p9_transport_open_state).transpose()?;
+        if let Some(value) = self.detached.as_mut() {
+            value.open = open.map(|open| TransportP9FidOpenView {
+                flags: open.wire_flags,
+                handle: open.handle,
+                directory: open.directory,
+                qid: open.qid,
+            });
+            return Ok(());
+        }
+        p9_target_set_open(&self.table, self.fid, open).map_err(super::to_js_error)
+    }
+
+    #[napi(getter)]
+    pub fn iounit(&self) -> napi::Result<u32> {
+        Ok(self.view()?.iounit)
+    }
+
+    #[napi(setter)]
+    pub fn set_iounit(&mut self, iounit: u32) -> napi::Result<()> {
+        if let Some(value) = self.detached.as_mut() {
+            value.iounit = iounit;
+            return Ok(());
+        }
+        p9_target_set_iounit(&self.table, self.fid, iounit).map_err(super::to_js_error)
+    }
+
+    #[napi(getter)]
+    pub fn cursor(&self) -> napi::Result<Option<P9FidCursor>> {
+        Ok(self.view()?.cursor.map(p9_cursor))
+    }
+
+    #[napi(setter)]
+    pub fn set_cursor(&mut self, cursor: Option<P9FidCursor>) -> napi::Result<()> {
+        let cursor = cursor.map(p9_transport_cursor).transpose()?;
+        if let Some(value) = self.detached.as_mut() {
+            value.cursor = cursor.map(p9_cursor_view);
+            return Ok(());
+        }
+        p9_target_set_cursor(&self.table, self.fid, cursor).map_err(super::to_js_error)
+    }
+}
+
+fn p9_target_size(target: &P9FidTableTarget) -> usize {
+    match target {
+        P9FidTableTarget::Standalone(table) => {
+            table.lock().expect("9P fid table mutex poisoned").len()
+        }
+        P9FidTableTarget::Session(session) => session.fid_size(),
+    }
+}
+
+fn p9_target_qid_path_count(target: &P9FidTableTarget) -> usize {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .qid_path_count(),
+        P9FidTableTarget::Session(session) => session.fid_qid_path_count(),
+    }
+}
+
+fn p9_target_exists(target: &P9FidTableTarget, fid: u32) -> bool {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .get(fid)
+            .is_some(),
+        P9FidTableTarget::Session(session) => session.fid_exists(fid),
+    }
+}
+
+fn p9_target_view(target: &P9FidTableTarget, fid: u32) -> napi::Result<TransportP9FidView> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .view(fid)
+            .ok_or_else(|| p9_fid_error(fid)),
+        P9FidTableTarget::Session(session) => session.fid_view(fid).map_err(super::to_js_error),
+    }
+}
+
+fn p9_target_ids(target: &P9FidTableTarget) -> Vec<u32> {
+    match target {
+        P9FidTableTarget::Standalone(table) => {
+            table.lock().expect("9P fid table mutex poisoned").fids()
+        }
+        P9FidTableTarget::Session(session) => session.fid_ids(),
+    }
+}
+
+fn p9_target_create(target: &P9FidTableTarget, fid: u32, path: &str) -> Result<(), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .create(fid, path)
+            .map(|_| ()),
+        P9FidTableTarget::Session(session) => session.fid_create(fid, path),
+    }
+}
+
+fn p9_target_clone(target: &P9FidTableTarget, from: u32, to: u32) -> Result<(), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .clone_fid(from, to)
+            .map(|_| ()),
+        P9FidTableTarget::Session(session) => session.fid_clone(from, to),
+    }
+}
+
+fn p9_target_clunk(target: &P9FidTableTarget, fid: u32) -> Result<TransportP9FidView, FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .clunk(fid)
+            .map(|entry| entry.view()),
+        P9FidTableTarget::Session(session) => session.fid_clunk(fid),
+    }
+}
+
+fn p9_target_set_path(target: &P9FidTableTarget, fid: u32, path: &str) -> Result<(), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => {
+            let mut table = table.lock().expect("9P fid table mutex poisoned");
+            let entry = table.get_mut(fid).ok_or_else(|| {
+                FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}"))
+            })?;
+            entry.set_path(path);
+            Ok(())
+        }
+        P9FidTableTarget::Session(session) => session.fid_set_path(fid, path),
+    }
+}
+
+fn p9_target_set_open(
+    target: &P9FidTableTarget,
+    fid: u32,
+    open: Option<TransportP9FidOpenState>,
+) -> Result<(), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .set_open(fid, open),
+        P9FidTableTarget::Session(session) => session.fid_set_open(fid, open),
+    }
+}
+
+fn p9_target_set_iounit(target: &P9FidTableTarget, fid: u32, iounit: u32) -> Result<(), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .set_iounit(fid, iounit),
+        P9FidTableTarget::Session(session) => session.fid_set_iounit(fid, iounit),
+    }
+}
+
+fn p9_target_set_cursor(
+    target: &P9FidTableTarget,
+    fid: u32,
+    cursor: Option<TransportP9DirCursor>,
+) -> Result<(), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .set_cursor(fid, cursor),
+        P9FidTableTarget::Session(session) => session.fid_set_cursor(fid, cursor),
+    }
+}
+
+fn p9_target_resume(
+    target: &P9FidTableTarget,
+    fid: u32,
+    offset: u64,
+) -> Result<Option<(Vec<String>, usize)>, FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .resume(fid, offset),
+        P9FidTableTarget::Session(session) => session.fid_resume(fid, offset),
+    }
+}
+
+fn p9_target_snapshot(
+    target: &P9FidTableTarget,
+    fid: u32,
+    entries: Vec<String>,
+) -> Result<(Vec<String>, usize), FsError> {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .snapshot(fid, entries),
+        P9FidTableTarget::Session(session) => session.fid_snapshot_entries(fid, entries),
+    }
+}
+
+fn p9_target_note_offset(target: &P9FidTableTarget, fid: u32, offset: u64, index: usize) {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .note_offset(fid, offset, index),
+        P9FidTableTarget::Session(session) => session.fid_note_offset(fid, offset, index),
+    }
+}
+
+fn p9_target_qid_for(target: &P9FidTableTarget, stats: &Stats, path: &str) -> mount_rs_9p::P9Qid {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .qid_for(stats, path),
+        P9FidTableTarget::Session(session) => session.fid_qid_for(stats, path),
+    }
+}
+
+fn p9_target_qid_path_for(target: &P9FidTableTarget, stats: &Stats, path: &str) -> u64 {
+    p9_target_qid_for(target, stats, path).path
+}
+
+fn p9_target_release(target: &P9FidTableTarget, path: &str) {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .release(path),
+        P9FidTableTarget::Session(session) => session.fid_release(path),
+    }
+}
+
+fn p9_target_remap(target: &P9FidTableTarget, from: &str, to: &str) {
+    match target {
+        P9FidTableTarget::Standalone(table) => table
+            .lock()
+            .expect("9P fid table mutex poisoned")
+            .remap(from, to),
+        P9FidTableTarget::Session(session) => session.fid_remap(from, to),
+    }
+}
+
+fn p9_target_clear(target: &P9FidTableTarget) {
+    match target {
+        P9FidTableTarget::Standalone(table) => {
+            table.lock().expect("9P fid table mutex poisoned").clear()
+        }
+        P9FidTableTarget::Session(session) => session.fid_clear(),
+    }
+}
+
+fn p9_stats(value: P9StatsLike) -> napi::Result<Stats> {
+    let dev = p9_u64_number(value.dev, "dev")?;
+    let ino = p9_u64_number(value.ino, "ino")?;
+    let mtime_ms = if value.mtime_ms.is_finite() {
+        value
+            .mtime_ms
+            .trunc()
+            .clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    } else {
+        0
+    };
+    Ok(Stats {
+        dev,
+        ino,
+        mode: value.mode,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        size: 0,
+        blksize: 0,
+        blocks: 0,
+        atime_ms: 0,
+        mtime_ms,
+        ctime_ms: 0,
+        birthtime_ms: 0,
+    })
+}
+
+fn p9_u64_number(value: f64, name: &str) -> napi::Result<u64> {
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u64::MAX as f64).contains(&value) {
+        return Err(config_error(format!(
+            "{name} must be a non-negative integer that fits uint64"
+        )));
+    }
+    Ok(value as u64)
+}
+
+#[napi]
+pub struct P9OpenHandle {
+    fid: P9Fid,
+    handle: FileHandle,
+}
+
+#[napi]
+impl P9OpenHandle {
+    #[napi(getter)]
+    pub fn fid(&self) -> P9Fid {
+        self.fid.clone()
+    }
+
+    #[napi(getter)]
+    pub fn handle(&self) -> FileHandle {
+        self.handle.clone()
+    }
+}
+
+#[napi]
+pub struct P9FidTable {
+    inner: P9FidTableTarget,
+}
+
+#[napi]
+impl P9FidTable {
+    #[napi(constructor)]
+    pub fn new(options: Option<P9FidTableOptions>) -> Self {
+        Self {
+            inner: P9FidTableTarget::Standalone(Arc::new(Mutex::new(TransportP9FidTable::new(
+                options
+                    .and_then(|options| options.use_driver_ino)
+                    .unwrap_or(true),
+            )))),
+        }
+    }
+
+    #[napi(getter)]
+    pub fn size(&self) -> f64 {
+        p9_target_size(&self.inner) as f64
+    }
+
+    #[napi(getter)]
+    pub fn qid_path_count(&self) -> f64 {
+        p9_target_qid_path_count(&self.inner) as f64
+    }
+
+    #[napi]
+    pub fn get(&self, fid: u32) -> Option<P9Fid> {
+        p9_target_exists(&self.inner, fid).then(|| P9Fid::live(self.inner.clone(), fid))
+    }
+
+    #[napi]
+    pub fn require(&self, fid: u32) -> napi::Result<P9Fid> {
+        if !p9_target_exists(&self.inner, fid) {
+            return Err(p9_fid_error(fid));
+        }
+        Ok(P9Fid::live(self.inner.clone(), fid))
+    }
+
+    #[napi]
+    pub fn create(&self, fid: u32, path: String) -> napi::Result<P9Fid> {
+        p9_target_create(&self.inner, fid, &path).map_err(super::to_js_error)?;
+        Ok(P9Fid::live(self.inner.clone(), fid))
+    }
+
+    #[napi(js_name = "clone")]
+    pub fn clone_fid(&self, from: u32, to: u32) -> napi::Result<P9Fid> {
+        p9_target_clone(&self.inner, from, to).map_err(super::to_js_error)?;
+        Ok(P9Fid::live(self.inner.clone(), to))
+    }
+
+    #[napi]
+    pub fn clunk(&self, fid: u32) -> napi::Result<P9Fid> {
+        let value = p9_target_clunk(&self.inner, fid).map_err(super::to_js_error)?;
+        Ok(P9Fid::detached(self.inner.clone(), value))
+    }
+
+    #[napi]
+    pub fn resume(&self, entry: &P9Fid, offset: BigInt) -> napi::Result<Option<P9DirResume>> {
+        let offset = p9_u64(offset, "offset")?;
+        p9_target_resume(&self.inner, entry.fid, offset)
+            .map(|value| {
+                value.map(|(entries, index)| P9DirResume {
+                    entries,
+                    index: index as f64,
+                })
+            })
+            .map_err(super::to_js_error)
+    }
+
+    #[napi]
+    pub fn snapshot(&self, entry: &P9Fid, entries: Vec<String>) -> napi::Result<P9DirResume> {
+        p9_target_snapshot(&self.inner, entry.fid, entries)
+            .map(|(entries, index)| P9DirResume {
+                entries,
+                index: index as f64,
+            })
+            .map_err(super::to_js_error)
+    }
+
+    #[napi]
+    pub fn note_offset(&self, entry: &P9Fid, offset: BigInt, index: f64) -> napi::Result<()> {
+        let offset = p9_u64(offset, "offset")?;
+        let index = number("index", Some(index), 0)?;
+        p9_target_note_offset(&self.inner, entry.fid, offset, index);
+        Ok(())
+    }
+
+    #[napi]
+    pub fn qid_for(&self, stats: P9StatsLike, path: String) -> napi::Result<NativeP9Qid> {
+        Ok(p9_qid(p9_target_qid_for(
+            &self.inner,
+            &p9_stats(stats)?,
+            &path,
+        )))
+    }
+
+    #[napi]
+    pub fn qid_path_for(&self, stats: P9StatsLike, path: String) -> napi::Result<BigInt> {
+        Ok(BigInt::from(p9_target_qid_path_for(
+            &self.inner,
+            &p9_stats(stats)?,
+            &path,
+        )))
+    }
+
+    #[napi]
+    pub fn release(&self, path: String) {
+        p9_target_release(&self.inner, &path);
+    }
+
+    #[napi]
+    pub fn remap(&self, from: String, to: String) {
+        p9_target_remap(&self.inner, &from, &to);
+    }
+
+    #[napi]
+    pub fn fids(&self) -> Vec<u32> {
+        p9_target_ids(&self.inner)
+    }
+
+    #[napi]
+    pub fn entries(&self) -> Vec<P9Fid> {
+        p9_target_ids(&self.inner)
+            .into_iter()
+            .map(|fid| P9Fid::live(self.inner.clone(), fid))
+            .collect()
+    }
+
+    #[napi]
+    pub fn open_handles(&self) -> napi::Result<Vec<P9OpenHandle>> {
+        let mut handles = Vec::new();
+        for fid in p9_target_ids(&self.inner) {
+            let value = p9_target_view(&self.inner, fid)?;
+            if let Some(open) = value.open
+                && let Some(handle) = open.handle
+            {
+                handles.push(P9OpenHandle {
+                    fid: P9Fid::live(self.inner.clone(), fid),
+                    handle: JsFileHandle { inner: handle },
+                });
+            }
+        }
+        Ok(handles)
+    }
+
+    #[napi]
+    pub fn clear(&self) {
+        p9_target_clear(&self.inner);
+    }
+}
+
+#[napi(object)]
 pub struct P9ServerOptions {
     pub port: Option<f64>,
     pub host: Option<String>,
@@ -1354,6 +2056,15 @@ impl P9Session {
     #[napi(getter)]
     pub fn locks(&self) -> P9LockClient {
         p9_lock_client(self.inner.lock_client())
+    }
+
+    /// The live per-connection fid table. The table is backed by the same
+    /// transport state used by protocol dispatch.
+    #[napi(getter)]
+    pub fn fids(&self) -> P9FidTable {
+        P9FidTable {
+            inner: P9FidTableTarget::Session(self.inner.clone()),
+        }
     }
 
     #[napi(getter)]
@@ -2519,7 +3230,7 @@ impl WebdavRequestBody for NapiWebdavRequestBody {
 enum WebdavResponseBodyState {
     Bytes(Option<Vec<u8>>),
     File {
-        handle: Arc<dyn FileHandle>,
+        handle: Arc<dyn CoreFileHandle>,
         position: u64,
         end: u64,
         chunk_size: usize,
@@ -2553,7 +3264,7 @@ impl WebdavBodyStream {
         }
     }
 
-    async fn close_handle(handle: Arc<dyn FileHandle>) -> napi::Result<()> {
+    async fn close_handle(handle: Arc<dyn CoreFileHandle>) -> napi::Result<()> {
         handle
             .close()
             .await

@@ -63,6 +63,16 @@ workflow does not replace the canary, rollback or explicit production GO gates.
 The implementation was published as `dff55858` in merge tip `6abc0535` on
 `origin/main` after concurrent mainline reconciliation.
 
+W08.29 then qualified the latest published-main target path in hosted run
+`35638433010`, source `9d3a6e502eccec9ba54c00e80c98e6e1da175177`. Both Linux
+x86_64 and macOS arm64 builds, downloaded bundles, provenance attestations,
+CycloneDX SBOM attestations and final identity verifiers passed; the two target
+bundles were independently rechecked after download. This remains target
+qualification, not a production-candidate tag release, registry acceptance,
+canary, rollback or GO decision. The evidence capture was committed as
+`ad45bf06` and published in merge tip
+`d68f14de3c13c0510237e9a88c615c1a8e74c9a3`.
+
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or
