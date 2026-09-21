@@ -2980,10 +2980,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `4b9787f9` was freshly reverified after the concurrent NFS/9P/WebDAV/
-  HTTP/provider, Ozone, FUSE, chunked, 9P parity and bounded teardown updates
-  with the full locked workspace test suite (exit 0) and strict workspace
-  Clippy with `-D warnings` (exit 0). Provider/
+  Source `7f964ca3` was freshly reverified after the concurrent NFS/9P/WebDAV/
+  HTTP/provider, Ozone, FUSE, chunked, 9P parity, bounded teardown and NFS
+  restart-fencing updates with the full locked workspace test suite (exit 0)
+  and strict workspace Clippy with `-D warnings` (exit 0). Provider/
   native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit
   opt-in skips. This is source-health evidence only and does not close
   W08-P01–P09.
