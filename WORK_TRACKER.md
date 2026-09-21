@@ -481,7 +481,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | Verifying | Main |
-| W05 | Cloudflare R2 | Verifying; local S3/R2 HTTP and configuration gates pass, but live provider acceptance is still credential-gated | Main |
+| W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
@@ -517,10 +517,13 @@ complete.
   Historical worker names in individual evidence entries identify earlier
   work, not live sessions. Main owns integration, root manifests, and commits.
 
-- [x] **D01 — Live R2 credentials:** created bucket-scoped object read/write
-  credentials for `mount-rs-integration-tests`, stored in macOS Keychain, expiring
-  2026-09-27. Read-only S3 listing passed. Full integration acceptance remains
-  open; credentials are not committed and RustFS evidence is not a substitute.
+- [x] **D01 — Live R2 credentials:** security-provisioned bucket-scoped Object
+  Read & Write credentials for `mount-rs-integration-tests` are stored as
+  encrypted GitHub `r2-ci` environment secrets, using a one-week Cloudflare
+  token TTL through 2026-09-28. The final hosted run `35579757447` passed the
+  budget guard, Rust/Node SDK and CLI matrices, live R2 trace/CLI/N-API,
+  service evidence and benchmark artifact. Credential values are not committed
+  or recorded; rotation remains scheduled maintenance.
 - [x] **D02 — License:** user selected Apache-2.0 for mount-rs on 2026-09-20.
   First-party package declarations use Apache-2.0; preserve third-party notices,
   including MIT attribution for upstream-derived portions.
@@ -803,8 +806,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] Land object-store/R2 driver code and configurable endpoint support.
 - [x] W05.1 Unblock D01 and run authenticated tests against actual Cloudflare R2.
   On 2026-09-20, main passed the explicit live filesystem contract test and
-  SQLite-metadata/R2-chunk roundtrip/reopen test (two tests, no skips). Credentials
-  remain in Keychain; this is local dirty-worktree evidence, not release acceptance.
+  SQLite-metadata/R2-chunk roundtrip/reopen test (two tests, no skips). The
+  current CI credential path is the security-provisioned encrypted GitHub
+  `r2-ci` environment, not a repository file or direct Keychain dependency;
+  the final hosted acceptance is recorded in W05.7.
 - [x] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
   The 2026-09-21 isolated rerun at base revision `6f1ab93` passed the local
@@ -853,8 +858,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   all `3,105/3,105` operations; the configuration-driven live R2 CLI passed;
   and the full public-NAPI benchmark passed all `8/8` iterations across 1,
   4, 10 and 16 MiB with fixed 64 KiB chunks, zero timeouts/failures and
-  verified cleanup. Hosted CI does not receive the dedicated R2 credentials,
-  so hosted live-R2 evidence remains a separate acceptance boundary.
+  verified cleanup. Hosted CI receives only the encrypted `r2-ci` environment
+  secrets; its live-R2 evidence remains a separate hosted acceptance boundary
+  from local and native evidence.
 - [x] W05.4 Record service identity and revision without recording credentials.
   `integrations/mount-rs-r2` now exposes a redacted `R2ServiceIdentity` and
   `scripts/r2-service-evidence.sh` records only endpoint authority, bucket,
@@ -875,6 +881,23 @@ Evidence landed without closing the remaining W01 acceptance gates:
   local, not live R2 traces. The subsequent full acceptance rerun passed with
   live R2 and PGlite enabled, while native privileged mounts and hosted CI remain
   separate evidence boundaries.
+- [x] W05.7 Add usage-capped CI credentials, cost guard, and full hosted
+  acceptance. Security-provisioned bucket-scoped Object Read & Write
+  credentials are stored only as encrypted GitHub `r2-ci` environment secrets;
+  the one-week token expires 2026-09-28 and no credential value is committed.
+  The fail-closed budget job admits at most 20 accepted runs per UTC month at
+  an assumed `$4` per run, for an `$80` envelope below the requested `$100`
+  ceiling; the final run `35579757447` recorded `12/20` with eight slots
+  remaining. A Cloudflare account-wide R2 alert is configured at `$80` as an
+  early-warning notification. Hosted acceptance passed at `3db491e`: Rust SDK
+  `9/0/0`, Node SDK `7/1/0`, CLI `14/1/0`, upstream `1200 passed/82 skipped`,
+  five seeds × eight local/PGlite backends × 621 operations, live R2 trace
+  `621/621`, live CLI, hosted N-API/service evidence, and artifact
+  `10630468958`. An earlier hosted `ESTALE` shutdown failure in run
+  `35575940720` was fixed by `c71c8ee`, which refreshes an expired unfenced
+  lease during shutdown and includes a regression test; runs `35577687152` and
+  `35579757447` then passed. Remaining actions are secret rotation before
+  expiry and separate Linux FUSE, Windows, and signed/activated FSKit gates.
 
 ## W06 — RustFS integration service
 
