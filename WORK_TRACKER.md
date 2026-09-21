@@ -263,6 +263,14 @@ pinned mountx oracle still classifies `SYNCFS` as unimplemented, so no oracle
 differential is claimed for this operation; hosted kernel syncfs behavior and
 the remaining native lifecycle, callback, crash/restart and durability gates
 remain open, and W01 stays NO-GO.
+The latest FUSE teardown packet makes forced session-task cancellation a
+terminal lifecycle transition: bounded unmount-timeout and post-runtime
+destructor fallbacks now mark the mount inactive/closed and wake
+`wait_closed()` observers. A Linux-gated regression covers the lifecycle
+contract; host FUSE tests, host/Linux-target strict Clippy, Linux-target test
+check, formatting and diff checks pass, while actual Linux `/dev/fuse`
+forced-unmount, callback, crash/restart and durability execution remain
+external, so W01 stays NO-GO.
 The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
 session destroy in unwind isolation. A backend or cleanup panic now becomes
 one owned `Task` transport error, still closes the session, marks the mount
@@ -3755,6 +3763,7 @@ cross-drive isolation.
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
+| `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |
 | `a31880d` (published as `1e45692`) | Seeded Rust SDK, Node SDK and CLI provider lifecycle matrix | Positional write, truncate, flush and reopen passed across 5 Rust SDK, 4 Node SDK and 9 CLI rows; PGlite/R2 remain explicit skips |

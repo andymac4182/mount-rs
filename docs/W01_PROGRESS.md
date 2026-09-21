@@ -121,6 +121,15 @@ macOS native path remains NFS, with no FSKit or macFUSE FUSE-protocol claim.
 This closes the macOS platform-scope decision but does not qualify any Linux
 hosted or lifecycle gate, so W01 remains NO-GO.
 
+The latest FUSE teardown packet makes forced session-task cancellation a
+terminal lifecycle transition: bounded unmount-timeout and post-runtime
+destructor fallbacks now mark the mount inactive/closed and wake
+`wait_closed()` observers. A Linux-gated regression covers that contract;
+host FUSE tests, host and Linux-target strict Clippy, Linux-target test check,
+formatting and diff checks pass, while actual Linux `/dev/fuse` forced-unmount,
+callback, crash/restart and durability execution remain external, so W01 stays
+NO-GO.
+
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
 direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed
