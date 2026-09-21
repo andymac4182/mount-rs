@@ -904,8 +904,8 @@ check with the transport lifecycle; the shared postbuild server facade now
 clears a failed close promise so a timed-out WebDAV close can be retried after
 the peer exits. The focused wrapper race test passes 40 alternating
 real-loopback iterations, its stalled-request timeout/retry regression passes,
-and the focused direct-session concurrency probe passes 64 concurrent PUT/GET
-requests, while the network-concurrency/auth test passes 64 concurrent HTTP
+and the focused direct-session concurrency probe passes 128 concurrent PUT/GET
+requests, while the network-concurrency/auth test passes 128 concurrent HTTP
 PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 opt-in
@@ -971,7 +971,7 @@ and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
 `/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
 acceptance. The host-enabled WebDAV session
-packet also completes 64 parallel unique-file PUTs and GETs through one
+packet also completes 128 parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
@@ -1011,14 +1011,15 @@ request token/ownership checks remain authoritative. The injectable `now`,
 `onAssertion`, and live `DavLockTable` remain explicit outside-scope controls.
 Hosted/native lifecycle, provider, restart/durability, and broader concurrency
 remain open rather than being silently accepted.
-At the exact published tip `5b9af323f1e6bf03725842f1b696d1ff02028fb9`, read-only
-status showed [CI run 35666922957](https://github.com/andymac4182/mount-rs/actions/runs/35666922957)
-and [W08 release targets run 35666922962](https://github.com/andymac4182/mount-rs/actions/runs/35666922962)
-pending, with [W08 release policy run 35666922862](https://github.com/andymac4182/mount-rs/actions/runs/35666922862),
-[Fault injection run 35666922905](https://github.com/andymac4182/mount-rs/actions/runs/35666922905),
-[Live Cloudflare R2 run 35666923030](https://github.com/andymac4182/mount-rs/actions/runs/35666923030),
-and [W04 production policy run 35666922969](https://github.com/andymac4182/mount-rs/actions/runs/35666922969)
-queued; no hosted WebDAV PASS is claimable from this tip.
+At the exact published WebDAV implementation packet
+`5c6716a201cdcbc1feeac9d2c245d113250f3bc3`, read-only status showed [CI run
+35667576642](https://github.com/andymac4182/mount-rs/actions/runs/35667576642),
+[W08 release targets run 35667576687](https://github.com/andymac4182/mount-rs/actions/runs/35667576687),
+[Fault injection run 35667576587](https://github.com/andymac4182/mount-rs/actions/runs/35667576587),
+and [W08 release policy run 35667576738](https://github.com/andymac4182/mount-rs/actions/runs/35667576738)
+pending, while [Live Cloudflare R2 run 35667576677](https://github.com/andymac4182/mount-rs/actions/runs/35667576677)
+and [W04 production policy run 35667576848](https://github.com/andymac4182/mount-rs/actions/runs/35667576848)
+were queued; no hosted WebDAV PASS is claimable from this implementation packet.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run
@@ -1470,7 +1471,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   full supported server/session prototype-member differential and full direct
   class 1/2/3 method matrix now pass; the oracle-only controls remain outside
   scope. Active lock-record readback and
-  post-UNLOCK cleanup, 64 parallel unique-file direct-session PUT/GET
+  post-UNLOCK cleanup, 128 parallel unique-file direct-session PUT/GET
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.

@@ -62,6 +62,11 @@ import {
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
+  DEFAULT_MAX_IN_FLIGHT,
+  DEFAULT_MAX_LOCKS_PER_FILE,
+  DEFAULT_MSIZE,
+  DEFAULT_P9_PORT,
+  DEFAULT_SOCKET_MODE,
   FidTable,
   FIRST_QID_PATH,
   MESSAGE_NAMES,
@@ -91,6 +96,7 @@ import {
   type P9LockHolder,
   type P9LockRequest,
   P9LockTable,
+  P9_LOCK_EOF_END,
   type P9LockTableOptions,
   type P9Server,
   type P9ServerOptions,
@@ -489,6 +495,18 @@ function checkServerAndKvSubpaths(): void {
   const p9Version: "9P2000.L" = P9_VERSION_DOTL
   const p9MessageNames: Readonly<Record<number, string>> = MESSAGE_NAMES
   const p9MessageName: string = messageName(p9MessageType)
+  const p9DefaultPort: 564 = DEFAULT_P9_PORT
+  const p9DefaultSocketMode: 384 = DEFAULT_SOCKET_MODE
+  const p9DefaultMaxInFlight: 16 = DEFAULT_MAX_IN_FLIGHT
+  const p9DefaultMsize: 1048576 = DEFAULT_MSIZE
+  const p9LockEofEnd: 0x10000000000000000n = P9_LOCK_EOF_END
+  const p9DefaultMaxLocksPerFile: 1024 = DEFAULT_MAX_LOCKS_PER_FILE
+  void p9DefaultPort
+  void p9DefaultSocketMode
+  void p9DefaultMaxInFlight
+  void p9DefaultMsize
+  void p9LockEofEnd
+  void p9DefaultMaxLocksPerFile
   const p9FidOptions: FidTableOptions = { useDriverIno: true }
   const p9FidTable: FidTable = new FidTable(p9FidOptions)
   const p9Fid = p9FidTable.create(1, "/")
