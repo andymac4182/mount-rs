@@ -1,11 +1,14 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 06:07 AEST**
+Status snapshot: **2026-09-22 06:11 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: W08.31 evidence documentation commit `d293fe5b` was
-reconciled into public merge tip `682d2441`; the final pointer-sync commit
-`7dbe0ce3` is the current public ref
-`7dbe0ce3aa3758e4e84ba2b105f1ea17a61ac296` (verified at **05:36 AEST**).
+Publication snapshot: W08.33 implementation commit `16ae685d` and its
+evidence-boundary documentation commit `969339b8` were reconciled with
+concurrent mainline work and are included in current public ref
+`38a995f57e619610a437e09dce4ae32e9e45097b` (verified at **06:11 AEST**).
+The W08.32 hosted-policy evidence documentation remains in the same public
+ancestry; its final pointer-sync history includes `7dbe0ce3`, which was
+verified at **05:36 AEST**.
 W08.30 source-verification documentation commit
 `8b4fac35` was reconciled into public merge tip
 `d4de2e75623ebfe730166bec696f4f43b25ea4fc` (the ref verified at **04:51
@@ -427,7 +430,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 05:34–05:36 AEST | Added the exact public-pointer reference, committed the pointer sync as `7dbe0ce3`, pushed it, refreshed `origin/main` and verified the clean equal refs. | ~0.03 engineer-day | ~2 min remote push/fetch | The final W08.31 ledger pointer is public at `7dbe0ce3`; no production gate was changed or inferred as passed. |
 | 2026-09-22 05:36–05:53 AEST | Added the fail-closed W08 rollout-ledger verifier/test and wired both controls into the dedicated hosted release-policy workflow; local syntax, baseline and six-case transition tests passed. Followed hosted run `35647096385` from source `2641962a6a65179abf4b8d785345fbe6af4be9b8` to terminal success, including job `106490142559`; classified cancelled run `35646848615` with `jobs=[]` as no evidence. | ~0.5 engineer-day | ~2m37s hosted policy execution plus queue/terminal observation; documentation synchronization and push remain separate | W08.32 implementation/static qualification and hosted tracking-control qualification are complete. The production decision remains NO-GO and P01–P09 remain external gates. |
 | 2026-09-22 05:53–current | Added `--require-go` to the fail-closed rollout-ledger verifier, added production-admission negative/complete-GO coverage and wired a required admission job before the protected candidate build matrix; `node --check`, the seven-case suite, YAML parsing and `git diff --check` passed. | ~0.35 engineer-day | ~0 min hosted candidate admission by design; local qualification completed | W08.33 is an implementation safety control. The current production decision remains NO-GO; no candidate tag or production gate is claimed. |
-| 2026-09-22 05:53–06:07 AEST | Followed the post-push W08.33 policy state: push run `35648755697` for source `86a87ed0` and manual-dispatch run `35648898876` (resolved source `987c593b`) both cancelled before job creation; no hosted admission result was promoted to evidence. | ~0.1 engineer-day | ~1 min hosted queue/cancellation observation plus source reconciliation | W08.33 remains locally qualified only. The cancellation boundary is external hosted scheduling state; the production decision remains NO-GO and no candidate tag or production gate is claimed. |
+| 2026-09-22 05:53–06:11 AEST | Followed the post-push W08.33 policy state: push run `35648755697` for source `86a87ed0` and manual-dispatch run `35648898876` (resolved source `987c593b`) both cancelled before job creation; no hosted admission result was promoted to evidence. Committed the correction as `969339b8`, reconciled concurrent mainline changes twice, and published the result in public ref `38a995f5`. | ~0.1 engineer-day | ~1 min hosted queue/cancellation observation plus ~4 min fetch/merge/push reconciliation | W08.33 remains locally qualified only. The cancellation boundary is external hosted scheduling state; the production decision remains NO-GO and no candidate tag or production gate is claimed. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
