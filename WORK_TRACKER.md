@@ -220,6 +220,14 @@ qualified on Linux. The focused session target passed 19/19, the complete
 locked FUSE target and strict Clippy passed, and the packet remains separate
 from hosted native mount, callback-event, FSKit, crash/restart and durability
 acceptance; W01 stays NO-GO.
+The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
+session destroy in unwind isolation. A backend or cleanup panic now becomes
+one owned `Task` transport error, still closes the session, marks the mount
+inactive/closed, and wakes lifecycle waiters; a Linux-gated Unix-stream panic
+harness covers the callback and state boundary. The macOS all-target FUSE
+suite, strict Clippy, formatting, and Linux-target test type-check passed;
+hosted Linux native fault/crash/restart, callback-event, concurrency, lock and
+durability evidence remain external, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure

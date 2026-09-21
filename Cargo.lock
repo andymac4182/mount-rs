@@ -1361,6 +1361,7 @@ name = "mount-rs-fuse"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "libc",
  "mount-rs-core",
  "tokio",
