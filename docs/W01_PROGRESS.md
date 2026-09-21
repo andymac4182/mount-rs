@@ -129,6 +129,14 @@ host FUSE tests, host and Linux-target strict Clippy, Linux-target test check,
 formatting and diff checks pass, while actual Linux `/dev/fuse` forced-unmount,
 callback, crash/restart and durability execution remain external, so W01 stays
 NO-GO.
+The follow-up FUSE teardown packet makes the forced `umount`/lazy-detach ladder
+and final session-task drain share one escalation deadline, so a graceful
+timeout cannot be extended by a third full task timeout. A Linux-gated
+stuck-helper regression checks the bounded `Timeout` result and terminal
+inactive/closed state; host all-target FUSE tests, host/Linux-target strict
+Clippy, Linux-target test check, formatting and diff checks pass. The timing
+test itself and real hosted `/dev/fuse` forced-unmount, callback, crash/restart
+and durability execution remain external, so W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
