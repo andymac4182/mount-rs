@@ -637,20 +637,30 @@ where
             }
         };
         for record in records {
-            let permit = match permits.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(error) => {
-                    report_once(
-                        &hooks,
-                        &reported,
-                        NfsTransportError::from_message(
-                            NfsTransportErrorKind::Read,
-                            Some(peer_name.clone()),
-                            format!("NFS connection semaphore closed: {error}"),
-                        ),
-                    );
+            let permit = tokio::select! {
+                _ = control.shutdown.notified() => {
                     workers.shutdown().await;
                     return;
+                }
+                _ = stop.notified() => {
+                    workers.shutdown().await;
+                    return;
+                }
+                permit = permits.clone().acquire_owned() => match permit {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        report_once(
+                            &hooks,
+                            &reported,
+                            NfsTransportError::from_message(
+                                NfsTransportErrorKind::Read,
+                                Some(peer_name.clone()),
+                                format!("NFS connection semaphore closed: {error}"),
+                            ),
+                        );
+                        workers.shutdown().await;
+                        return;
+                    }
                 }
             };
             let session = session.clone();
