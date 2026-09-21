@@ -248,11 +248,11 @@ impl AutoMount {
         }
     }
 
-    /// The transport source where the underlying API exposes one. FUSE's
-    /// source is an internal device/filename and is intentionally not guessed.
+    /// The transport source where the underlying API exposes one. FUSE uses
+    /// its configured `fsname`; unsupported-platform FUSE mounts have none.
     pub fn source(&self) -> Option<&str> {
         match self {
-            Self::Fuse { .. } => None,
+            Self::Fuse { mount, .. } => mount.source(),
             Self::P9 { mount, .. } => Some(mount.source.as_str()),
             Self::Nfs { mount, .. } => Some(mount.source()),
         }

@@ -352,6 +352,21 @@ impl FuseMount {
     }
 }
 
+impl FuseMount {
+    /// The configured `fsname` exposed as the native mount source. Unsupported
+    /// platforms have no native FUSE source.
+    pub fn source(&self) -> Option<&str> {
+        #[cfg(target_os = "linux")]
+        {
+            Some(self.state.options.fsname.as_str())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            None
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 impl Drop for FuseMount {
     fn drop(&mut self) {
@@ -1854,6 +1869,28 @@ mod tests {
 
         // The test did not create a real native mount. Prevent Drop from
         // attempting the production unmount fallback for this synthetic state.
+        state.mounted.store(false, Ordering::Release);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn source_reports_the_configured_fsname() {
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-source-test"),
+            MountOptions {
+                fsname: "mount-rs-source-test".to_owned(),
+                ..MountOptions::default()
+            },
+            None,
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-source-test"),
+        };
+
+        assert_eq!(mount.source(), Some("mount-rs-source-test"));
         state.mounted.store(false, Ordering::Release);
     }
 
