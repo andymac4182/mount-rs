@@ -842,7 +842,9 @@ export interface JsChunkedOptions {
   chunkSize: number
   owner?: string
   ttlMs?: number
+  /** Defaults to the current process uid, matching the memory driver. */
   uid?: number
+  /** Defaults to the current process gid, matching the memory driver. */
   gid?: number
   umask?: number
   rootMode?: number
@@ -854,7 +856,11 @@ export interface JsChunkedOptions {
  * backend never falls back to an in-memory store.
  */
 export interface JsChunkedStoreOptions {
-  /** Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2 (blocks only). */
+  /**
+   * Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
+   * (blocks only). FoundationDB requires the native feature and an
+   * explicit persisted-single-authority or shared-provider authority.
+   */
   kind: string
   uri?: string
   key?: string

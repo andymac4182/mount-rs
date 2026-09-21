@@ -104,6 +104,36 @@ if (!types.includes(driverTypes)) {
 types = types.replace(/(function (?:mount|createNfsServer|createP9Server|createWebdavServer)\(driver: )Filesystem(?=,)/g, "$1Filesystem | FsDriver")
 types = types.replace(/(function createS3Server\(source: )Filesystem \| \{ buckets: Record<string, Filesystem> \}/g, "$1Filesystem | FsDriver | { buckets: Record<string, Filesystem | FsDriver> }")
 types = types.replace(/function createDriver\(driver: object\)/g, "function createDriver(driver: FsDriver)")
+// These dirent helpers are implemented by the JavaScript FUSE postlude rather
+// than by napi-rs' generated native declarations. Preserve their public type
+// surface across every clean `napi build`; otherwise a release build silently
+// removes APIs that `fuse.cjs` still exports at runtime.
+const direntTypes = `export interface NativeFuseDirent {
+  ino: bigint
+  off: bigint
+  type: number
+  name: string
+}
+
+export interface NativeFuseDirentPlus {
+  entry: NativeFuseEntryOut
+  dirent: NativeFuseDirent
+}
+`
+if (!types.includes("export interface NativeFuseDirent")) {
+  types = types.replace("export interface NativeFuseInterruptIn", `${direntTypes}\nexport interface NativeFuseInterruptIn`)
+}
+const direntFunctions = `export declare function packDirents(entries: Iterable<NativeFuseDirent>, maxSize: number): { buffer: Buffer; packed: number }
+
+export declare function unpackDirents(body: Uint8Array): Array<NativeFuseDirent>
+
+export declare function packDirentsPlus(entries: Iterable<NativeFuseDirentPlus>, maxSize: number, context?: NativeFuseProtocolContext | undefined | null): { buffer: Buffer; packed: number }
+
+export declare function unpackDirentsPlus(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): Array<NativeFuseDirentPlus>
+`
+if (!types.includes("export declare function packDirents(")) {
+  types = types.replace("export declare function isFsError", `${direntFunctions}\nexport declare function isFsError`)
+}
 const harnessTypes = 'export { createLoopback, resolveCapabilities } from "./types/harness.js"'
 if (!types.includes(harnessTypes)) {
   types += `\n${harnessTypes}\nexport type { Loopback, ResolvedCapabilities } from "./types/harness.js"\n`
