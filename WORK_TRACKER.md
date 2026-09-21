@@ -3175,12 +3175,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
   CLI, TiDB Rust composition plus N-API seed/reopen, and FoundationDB Rust
   composition/restart plus N-API seed/reopen markers. The synthetic packet
   test proves a missing Node CLI marker fails closed. Local benchmark/evidence
-  tests, Node/shell syntax, YAML parsing and diff checks passed. Commit
+  tests, Node/shell syntax, YAML parsing, diff checks and the full locked
+  workspace test command `./scripts/cargo-shared test --workspace --all-targets
+  --locked` exited 0; environment-gated native/provider rows remain explicit
+  skips. Commit
   `20a06b8` was reconciled with concurrent mainline changes and published at
   `0e0454d`; focused security diff scan
   `e4ce1aab-c6cd-44e4-b20d-3130ca357412` found zero reportable findings.
-  Terminal hosted provider/aggregate results, native/mount qualification,
-  customer secure-runtime evidence and measured SLO/RPO/RTO remain open.
+  Manual qualification run `35635486040` is active on
+  `cfe7e29e001dc01f2fa430a54bc8981b44db0b05` with Ozone, composition and TiDB
+  jobs running and FoundationDB queued; no queued/in-progress result is
+  promoted. Terminal hosted provider/aggregate results, native/mount
+  qualification, customer secure-runtime evidence and measured SLO/RPO/RTO
+  remain open.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
