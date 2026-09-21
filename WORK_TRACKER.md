@@ -62,8 +62,9 @@ backend durability, crash injection, and durable-restart qualification. The
 new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
 session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
-options; the wire suite passes 5/5, including rejection of an additional
-range on an existing lock state at `maxLocksPerFile`. Upstream ID-map, deterministic clock/seed,
+options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
+an existing lock state, `NFS4ERR_TOOSMALL` for an undersized fore response
+offer, and `NFS4ERR_NOSPC` for an exhausted session cap. Upstream ID-map, deterministic clock/seed,
 and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -1064,6 +1065,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   rootless wire assertion for the additional-range rejection. The complete
   NFS target and scoped Clippy pass; native Linux/hosted/crash gates remain
   open.
+- [x] The NFSv4 channel follow-up aligns `CREATE_SESSION` with the pinned
+  negotiation boundary: undersized fore responses return `NFS4ERR_TOOSMALL`,
+  per-client exhaustion returns `NFS4ERR_NOSPC`, and back-channel count offers
+  are preserved. The complete NFS target and scoped Clippy pass.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

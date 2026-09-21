@@ -401,6 +401,7 @@ const DEFAULT_MAX_SLOTS: usize = 64;
 const DEFAULT_MAX_READ: usize = 1024 * 1024;
 const DEFAULT_MAX_WRITE: usize = 1024 * 1024;
 const MAX_OFFSET: u64 = 9_007_199_254_740_991;
+const MIN_RESPONSE_SIZE: u32 = 128;
 
 // ---------------------------------------------------------------------------
 // v4 wire values
@@ -2209,6 +2210,9 @@ impl Nfs4Session {
             if client.sequence != *sequence {
                 return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_BAD_SEQID);
             }
+            if fore.maxresponsesize < MIN_RESPONSE_SIZE {
+                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_TOOSMALL);
+            }
             if state
                 .sessions
                 .values()
@@ -2216,7 +2220,7 @@ impl Nfs4Session {
                 .count()
                 >= self.options.nfs4.max_sessions.max(1)
             {
-                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_RESOURCE);
+                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_NOSPC);
             }
             let client = state
                 .clients
@@ -2284,8 +2288,8 @@ impl Nfs4Session {
             maxrequestsize: back.maxrequestsize.min(max_request_size),
             maxresponsesize: back.maxresponsesize.min(max_request_size),
             maxresponsesize_cached: back.maxresponsesize_cached.min(max_cached_response_size),
-            maxoperations: back.maxoperations.max(1),
-            maxrequests: back.maxrequests.max(1),
+            maxoperations: back.maxoperations,
+            maxrequests: back.maxrequests,
         };
         let mut body = XdrWriter::with_capacity(128);
         body.fixed_opaque(&sessionid, NFS4_SESSIONID_SIZE);
