@@ -1056,7 +1056,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
     partial writes, truncate/extend, concurrent publication, stale-writer
     fencing, maybe-committed reconciliation, lease renewal/expiry, reconnect
     and fresh-client reopen at production-like duration and load. Record
-    latency, retry, capacity and error-budget results.
+    latency, retry, capacity and error-budget results. The real composition
+    harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
+    latency and throughput for future retained runs; this does not convert
+    the prior one-round qualification into production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.

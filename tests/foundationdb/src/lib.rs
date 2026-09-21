@@ -19,11 +19,67 @@ use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
 use std::collections::BTreeSet;
 use std::env;
+use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+
+#[derive(Default)]
+struct OperationMetrics {
+    samples: Vec<Duration>,
+    completed_operations: usize,
+}
+
+impl OperationMetrics {
+    async fn measure<T, F>(&mut self, operation: F) -> Result<T>
+    where
+        F: Future<Output = Result<T>>,
+    {
+        let started = Instant::now();
+        let result = operation.await;
+        self.samples.push(started.elapsed());
+        if result.is_ok() {
+            self.completed_operations += 1;
+        }
+        result
+    }
+
+    fn emit(&mut self, workload: &str) {
+        if self.samples.is_empty() {
+            return;
+        }
+        self.samples.sort_unstable();
+        let total = self
+            .samples
+            .iter()
+            .copied()
+            .fold(Duration::ZERO, |total, sample| total.saturating_add(sample));
+        let percentile = |numerator: usize, denominator: usize| {
+            let rank = self
+                .samples
+                .len()
+                .saturating_mul(numerator)
+                .div_ceil(denominator)
+                .saturating_sub(1);
+            self.samples[rank.min(self.samples.len() - 1)].as_micros()
+        };
+        let throughput = if total.is_zero() {
+            0.0
+        } else {
+            self.completed_operations as f64 / total.as_secs_f64()
+        };
+        println!(
+            "FOUNDATIONDB_LATENCY_PASS workload={workload} operations={} p50_us={} p95_us={} p99_us={} total_ms={} throughput_ops_per_sec={throughput:.2}",
+            self.completed_operations,
+            percentile(50, 100),
+            percentile(95, 100),
+            percentile(99, 100),
+            total.as_millis(),
+        );
+    }
+}
 
 #[derive(Debug)]
 struct DeterministicLeaseOracle {
@@ -180,58 +236,63 @@ async fn composition_round_trip(
     authority_prefix: &str,
     created: Arc<Mutex<BTreeSet<BlockId>>>,
 ) -> Result<(Vec<u8>, u64)> {
+    let mut metrics = OperationMetrics::default();
     let storage = open_shared_storage(cluster_file, volume_prefix, authority_prefix)?;
     let metadata = storage.metadata();
     let blocks = TrackedRustFsBlocks::new(config, block_prefix, created);
-    let filesystem = ChunkedFs::open(
-        metadata.clone(),
-        blocks.clone(),
-        ChunkedOptions::fixed("foundationdb-rustfs-first", 4096)?
-            .with_lease_ttl(Duration::from_secs(30)),
-    )
-    .await?;
+    let filesystem = metrics
+        .measure(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            ChunkedOptions::fixed("foundationdb-rustfs-first", 4096)?
+                .with_lease_ttl(Duration::from_secs(30)),
+        ))
+        .await?;
     assert!(filesystem.capabilities().durable_writes);
 
     let loopback = Loopback::new(filesystem.clone());
-    let file = loopback.open("/binary", "w+", 0o640).await?;
+    let file = metrics.measure(loopback.open("/binary", "w+", 0o640)).await?;
     let initial = patterned_bytes(4096 * 3 + 113);
     let mut expected = initial.clone();
-    file.write(&initial, Some(0)).await?;
+    metrics.measure(file.write(&initial, Some(0))).await?;
 
     let patch = patterned_bytes(257);
-    file.write(&patch, Some(4096 + 37)).await?;
+    metrics
+        .measure(file.write(&patch, Some(4096 + 37)))
+        .await?;
     expected[4096 + 37..4096 + 37 + patch.len()].copy_from_slice(&patch);
 
-    file.truncate(4096 + 19).await?;
+    metrics.measure(file.truncate(4096 + 19)).await?;
     expected.truncate(4096 + 19);
-    file.truncate(4096 * 3 + 29).await?;
+    metrics.measure(file.truncate(4096 * 3 + 29)).await?;
     expected.resize(4096 * 3 + 29, 0);
 
     let tail = patterned_bytes(193);
-    file.write(&tail, Some(4096 * 2 + 73)).await?;
+    metrics
+        .measure(file.write(&tail, Some(4096 * 2 + 73)))
+        .await?;
     expected[4096 * 2 + 73..4096 * 2 + 73 + tail.len()].copy_from_slice(&tail);
-    file.sync().await?;
+    metrics.measure(file.sync()).await?;
 
     let mut actual = vec![0; expected.len() + 41];
-    let read = file.read(&mut actual, Some(0)).await?;
+    let read = metrics
+        .measure(file.read(&mut actual, Some(0)))
+        .await?;
     assert_eq!(read, expected.len());
     assert_eq!(&actual[..read], expected);
-    assert!(
-        filesystem
-            .metadata_store()
-            .load()
-            .await?
-            .namespace
-            .expect("published namespace")
-            .nodes
-            .values()
-            .any(|node| matches!(
-                &node.data,
-                mount_rs_core::storage::NodeData::File(layout) if layout.extents.len() > 1
-            ))
-    );
+    let loaded = metrics.measure(filesystem.metadata_store().load()).await?;
+    assert!(loaded
+        .namespace
+        .expect("published namespace")
+        .nodes
+        .values()
+        .any(|node| matches!(
+            &node.data,
+            mount_rs_core::storage::NodeData::File(layout) if layout.extents.len() > 1
+        )));
 
-    file.close().await?;
+    metrics.measure(file.close()).await?;
+    metrics.emit("composition");
     drop(loopback);
     let revision = metadata.load().await?.revision;
     filesystem.shutdown().await?;
