@@ -18,7 +18,11 @@ The server does not start `rpcbind`/portmap and does not register a dynamic
 port. It serves MOUNTv3/NFSv3 and NFSv4.1 on the same explicitly selected TCP
 address. The NFSv4.1 service uses AUTH_NONE/AUTH_SYS, session slots, replay
 cache, stateids, common namespace operations, OPEN/CLOSE, READ/WRITE, and the
-filesystem-backed attributes exposed by `FsDriver`.
+filesystem-backed attributes exposed by `FsDriver`. `NfsServer::clients()`
+returns live accepted `NfsConnection` objects in arrival order; each exposes a
+stable id, peer, shared v3/v4 sessions, and bounded `close`/`wait_closed`
+lifecycle operations. Closing one connection tears down only its TCP serving
+task; the server-owned protocol state remains available to other clients.
 
 ## Native macOS/Linux mount lifecycle
 
@@ -62,10 +66,10 @@ and a 256-entry directory listing:
 
 ```text
 # macOS or Linux: NFSv3
-MOUNT_RS_NFS_NATIVE_TEST=1 cargo test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture
+MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture
 
 # Linux only: NFSv4.1
-MOUNT_RS_NFS_NATIVE_V4_TEST=1 cargo test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_v4_1_round_trip --nocapture
+MOUNT_RS_NFS_NATIVE_V4_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_v4_1_round_trip --nocapture
 ```
 
 On macOS the first command is the native verification command: run it without
@@ -97,4 +101,7 @@ crate.
 UDP transport, portmapper registration, NLM/NSM locking, and persistent
 cross-process file-handle recovery remain unimplemented. File handles and
 exclusive-create verifiers are process-local unless the caller supplies a
-stable handle verifier.
+stable handle verifier. `NfsConnection` close/wait state is process-local and
+does not provide reconnect, lease recovery, or crash-durable session/reply
+state; cross-process crash and durability behavior remains outside the
+supported local scope until a separate qualification lane is accepted.

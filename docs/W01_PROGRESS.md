@@ -52,8 +52,8 @@ ledger in the same commit as an implementation/evidence chunk.
 | Track | Scope | Current boundary | Production-ready gate |
 | --- | --- | --- | --- |
 | W01-FUSE | FUSE protocol, mount-free session, native mount, callbacks and lifecycle | Focused Rust/N-API protocol/session evidence exists; native Linux, callback events, remaining session parity and lifecycle races remain | Hosted Linux native mount/read/write/unmount, callback-event and lifecycle evidence, plus the supported macOS/FSKit decision |
-| W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Rust/N-API attached Node Duplex, direct session, ownership, duplicate-attach, bounded backpressure, write-fault, server-teardown, broadcast-shutdown, active-connection close-race, and bounded task-reaping evidence passes; native Tokio listener connections intentionally expose no Node stream and use the supported `attach` seam; hosted run `35616832528` passed the prior native Linux lifecycle packet | Fresh hosted rerun for the shutdown/reaping packet, native reset/half-close/concurrency/crash evidence, and complete applicable stream/attach/connection decision |
-| W01-NFS | NFSv3/v4 router, sessions, handles, native mount and lifecycle | Direct routing and local lifecycle evidence exist; complete state and hosted/native qualification remain | Shared v3/v4 state, native macOS/Linux lifecycle and crash/close evidence |
+| W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Rust/N-API attached Node Duplex, direct session, ownership, duplicate-attach, bounded backpressure, write-fault, server-teardown, broadcast-shutdown, active-connection close-race, and bounded task-reaping evidence passes; an ignored native harness now covers eight concurrent mounted file write/read/rename/read workers plus bounded unmount; native Tokio listener connections intentionally expose no Node stream and use the supported `attach` seam; hosted run `35616832528` passed the prior native Linux lifecycle packet | Fresh hosted rerun for the shutdown/reaping and concurrent-I/O packet, native reset/half-close/crash evidence, and complete applicable stream/attach/connection decision |
+| W01-NFS | NFSv3/v4 router, sessions, handles, native mount and lifecycle | v3/v4 direct routing, shared server state, BigInt handle snapshots, active connection objects/count, close/wait lifecycle, and v4 view are implemented; full stateful matrix and native/hosted qualification remain | Shared v3/v4 handle/state proof, native macOS/Linux lifecycle, v4 behavior matrix, and crash/close evidence |
 | W01-S3 | S3 protocol, session, streaming, providers and lifecycle | Local protocol and structural-driver evidence exists; live provider and complete member parity remain | Applicable API ledger, live AWS/R2, fault/restart and concurrency evidence |
 | W01-WebDAV | WebDAV protocol, locks, session, streaming and lifecycle | Local protocol/session evidence exists; provider/native lifecycle remains | Applicable API ledger, auth/lock durability and restart evidence |
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
@@ -63,17 +63,23 @@ The canonical detailed FUSE ledger is
 [docs/W01_FUSE_PROGRESS.md](./W01_FUSE_PROGRESS.md). Its 2026-09-22
 session-controls chunk adds public construction options and lifecycle/error
 observability while preserving the established durable `FLUSH` sync default.
-The package tests and strict scoped Clippy pass, but native Linux FUSE,
-macOS/FSKit activation, callbacks, cancellation, concurrency, crash/restart
-and durability remain open.
+The follow-up N-API chunk adds the Rust-backed `FuseSession` class and public
+`./fuse` facade with generated declarations, typed options/defaults, negotiated
+state, inode views, request/reply/error counters, callbacks, notification
+encoders, destroy-state readback, and raw INIT/LOOKUP/READLINK coverage. The
+focused package/build/typecheck evidence passes, but native Linux FUSE,
+macOS/FSKit activation, callback events, cancellation, concurrency,
+crash/restart and durability remain open.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
 direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed
 state, shared byte-range lock state, ownership and duplicate-attach handling,
 bounded frame dispatch/backpressure, write-failure reporting, and server-close
-teardown. The focused Rust/N-API gates and pinned 44-case 9P codec differential
-pass. Native listener connections expose `stream: undefined` by deliberate
+teardown. It also adds an ignored Linux-native harness for eight concurrent
+mounted file write/read/rename/read workers followed by bounded unmount. The
+focused Rust/N-API gates and pinned 44-case 9P codec differential pass. Native
+listener connections expose `stream: undefined` by deliberate
 supported-scope decision because their Tokio stream is not transferable to a
 Node `Duplex`; hosted Linux kernel-client and native fault/race/crash evidence
 remain external gates.
@@ -91,10 +97,10 @@ surfaces.
 | Core Rust, Node, memory, and oracle contract | Done | 101-step pinned trace: 79 successful results, 22 expected errors, zero mismatches/skips | 100% | — |
 | Local persistence and consumer paths | Done locally | Rust/Node SDK, CLI, SQLite, object-store, and chunked local paths pass; live providers remain separate | 90% | — |
 | FUSE wire codecs and whole-message framing | Done focused | Typed body table, raw/unknown framing, protocol-minor differentials, malformed/trailing checks | 95% | — |
-| Rust-backed mount-free FUSE session | In progress | INIT, options, cache, negative lookup, flush, callbacks, counters, lifecycle readback, inode view, and plain RENAME2 pass; remaining operation/native-session parity is open | 80% | — |
+| Rust-backed mount-free FUSE session | In progress | INIT, options, cache, negative lookup, flush, callbacks, counters, lifecycle readback, inode view, generated N-API facade, and plain RENAME2 pass; remaining operation/native-session parity is open | 82% | — |
 | Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
 | Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
-| NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with v3/v4-aware direct request routing, shared v3/v4 counters and sorted BigInt handle snapshots, a v4 session view, mounts, destroyed state, and an active server connection count; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; the full upstream object/session/handle/attach surface and native qualification remain | 72% | — |
+| NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with v3/v4-aware direct request routing, shared v3/v4 counters and sorted BigInt handle snapshots, a v4 session view, mounts, destroyed state, live connection objects/count, and close/wait lifecycle; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; the full upstream object/session/handle/attach surface and native qualification remain | 75% | — |
 | S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and the WebDAV subpath now exposes pinned constants/status tables; S3 Rust gateway connection/peer-fault coverage is green, while streaming N-API bodies, protocol/XML/lock helper barrels, direct JavaScript peer-fault injection, and complete option/member parity remain | 70% | — |
 | CLI parity and native consumer behavior | Partial | SDK-backed Rust/Node CLI and macOS NFS self-tests pass; exact oracle/native/hosted coverage remains | 65% | — |
 
@@ -139,10 +145,10 @@ the socket. NFS library tests (30/30), NFS integration targets
 (rootless wire 1, transport errors 4, v4 barrier 1, v4 wire 2), N-API library
 tests (16/16), the N-API server integration, release addon build, generated
 typecheck, repository formatting, and focused cross-transport Clippy pass; this
-is still a read-only view with a raw-v3 request method rather than complete
-NFS unified session, connection-object, or handle parity. The `./nfs` package
+is still a read-only view with process-local connection close state rather than
+complete NFS unified session/member or crash/durability parity. The `./nfs` package
 subpath now re-exports the same
-`NfsServer` and `NfsSession` constructors/classes as the root facade, and the
+`NfsServer`, `NfsSession`, and `NfsConnection` constructors/classes as the root facade, and the
 pinned NFS codec differential verifies that identity without mutating root
 exports. The analogous `P9Session.handleCall` binding is exercised on a live
 connection session with a direct `Rversion` reply, while the Rust/N-API 9P
@@ -222,13 +228,13 @@ it combines behavior verification with host and kernel prerequisites.
 | Rust CLI macOS NFS | Done | Independent Rust and Node clients passed mounted I/O and persistence |
 | Node SDK CLI macOS NFS | Done | Native self-test passed mount/read/write/unmount/persistence |
 | Linux FUSE native mount | External gate | Structural job and CI wiring exist; hosted `/dev/fuse` result is still required |
-| Linux 9P and native NFS | External gate | The revision-matched hosted Linux 9P job `35616832528` / `native-9p` job `106389895603` passed kernel-module probing and privileged native mount/read/write/unmount on the prior packet, and the macOS native NFSv3 loopback package gate passes; the current 9P shutdown/reaping packet and Linux NFSv4.1 mount/read/write/unmount still need fresh hosted evidence, with native fault/race/crash evidence open |
+| Linux 9P and native NFS | External gate | The revision-matched hosted Linux 9P job `35616832528` / `native-9p` job `106389895603` passed kernel-module probing and privileged native mount/read/write/unmount on the prior packet, and the macOS native NFSv3 loopback package gate passes; the current 9P shutdown/reaping/concurrent-I/O packet and Linux NFSv4.1 mount/read/write/unmount still need fresh hosted evidence, with native fault/race/crash evidence open |
 | macOS FSKit/macFUSE boundary | Open/external | Current implementation does not claim FSKit or macFUSE FUSE-protocol parity |
 | Hosted Windows runtime | External gate | Windows-target checks exist; hosted runtime evidence remains required |
 | Errors, paths, bytes, links, timestamps | In progress | Strong mount-free and macOS NFS evidence; cross-platform/native coverage remains |
 | Handles and lifecycle | In progress | Mount-free inode/handle readback, NFS `Mounted.port`, signal teardown, async disposal, and NFS evidence exist; NFS handle parity and native cleanup races remain |
 | Cross-process/crash, cancellation/close, exact append ordering, durability/restart | Open/classified | Package-level NFS signal teardown now passes in a child process; cross-process I/O/crash, cancellation/close races, exact append ordering, and failure durability remain |
-| Transport/native concurrency | Open/classified | Requires native Linux/macOS and hosted execution rather than local userspace traces |
+| Transport/native concurrency | Open/classified | An opt-in Linux-native 9P harness now exercises eight concurrent mounted file round trips and bounded unmount; hosted execution and broader native Linux/macOS evidence are still required rather than local userspace traces |
 
 ### W01.5 — Bounded deterministic concurrency packet
 
@@ -247,6 +253,7 @@ spent waiting for a hosted job or credential approval.
 | Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
 | --- | --- | --- | ---: | ---: | --- |
 | 2026-09-22 | W01-FUSE | Added public Rust `FuseSessionOptions`/`FuseFlushMechanism`, configured inode identity, INIT preferences, cache/timeout policy, error readback, handle counts and destroy-state observability; the complete locked FUSE target (14 unit, 6 INIT, 6 notify/record, 11 protocol, 18 session, 3 sync-barrier tests), strict scoped Clippy, formatting and diff checks passed | — | 66% planning view | Native Linux/FSKit, callbacks, hosted platform, cancellation/concurrency, crash/restart and durability evidence remain open |
+| 2026-09-22 | W01-FUSE | Added the Rust-backed N-API `FuseSession` and public `./fuse` facade with typed options/defaults, negotiated state, inode views, request/reply/error counters, assertion/error callbacks, notification encoders, destroy-state readback, generated declarations, and raw INIT/LOOKUP/READLINK coverage; locked N-API check/Clippy, debug addon build, focused session/codec/typecheck tests, FUSE tests, formatting and diff checks passed | — | 68% planning view | `MOUNTX_SOURCE`-backed full package suite, native Linux FUSE/callback events, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-21 | Baseline | Created this ledger from the current W01 tracker and evidence | — | 61% planning view | Hosted/native/live-provider gates remain open |
 | 2026-09-21 | W01.1 / W01.4 | Added shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source`, package-level signal teardown, `Mounted.port` readback, and `Mounted[Symbol.asyncDispose]()` to the N-API auto facade; 16 N-API unit tests, affected Rust crates, strict Clippy, Linux-target transport check, build/typecheck, authorized macOS NFS lifecycle, and the opt-in child-process signal lane passed | — | 65% planning view | Automatic error/transport callbacks, shared-server handles, remaining option/session members, hosted Linux native lanes, FSKit, PGlite, and live R2 remain open |
 | 2026-09-21 | W01.2 / W01.3 | Refreshed the pinned PGlite-enabled upstream suite (4 files, 1,200 passed, 82 skipped), the bounded PGlite provider/CLI packet (Rust SDK 6/6, Node SDK 5/5, CLI 11/11 with R2 skips), and all 40 seeded trace lanes across eight local backends at the pinned oracle revision | — | 65% planning view | Root-only skip rows, live R2, hosted platforms, and native transport acceptance remain open |
@@ -268,10 +275,12 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-S3 | Reconciled the current `origin/main` S3 loopback-only hardening with the Rust peer-fault packet; bounded drain timeout, live TCP connection tracking, peer-aware transport hooks, and reset-on-close evidence passed in the locked S3 target (4 unit, 6 chunked, 17 gateway, 5 public-API tests) | — | 70% W01.1 planning view | S3 N-API streaming/member parity, direct JavaScript peer-fault evidence, live AWS/R2, and broader fault/restart/durability/concurrency/native gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-9P | Added the N-API attached Node Duplex contract, direct session `handleCall`/`destroy`, shared lock-table state, ownership/duplicate-attach/closed semantics, bounded dispatch/backpressure, hostile-write reporting, server-close teardown, generated declarations and explicit native-listener `stream: undefined` scope; focused 9P/auto Rust tests, strict Clippy, host-enabled server phases, typecheck, and the pinned oracle package gate passed | — | 65% W01.1 planning view | PGlite/R2/native-mount opt-ins remain explicit skips; fresh hosted Linux 9P kernel-client lifecycle, native fault/race/crash, and broader W01 gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-9P | Hosted `native-9p` job `106389895603` in run `35616832528` passed the actual Linux `9p`/`9pnet_fd` probe and privileged native mount/read/write/unmount lifecycle. Added broadcast shutdown with an atomic race guard, active-connection close/accept-loop regression coverage, `Task` transport-failure reporting, and completed request-task reaping; local lifecycle 5/5, transport-error 8/8 and strict 9P Clippy passed | — | 65% W01.1 planning view | The hosted result predates this shutdown/reaping packet and must be rerun at its current commit; native reset/half-close/concurrency/crash and broader W01 gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-9P | Added an ignored Linux-native harness with eight concurrent mounted file write/read/rename/read workers followed by bounded unmount; focused 9P tests and strict 9P Clippy passed locally | — | 65% W01.1 planning view | A hosted run on the harness revision is required; native reset/half-close/crash and broader W01 gates remain open; W01 stays NO-GO |
 
 | 2026-09-22 | W01-FUSE | Added fail-closed validation for caller-supplied native FUSE mount option tokens and transport-owned overrides; focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS | — | 35% W01.4 planning view | Hosted Linux `/dev/fuse`, callback-event, crash/concurrency/durability, and signed/activated FSKit evidence remain open; W01 stays NO-GO |
-| 2026-09-22 | W01-NFS | Added active NFS socket-task accounting with abort-safe close draining and read-only sorted BigInt shared-handle snapshots on both the v3 and v4 N-API views. Rust NFS tests passed 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; the release addon, generated typecheck, and live N-API server integration passed | — | 72% W01.1 planning view | Full v3/v4 stateful matrix, upstream connection-object parity, hosted lifecycle, Linux NFSv4.1 and crash/durability gates remain open; W01 stays NO-GO |
-| 2026-09-22 | W01-NFS | The opt-in macOS native NFSv3 loopback mount gate passed 1/1 in 0.09s, including filesystem round trips and bounded cleanup | — | 72% W01.4 planning view | Linux NFSv4.1, Linux 9P, hosted lifecycle, full stateful/connection-object parity, crash/concurrency/durability, and live-provider gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Added active NFS socket-task accounting with abort-safe close draining and read-only sorted BigInt shared-handle snapshots on both the v3 and v4 N-API views. Rust NFS tests passed 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; the release addon, generated typecheck, and live N-API server integration passed | — | 72% W01.1 planning view | Full v3/v4 stateful matrix, remaining upstream session/member parity, hosted lifecycle, Linux NFSv4.1 and crash/durability gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Added live NFS connection objects with stable id/peer/shared-session views and abort-safe `close`/`waitClosed`; the `./nfs` subpath identity check, release addon, generated typecheck, distribution check, and host-enabled N-API server integration passed | — | 75% W01.1 planning view | Full v3/v4 stateful matrix, hosted lifecycle, Linux NFSv4.1, crash/durability, and any remaining upstream member differences remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | The opt-in macOS native NFSv3 loopback mount gate passed 1/1 in 0.09s, including filesystem round trips and bounded cleanup | — | 75% W01.4 planning view | Linux NFSv4.1, Linux 9P, hosted lifecycle, full stateful parity, crash/concurrency/durability, and live-provider gates remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 

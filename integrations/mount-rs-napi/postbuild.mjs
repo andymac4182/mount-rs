@@ -99,6 +99,13 @@ types = types.replace(
   },
 )
 types = types.replace(
+  /export declare class NfsConnection \{([\s\S]*?)\n\}/g,
+  (declaration, body) => {
+    if (!/\bclosed\s*:/.test(body)) body += "\n  readonly closed: Promise<void>"
+    return `export declare class NfsConnection {${body}\n}`
+  },
+)
+types = types.replace(
   /export declare class P9Session \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
     if (!/\bhandleCall\(/.test(body)) {
@@ -117,6 +124,77 @@ types = types.replace(
     return `export declare class P9Server {${body}\n}`
   },
 )
+// The FUSE postlude wraps the native async class with the public
+// mount-free/session facade. Keep generated declarations aligned with that
+// runtime layer after every clean `napi build`.
+types = types.replace(
+  /export declare class FuseSession \{[\s\S]*?\n\}/,
+  `export declare class FuseSession {
+  constructor(filesystem: Filesystem, options?: FuseSessionOptions | undefined | null)
+  readonly options: FuseSessionOptions
+  readonly stats: FuseSessionStats
+  readonly assertions: string[]
+  readonly negotiated: NativeFuseNegotiatedSession | undefined
+  readonly protocol: NativeFuseProtocolContext | undefined
+  readonly destroyed: boolean
+  readonly openHandles: number
+  readonly inodes: FuseSessionInodeTable
+  handle(bytes: Buffer): Promise<Buffer | null>
+  handleMessage(bytes: Buffer): Promise<Buffer | null>
+  destroy(): Promise<void>
+  notifyInvalInode(ino: bigint, off?: bigint, len?: bigint): Buffer
+  notifyInvalEntry(parent: bigint, name: string, flags?: number): Buffer
+}`,
+)
+const fuseSessionTypes = `
+export type FuseFlushMechanism = "sync" | "enosys" | "noflush"
+export const DEFAULT_ATTR_TIMEOUT: 10
+export const DEFAULT_ENTRY_TIMEOUT: 10
+export const DEFAULT_FLUSH_MECHANISM: FuseFlushMechanism
+export function createFuseSession(filesystem: Filesystem, options?: FuseSessionOptions | undefined | null): FuseSession
+
+export interface FuseRequest {
+  header: NativeFuseInHeader
+  payload: Buffer
+  extensions: Buffer
+  body: unknown
+}
+
+export type FuseSessionOptions = Omit<NativeFuseSessionOptions, "flushMechanism"> & {
+  flushMechanism?: FuseFlushMechanism
+  debug?: boolean
+  onError?: (error: unknown, request?: FuseRequest) => void
+  onAssertion?: (message: string) => void
+}
+
+export interface FuseSessionStats {
+  requests: number
+  replies: number
+  errors: number
+  noReply: number
+  dropped: number
+  assertions: number
+}
+
+export interface FuseSessionInode {
+  readonly nodeid: bigint
+  readonly key: string | undefined
+  readonly nlookup: bigint
+  readonly paths: Set<string>
+}
+
+export interface FuseSessionInodeTable {
+  readonly root: FuseSessionInode | undefined
+  readonly size: number
+  readonly pathCount: number
+  get(nodeid: bigint): FuseSessionInode | undefined
+  at(path: string): FuseSessionInode | undefined
+  require(nodeid: bigint): FuseSessionInode
+  pathOf(inode: FuseSessionInode): string
+  requirePath(nodeid: bigint): string
+}
+`
+if (!types.includes("export interface FuseSessionStats")) types += fuseSessionTypes
 const utilityTypes = 'import type { FsError, FsErrorOptions } from "./types/root.js"'
 if (!types.includes(utilityTypes)) {
   types += `\n${utilityTypes}\nexport type { ErrnoCode, FsError, FsErrorOptions } from "./types/root.js"\nexport { ERRNO_CODES, joinPath } from "./types/root.js"\n`

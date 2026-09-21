@@ -1014,25 +1014,36 @@ fn mount_data(
     let mut parts = Vec::new();
     if let Some((fd, root_mode, uid, gid)) = privileged {
         parts.push(format!("fd={fd}"));
-        parts.push(format!("rootmode={root_mode:o}"));
+        // The kernel expects only the root inode's file-type bits here. The
+        // driver stat includes normal permission bits as well, so mask them
+        // before serializing the privileged mount boundary.
+        parts.push(format!("rootmode={:o}", root_mode & S_IFMT));
         parts.push(format!("user_id={uid}"));
         parts.push(format!("group_id={gid}"));
     }
-    parts.push(format!("fsname={}", options.fsname));
+    // The helper consumes source metadata and generic mount flags from its
+    // option string. The privileged mount(2) path supplies the source and
+    // flags through its syscall arguments instead, so forwarding them as
+    // kernel data would make the FUSE driver reject the mount with EINVAL.
+    if privileged.is_none() {
+        parts.push(format!("fsname={}", options.fsname));
+    }
     if options.default_permissions {
         parts.push("default_permissions".to_owned());
     }
     if options.allow_other {
         parts.push("allow_other".to_owned());
     }
-    if options.read_only {
+    if privileged.is_none() && options.read_only {
         parts.push("ro".to_owned());
     }
     if let Some(max_read) = options.max_read {
         parts.push(format!("max_read={max_read}"));
     }
-    if let Some(subtype) = &options.subtype {
-        parts.push(format!("subtype={subtype}"));
+    if privileged.is_none() {
+        if let Some(subtype) = &options.subtype {
+            parts.push(format!("subtype={subtype}"));
+        }
     }
     parts.extend(options.mount_options.iter().cloned());
     std::ffi::CString::new(parts.join(",")).map_err(|_| {
@@ -1367,6 +1378,30 @@ mod tests {
         assert_eq!(options.device, Path::new("/dev/fuse"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_mount_data_excludes_helper_metadata_and_flags() {
+        let options = MountOptions {
+            fsname: "mount-rs-test".to_owned(),
+            subtype: Some("mount-rs".to_owned()),
+            read_only: true,
+            ..MountOptions::default()
+        };
+
+        let privileged = mount_data(&options, Some((3, 0o040755, 1000, 1000)))
+            .expect("privileged mount data should be valid");
+        assert_eq!(
+            privileged.to_str().expect("mount data is UTF-8"),
+            "fd=3,rootmode=40755,user_id=1000,group_id=1000,default_permissions"
+        );
+
+        let helper = mount_data(&options, None).expect("helper mount data should be valid");
+        assert_eq!(
+            helper.to_str().expect("mount data is UTF-8"),
+            "fsname=mount-rs-test,default_permissions,ro,subtype=mount-rs"
+        );
+    }
+
     #[test]
     fn mode_and_option_validation_have_no_native_side_effects() {
         #[cfg(target_os = "linux")]
@@ -1391,6 +1426,20 @@ mod tests {
             options.mount_options = vec!["fsname=caller-controlled".to_owned()];
             assert!(validate_options(&options).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_mount_data_masks_root_permissions() {
+        let data = mount_data(
+            &MountOptions::default(),
+            Some((3, S_IFDIR | 0o755, 1000, 1001)),
+        )
+        .expect("mount data should be valid");
+        assert_eq!(
+            data.to_bytes(),
+            b"fd=3,rootmode=40000,user_id=1000,group_id=1001,fsname=mount-rs,default_permissions"
+        );
     }
 
     #[cfg(target_os = "linux")]

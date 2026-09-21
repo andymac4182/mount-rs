@@ -47,6 +47,7 @@ import {
 } from "@mount-rs/core/drivers/unstorage"
 import {
   createNfsServer,
+  type NfsConnection,
   type NfsServer,
   type NfsServerOptions,
 } from "@mount-rs/core/nfs"
@@ -74,12 +75,14 @@ import {
   encodeLkOut,
   FUSE_LK_FLOCK,
   F_UNLCK,
+  FuseSession,
   F_WRLCK,
   InodeTable,
   type Inode,
   type NativeFuseFileLock,
   type NativeFuseLkIn,
   type NativeFuseLkOut,
+  type FuseSessionOptions,
 } from "@mount-rs/core/fuse"
 
 // node:fs/promises and minimal structural drivers satisfy the public boundary.
@@ -102,6 +105,23 @@ const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
 
 async function checkFilesystemAndHandles(): Promise<void> {
   const filesystem: Filesystem = Filesystem.memory()
+  const sessionOptions: FuseSessionOptions = {
+    maxRequest: 65_536,
+    useDriverIno: false,
+    attrTimeout: 1.25,
+    entryTimeout: 2.5,
+    negativeTimeout: 3.75,
+    keepCache: false,
+    flushMechanism: "noflush",
+    onError: (error, request) => {
+      void error
+      void request
+    },
+  }
+  const fuseSession = new FuseSession(filesystem, sessionOptions)
+  void fuseSession.handle(new Uint8Array())
+  void fuseSession.negotiated
+  void fuseSession.inodes
   const handle: FileHandle = await filesystem.open("/file", "w+", 0o644)
   const buffer = new Uint8Array(8)
 
@@ -313,8 +333,15 @@ function checkServerAndKvSubpaths(): void {
 
   const nfsHost: string = nfsServer.host
   const nfsPort: number = nfsServer.port
+  const nfsConnections: Array<NfsConnection> = nfsServer.clients()
   const nfsListen: Promise<NfsServer> = nfsServer.listen()
   const nfsClose: Promise<void> = nfsServer.close()
+  const nfsConnection: NfsConnection = nfsConnections[0]
+  const nfsConnectionId: number = nfsConnection.id
+  const nfsConnectionPeer: string | null = nfsConnection.peer
+  const nfsConnectionClosed: boolean = nfsConnection.isClosed
+  const nfsConnectionClose: Promise<void> = nfsConnection.close()
+  const nfsConnectionWaitClosed: Promise<void> = nfsConnection.waitClosed()
   const p9Address: string | null = p9Server.address()
   const p9Connections: Array<P9Connection> = p9Server.clients()
   const p9Path: string | null = p9Server.path
@@ -359,8 +386,15 @@ function checkServerAndKvSubpaths(): void {
   void kvFilesystem
   void nfsHost
   void nfsPort
+  void nfsConnections
   void nfsListen
   void nfsClose
+  void nfsConnection
+  void nfsConnectionId
+  void nfsConnectionPeer
+  void nfsConnectionClosed
+  void nfsConnectionClose
+  void nfsConnectionWaitClosed
   void p9Address
   void p9Path
   void p9Listen

@@ -24,7 +24,7 @@ for a production deployment result.
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Partial AWS S3 plus external PGlite qualification passed; production provider selection, multi-writer, backup/restore, and failure-recovery evidence remain open |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open; the S3 gateway now exposes a bounded `S3Session::stats()` snapshot for latency, buffered bytes, operation counts, and authentication/conditional/throttling/client/server error classes. The public SDK's optional observability path records provider block latency, errors, bytes, and reconciliation scanned/protected/recent/deleted counts through local snapshots, tracing, and OTLP counters. [`docs/aws-s3-operations-runbook.md`](aws-s3-operations-runbook.md) defines the deployment handoff and drills. These are implementation surfaces only: exporter wiring, retry visibility, credential-expiry detection, cost/retention alerts, SLO thresholds, and exercised staging procedures remain deployment gates |
-| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed Standard scan `bb69ddae-798a-4387-bb87-f3e7acd496cb` covers pushed head `227f81932b48fa1fe8b4999ed619add812a88e42` with zero reportable findings in 22 directly reviewed W25 surfaces, while the remaining repository inventory was explicitly deferred. The completed scan `c6992ddb-3762-4638-b37e-f1399bd77e42` at target `8e271cd24de1458519c9dca61363c427784a3dd3` found one medium `StoreConfig` debug-credential disclosure and partial coverage (10 W25 surfaces of a 606-file inventory). That finding is fixed at `3fca80270070635ea6e63c00099ab7342a2ffdf1` with a redacting SDK `Debug` implementation and regression test; the W25 evidence boundary recorded here is `20baa9e` after later IaC, CI, and documentation commits, so the scan predates the reviewed boundary and is not current-head security evidence. Hosted OIDC/deployment evidence, repository-coverage follow-up, load/soak/fault/recovery drills, canary, rollback, and post-deploy smoke remain open. The latest hosted run [`35610661014`](https://github.com/andymac4182/mount-rs/actions/runs/35610661014) at `428ce6d` fails safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` before AWS authentication; later commits have not produced a new hosted result. The existing test-role trust still allows only the SSO administrator, not GitHub OIDC, so an approved IAM trust/environment change is required. Bounded publication, listing, quota/TTL, backing-file-aware staging cleanup, the explicit AWS client retry budget, and SDK diagnostic redaction have landed |
+| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed Standard scan `bb69ddae-798a-4387-bb87-f3e7acd496cb` covers pushed head `227f81932b48fa1fe8b4999ed619add812a88e42` with zero reportable findings in 22 directly reviewed W25 surfaces, while the remaining repository inventory was explicitly deferred. The completed scan `c6992ddb-3762-4638-b37e-f1399bd77e42` at target `8e271cd24de1458519c9dca61363c427784a3dd3` found one medium `StoreConfig` debug-credential disclosure and partial coverage (10 W25 surfaces of a 606-file inventory). That finding is fixed at `3fca80270070635ea6e63c00099ab7342a2ffdf1` with a redacting SDK `Debug` implementation and regression test; the W25 evidence boundary recorded here is `20baa9e` after later IaC, CI, and documentation commits, so the scan predates the reviewed boundary and is not current-head security evidence. Hosted OIDC/deployment evidence, repository-coverage follow-up, load/soak/fault/recovery drills, canary, rollback, and post-deploy smoke remain open. The latest observed hosted run [`35618187611`](https://github.com/andymac4182/mount-rs/actions/runs/35618187611) at `a83540a` passed the new secret-free validator regression step, then failed safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` before AWS authentication; AWS identity and acceptance were skipped. The existing test-role trust still allows only the SSO administrator, not GitHub OIDC, so an approved IAM trust/environment change is required. Bounded publication, listing, quota/TTL, backing-file-aware staging cleanup, the explicit AWS client retry budget, and SDK diagnostic redaction have landed |
 
 ## Deployment contract
 
@@ -80,6 +80,13 @@ A fresh current-source rerun at `3fca802` passed the same CLI, composed,
 process-reopen, independent-PGlite, fencing, restore/reopen, and exact cleanup
 gates under
 `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
+The latest integrated qualification at audit commit `d7ccdc7` passed the same
+scoped-role, public SDK/CLI, composed filesystem, process-reopen, independent
+PGlite, fencing, restore/reopen, and exact cleanup gates under
+`mount-rs-tests/aws-s3/20260921T152108Z-66596-90bba238142882ef153e6e3c246d0003`;
+the same source's read-only resource audit passed the account/region,
+public-access, ownership, encryption, versioning, lifecycle, and multipart-
+abort checks.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
@@ -106,8 +113,9 @@ deletion are reserved for the maintenance role.
 
 The template was syntax-validated with the read-only AWS CloudFormation API on
 2026-09-21 and revalidated after tightening `OwnedPrefix` to reject empty and
-dot components on 2026-09-22; no stack or change set was created. Validation
-does not approve
+dot components, widening the transport deny to all object keys, and expiring
+noncurrent versions on 2026-09-22; no stack or change set was created.
+Validation does not approve
 the production parameters, role trust policies, metadata topology, backup
 plan, or deployment promotion. Those remain W25.5-W25.9 gates.
 
@@ -170,9 +178,10 @@ AWS_S3_CI_ROLE_ARN=<approved-ci-role-arn> \
 
 The audit verifies the repository's immutable owner/repository subject shape,
 the protected environment and main-branch policy, the required variable and
-secret names, the AWS OIDC provider and `sts.amazonaws.com` audience, and an
-exact `AssumeRoleWithWebIdentity` trust statement. It never reads secret
-values or mutates GitHub or AWS. The current account audit is expected to fail
+secret names, the AWS OIDC provider and `sts.amazonaws.com` audience, and one
+exact `AssumeRoleWithWebIdentity` trust statement without additional broad
+GitHub federation grants. It never reads secret values or mutates GitHub or
+AWS. The current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
 result.
@@ -217,7 +226,8 @@ AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID=<approved-audit-account-id> \
 The command fails closed on inherited AWS endpoint or service-profile overrides,
 checks the caller account and bucket region, then checks all four Block Public
 Access settings, BucketOwnerEnforced ownership, default server-side encryption,
-the configured lifecycle expiry and multipart-abort days, and reports rather
+the configured current-object lifecycle expiry, matching noncurrent-version
+expiry when versioning is enabled, and multipart-abort days. It reports rather
 than changes bucket versioning. It is safe to run during review, but a passing
 qualification-bucket audit does not close the production-resource gate.
 

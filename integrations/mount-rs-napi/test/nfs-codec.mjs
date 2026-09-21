@@ -3,11 +3,6 @@ import { createRequire } from "node:module"
 import { pathToFileURL } from "node:url"
 
 const source = process.env.MOUNTX_SOURCE
-if (!source) {
-  console.log("mount-rs N-API NFS codec differential: SKIP (MOUNTX_SOURCE unset)")
-  process.exit(0)
-}
-
 const require = createRequire(import.meta.url)
 const root = require("@mount-rs/core")
 const rootKeys = Object.keys(root)
@@ -17,6 +12,12 @@ assert.equal(native.createNfsServer, root.createNfsServer)
 assert.equal(native.NfsServer, root.NfsServer)
 assert.equal(native.NfsSession, root.NfsSession)
 assert.equal(native.Nfs4Session, root.Nfs4Session)
+assert.equal(native.NfsConnection, root.NfsConnection)
+
+if (!source) {
+  console.log("mount-rs N-API NFS codec differential: SKIP (MOUNTX_SOURCE unset)")
+  process.exit(0)
+}
 
 const [upstreamXdr, upstreamRpc] = await Promise.all([
   import(pathToFileURL(`${source}/src/nfs/xdr.ts`).href),

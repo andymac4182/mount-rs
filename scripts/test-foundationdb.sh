@@ -14,6 +14,14 @@ run_napi=0
 if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
   run_napi=1
 fi
+run_iops=0
+if [ "${MOUNT_RS_FOUNDATIONDB_IOPS:-0}" = "1" ]; then
+  run_iops=1
+  if [ "$run_napi" -ne 1 ]; then
+    echo "MOUNT_RS_FOUNDATIONDB_IOPS=1 requires MOUNT_RS_FOUNDATIONDB_NAPI=1" >&2
+    exit 2
+  fi
+fi
 run_native_cli=0
 if [ "${MOUNT_RS_FOUNDATIONDB_NATIVE_CLI:-0}" = "1" ]; then
   run_native_cli=1
@@ -560,13 +568,31 @@ else
 fi
 
 if [ "$run_napi" -eq 1 ]; then
+  node_command='node integrations/mount-rs-napi/test/foundationdb.mjs'
+  if [ "$run_iops" -eq 1 ]; then
+    iops_size_mib=${MOUNT_RS_FOUNDATIONDB_IOPS_SIZE_MIB:-1}
+    iops_payload_bytes=${MOUNT_RS_FOUNDATIONDB_IOPS_PAYLOAD_BYTES:-4096}
+    iops_iterations=${MOUNT_RS_FOUNDATIONDB_IOPS_ITERATIONS:-400}
+    iops_concurrency=${MOUNT_RS_FOUNDATIONDB_IOPS_CONCURRENCY:-64}
+    iops_minimum=${MOUNT_RS_FOUNDATIONDB_IOPS_MIN:-1000}
+    for iops_value in "$iops_size_mib" "$iops_payload_bytes" "$iops_iterations" "$iops_concurrency" "$iops_minimum"; do
+      case "$iops_value" in
+        ''|*[!0-9]*|0)
+          echo "FoundationDB IOPS settings must be positive integers" >&2
+          exit 2
+          ;;
+      esac
+    done
+    node_command="$node_command && node benchmarks/storage/runner.mjs --providers mount-rs-split-foundationdb-r2 --sizes $iops_size_mib --payload-bytes $iops_payload_bytes --iterations $iops_iterations --concurrency $iops_concurrency --min-iops $iops_minimum --network-context ozone-ci --output /fdb/foundationdb-ozone-iops.json"
+  fi
+  napi_status=0
   if [ -n "$rustfs_endpoint" ]; then
-    docker run --rm \
+    if docker run --rm \
       --platform "$docker_platform" \
       --network "$network" \
       --add-host host.docker.internal:host-gateway \
       --volume "$repo_dir:/workspace:ro" \
-      --volume "$run_dir:/fdb:ro" \
+      --volume "$client_fdb_volume" \
       --workdir /workspace \
       --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
       --env LD_LIBRARY_PATH=/fdb \
@@ -579,13 +605,17 @@ if [ "$run_napi" -eq 1 ]; then
       --env R2_BUCKET \
       --env R2_ACCESS_KEY_ID \
       --env R2_SECRET_ACCESS_KEY \
-      "$node_image" node integrations/mount-rs-napi/test/foundationdb.mjs
+      "$node_image" sh -c "$node_command"; then
+      :
+    else
+      napi_status=$?
+    fi
   else
-    docker run --rm \
+    if docker run --rm \
       --platform "$docker_platform" \
       --network "$network" \
       --volume "$repo_dir:/workspace:ro" \
-      --volume "$run_dir:/fdb:ro" \
+      --volume "$client_fdb_volume" \
       --workdir /workspace \
       --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
       --env LD_LIBRARY_PATH=/fdb \
@@ -594,7 +624,31 @@ if [ "$run_napi" -eq 1 ]; then
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
       --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
-      "$node_image" node integrations/mount-rs-napi/test/foundationdb.mjs
+      "$node_image" sh -c "$node_command"; then
+      :
+    else
+      napi_status=$?
+    fi
+  fi
+  if [ "$run_iops" -eq 1 ]; then
+    iops_output=${MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT:-$run_dir/foundationdb-ozone-iops.json}
+    case "$iops_output" in
+      /*) host_iops_output=$iops_output ;;
+      *) host_iops_output="$repo_dir/$iops_output" ;;
+    esac
+    if [ -f "$run_dir/foundationdb-ozone-iops.json" ]; then
+      mkdir -p "$(dirname "$host_iops_output")"
+      cp "$run_dir/foundationdb-ozone-iops.json" "$host_iops_output"
+      if [ "$napi_status" -eq 0 ]; then
+        echo "FOUNDATIONDB_OZONE_IOPS_PASS provider=foundationdb-r2 target=$iops_minimum output=$host_iops_output"
+      fi
+    else
+      echo "FOUNDATIONDB_OZONE_IOPS_ARTIFACT_MISSING path=$run_dir/foundationdb-ozone-iops.json" >&2
+      [ "$napi_status" -ne 0 ] || napi_status=1
+    fi
+  fi
+  if [ "$napi_status" -ne 0 ]; then
+    exit "$napi_status"
   fi
   echo "FOUNDATIONDB_NAPI_PASS image=$node_image"
 fi

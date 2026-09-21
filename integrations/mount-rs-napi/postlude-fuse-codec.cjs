@@ -1,9 +1,9 @@
 "use strict"
 
-// This postlude is the mount-free part of the FUSE public surface.  The Rust
-// transport owns byte layouts and validation; JavaScript only supplies the
-// oracle-shaped names, error classes, constants, and recorder clock option.
-// There is intentionally no session/device/mount binding here.
+// This postlude is the mount-free part of the FUSE public surface. The Rust
+// transport owns byte layouts, validation, and session state; JavaScript
+// supplies the oracle-shaped names, error classes, constants, recorder clock
+// option, and callback/state facade. It never opens a native device or mount.
 
 const ERROR_MARKER = "__mount_rs_fuse_codec_error_v1__"
 
@@ -271,6 +271,9 @@ function installConstants(binding) {
     constants.FUSE_SETXATTR_EXT
   constants.DEFAULT_MAX_WRITE = 1024 * 1024
   constants.DEFAULT_PROTOCOL = Object.freeze({ minor: 41, setxattrExt: false })
+  constants.DEFAULT_ATTR_TIMEOUT = 10
+  constants.DEFAULT_ENTRY_TIMEOUT = 10
+  constants.DEFAULT_FLUSH_MECHANISM = "sync"
 
   Object.assign(binding, constants)
 }
@@ -320,6 +323,260 @@ function install(binding) {
     encode() { return invoke(this.#inner.encode, this.#inner, []) }
   }
   binding.TranscriptRecorder = TranscriptRecorder
+
+  // Native async methods reject with the encoded N-API error marker after the
+  // Rust future resumes.  Keep the public ProtocolError contract consistent
+  // with the synchronous codec wrappers by reviving those rejections here.
+  const NativeFuseSession = binding.FuseSession
+  if (typeof NativeFuseSession === "function") {
+    const nativeSessionOptions = (options) => {
+      if (options == null) return options
+      const value = { ...options }
+      delete value.debug
+      delete value.onError
+      delete value.onAssertion
+      return value
+    }
+
+    const sessionError = (value) => {
+      const error = new Error(value.message || value.code || "FUSE request failed")
+      if (value.code !== undefined) error.code = value.code
+      if (value.errno !== undefined) error.errno = value.errno
+      if (value.syscall !== undefined && value.syscall !== null) error.syscall = value.syscall
+      if (value.path !== undefined && value.path !== null) error.path = value.path
+      if (value.dest !== undefined && value.dest !== null) error.dest = value.dest
+      return error
+    }
+
+    class SessionInodeTable {
+      #nodes = new Map()
+      #paths = new Map()
+
+      constructor(entries) {
+        this.apply(entries)
+      }
+
+      apply(entries) {
+        this.#nodes.clear()
+        this.#paths.clear()
+        const values = entries?.length
+          ? entries
+          : [{ nodeid: 1n, key: undefined, nlookup: 1n, paths: ["/"] }]
+        for (const entry of values) {
+          const node = {
+            nodeid: BigInt(entry.nodeid),
+            key: entry.key ?? undefined,
+            nlookup: BigInt(entry.nlookup),
+            paths: new Set(entry.paths ?? []),
+          }
+          this.#nodes.set(node.nodeid, node)
+          for (const path of node.paths) this.#paths.set(path, node)
+        }
+      }
+
+      get root() { return this.get(1n) }
+      get size() { return this.#nodes.size }
+      get pathCount() {
+        let count = 0
+        for (const node of this.#nodes.values()) count += node.paths.size
+        return count
+      }
+      get(nodeid) { return this.#nodes.get(BigInt(nodeid)) }
+      at(path) { return this.#paths.get(path) }
+
+      require(nodeid) {
+        const node = this.get(nodeid)
+        if (node !== undefined) return node
+        const error = new Error("ESTALE: stale FUSE inode")
+        error.code = "ESTALE"
+        error.errno = -116
+        throw error
+      }
+
+      pathOf(inode) {
+        const node = this.require(typeof inode === "bigint" ? inode : inode.nodeid)
+        const path = node.paths.values().next().value
+        if (path !== undefined) return path
+        const error = new Error("ENOENT: FUSE inode has no path")
+        error.code = "ENOENT"
+        error.errno = -2
+        throw error
+      }
+
+      requirePath(nodeid) { return this.pathOf(nodeid) }
+    }
+
+    class FuseSession {
+      #inner
+      #debug
+      #onError
+      #onAssertion
+      #inflight = new Set()
+      #negotiated
+      #protocol
+      #destroyed = false
+      #openHandles = 0
+      #inodes = new SessionInodeTable()
+
+      #applyState(state) {
+        this.#destroyed = state?.destroyed === true
+        this.#openHandles = state?.openHandles ?? 0
+        this.#negotiated = state?.negotiated ?? undefined
+        this.#protocol = this.#negotiated?.protocol
+        this.#inodes.apply(state?.inodes)
+      }
+
+      #refreshState() {
+        if (typeof this.#inner.__state !== "function") return Promise.resolve()
+        return this.#inner.__state().then((state) => {
+          this.#applyState(state)
+          return state
+        })
+      }
+
+      constructor(filesystem, options) {
+        try {
+          this.options = options ?? {}
+          this.#debug = options?.debug ?? process.env.NODE_ENV !== "production"
+          this.#onError = typeof options?.onError === "function" ? options.onError : undefined
+          this.#onAssertion = typeof options?.onAssertion === "function" ? options.onAssertion : undefined
+          this.#inner = new NativeFuseSession(filesystem, nativeSessionOptions(options))
+          this.#applyState({ destroyed: false, openHandles: 0, negotiated: undefined })
+          this.stats = {
+            requests: 0,
+            replies: 0,
+            errors: 0,
+            noReply: 0,
+            dropped: 0,
+            assertions: 0,
+          }
+          this.assertions = []
+        } catch (error) {
+          throw revive(error)
+        }
+      }
+
+      #assert(message) {
+        this.stats.assertions += 1
+        this.assertions.push(message)
+        try {
+          this.#onAssertion?.(message)
+        } catch {
+          // A diagnostic callback must never alter request/reply behavior.
+        }
+      }
+
+      #track(frame) {
+        if (!this.#debug) return undefined
+        let header
+        try {
+          header = binding.decodeInHeader(frame)
+        } catch {
+          return undefined
+        }
+        if (
+          header.unique === 0n ||
+          header.len > frame.length ||
+          header.len < binding.FUSE_IN_HEADER_SIZE ||
+          header.opcode === binding.FUSE_FORGET ||
+          header.opcode === binding.FUSE_BATCH_FORGET ||
+          header.opcode === binding.FUSE_NOTIFY_REPLY
+        ) return undefined
+        if (this.#inflight.has(header.unique)) {
+          this.#assert(`unique ${header.unique} is already in flight (${binding.opcodeName(header.opcode)})`)
+        }
+        this.#inflight.add(header.unique)
+        return header.unique
+      }
+
+      #reportError(observed, frame) {
+        if (observed.error == null) return
+        let request
+        try {
+          request = typeof binding.decodeRequest === "function"
+            ? binding.decodeRequest(frame)
+            : {
+                header: binding.decodeInHeader(frame),
+                payload: frame.subarray(binding.FUSE_IN_HEADER_SIZE),
+                extensions: Buffer.alloc(0),
+                body: undefined,
+              }
+        } catch {
+          request = undefined
+        }
+        try {
+          this.#onError?.(sessionError(observed.error), request)
+        } catch {
+          // A logger is never allowed to cost a reply.
+        }
+      }
+
+      handle(bytes) {
+        const frame = copyBytes(bytes)
+        this.stats.requests += 1
+        const tracked = this.#track(frame)
+        return Promise.resolve()
+          .then(() => {
+            if (typeof this.#inner.__handleObserved === "function") {
+              return this.#inner.__handleObserved(frame)
+            }
+            return this.#inner.handle(frame).then((reply) => ({ reply, error: null }))
+          })
+          .then((observed) => this.#refreshState().then(() => observed))
+          .then((observed) => {
+            const reply = observed.reply ?? null
+            if (reply == null) {
+              this.stats.noReply += 1
+              return reply
+            }
+            this.stats.replies += 1
+            try {
+              if (binding.decodeOutHeader(reply).error !== 0) {
+                this.stats.errors += 1
+                this.#reportError(observed, frame)
+              }
+            } catch (error) {
+              throw revive(error)
+            }
+            return reply
+          })
+          .catch((error) => {
+            this.stats.dropped += 1
+            throw revive(error)
+          })
+          .finally(() => {
+            if (tracked !== undefined) this.#inflight.delete(tracked)
+          })
+      }
+
+      destroy() {
+        return Promise.resolve()
+          .then(() => this.#inner.destroy())
+          .then(() => this.#refreshState())
+          .catch((error) => { throw revive(error) })
+      }
+
+      get negotiated() { return this.#negotiated }
+      get protocol() { return this.#protocol }
+      get destroyed() { return this.#destroyed }
+      get openHandles() { return this.#openHandles }
+      get inodes() { return this.#inodes }
+
+      handleMessage(bytes) {
+        return this.handle(bytes)
+      }
+
+      notifyInvalInode(ino, off = -1n, len = 0n) {
+        return binding.encodeNotifyInvalInode({ ino, off, len })
+      }
+
+      notifyInvalEntry(parent, name, flags = 0) {
+        return binding.encodeNotifyInvalEntry({ parent, name, flags })
+      }
+    }
+    binding.FuseSession = FuseSession
+    binding.createFuseSession = (filesystem, options) => new FuseSession(filesystem, options)
+  }
 
   // Keep the inode table native: the transport owns the identity, orphan,
   // hardlink, and subtree-remap invariants.  This small facade only restores

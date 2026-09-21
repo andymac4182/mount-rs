@@ -550,12 +550,52 @@ function wrapP9Connection(P9Connection) {
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
 }
 
+function wrapNfsConnection(NfsConnection) {
+  if (!NfsConnection || !NfsConnection.prototype || NfsConnection.prototype[CONNECTION_WRAPPED]) {
+    return
+  }
+  const prototype = NfsConnection.prototype
+  if (typeof prototype.waitClosed !== "function") return
+
+  const nativeSession = Object.getOwnPropertyDescriptor(prototype, "session")
+  if (nativeSession && typeof nativeSession.get === "function") {
+    Object.defineProperty(prototype, "session", {
+      configurable: true,
+      enumerable: false,
+      get() {
+        const state = connectionState(this)
+        if (state.session === undefined) {
+          state.session = nativeSession.get.call(this)
+        }
+        return state.session
+      },
+    })
+  }
+
+  Object.defineProperty(prototype, "closed", {
+    configurable: true,
+    enumerable: false,
+    get() {
+      const state = connectionState(this)
+      if (state.closed === undefined) {
+        state.closed = cachedPromise(
+          () => this.waitClosed(),
+          () => undefined,
+        )
+      }
+      return state.closed
+    },
+  })
+  Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
+}
+
 module.exports = function installServers(binding) {
   wrapP9Server(binding && binding.P9Server)
   for (const name of ["NfsServer", "P9Server", "S3Server", "WebdavServer"]) {
     wrapServer(binding && binding[name])
   }
   wrapP9Connection(binding && binding.P9Connection)
+  wrapNfsConnection(binding && binding.NfsConnection)
   installStructuralFactories(binding)
   return binding
 }

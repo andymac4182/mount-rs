@@ -7,9 +7,10 @@
 //! address and the host's own NFS client privileges; this server does not claim
 //! to perform that native mount step.
 
+use std::collections::HashMap;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mount_rs_core::{FsDriver, Loopback};
@@ -100,6 +101,76 @@ impl Default for NfsServerOptions {
     }
 }
 
+struct NfsConnectionControl {
+    shutdown: Notify,
+    closed: Notify,
+    done: AtomicBool,
+}
+
+impl NfsConnectionControl {
+    fn new() -> Self {
+        Self {
+            shutdown: Notify::new(),
+            closed: Notify::new(),
+            done: AtomicBool::new(false),
+        }
+    }
+
+    fn stop(&self) {
+        // Notify retains one permit when close wins the race with the serving
+        // task registering its select branch.
+        self.shutdown.notify_one();
+    }
+
+    fn finish(&self) {
+        self.done.store(true, Ordering::Release);
+        self.closed.notify_waiters();
+    }
+
+    async fn wait(&self) {
+        while !self.done.load(Ordering::Acquire) {
+            self.closed.notified().await;
+        }
+    }
+}
+
+/// One accepted NFS client and its shared v3/v4 session lifecycle.
+#[derive(Clone)]
+pub struct NfsConnection {
+    pub session: Nfs3Session,
+    pub v4_session: Nfs4Session,
+    /// The accepted TCP `address:port`.
+    pub peer: Option<String>,
+    id: u64,
+    control: Arc<NfsConnectionControl>,
+}
+
+impl NfsConnection {
+    /// Stable identity useful when inspecting or closing one accepted client.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.control.done.load(Ordering::Acquire)
+    }
+
+    /// Request connection/session teardown and wait until the serving task is
+    /// gone. NFS uses one shared session per server, so closing this object
+    /// closes only its transport and leaves the server session available to
+    /// other clients.
+    pub async fn close(&self) -> io::Result<()> {
+        self.control.stop();
+        self.control.wait().await;
+        Ok(())
+    }
+
+    /// Wait for EOF, an explicit close, or server shutdown.
+    pub async fn wait_closed(&self) {
+        self.control.wait().await;
+    }
+}
+
 pub struct NfsServer {
     session: Nfs3Session,
     v4_session: Nfs4Session,
@@ -108,7 +179,9 @@ pub struct NfsServer {
     address: Arc<Mutex<Option<SocketAddr>>>,
     shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     accept_task: Arc<Mutex<Option<JoinHandle<()>>>>,
-    connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    connection_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    clients: Arc<Mutex<HashMap<u64, NfsConnection>>>,
+    next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicUsize>,
 }
 
@@ -170,7 +243,9 @@ impl NfsServer {
             address: Arc::new(Mutex::new(None)),
             shutdown: Arc::new(Mutex::new(None)),
             accept_task: Arc::new(Mutex::new(None)),
-            connections: Arc::new(Mutex::new(Vec::new())),
+            connection_tasks: Arc::new(Mutex::new(Vec::new())),
+            clients: Arc::new(Mutex::new(HashMap::new())),
+            next_connection_id: Arc::new(AtomicU64::new(1)),
             active_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -207,6 +282,19 @@ impl NfsServer {
         self.local_addr().map(|address| address.port())
     }
 
+    /// Return live accepted clients in arrival order.
+    pub fn clients(&self) -> io::Result<Vec<NfsConnection>> {
+        let mut clients = self
+            .clients
+            .lock()
+            .map_err(|_| io::Error::other("NFS connection lock poisoned"))?
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        clients.sort_by_key(NfsConnection::id);
+        Ok(clients)
+    }
+
     /// Return the number of accepted TCP connections whose serving task has
     /// not finished yet. This is deliberately an active count rather than the
     /// number of retained join handles.
@@ -229,7 +317,9 @@ impl NfsServer {
         let max_in_flight = self.options.max_in_flight.max(1);
         let allow_remote = self.options.allow_remote;
         let hooks = self.hooks.clone();
-        let connections = self.connections.clone();
+        let connection_tasks = self.connection_tasks.clone();
+        let clients = self.clients.clone();
+        let next_connection_id = self.next_connection_id.clone();
         let active_connections = self.active_connections.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -251,9 +341,26 @@ impl NfsServer {
                         let v4_session = v4_session.clone();
                         let hooks = hooks.clone();
                         let active_connections = active_connections.clone();
+                        let clients = clients.clone();
+                        let id = next_connection_id.fetch_add(1, Ordering::Relaxed);
+                        let control = Arc::new(NfsConnectionControl::new());
+                        let connection = NfsConnection {
+                            session: session.clone(),
+                            v4_session: v4_session.clone(),
+                            peer: Some(peer.to_string()),
+                            id,
+                            control: Arc::clone(&control),
+                        };
+                        clients
+                            .lock()
+                            .expect("NFS connection lock")
+                            .insert(id, connection);
                         active_connections.fetch_add(1, Ordering::AcqRel);
                         let guard = ConnectionGuard {
                             counter: active_connections,
+                            clients,
+                            control: Arc::clone(&control),
+                            id,
                         };
                         let task = tokio::spawn(async move {
                             // The guard is constructed before spawning so an
@@ -269,10 +376,14 @@ impl NfsServer {
                                 max_in_flight,
                                 allow_remote,
                                 hooks,
+                                control,
                             })
                             .await;
                         });
-                        connections.lock().expect("NFS connection lock").push(task);
+                        connection_tasks
+                            .lock()
+                            .expect("NFS connection task lock")
+                            .push(task);
                     }
                 }
             }
@@ -289,8 +400,12 @@ impl NfsServer {
         if let Some(task) = accept_task {
             let _ = task.await;
         }
+        let clients = self.clients()?;
+        for client in &clients {
+            client.control.stop();
+        }
         let tasks = self
-            .connections
+            .connection_tasks
             .lock()
             .expect("NFS connection lock")
             .drain(..)
@@ -303,6 +418,7 @@ impl NfsServer {
         }
         self.session.destroy().await;
         self.v4_session.destroy().await;
+        debug_assert_eq!(self.connections(), 0);
         Ok(())
     }
 }
@@ -316,7 +432,7 @@ impl Drop for NfsServer {
             task.abort();
         }
         for task in self
-            .connections
+            .connection_tasks
             .lock()
             .expect("NFS connection lock")
             .drain(..)
@@ -336,6 +452,7 @@ struct NfsConnectionRuntime<R, W> {
     max_in_flight: usize,
     hooks: NfsServerHooks,
     reported: Arc<AtomicBool>,
+    control: Arc<NfsConnectionControl>,
 }
 
 struct NfsTcpConnectionRuntime {
@@ -347,15 +464,24 @@ struct NfsTcpConnectionRuntime {
     max_in_flight: usize,
     allow_remote: bool,
     hooks: NfsServerHooks,
+    control: Arc<NfsConnectionControl>,
 }
 
 struct ConnectionGuard {
     counter: Arc<AtomicUsize>,
+    clients: Arc<Mutex<HashMap<u64, NfsConnection>>>,
+    control: Arc<NfsConnectionControl>,
+    id: u64,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
+        self.clients
+            .lock()
+            .expect("NFS connection lock")
+            .remove(&self.id);
+        self.control.finish();
     }
 }
 
@@ -369,6 +495,7 @@ async fn serve_tcp_connection(runtime: NfsTcpConnectionRuntime) {
         max_in_flight,
         allow_remote,
         hooks,
+        control,
     } = runtime;
     let peer_name = peer.ip().to_string();
     let reported = Arc::new(AtomicBool::new(false));
@@ -405,6 +532,7 @@ async fn serve_tcp_connection(runtime: NfsTcpConnectionRuntime) {
         max_in_flight,
         hooks,
         reported,
+        control,
     })
     .await;
 }
@@ -424,6 +552,7 @@ where
         max_in_flight,
         hooks,
         reported,
+        control,
     } = runtime;
     let peer_name = peer.ip().to_string();
     let mut reader = reader;
@@ -451,6 +580,10 @@ where
             }
         }
         let count = tokio::select! {
+            _ = control.shutdown.notified() => {
+                workers.shutdown().await;
+                return;
+            }
             _ = stop.notified() => {
                 workers.shutdown().await;
                 return;
@@ -644,6 +777,15 @@ mod tests {
         assert_eq!(reply.accept_stat, Some(0));
         results.end("NULL reply").unwrap();
         assert_eq!(server.connections(), 1);
+        let client = server.clients().unwrap().pop().expect("live NFS client");
+        assert_eq!(client.id(), 1);
+        assert_eq!(
+            client.peer.as_deref().unwrap().split(':').next(),
+            Some("127.0.0.1")
+        );
+        assert!(!client.is_closed());
+        client.close().await.unwrap();
+        assert!(client.is_closed());
         drop(stream);
         timeout(Duration::from_secs(1), async {
             while server.connections() != 0 {
@@ -652,6 +794,7 @@ mod tests {
         })
         .await
         .expect("connection task closes");
+        assert!(server.clients().unwrap().is_empty());
         server.close().await.unwrap();
         assert_eq!(server.connections(), 0);
     }
@@ -799,6 +942,7 @@ mod tests {
             max_in_flight,
             hooks,
             reported: Arc::new(AtomicBool::new(false)),
+            control: Arc::new(NfsConnectionControl::new()),
         }
     }
 

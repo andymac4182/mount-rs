@@ -1,8 +1,8 @@
 "use strict"
 
-// The FUSE entrypoint is intentionally a codec barrel.  It shares the native
-// loader for the Rust wire helpers, but it does not re-export the root mount
-// lifecycle or claim a Node-facing FUSE session/device implementation.
+// The FUSE entrypoint exposes the Rust wire helpers and mount-free session
+// facade. It does not re-export the root mount lifecycle or claim native
+// device/mount parity.
 const binding = require("./postlude-fuse-codec.cjs")({ ...require("./index.js") })
 
 if (!binding || typeof binding.decodeInHeader !== "function") {
@@ -20,6 +20,12 @@ module.exports.isProtocolError = binding.isProtocolError
 module.exports.TranscriptError = binding.TranscriptError
 module.exports.TranscriptRecorder = binding.TranscriptRecorder
 module.exports.InodeTable = binding.InodeTable
+module.exports.Filesystem = binding.Filesystem
+module.exports.FuseSession = binding.FuseSession
+module.exports.createFuseSession = binding.createFuseSession
+module.exports.DEFAULT_ATTR_TIMEOUT = binding.DEFAULT_ATTR_TIMEOUT
+module.exports.DEFAULT_ENTRY_TIMEOUT = binding.DEFAULT_ENTRY_TIMEOUT
+module.exports.DEFAULT_FLUSH_MECHANISM = binding.DEFAULT_FLUSH_MECHANISM
 module.exports.INODE_GENERATION = binding.INODE_GENERATION
 module.exports.FUSE_NAME_MAX = binding.FUSE_NAME_MAX
 module.exports.encodeNotify = binding.encodeNotify
