@@ -8,7 +8,7 @@ import {
   withTimeout,
 } from "./errors.mjs"
 import { providerById, providerSummary } from "./providers.mjs"
-import { cleanupOwnedPaths, parseArgs, runSample } from "./runner.mjs"
+import { cleanupOwnedPaths, parseArgs, runBenchmark, runSample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
 
 async function testStats() {
@@ -142,6 +142,7 @@ async function testCli() {
     networkContext: "not-provided",
     payloadBytes: undefined,
     minIops: undefined,
+    requireConfigured: false,
   })
   assert.deepEqual(parseArgs(["--smoke", "--providers", "mount-rs-memory,mountx-memory"]).providers, [
     "mount-rs-memory",
@@ -149,8 +150,37 @@ async function testCli() {
   ])
   assert.equal(parseArgs(["--payload-bytes", "4096", "--min-iops", "1000"]).payloadBytes, 4096)
   assert.equal(parseArgs(["--payload-bytes", "4096", "--min-iops", "1000"]).minIops, 1000)
+  assert.equal(parseArgs(["--require-configured"]).requireConfigured, true)
   assert.throws(() => parseArgs(["--iterations", "0"]), /positive integer/)
   assert.throws(() => parseArgs(["--unknown"]), /unknown argument/)
+}
+
+async function testRequiredProviderConfiguration() {
+  const result = await runBenchmark(
+    parseArgs([
+      "--providers",
+      "mount-rs-split-tidb-r2",
+      "--sizes",
+      "1",
+      "--iterations",
+      "1",
+      "--require-configured",
+    ]),
+    {},
+  )
+  assert.equal(result.status, "failed")
+  assert.equal(result.counts.providersSkipped, 1)
+  assert.equal(result.configurationFailures[0].provider, "mount-rs-split-tidb-r2")
+  assert.ok(
+    result.configurationFailures[0].missingConfiguration.includes(
+      "MOUNT_RS_TIDB_URL (or TIDB_URL)",
+    ),
+  )
+  assert.ok(
+    result.configurationFailures[0].missingConfiguration.includes(
+      "MOUNT_RS_R2_ENDPOINT (or R2_ENDPOINT)",
+    ),
+  )
 }
 
 async function testExecutionSurfaceLabels() {
@@ -237,6 +267,7 @@ async function testOzoneProviderMatrix() {
 await testStats()
 await testErrors()
 await testCli()
+await testRequiredProviderConfiguration()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()
