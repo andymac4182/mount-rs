@@ -255,6 +255,17 @@ where
     /// callers should close handles before shutting down the filesystem.
     pub async fn shutdown(&self) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
+        // Provider I/O can outlive the lease TTL (for example, a bounded
+        // remote R2 write). Refresh our own lease before releasing it so a
+        // graceful shutdown is not reported as ESTALE merely because the
+        // last operation was slow. `renew_lease` safely reacquires the next
+        // fence when our lease expired without another owner publishing a
+        // revision; a fenced instance still fails closed.
+        let refresh = if self.lock_lease()?.is_some() {
+            self.renew_lease().await.map(|_| ())
+        } else {
+            Ok(())
+        };
         let lease = {
             let mut state = self.lock_lease()?;
             state.take()
@@ -263,6 +274,7 @@ where
             let mut state = self.lock_state()?;
             state.closed = true;
         }
+        refresh?;
         let Some(lease) = lease else {
             return Ok(());
         };
@@ -2835,6 +2847,26 @@ mod tests {
         assert!(block_on(filesystem.stat("/")).is_ok());
         assert!(!filesystem.failed());
         block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn shutdown_reacquires_its_expired_unfenced_lease_before_release() {
+        let clock = Arc::new(ManualClock::new(0));
+        let metadata = MemoryMetadataStore::with_clock(clock.clone());
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("shutdown-expired").with_lease_ttl(Duration::from_secs(1)),
+        ))
+        .unwrap();
+
+        assert!(clock.advance_ms(1_000));
+        block_on(filesystem.shutdown())
+            .expect("graceful shutdown should renew an expired lease owned by this filesystem");
+
+        let replacement = block_on(metadata.acquire_writer("replacement", Duration::from_secs(10)))
+            .expect("shutdown must release its refreshed lease");
+        block_on(metadata.release_writer(&replacement)).unwrap();
     }
 
     #[test]
