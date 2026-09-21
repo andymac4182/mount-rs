@@ -1190,8 +1190,13 @@ reproducible in a production-like environment.
   for an empty registry); the default `mount-rs-http` suite passed 8 unit and
   10 integration tests, and its all-features observability/OTLP suite passed 8
   unit and 13 integration tests; strict Clippy passed in both configurations.
+  Responses also carry `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`, with local regression assertions passing
+  on reconciled source `2159976`.
   Hosted CI run `35599817215`, source `b26819e`, job `106333141914` also
-  reached terminal success for that all-features gate. This is
+  reached terminal success for the pre-hardening all-features gate. The
+  header-hardening hosted requalification is still open because successive
+  current-main candidates were cancelled before the job ran. This is
   process/configuration and local/hosted exporter-path evidence only:
   provider-aware readiness, collector, SLO, paging, redaction and end-to-end
   alert evidence remain open. *(Implementation + hosted/provider; collector
