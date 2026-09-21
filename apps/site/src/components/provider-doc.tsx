@@ -592,7 +592,10 @@ LIMIT 20;`,
         explicit credential-gated skips. The maturity label stays Experimental
         until replicated/durable topology and broader consumer gates are
         complete; the generic workspace job does not substitute for those
-        dedicated service runs.
+        dedicated service runs. A separate single-node TiDB/Ozone run also
+        passed the direct TiDB contract, ChunkedFs partial/truncate/CAS/
+        stale-fencing/reopen, ambiguous-commit handling, and cleanup; it is
+        not replicated-durability evidence.
       </>
     ),
     sources: [
@@ -657,7 +660,14 @@ LIMIT 20;`,
         a local clock. Consumer configuration selects
         <code>lease_authority: "shared-provider"</code> with an explicit
         <code>authority_prefix</code>; the persisted single-authority mode is
-        reserved for an owned test cluster.
+        reserved for an owned test cluster. Production deployment must enforce
+        one write-capable authority identity per prefix, read-only consumer
+        credentials, a monitored clock-skew bound, and publication more often
+        than the smallest lease TTL; authority time must be republished after
+        authority restart. These controls are deployment contracts, not
+        permissions created by the library. The authority prefix is also
+        checked against FoundationDB's key-size limit at construction, so an
+        oversized prefix fails before its first transaction.
       </>
     ),
     inspectLabel: 'Inspect a volume-scoped key range with fdbcli',
@@ -688,7 +698,9 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         are not wall-clock expiry. The shared-provider Rust SDK/CLI and Node
         selection paths are opt-in native features, not portable-default
         support, and the authority service must enforce the read-only worker
-        boundary outside the library API.
+        boundary outside the library API. The latest arm64 Ozone/FoundationDB
+        composition attempt was blocked by Docker Desktop layer-registration
+        and daemon corruption, so it produces no Ozone/FoundationDB acceptance.
       </>
     ),
     evidence: (
@@ -699,14 +711,16 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         preservation. The real
         cluster authority test covers two independent readers, an absent-
         authority fail-closed result, backward-sample clamping, forward
-        recovery, and stale-writer fencing. A hosted FoundationDB lane now
-        builds the feature-enabled Node addon and can run the configuration-
-        driven Linux FUSE CLI lifecycle when <code>/dev/fuse</code> is present;
-        consumer configuration now also exposes the protected
-        <code>shared-provider</code> authority mode with an
-        <code>authority_prefix</code>. The hosted result and macOS NFS
-        acceptance remain open. This is not yet a general production or
-        release-readiness claim.
+        recovery, and stale-writer fencing. The RustFS composition now
+        publishes the authority, opens consumers through the read-only oracle,
+        republishes after the owned FoundationDB restart, and reopens from a
+        fresh client. A hosted FoundationDB lane now builds the feature-enabled
+        Node addon and can run the configuration-driven Linux FUSE CLI lifecycle
+        when <code>/dev/fuse</code> is present; the live Node gate and native CLI
+        use a separately published shared-provider authority prefix. The macOS
+        job compiles the FoundationDB-enabled CLI NFS test, but live macOS
+        service/cluster acceptance and hosted results remain open. This is not
+        yet a general production or release-readiness claim.
       </>
     ),
     sources: [
@@ -809,7 +823,7 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway block/restart checkpoint; hosted SQLite/PGlite composition and live Node/Rust CLI consumer gates are wired, but their results, mixed stores, and hosted topology remain open.',
+    maturityNote: 'Pinned 2.2.1 gateway and current arm64 block/restart/CAS/range checkpoint; SQLite/PGlite/TiDB composition and Node/Rust CLI consumer evidence now exist locally, while hosted topology and durable multi-host coverage remain open.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -842,10 +856,13 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     ),
     consistency: (
       <>
-        The pinned local gateway harness passed immutable block operations,
-        CAS/publication, concurrent access, restart/reopen, and cleanup. The
-        actual cluster's replication, Ratis, auth, TLS, and failure policy are
-        not inferred from that single-node or all-in-one run.
+        The current arm64 gateway run passed create-only publication and
+        duplicate rejection, ETag stale-read/stale-write rejection and CAS,
+        concurrent writers, full/range reads, missing objects, binary payloads,
+        a bounded stopped-gateway failure, service restart/reopen, and owned
+        cleanup. The actual cluster's replication, Ratis, auth, TLS, and
+        failure policy are not inferred from that single-node or all-in-one
+        run.
       </>
     ),
     inspectLabel: 'Use S3-compatible tools against the Ozone gateway',
@@ -879,19 +896,29 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         stores also remain open. The
         non-secure all-in-one service is loopback-only and is not production
         authentication or durability evidence; the CI composition job covers
-        SQLite/PGlite only and does not imply TiDB/FoundationDB coverage.
+        SQLite/PGlite only and does not imply TiDB/FoundationDB coverage. The
+        arm64 FoundationDB composition attempt was blocked by Docker Desktop
+        layer-registration/daemon corruption; no Ozone/FoundationDB result is
+        counted.
       </>
     ),
     evidence: (
       <>
-        The current maturity is Experimental: the real gateway harness has a
-        meaningful block/restart checkpoint. A dedicated hosted
+        The current maturity is Experimental: the real arm64 gateway harness
+        has the block, CAS, range, failure, restart/reopen, and cleanup
+        checkpoint above. Its SQLite/PGlite compositions passed through the
+        real Ozone gateway, and a separate single-node TiDB/Ozone run passed
+        the direct TiDB contract, ChunkedFs partial/truncate/CAS/stale-fencing/
+        reopen, ambiguous-commit, and cleanup checks. The arm64 Node provider
+        and Node/Rust CLI run recorded <code>pass=7 skip=1 fail=0</code>. A
+        dedicated hosted
         <code>ozone-compositions</code> job now installs PGlite, builds the
         public Node addon, and runs the real SQLite/PGlite mixed-metadata gate.
         Its opt-in consumer phase covers the Node provider matrix, Node CLI,
         and Rust CLI against live Ozone/PGlite/R2-compatible services, but the
-        hosted result is still pending. The broader backend matrix and
-        deployment topology are not yet accepted.
+        hosted result is still pending and revision-specific. Durable
+        multi-node TiDB/FoundationDB, secure/replicated Ozone deployment, and
+        the broader backend matrix are not yet accepted.
       </>
     ),
     sources: [
