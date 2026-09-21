@@ -1877,16 +1877,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     revision and result. Failed, skipped, cancelled or unavailable evidence
     remains open.
 
-  The current-main source gate on 2026-09-22 tested revision `9d3a6e5` and
+  The current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
   Clippy with `-D warnings`, and the locked
   `./scripts/cargo-shared test --workspace --all-targets --locked` suite,
-  including the FUSE sync-barrier/session coverage. The suite's provider,
-  native-mount and external-service rows remained explicitly ignored where
-  their required harnesses were not present. This is current source
-  qualification only; it does not close the hosted platform matrix or any
-  production deployment gate. Earlier source checkpoints at `29365e9` and
-  `717a0ab` remain historical evidence in the rollout ledger.
+  including the current FUSE sync-barrier/session and NFS coverage. The
+  suite's provider, native-mount and external-service rows remained explicitly
+  ignored where their required harnesses were not present. This is current
+  source qualification only; it does not close the hosted platform matrix or
+  any production deployment gate. Earlier source checkpoints at `9d3a6e5`,
+  `29365e9` and `717a0ab` remain historical evidence in the rollout ledger.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
