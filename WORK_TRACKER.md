@@ -2777,6 +2777,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   passed. The run emitted both `AWS_S3_TEST_PASS` and
   `AWS_S3_PGLITE_TEST_PASS`; this is qualification-account and local-metadata
   evidence only, not production deployment acceptance.
+- [x] The latest pushed source
+  `870348184b5a047faea01f584a68cb961b34f810` passed a fresh authorized
+  `myroot` qualification on 2026-09-22 under
+  `mount-rs-tests/aws-s3/20260921T183403Z-86652-1728a866a9affcd4348775aa8416f075`:
+  sibling-prefix denial, public SDK/CLI self-test, composed AWS S3 filesystem,
+  process reopen, independent PGlite metadata, writer fencing, PGlite
+  backup/restore, fresh-server reopen, and exact owned-prefix cleanup all
+  passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted;
+  this remains qualification-account and local-metadata evidence only, not
+  production deployment acceptance.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
