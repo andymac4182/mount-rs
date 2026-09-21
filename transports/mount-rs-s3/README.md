@@ -7,9 +7,15 @@ filesystem mount: the rootless tests exercise HTTP and S3 semantics only.
 The server always binds loopback addresses only. SigV4 credentials authenticate
 requests but do not provide TLS or authorize a non-loopback bind; put a
 reviewed TLS/mTLS proxy in front of the loopback listener for remote access.
-The crate supports the core object operations, ListObjectsV2, ranges and HTTP conditionals, copy,
-DeleteObjects, and multipart create/upload/list/complete/abort using the
-driver's reserved `.mountx-multipart` staging tree.
+The crate supports the core object operations, ListObjectsV2, ranges and HTTP
+conditionals, copy, DeleteObjects, and multipart create/upload/list/complete/
+abort using the driver's reserved `.mountx-multipart` staging tree.
+
+Streaming PUT and multipart completion publish through private staging files
+and an atomic rename, so a failed integrity check or part read does not replace
+an existing object. Drivers that do not advertise `atomic_rename` receive an
+explicit `NotImplemented` response for those operations instead of a weaker
+direct-write fallback; the staging buffer is bounded by `read_chunk_bytes`.
 
 `cargo test -p mount-rs-s3` is rootless and runs on macOS and Linux. It does
 not prove FUSE, NFS, macFUSE, or Linux kernel mount behavior. Native mount

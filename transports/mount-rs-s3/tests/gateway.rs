@@ -939,6 +939,16 @@ async fn real_http_signed_body_digest_mismatch_is_rejected() {
         .map(|header| (header.name.clone(), header.value.clone()))
         .collect::<Vec<_>>();
     wire_headers.push(("authorization".to_owned(), authorization));
+    let stored = wire_request(
+        &server,
+        "PUT",
+        "/mountx/digest-mismatch.txt",
+        &wire_headers,
+        expected,
+    )
+    .await;
+    assert_eq!(stored.status, 200);
+
     let response = wire_request(
         &server,
         "PUT",
@@ -949,7 +959,17 @@ async fn real_http_signed_body_digest_mismatch_is_rejected() {
     .await;
     assert_eq!(response.status, 403);
     assert!(String::from_utf8_lossy(&response.body).contains("<Code>SignatureDoesNotMatch</Code>"));
-    assert!(memory.stat("/digest-mismatch.txt").await.is_err());
+    let handle = memory
+        .open("/digest-mismatch.txt", "r", 0)
+        .await
+        .expect("existing object remains readable");
+    let mut preserved = vec![0_u8; expected.len()];
+    assert_eq!(
+        handle.read(&mut preserved, Some(0)).await.unwrap(),
+        expected.len()
+    );
+    handle.close().await.unwrap();
+    assert_eq!(preserved, expected);
     server.close().await.expect("clean shutdown");
 }
 
@@ -1084,6 +1104,10 @@ impl FsDriver for ProbeFs {
             inner,
             signals: self.signals.clone(),
         }))
+    }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        self.inner.rename(old_path, new_path).await
     }
 }
 

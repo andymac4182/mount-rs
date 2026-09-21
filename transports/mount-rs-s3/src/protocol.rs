@@ -20,6 +20,7 @@ pub const MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 pub const MAX_KEY_BYTES: usize = 1024;
 pub const MAX_XML_BYTES: usize = 16 * 1024 * 1024;
 pub const MULTIPART_PREFIX: &str = ".mountx-multipart";
+pub const STREAMING_STAGING_PREFIX: &str = ".mountx-put-";
 pub const OBJECT_CONTENT_TYPE: &str = "application/octet-stream";
 pub const XML_CONTENT_TYPE: &str = "application/xml";
 pub const SYNTHETIC_OWNER_ID: &str = "mountx-gateway";
@@ -345,7 +346,9 @@ pub struct ObjectTarget {
 }
 
 pub fn is_staging_key(key: &str) -> bool {
-    key == MULTIPART_PREFIX || key.starts_with(&format!("{MULTIPART_PREFIX}/"))
+    key == MULTIPART_PREFIX
+        || key.starts_with(&format!("{MULTIPART_PREFIX}/"))
+        || key.starts_with(STREAMING_STAGING_PREFIX)
 }
 
 pub fn parse_object_key(bucket: &str, key: &str) -> S3Result<ObjectTarget> {
