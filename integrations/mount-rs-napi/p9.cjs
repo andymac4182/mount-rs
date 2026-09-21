@@ -608,6 +608,15 @@ function p9MountOptions(target, options = {}) {
 }
 
 async function mount9p(driver, mountpoint, options = {}) {
+  const server = options.server
+  if (server !== undefined &&
+      (server === null || typeof server.listen !== "function")) {
+    throw new TypeError("9P mount server must be a P9Server")
+  }
+  // Avoid starting a user-supplied listener on hosts where the native client
+  // cannot mount 9P, while still making the common configured-server sequence
+  // adopt the exact bound listener.
+  if (server !== undefined && module.exports.p9ClientProbe().usable) await server.listen()
   const trans = options.transport ?? ((options.port !== undefined || options.host !== undefined) ? "tcp" : "unix")
   const p9 = {
     transport: trans,
@@ -623,6 +632,7 @@ async function mount9p(driver, mountpoint, options = {}) {
     useDriverIno: options.useDriverIno,
     mountOptions: options.mountOptions,
     unmountTimeoutMs: options.unmountTimeout,
+    server,
   }
   return binding.mount(driver, mountpoint, {
     transport: "9p",
