@@ -587,6 +587,55 @@ function p9Port(value) {
   return value
 }
 
+// Direct 9P mounts own one process-wide teardown handler pair. Automatic
+// cross-transport mounts deliberately remain on the native/supervisor path;
+// this keeps the ./9p facade's signal behavior scoped to the mounts it creates.
+const TEARDOWN_SIGNALS = ["SIGINT", "SIGTERM"]
+const signalMounts = new Set()
+let signalsInstalled = false
+
+async function onTeardownSignal(signal) {
+  removeSignalHandlers()
+  for (const failure of await unmountAll9p()) {
+    const message = failure && typeof failure.message === "string" ? failure.message : String(failure)
+    console.error(`mount-rs: 9P unmount on ${signal} failed: ${message}`)
+  }
+  if (process.listenerCount(signal) === 0) process.kill(process.pid, signal)
+}
+
+const signalHandlers = new Map(
+  TEARDOWN_SIGNALS.map((signal) => [signal, () => void onTeardownSignal(signal)]),
+)
+
+function installSignalHandlers() {
+  if (signalsInstalled) return
+  signalsInstalled = true
+  for (const [signal, handler] of signalHandlers) process.on(signal, handler)
+}
+
+function removeSignalHandlers() {
+  if (!signalsInstalled) return
+  signalsInstalled = false
+  for (const [signal, handler] of signalHandlers) process.off(signal, handler)
+}
+
+function untrackSignalMount(mount) {
+  signalMounts.delete(mount)
+  if (signalMounts.size === 0) removeSignalHandlers()
+}
+
+function trackSignalMount(mount) {
+  signalMounts.add(mount)
+  installSignalHandlers()
+  const closed = mount?.closed
+  if (closed && typeof closed.then === "function") {
+    void closed.then(
+      () => untrackSignalMount(mount),
+      () => untrackSignalMount(mount),
+    )
+  }
+}
+
 function p9MountOptions(target, options = {}) {
   const trans = target?.trans
   if (trans !== "unix" && trans !== "tcp") {
@@ -645,13 +694,15 @@ async function mount9p(driver, mountpoint, options = {}) {
     unmountTimeoutMs: options.unmountTimeout,
     server,
   }
-  return binding.mount(driver, mountpoint, {
+  const mounted = await binding.mount(driver, mountpoint, {
     transport: "9p",
     readOnly: options.readOnly,
     unmountTimeoutMs: options.unmountTimeout,
     onTransportError: options.onTransportError,
     p9,
   })
+  if (options.signals !== false) trackSignalMount(mounted)
+  return mounted
 }
 
 async function live9pMounts() {
