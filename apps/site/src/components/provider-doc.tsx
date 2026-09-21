@@ -955,7 +955,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, while the latest one-revision packet failed its hard 1,000-IOPS gate and customer topology, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, the latest terminal packet failed its hard 1,000-IOPS gate, and a replacement packet is active after concurrency remediation. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -1033,7 +1033,10 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         test-deployment evidence and does not imply production auth, TLS, or
         power-loss durability. W26.15 now requires a safe concurrency or
         publication-path remediation, or production-like Ozone capacity
-        evidence, before a fresh one-revision packet.
+        evidence, before a fresh one-revision packet. Replacement run
+        <code>35641941218</code> at <code>88b707ba</code> is active after the
+        published read/write-overlap and shutdown-ordering remediation; its
+        producer and aggregate results are not yet terminal acceptance.
       </>
     ),
     evidence: (
@@ -1050,8 +1053,8 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         configuration, transaction readiness across a replicated-node restart,
         fresh-client reopen, and owned cleanup. A dedicated
         <code>ozone-tidb</code> hosted job is wired for durable v8.5.7 TiDB with
-        Node 24 against the real Ozone gateway, but its latest job was canceled
-        before evidence. A
+        Node 24 against the real Ozone gateway, but the current replacement job
+        is queued and has no result yet. A
         dedicated hosted
         <code>ozone-compositions</code> job now installs PGlite, builds the
         public Node addon, and runs the real SQLite/PGlite mixed-metadata gate.
@@ -1070,8 +1073,12 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         five-minute RPO/RTO, TLS/SigV4, tenant-scoped prefixes, and
         three-node/three-replica/three-domain topology; these are
         customer/Ozone requirements, not proof of a deployed environment.
-        W26.15, secure customer topology, backup/DR, measured SLO/capacity,
-        and release/canary/rollback remain open.
+        Fresh replacement run <code>35641941218</code> is now active on the
+        merged remediation tip, with Ozone, compositions, and FoundationDB
+        producers in progress and TiDB queued at the latest inspection; no
+        queued or in-progress result is promoted. W26.15, secure customer
+        topology, backup/DR, measured SLO/capacity, and release/canary/rollback
+        remain open.
       </>
     ),
     sources: [
@@ -1082,6 +1089,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
+      { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>
