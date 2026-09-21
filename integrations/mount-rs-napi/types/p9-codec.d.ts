@@ -250,6 +250,8 @@ export interface MountP9Options {
   locks?: P9LockTable
   onError?: (error: unknown, header: NativeP9Header | undefined) => void
   onAssertion?: (message: string) => void
+  /** Unmount on SIGINT/SIGTERM. Default: true for direct ./9p mounts. */
+  signals?: boolean
   mountOptions?: readonly string[]
   unmountTimeout?: number
   onTransportError?: (error: unknown, peer: string | undefined) => void

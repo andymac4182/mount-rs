@@ -15,7 +15,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | Gate | State | Required evidence |
 | --- | --- | --- |
 | Public 9P exports and protocol behavior | Local PASS for the implemented codec, constants, qid, cursor, fid-table, and session-backed fid surface; parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, and public-session behavior |
-| Session and connection objects | Local PASS for current exposed members and the bounded N-API mount-helper facade; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, injected shared lock-table option coverage, direct `./9p` probe/refusal/option/mount-helper checks, configured `P9Server` reuse through the native mount option, and direct mount-created scalar server-policy/session-callback mapping; process signals, remaining mount controls, and hosted N-API native-mount evidence remain open |
+| Session and connection objects | Local PASS for current exposed members and the bounded N-API mount-helper facade; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, injected shared lock-table option coverage, direct `./9p` probe/refusal/option/mount-helper/signal checks, configured `P9Server` reuse through the native mount option, and direct mount-created scalar server-policy/session-callback mapping; automatic cross-transport signals, remaining mount controls, and hosted N-API native-mount evidence remain open |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
 | Linux native 9P | Hosted PASS for the supported Linux lifecycle scope; crash/reset/half-close recovery is outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2` passed `9p`/`9pnet_fd` probing and all four ignored native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Earlier failure/cancellation records remain below as history |
@@ -46,7 +46,8 @@ upstream stream/attach contract or hosted native mount behavior.
   policy, frame/in-flight bounds, negotiated `msize`, inode/read-only policy,
   ownership claims, debug mode, lock-table injection, and direct session
   `onError`/`onAssertion` callbacks. These callbacks apply to a listener created
-  by the mount; an injected shared server retains its own callbacks. Signals and
+  by the mount; an injected shared server retains its own callbacks. The direct
+  `./9p` signal teardown is now supported. Automatic cross-transport signal ownership and
   the remaining oracle mount controls are not claimed by this packet. A hosted N-API native mount run is
   still required before these views are treated as native runtime-qualified.
 
@@ -70,8 +71,11 @@ upstream stream/attach contract or hosted native mount behavior.
   locally evidenced, including reuse of a configured native `P9Server`, while
   scalar server-policy fields and direct session `onError`/`onAssertion`
   callbacks are now mapped for mount-created listeners; an injected shared
-  server keeps its own hooks. Process signals and the remaining mount controls
-  remain applicable parity work. The `./9p` barrel now exposes
+  server keeps its own hooks. The direct `./9p` facade also installs one
+  process-wide `SIGINT`/`SIGTERM` teardown pair for opted-in mounts and removes
+  it after the last such mount closes; automatic cross-transport signal
+  ownership and the remaining mount controls remain applicable parity work. The
+  `./9p` barrel now exposes
   the authoritative Rust-backed `FidTable` alias, live `P9Session.fids`, qid
   synthesis helpers, cursor/resume state, detached clunk views, and retained
   open-handle enumeration; the focused runtime test covers hardlink identity,
@@ -116,6 +120,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | 2026-09-22 | N-API P9 shared-server mount injection | The native mount option now accepts a configured `P9Server`; `mount9p` starts it only when the Linux client probe is usable, and the Rust adapter passes the exact bound transport through to `mount_9p` for client adoption. Generated declarations, N-API compile/build, typecheck, helper validation, syntax, and diff checks passed | Extended server-policy/signal/session callback controls and hosted N-API native-mount lifecycle evidence remain open; production remains NO-GO |
 | 2026-09-22 | N-API P9 mount-created server policy | Direct and automatic 9P mount options now map scalar `P9ServerOptions` policy to a private mount-created listener, including remote admission, socket mode/shared-directory policy, frame/in-flight bounds, negotiated `msize`, inode/read-only/ownership/debug policy, and an injected `P9LockTable`; Rust and N-API mapping tests passed, generated declarations/typecheck, focused P9/N-API tests, host-enabled server integration, formatting, and strict Clippy passed | Direct session `onError`/`onAssertion` callback injection, process signals, and hosted N-API native-mount lifecycle evidence remain open; production remains NO-GO |
 | 2026-09-22 | N-API P9 mount-created session callbacks | Direct and automatic 9P mount options now carry `onError` and `onAssertion` into the private listener's existing Rust `P9SessionHooks`; shared-server mounts retain the configured server's hooks. The debug N-API build, generated typecheck, observability/mount-helper/session/fid/lock runtime regressions, host-enabled server integration, N-API/Rust tests, formatting, syntax, diff checks, and strict Clippy passed | Process signals, remaining mount controls, and hosted N-API native-mount lifecycle evidence remain open; production remains NO-GO |
+| 2026-09-22 | N-API P9 direct-facade signal teardown | The direct `./9p` mount helper now supports `signals` (default `true`) with one process-wide `SIGINT`/`SIGTERM` pair, unmount-all dispatch, handler removal after opted-in mounts close, and default-signal re-raise when no other listener remains; the signal lifecycle regression, mount-helper regression, syntax and diff checks passed | Automatic cross-transport signal ownership, remaining mount controls, and hosted N-API native-mount lifecycle evidence remain open; the release build was not completed because the isolated target exhausted `/private/tmp`; production remains NO-GO |
 
 ## Completion rule
 

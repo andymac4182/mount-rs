@@ -205,11 +205,11 @@ defines that shared shape. The direct `./9p` facade additionally exposes
 remote admission, socket mode/shared-directory policy, frame/in-flight bounds,
 negotiated `msize`, inode/read-only/ownership/debug policy, lock-table
 injection, and direct session `onError`/`onAssertion` callbacks), access/cache/
-uname/aname, mount msize, mount options, unmount timeout, transport-error
-callback, and configured shared-server injection. The direct session callbacks
+uname/aname, mount msize, mount options, `signals`, unmount timeout,
+transport-error callback, and configured shared-server injection. The direct session callbacks
 apply when the mount creates its own listener; an injected shared server retains
-its configured hooks. It does not claim the oracle's signals or remaining mount
-controls. The
+its configured hooks. It does not claim automatic cross-transport signal
+ownership or remaining mount controls. The
 callback is retained by the `Mounted` lifecycle and is wired to the selected
 native FUSE, 9P, or NFS transport hook; a hosted native fault event and a
 hosted N-API native-mount run are still required before this boundary can be
@@ -275,7 +275,8 @@ Current focused behavior:
   listener. Mount-created listeners now receive the scalar server-policy
   fields, lock table, and direct session `onError`/`onAssertion` callbacks from
   the same option bag. This is not full oracle mount parity: signals and the
-  remaining mount controls are explicitly unsupported in this packet, and
+  automatic cross-transport signal ownership and the remaining mount controls
+  are explicitly unsupported in this packet, and
   hosted N-API native mount lifecycle evidence remains unverified.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
@@ -292,8 +293,11 @@ Current focused behavior:
   now pass the privileged native NFSv3/NFSv4.1 and SQLite-over-NFS checks;
   the host-backed NFSv3 process-crash/restart test rejects the old file handle
   with `NFS3ERR_STALE` and then recovers a `FILE_SYNC` payload through a
-  replacement server. NFSv4 lease/replay/file-handle recovery, power-loss
-  durability, and whole-workflow release acceptance remain open. S3 now
+  replacement server. Rootless NFSv4.1 wire coverage also drives two
+  independent sessions through concurrent distinct-file OPEN/WRITE/READ
+  round trips. NFSv4 lease/replay/file-handle recovery, cross-process/native
+  concurrency, power-loss durability, and whole-workflow release acceptance
+  remain open. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
   safe effective options, debug-gated assertions, buffered `handleRequest`,
   streaming `handleRequestStream`, async session metrics, live `connections`,
