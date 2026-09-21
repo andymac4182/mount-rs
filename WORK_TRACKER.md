@@ -933,8 +933,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   has an explicit Linux FUSE prerequisite and runs the config-driven CLI native
   lifecycle/reopen test inside the client container with a separately
   published shared-provider authority when `/dev/fuse` is available. The live
-  Node gate uses that same published authority prefix. Hosted result and macOS
-  NFS acceptance remain open.
+  Node gate uses that same published authority prefix. The macOS native-NFS job
+  now also compiles the FoundationDB-enabled CLI lifecycle test; live macOS
+  service/cluster acceptance and the hosted result remain open.
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.

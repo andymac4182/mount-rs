@@ -245,6 +245,10 @@ jobs:
             MOUNT_RS_NFS_NATIVE_TEST=1 python3 -c 'import subprocess,sys; subprocess.run([sys.argv[1], "--ignored", "--nocapture"], check=True, timeout=240)' "$native_test"
           fi
 
+      - name: Compile FoundationDB-enabled CLI NFS acceptance on macOS
+        if: runner.os == 'macOS'
+        run: cargo check --locked -p mount-rs-cli --features foundationdb --test native_lifecycle
+
       - name: Verify config-driven CLI NFS persistence and cleanup
         if: runner.os == 'macOS'
         env:
