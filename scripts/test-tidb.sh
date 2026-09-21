@@ -411,7 +411,6 @@ start_pd() {
     --advertise-client-urls="http://$pd_ip:2379" \
     --advertise-peer-urls="http://$pd_ip:2380" \
     --initial-cluster="$pd_cluster" \
-    --initial-cluster-state=new \
     --log-level=warn \
     --data-dir=/data \
     >/dev/null
