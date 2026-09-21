@@ -51,7 +51,7 @@ function canonicalQuery(url) {
     .join("&");
 }
 
-export function rustfsConfigFromEnv(env = process.env) {
+export function r2ConfigFromEnv(env = process.env) {
   const names = [
     "R2_ENDPOINT",
     "R2_BUCKET",
@@ -60,9 +60,6 @@ export function rustfsConfigFromEnv(env = process.env) {
   ];
   const missing = names.filter((name) => !env[name]);
   if (missing.length > 0) return { missing };
-  if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+(?:\/|$)/.test(env.R2_ENDPOINT)) {
-    return { missing: ["R2_ENDPOINT(loopback RustFS)"] };
-  }
   return {
     config: {
       endpoint: env.R2_ENDPOINT,
@@ -73,6 +70,15 @@ export function rustfsConfigFromEnv(env = process.env) {
     },
     missing: [],
   };
+}
+
+export function rustfsConfigFromEnv(env = process.env) {
+  const result = r2ConfigFromEnv(env);
+  if (result.missing.length > 0) return result;
+  if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+(?:\/|$)/.test(env.R2_ENDPOINT)) {
+    return { missing: ["R2_ENDPOINT(loopback RustFS)"] };
+  }
+  return result;
 }
 
 async function signedRequest(config, method, key, query = {}) {

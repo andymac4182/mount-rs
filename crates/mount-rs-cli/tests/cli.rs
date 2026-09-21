@@ -211,3 +211,90 @@ fn actual_binary_uses_the_public_rust_sdk_for_mount_free_self_tests() {
     );
     assert!(stdout.contains("Rust SDK wrote, shut down, reopened, and read"));
 }
+
+#[test]
+#[ignore = "requires the explicit live Apache Ozone and PGlite composition harness"]
+fn actual_binary_runs_live_ozone_split_provider_self_test() {
+    let endpoint = std::env::var("R2_ENDPOINT").expect("R2_ENDPOINT must be set");
+    let bucket = std::env::var("R2_BUCKET").expect("R2_BUCKET must be set");
+    let pglite_url =
+        std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL must be set");
+    let access_key_id =
+        std::env::var("R2_ACCESS_KEY_ID").expect("R2_ACCESS_KEY_ID must be set");
+    let secret_access_key =
+        std::env::var("R2_SECRET_ACCESS_KEY").expect("R2_SECRET_ACCESS_KEY must be set");
+    let run_id = std::env::var("MOUNT_RS_PROVIDER_MATRIX_RUN_ID")
+        .unwrap_or_else(|_| std::process::id().to_string());
+    assert!(
+        run_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || ".-_".contains(character)),
+        "provider-matrix run id must be safe for an object prefix"
+    );
+
+    let prefix = format!("mount-rs-provider-matrix/{run_id}/node-cli-ozone/rust-cli");
+    let root = std::env::temp_dir().join(format!(
+        "mount-rs-cli-ozone-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("create live Ozone CLI config directory");
+    let config_path = root.join("config.json");
+    let config = serde_json::json!({
+        "version": 1,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "metadata": {
+                    "kind": "pglite",
+                    "connection": {"env": "PGLITE_DATABASE_URL"},
+                    "volume_key": format!("{prefix}/metadata"),
+                    "durable": true
+                },
+                "blocks": {
+                    "kind": "r2",
+                    "endpoint": endpoint,
+                    "bucket": bucket,
+                    "prefix": prefix,
+                    "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
+                    "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"},
+                    "durable": true
+                },
+                "chunk_size_bytes": 7,
+                "owner": format!("rust-cli-ozone-{}", std::process::id())
+            }
+        }
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("serialize live Ozone CLI config"),
+    )
+    .expect("write live Ozone CLI config");
+
+    let output = ProcessCommand::new(env!("CARGO_BIN_EXE_mount-rs"))
+        .args([
+            "sdk-self-test",
+            "--config",
+            config_path.to_str().expect("UTF-8 live Ozone CLI config path"),
+            "--reopen",
+        ])
+        .env("PGLITE_DATABASE_URL", pglite_url)
+        .env("R2_ENDPOINT", std::env::var("R2_ENDPOINT").unwrap())
+        .env("R2_BUCKET", std::env::var("R2_BUCKET").unwrap())
+        .env("R2_ACCESS_KEY_ID", access_key_id)
+        .env("R2_SECRET_ACCESS_KEY", secret_access_key)
+        .output()
+        .expect("run live Ozone Rust CLI self-test");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let status = output.status;
+    let _ = fs::remove_dir_all(&root);
+    assert!(
+        status.success(),
+        "live Ozone Rust CLI self-test failed: stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("Rust SDK wrote, shut down, reopened, and read"));
+}

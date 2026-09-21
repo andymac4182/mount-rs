@@ -47,9 +47,16 @@ jobs:
           workspaces: tests/ozone -> target
       - name: Install the real PGlite composition service
         run: pnpm --dir tests/pglite install --frozen-lockfile
+      - name: Install the public Node SDK test addon
+        run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - name: Build the public Node SDK test addon
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
       - name: Verify Ozone with SQLite and PGlite metadata
         env:
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
+          MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
         run: sh scripts/test-ozone-compositions.sh
 
   rustfs:

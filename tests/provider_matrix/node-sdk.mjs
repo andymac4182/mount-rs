@@ -13,18 +13,13 @@ import { createChunkedDriver, Filesystem } from "../../integrations/mount-rs-nap
 import {
   cleanupR2Prefix,
   listR2Prefix,
+  r2ConfigFromEnv,
   rustfsConfigFromEnv,
 } from "./r2-cleanup.mjs";
 
 const PAYLOAD = Buffer.from([
   109, 111, 117, 110, 116, 45, 114, 115, 0, 112, 114, 111, 118, 105, 100, 101, 114, 255,
 ]);
-const R2_REQUIRED = [
-  "R2_ENDPOINT",
-  "R2_BUCKET",
-  "R2_ACCESS_KEY_ID",
-  "R2_SECRET_ACCESS_KEY",
-];
 const SEEDED_PAYLOAD = Buffer.from("seeded\0cross-backend-payload");
 const SEEDED_PATCH = Buffer.from("R2!");
 const SEEDED_PATCH_OFFSET = 7;
@@ -294,6 +289,9 @@ await runReopenCase(
 );
 
 const pgliteUrl = process.env.PGLITE_DATABASE_URL;
+const r2 = r2ConfigFromEnv();
+const missingR2 = r2.missing;
+const pgliteR2Ready = Boolean(pgliteUrl) && missingR2.length === 0;
 if (pgliteUrl) {
   const pgliteOptions = (owner) => ({
     metadata: {
@@ -318,6 +316,51 @@ if (pgliteUrl) {
   );
 } else {
   console.log("SKIP node-sdk case=chunked-pglite/pglite gate=PGLITE_DATABASE_URL");
+}
+
+if (pgliteR2Ready) {
+  const runId = safeRunId();
+  const prefix = `mount-rs-provider-matrix/${runId}/node-pglite-r2`;
+  const volumeKey = `mount-rs-provider-matrix/${runId}/node-pglite-r2-metadata`;
+  const protectedKeys = await listR2Prefix(r2.config, prefix);
+  const options = (owner) => ({
+    metadata: {
+      kind: "pglite",
+      uri: pgliteUrl,
+      key: volumeKey,
+      durable: true,
+    },
+    blocks: {
+      kind: "r2",
+      endpoint: r2.config.endpoint,
+      bucket: r2.config.bucket,
+      key: prefix,
+      accessKeyId: r2.config.accessKeyId,
+      secretAccessKey: r2.config.secretAccessKey,
+      durable: true,
+    },
+    chunkSize: 7,
+    owner,
+  });
+  await runReopenCase(
+    "chunked-pglite/r2-partial-truncate-reopen",
+    () => createChunkedDriver(options("provider-matrix-node-pglite-r2-first")),
+    () => createChunkedDriver(options("provider-matrix-node-pglite-r2-reopened")),
+    () => cleanupR2Prefix(r2.config, prefix, protectedKeys),
+    exerciseSeeded,
+    seededExpected(),
+    "/provider-matrix/seeded",
+  );
+} else {
+  const gate = [
+    pgliteUrl ? undefined : "PGLITE_DATABASE_URL",
+    ...missingR2,
+  ].filter(Boolean);
+  console.log(
+    "SKIP node-sdk case=chunked-pglite/r2-partial-truncate-reopen gate=" +
+      gate.join("|") +
+      " reason=requires_actual_pglite_and_s3_endpoint",
+  );
 }
 
 const tidbUrl = process.env.MOUNT_RS_TIDB_URL;
@@ -368,7 +411,6 @@ if (tidbRustfsReady) {
   );
 }
 
-const missingR2 = R2_REQUIRED.filter((name) => !process.env[name]);
 if (missingR2.length === 0) {
   const stateKey = "mount-rs-provider-matrix/node-" + safeRunId() + ".json";
   await runCase(
@@ -390,10 +432,10 @@ if (missingR2.length === 0) {
 console.log(
   "SUMMARY node-sdk pass=" +
     (4 + (pgliteUrl ? 1 : 0) + (missingR2.length === 0 ? 1 : 0) +
-      (tidbRustfsReady ? 1 : 0) - failures.length) +
+      (pgliteR2Ready ? 1 : 0) + (tidbRustfsReady ? 1 : 0) - failures.length) +
     " skip=" +
     ((pgliteUrl ? 0 : 1) + (missingR2.length === 0 ? 0 : 1) +
-      (tidbRustfsReady ? 0 : 1)) +
+      (pgliteR2Ready ? 0 : 1) + (tidbRustfsReady ? 0 : 1)) +
     " fail=" +
     failures.length,
 );

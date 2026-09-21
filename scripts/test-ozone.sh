@@ -525,6 +525,44 @@ bounded_ignored_cargo_test() {
   return "$test_status"
 }
 
+bounded_cli_ignored_cargo_test() {
+  test_name=$1
+  if bounded_process_command_for_timeout "$ozone_test_timeout" "ozone-cli-$test_name" \
+    cargo test \
+      --manifest-path "$repo_dir/crates/mount-rs-cli/Cargo.toml" \
+      --locked \
+      --test cli \
+      -- "$test_name" --exact --ignored --test-threads=1 --nocapture; then
+    return 0
+  else
+    test_status=$?
+  fi
+  if [ "$test_status" -eq 124 ] || [ "$test_status" -eq 125 ]; then
+    echo "Apache Ozone Rust CLI test exceeded its bounded timeout: $test_name" >&2
+  else
+    echo "Apache Ozone Rust CLI test failed with status $test_status: $test_name" >&2
+  fi
+  return "$test_status"
+}
+
+bounded_node_test() {
+  test_name=$1
+  test_script=$2
+  shift 2
+  if bounded_process_command_for_timeout "$ozone_test_timeout" "ozone-node-$test_name" \
+    node "$test_script" "$@"; then
+    return 0
+  else
+    test_status=$?
+  fi
+  if [ "$test_status" -eq 124 ] || [ "$test_status" -eq 125 ]; then
+    echo "Apache Ozone Node test exceeded its bounded timeout: $test_name" >&2
+  else
+    echo "Apache Ozone Node test failed with status $test_status: $test_name" >&2
+  fi
+  return "$test_status"
+}
+
 bounded_composition_script() {
   composition_name=$1
   composition_command=$2
@@ -595,6 +633,13 @@ if [ "${MOUNT_RS_OZONE_COMPOSITIONS:-0}" = "1" ]; then
   export MOUNT_RS_OZONE_CHUNKED_PGLITE=1
   bounded_ignored_cargo_test "chunked_composition::real_ozone_sqlite_chunked_composition"
   bounded_ignored_cargo_test "chunked_composition::real_ozone_pglite_chunked_composition"
+  if [ "${MOUNT_RS_OZONE_NODE_COMPOSITION:-0}" = "1" ]; then
+    export MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$run_id"
+    export RUSTFS_REGION="$ozone_region"
+    bounded_cli_ignored_cargo_test "actual_binary_runs_live_ozone_split_provider_self_test"
+    bounded_node_test "provider-matrix" "$repo_dir/tests/provider_matrix/node-sdk.mjs"
+    bounded_node_test "cli" "$repo_dir/tests/ozone/node-cli.mjs"
+  fi
 fi
 
 if [ "${MOUNT_RS_OZONE_TIDB_COMPOSITION:-0}" = "1" ]; then

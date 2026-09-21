@@ -152,11 +152,13 @@ node examples/node-cli/index.mjs \
 ```
 
 The base Ubuntu CI Ozone job runs the real gateway contract plus these
-mount-free Rust/Node configuration checks. A live Node SDK Ozone run still
-requires the normal N-API build and PGlite service prerequisites, so it is
-not reported as covered by the static configuration gate. CI also has a
-separate `ozone-compositions` job that installs the locked PGlite service and
-runs this SQLite/PGlite mixed-metadata gate against the real Ozone gateway;
-that hosted result is the acceptance evidence for the job, while TiDB and
-FoundationDB remain explicit manual modes and are not implied to be covered
-by this job.
+mount-free Rust/Node configuration checks. A separate `ozone-compositions`
+job installs the locked PGlite service and builds the local N-API addon, then
+runs the SQLite/PGlite composition against the real Ozone gateway. With
+`MOUNT_RS_OZONE_NODE_COMPOSITION=1`, that same job also runs the public Node
+provider matrix's PGlite-metadata/R2-block row and
+`tests/ozone/node-cli.mjs`, which executes the versioned config through the
+Node CLI's real `--sdk-self-test --reopen` path; it also runs the matching
+ignored Rust CLI self-test against a generated versioned config. Those rows
+are live provider evidence, not static validation. TiDB and FoundationDB
+remain explicit manual modes and are not implied to be covered by this job.
