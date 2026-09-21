@@ -70,7 +70,13 @@ import {
   qidType,
   qidVersion,
   walkStep,
+  mount9p,
+  p9ClientProbe,
+  p9MountOptions,
+  p9Platform,
   type P9AttachOptions,
+  type MountP9Options,
+  type P9ClientProbe,
   type P9Connection,
   type DirCursor,
   type DirResume,
@@ -89,6 +95,8 @@ import {
   type P9SessionOptions,
   type P9SessionStats,
   type P9User,
+  type P9Mount,
+  type P9MountTarget,
 } from "@mount-rs/core/9p"
 import {
   createS3Server,
@@ -158,6 +166,22 @@ const autoMountOptions: JsAutoMountOptions = {
   },
 }
 void autoMountOptions
+const p9MountConfig: MountP9Options = {
+  transport: "unix",
+  mountMsize: 131096,
+  mountOptions: ["debug"],
+  unmountTimeout: 1000,
+}
+const p9Target: P9MountTarget = { trans: "tcp", port: 564 }
+const p9Probe: P9ClientProbe = p9ClientProbe()
+const p9OptionsString: string = p9MountOptions(p9Target, p9MountConfig)
+const p9PlatformName: "linux" | undefined = p9Platform()
+declare const p9Mounted: P9Mount
+void mount9p
+void p9Probe
+void p9OptionsString
+void p9PlatformName
+void p9Mounted
 declare const mounted: Mounted
 const mountedDisposal: Promise<void> = mounted[Symbol.asyncDispose]()
 void mountedDisposal

@@ -15,7 +15,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | Gate | State | Required evidence |
 | --- | --- | --- |
 | Public 9P exports and protocol behavior | Local PASS for the implemented codec, constants, qid, cursor, fid-table, and session-backed fid surface; parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, and public-session behavior |
-| Session and connection objects | Local PASS for current exposed members; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, and injected shared lock-table option coverage; 9P mount helpers remain open |
+| Session and connection objects | Local PASS for current exposed members and the bounded N-API mount-helper facade; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, injected shared lock-table option coverage, and direct `./9p` probe/refusal/option/mount-helper checks; richer mount options and hosted N-API native-mount evidence remain open |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
 | Linux native 9P | Hosted PASS for the supported Linux lifecycle scope; crash/reset/half-close recovery is outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2` passed `9p`/`9pnet_fd` probing and all four ignored native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Earlier failure/cancellation records remain below as history |
@@ -33,6 +33,16 @@ upstream stream/attach contract or hosted native mount behavior.
   policy. Those recovery properties are not automatic guarantees of this
   library and are not promoted from the hosted lifecycle pass.
 - Keep unsupported platform/client results explicit and separate from passes.
+- The direct `./9p` mount-helper facade currently supports Linux-client probing,
+  Unix/TCP refusal and option-string helpers, strict named 9P delegation through
+  `mount9p`, 9P-only live-mount filtering/cleanup, and mounted `trans`/server/
+  connection/`closed` views. Its supported option bag is deliberately bounded
+  to transport, host/port/path, msize, access/cache/uname/aname, read-only,
+  driver inode, mount options, unmount timeout, and transport-error callback.
+  Shared-server injection, signals, server-policy fields, session callbacks,
+  lock-table injection, and the remaining oracle mount controls are not claimed
+  by this packet. A hosted N-API native mount run is still required before these
+  views are treated as native runtime-qualified.
 
 ## Supported-scope decisions
 
@@ -50,8 +60,9 @@ upstream stream/attach contract or hosted native mount behavior.
   release. `P9Server.clients` is now a live property-shaped array combining
   native and attached connections. `P9ServerOptions.locks` now accepts a
   `P9LockTable` and shares it across native and attached sessions, with live
-  server/session option handles. 9P mount helpers remain applicable parity
-  work. The `./9p` barrel now exposes
+  server/session option handles. The bounded `./9p` mount-helper facade is
+  locally evidenced, while richer oracle mount options and hosted N-API native
+  mount lifecycle remain applicable parity work. The `./9p` barrel now exposes
   the authoritative Rust-backed `FidTable` alias, live `P9Session.fids`, qid
   synthesis helpers, cursor/resume state, detached clunk views, and retained
   open-handle enumeration; the focused runtime test covers hardlink identity,
@@ -92,6 +103,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | 2026-09-22 | N-API P9 driver and observability parity | Release `pnpm --dir integrations/mount-rs-napi build`, generated `node test/typecheck.mjs`, `node test/p9-observability.mjs`, `node test/p9-fids.mjs`, `node test/p9-session-metadata.mjs`, `node test/p9-locks.mjs`, pinned `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/p9-constants.mjs` (124 exports), pinned `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/9p-codec.mjs` (44 typed cases), root/`./9p` factory identity, `node --check` for the server and 9P facades, `git diff --check`, `./scripts/cargo-shared fmt --all -- --check`, focused `mount-rs-9p` tests (31 passed, 0 failed), and isolated warning-denied Clippy passed. Coverage includes the live `P9Session.driver`, debug-gated assertion readback/counters, duplicate-tag assertion/error reporting, malformed-frame `EPROTO` reporting without a header, negotiated unknown-message `ENOTSUP` reporting with its typed header, and Node error revival | Lock-table option injection, property-shaped `clients`, and 9P mount-helper parity remain open; hosted native evidence remains revision-scoped, crash/reset/half-close recovery is supervisor-owned, and production remains NO-GO |
 | 2026-09-22 | N-API P9 property-shaped clients parity | Release `pnpm --dir integrations/mount-rs-napi build`, generated `node test/typecheck.mjs`, `node test/p9-observability.mjs`, `node test/p9-fids.mjs`, `node test/p9-session-metadata.mjs`, `node test/p9-locks.mjs`, host-enabled `node test/servers.mjs`, `node --check` for the server and 9P facades, `git diff --check`, `./scripts/cargo-shared fmt --all -- --check`, focused `mount-rs-9p` tests (31 passed, 0 failed), and isolated warning-denied Clippy passed. `P9Server.clients` is now a live property-shaped array combining native and attached connections, with generated declaration and runtime identity/teardown evidence; the host-enabled server integration passed. The earlier sandbox-only NFS relisten `Operation not permitted` was not promoted to a product failure | Lock-table option injection and 9P mount-helper parity remain open; hosted native evidence remains revision-scoped, crash/reset/half-close recovery is supervisor-owned, and production remains NO-GO |
 | 2026-09-22 | N-API P9 lock-table option injection parity | Release `pnpm --dir integrations/mount-rs-napi build`, generated `node test/typecheck.mjs`, `node test/p9-session-metadata.mjs`, `node test/p9-observability.mjs`, `node test/p9-fids.mjs`, `node test/p9-locks.mjs`, host-enabled `node test/servers.mjs`, `node --check` for the server and 9P facades, `git diff --check`, `./scripts/cargo-shared fmt --all -- --check`, focused `mount-rs-9p` tests (31 passed, 0 failed), and isolated warning-denied Clippy passed. `P9ServerOptions.locks` now accepts a `P9LockTable`; injected ranges are visible through the server and connection-session option handles and are shared with protocol lock state, with generated declaration and type/runtime evidence | 9P mount-helper parity remains open; hosted native evidence remains revision-scoped, crash/reset/half-close recovery is supervisor-owned, and production remains NO-GO |
+| 2026-09-22 | N-API P9 bounded mount-helper facade | Release `pnpm --dir integrations/mount-rs-napi build`, generated `node test/typecheck.mjs`, `node test/p9-mount-helpers.mjs`, the focused P9 session/observability/fid/lock regressions, host-enabled `node test/servers.mjs`, `node --check` for the P9/server facades, `git diff --check`, `./scripts/cargo-shared fmt --all -- --check`, `mount-rs-napi --lib` (17 passed, 0 failed), focused `mount-rs-9p` tests (35 passed, 0 failed), and warning-denied Clippy for `mount-rs-napi`, `mount-rs-auto`, and `mount-rs-9p` passed. The direct `./9p` facade now exposes probe/refusal/option helpers, strict named `mount9p` delegation, 9P live-mount filtering/cleanup, and mounted transport/server/connection/closed views; the nested auto option bag carries the same bounded native 9P fields | Oracle shared-server/signal/extended server-policy mount options and hosted N-API native-mount lifecycle evidence remain open; prior hosted Linux evidence is revision-scoped, crash/reset/half-close recovery is supervisor-owned, and production remains NO-GO |
 
 ## Completion rule
 

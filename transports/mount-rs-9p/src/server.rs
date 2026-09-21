@@ -457,6 +457,13 @@ impl P9Server {
         &self.options
     }
 
+    /// Return the server-owned driver for a higher-level lifecycle wrapper.
+    /// The returned trait object is the same shared driver used by every
+    /// session; no new ownership or filesystem instance is created.
+    pub fn driver(&self) -> Arc<dyn FsDriver> {
+        Arc::clone(&self.driver)
+    }
+
     pub fn shutdown_handle(&self) -> Arc<Notify> {
         Arc::clone(&self.shutdown)
     }

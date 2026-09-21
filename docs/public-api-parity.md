@@ -191,18 +191,26 @@ the native-session, hosted-platform, or native-mount acceptance boundary.
 The current root facade exposes `mount`, `liveMounts`, `unmountAll`, and
 `probeTransports` through [`postbuild.mjs`](../integrations/mount-rs-napi/postbuild.mjs#L6-L22).
 The native `Mounted` object exposes transport, mountpoint, source, active, and
-`unmount`; see [`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L135-L141).
+`unmount`; the bounded 9P view additionally exposes `trans`, the adopted
+server/connection, `waitClosed()`, and `closed`; see
+[`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L175-L205).
 
 The public auto options are currently `transport`, `readOnly`,
-`unmountTimeout`, `onTransportError`, and `nfsSqliteSingleHost`.
-[`JsAutoMountOptions`](../integrations/mount-rs-napi/index.d.ts#L478-L487) does
-not cover the oracle's signals, `useDriverIno`, `onError`, or
-transport-specific `fuse`/`9p`/`nfs` option bags. The callback is retained by
-the `Mounted` lifecycle and is wired to the selected native FUSE, 9P, or NFS
-transport hook; a hosted native fault event is still required before this
-boundary can be treated as runtime-qualified. The Rust auto layer has typed
-transport selection and timeout handling, but this does not close the
-upstream option or lifecycle surface.
+`unmountTimeout`, `onTransportError`, `nfsSqliteSingleHost`, and a bounded
+`p9` bag. [`JsAutoMountOptions`](../integrations/mount-rs-napi/index.d.ts#L1148-L1168)
+defines that shared shape. The direct `./9p` facade additionally exposes
+`p9ClientProbe`, `p9Platform`, `socketPathRefusal`, `tcpSourceRefusal`,
+`p9MountOptions`, `mount9p`, `live9pMounts`, and `unmountAll9p`. The supported
+9P bag covers transport, host/port/path, msize, access/cache/uname/aname,
+read-only, driver inode, mount options, unmount timeout, and the transport-error
+callback. It does not claim the oracle's shared-server injection, signals,
+server-policy/session callback fields, or remaining mount controls. The
+callback is retained by the `Mounted` lifecycle and is wired to the selected
+native FUSE, 9P, or NFS transport hook; a hosted native fault event and a
+hosted N-API native-mount run are still required before this boundary can be
+treated as runtime-qualified. The Rust auto layer has typed transport
+selection and timeout handling, but this does not close the upstream option or
+lifecycle surface.
 
 No native mount, unmount, signal, or live-filesystem result should be inferred
 from component tests. The CLI and integration test prerequisites remain an
@@ -253,8 +261,14 @@ Current focused behavior:
   sessions. `P9Server.clients` is now a live property-shaped array combining
   native and attached connections. `P9ServerOptions.locks` accepts a
   `P9LockTable`, and the injected table is shared by native and attached
-  sessions and exposed through their live option handles. The 9P mount helpers
-  remain unresolved rather than being treated as intentionally out of scope.
+  sessions and exposed through their live option handles. The bounded `./9p`
+  mount-helper facade now exposes Linux-client probing, refusal and exact
+  option-string helpers, strict named `mount9p` delegation, 9P live-mount
+  filtering/cleanup, and mounted transport/server/connection/closed views.
+  This is not full oracle mount parity: shared-server injection, signals,
+  server-policy/session callback fields, and the remaining extended mount
+  controls are explicitly unsupported in this packet, and hosted N-API native
+  mount lifecycle evidence remains unverified.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct `destroy()` on both the unified and v4 views, a read-only `v4`
   session view, synchronized v3/v4 request/reply/error/drop/procedure stats,
@@ -389,7 +403,10 @@ host-enabled WebDAV network/fault/restart matrix; hosted network concurrency
 and hosted lifecycle remain open.
 The shared postbuild server facade keeps close idempotent while in flight but
 clears a rejected close promise so a timed-out N-API WebDAV close can be
-retried after the peer drains.
+retried after the peer drains. The local SQLite N-API WebDAV probe also
+survives an abrupt child-process termination and confirms that bytes persist
+while replacement-session locks remain process-local; live-provider,
+power-loss, and hosted lifecycle acceptance remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full
