@@ -9,7 +9,7 @@
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::{BlockId, BlockStore, LoadedMetadata, MetadataStore};
-use mount_rs_core::{ErrorCode, Loopback, MkdirOptions};
+use mount_rs_core::{ErrorCode, FsDriver, Loopback, MkdirOptions};
 use mount_rs_pglite::{PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_sqlite::SqliteMetadataStore;
@@ -229,6 +229,43 @@ where
     file.close()
         .await
         .expect("could not close the Ozone composition file");
+    let bounded_file = loopback
+        .open("/chunks/bounded", "w+", 0o640)
+        .await
+        .expect("could not open the bounded-listing fixture file");
+    bounded_file
+        .write(b"bounded listing fixture", Some(0))
+        .await
+        .expect("could not write the bounded-listing fixture file");
+    bounded_file
+        .close()
+        .await
+        .expect("could not close the bounded-listing fixture file");
+    let bounded_entries = filesystem
+        .readdir_bounded("/chunks", 2)
+        .await
+        .expect("Ozone metadata provider could not enumerate its bounded directory");
+    let bounded_names = bounded_entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        bounded_names,
+        BTreeSet::from(["binary", "bounded"]),
+        "bounded Ozone directory listing returned unexpected entries"
+    );
+    let overflow = filesystem
+        .readdir_bounded("/chunks", 1)
+        .await
+        .expect_err("Ozone metadata provider exceeded the configured directory bound");
+    assert!(
+        overflow.is(ErrorCode::Eoverflow),
+        "bounded Ozone directory overflow returned the wrong error: {overflow}"
+    );
+    println!(
+        "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner={owner} entries={}",
+        bounded_entries.len()
+    );
     assert_eq!(
         loopback.read_file("/chunks/binary").await.unwrap(),
         expected
