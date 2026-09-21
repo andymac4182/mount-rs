@@ -1000,6 +1000,78 @@ async function exerciseWebdav() {
     assert.equal(unlock.status, 204);
     assert.equal(server.session.locks.length, 0);
 
+    const directRequest = (method, target, headers = [], body = null) =>
+      server.session.handleRequest({ method, target, headers }, body);
+    const options = await directRequest("OPTIONS", "/direct-methods");
+    assert.equal(options.status, 200);
+    const mkcol = await directRequest("MKCOL", "/direct-methods");
+    assert.ok([201, 204].includes(mkcol.status));
+    const methodObject = Buffer.from("direct WebDAV method coverage");
+    const methodPut = await directRequest(
+      "PUT",
+      "/direct-methods/source.txt",
+      [],
+      methodObject,
+    );
+    assert.ok([200, 201, 204].includes(methodPut.status));
+    const head = await directRequest("HEAD", "/direct-methods/source.txt");
+    assert.equal(head.status, 200);
+    assert.equal(head.body ?? null, null);
+    assert.equal(
+      Number(head.headers.find(({ name }) => name === "content-length")?.value),
+      methodObject.length,
+    );
+    const methodGet = await directRequest("GET", "/direct-methods/source.txt");
+    assert.equal(methodGet.status, 200);
+    assert.deepEqual(methodGet.body, methodObject);
+    const propfind = await directRequest(
+      "PROPFIND",
+      "/direct-methods",
+      [{ name: "depth", value: "1" }],
+      Buffer.from('<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>'),
+    );
+    assert.equal(propfind.status, 207);
+    assert.match(propfind.body.toString("utf8"), /<multistatus xmlns="DAV:">/);
+    const proppatch = await directRequest(
+      "PROPPATCH",
+      "/direct-methods/source.txt",
+      [],
+      Buffer.from('<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><D:getlastmodified>2026-09-21T00:00:00.000Z</D:getlastmodified></D:prop></D:set></D:propertyupdate>'),
+    );
+    assert.equal(proppatch.status, 207);
+    const copy = await directRequest(
+      "COPY",
+      "/direct-methods/source.txt",
+      [{ name: "destination", value: "/direct-methods/copy.txt" }],
+    );
+    assert.ok([201, 204].includes(copy.status));
+    const move = await directRequest(
+      "MOVE",
+      "/direct-methods/copy.txt",
+      [{ name: "destination", value: "/direct-methods/moved.txt" }],
+    );
+    assert.ok([201, 204].includes(move.status));
+    const methodLock = await directRequest(
+      "LOCK",
+      "/direct-methods/moved.txt",
+      [{ name: "depth", value: "0" }],
+      Buffer.from('<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>'),
+    );
+    assert.equal(methodLock.status, 200);
+    const methodLockToken = methodLock.headers.find(({ name }) => name === "lock-token")?.value;
+    assert.match(methodLockToken ?? "", /^<urn:uuid:/);
+    assert.match(methodLock.body.toString("utf8"), /<lockdiscovery>/);
+    const methodUnlock = await directRequest(
+      "UNLOCK",
+      "/direct-methods/moved.txt",
+      [{ name: "lock-token", value: methodLockToken }],
+    );
+    assert.equal(methodUnlock.status, 204);
+    const unsupported = await directRequest("PATCH", "/direct-methods/moved.txt");
+    assert.equal(unsupported.status, 405);
+    const remove = await directRequest("DELETE", "/direct-methods/moved.txt");
+    assert.equal(remove.status, 204);
+
     const put = await fetchBody(
       `${server.url}/servers-webdav.txt`,
       { method: "PUT", body: object },

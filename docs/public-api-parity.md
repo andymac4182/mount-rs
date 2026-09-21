@@ -289,9 +289,9 @@ root server/class identity while exposing the low-level constants/status,
 path/header/XML/lock helpers and generated declarations. The N-API session now
 accepts async-iterable or Web ReadableStream request bodies and returns a
 pull-based response iterator; the session also exposes read-only active lock
-records with expiry cleanup. The direct probe covers LOCK/UNLOCK cleanup,
-chunked PUT, multi-chunk GET, early iterator return, and deliberate
-request-body failure mapping. The
+records with expiry cleanup. The direct probe covers the class 1/2/3 method
+matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
+return, and deliberate request-body failure mapping. The
 pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
 provider/native, restart, and complete member-parity gates remain open.
 

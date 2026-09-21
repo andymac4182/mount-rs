@@ -1014,7 +1014,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
-  loopback integration verified direct class 1/2/3 methods plus chunked PUT,
+  host-enabled integration verified direct OPTIONS/MKCOL/PUT/HEAD/GET,
+  PROPFIND/PROPPATCH, COPY/MOVE, LOCK/UNLOCK, DELETE, and PATCH refusal, plus
+  chunked PUT,
   multi-chunk GET, early iterator return, and deliberate request-stream
   failure; WebDAV integration 13/13, isolated N-API compile, release build,
   generated typecheck, server integration, and scoped warning-denied Clippy
