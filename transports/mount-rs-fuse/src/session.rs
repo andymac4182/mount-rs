@@ -9,7 +9,7 @@ use crate::{
         FUSE_FALLOCATE, FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL,
         FUSE_KERNEL_MINOR_VERSION, FUSE_LISTXATTR, FUSE_LK_FLOCK, FUSE_LSEEK, FUSE_NOTIFY_REPLY,
         FUSE_POLL, FUSE_READLINK, FUSE_REMOVEXATTR, FUSE_RENAME2, FUSE_SETLK, FUSE_SETLKW,
-        FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS, FUSE_SYNCFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -211,6 +211,7 @@ fn validate_body(opcode: u32, body: &[u8], context: Option<ProtocolContext>) -> 
         FUSE_FALLOCATE => Some(32),
         FUSE_LSEEK => Some(24),
         FUSE_COPY_FILE_RANGE => Some(56),
+        FUSE_SYNCFS => Some(8),
         _ => None,
     };
     if exact.is_some_and(|size| body.len() != size) {
@@ -865,6 +866,11 @@ impl FuseSession {
                 if !self.directories.contains_key(&u64_at(r.body, 0)?) {
                     return Err(FsError::new(ErrorCode::Ebadf));
                 }
+                self.driver.syncfs().await?;
+                Ok(vec![])
+            }
+            FUSE_SYNCFS => {
+                let _padding = u64_at(r.body, 0)?;
                 self.driver.syncfs().await?;
                 Ok(vec![])
             }

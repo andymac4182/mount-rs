@@ -44,7 +44,7 @@ The typed codec table covers these operations:
 `REMOVEXATTR`, `FLUSH`, `INIT`, `OPENDIR`, `READDIR`, `RELEASEDIR`,
 `FSYNCDIR`, `GETLK`, `SETLK`, `SETLKW`, `ACCESS`, `CREATE`, `INTERRUPT`,
 `BMAP`, `DESTROY`, `POLL`, `BATCH_FORGET`, `FALLOCATE`, `READDIRPLUS`,
-`RENAME2`, and `LSEEK`.
+`RENAME2`, `LSEEK`, and `SYNCFS`.
 
 The focused tests in `tests/protocol.rs` retain upstream byte fixtures for
 `INIT`, `LOOKUP`, `READDIRPLUS`, and `WRITE`, plus the generated
@@ -60,7 +60,7 @@ The following named upstream opcodes intentionally have no typed body codec
 in this slice and are returned as unsupported by the dispatch helpers:
 
 `IOCTL`, `NOTIFY_REPLY`, `COPY_FILE_RANGE`, `SETUPMAPPING`, `REMOVEMAPPING`,
-`SYNCFS`, `TMPFILE`, `STATX`, and `CUSE_INIT`.
+`TMPFILE`, `STATX`, and `CUSE_INIT`.
 
 Unknown numeric opcodes can still be framed as raw payloads, but they are not
 decoded into a typed body and are not treated as supported operations.
@@ -71,8 +71,10 @@ The existing `FuseSession` native path remains intact. Its current dispatch
 handles `INIT` (modern 7.12+ layout), `MKNOD`, `FLUSH`, `FSYNCDIR`, `SETATTR`,
 `DESTROY`, `OPENDIR`, `READDIR`, `READDIRPLUS`, `RELEASEDIR`, `STATFS`,
 `FSYNC`, `CREATE`, `READLINK`, `SYMLINK`, `MKDIR`, `UNLINK`, `RMDIR`,
-`RENAME`, `LINK`, `LOOKUP`, `GETATTR`, `OPEN`, `READ`, `WRITE`, `ACCESS`, and
-`RELEASE`. `ACCESS` evaluates the request uid/gid against driver metadata;
+`RENAME`, `LINK`, `LOOKUP`, `GETATTR`, `OPEN`, `READ`, `WRITE`, `ACCESS`,
+`RELEASE`, and `SYNCFS`. `SYNCFS` invokes the driver's filesystem-wide
+`syncfs()` barrier; durable drivers that do not implement that barrier return
+an explicit `ENOSYS` result. `ACCESS` evaluates the request uid/gid against driver metadata;
 supplementary groups remain an explicit boundary because this session does not
 negotiate or receive them.
 `FORGET` and `BATCH_FORGET` remain bookkeeping paths, while

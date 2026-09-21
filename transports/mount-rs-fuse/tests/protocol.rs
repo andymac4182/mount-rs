@@ -1469,6 +1469,32 @@ fn readlink_and_statfs_wire_edges_match_empty_and_legacy_layouts() {
         trailing.push(0);
         assert!(decode_reply_body(FUSE_STATFS, &trailing, Some(context)).is_err());
     }
+
+    for context in contexts {
+        let request = FuseRequestBody::Syncfs(FuseSyncfsIn {
+            padding: 0x0102_0304_0506_0708,
+        });
+        let wire = encode_request_body(FUSE_SYNCFS, &request, Some(context)).unwrap();
+        assert_eq!(wire, 0x0102_0304_0506_0708_u64.to_le_bytes());
+        assert_eq!(
+            decode_request_body(FUSE_SYNCFS, &wire, Some(context)).unwrap(),
+            request
+        );
+        for length in 0..wire.len() {
+            assert!(decode_request_body(FUSE_SYNCFS, &wire[..length], Some(context)).is_err());
+        }
+        let mut trailing = wire.clone();
+        trailing.push(0);
+        assert!(decode_request_body(FUSE_SYNCFS, &trailing, Some(context)).is_err());
+        assert_eq!(
+            decode_reply_body(FUSE_SYNCFS, &[], Some(context)).unwrap(),
+            FuseReplyBody::Empty
+        );
+        assert_eq!(
+            encode_reply_body(FUSE_SYNCFS, &FuseReplyBody::Empty, Some(context)).unwrap(),
+            Vec::<u8>::new()
+        );
+    }
 }
 
 #[test]

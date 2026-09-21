@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use mount_rs_core::{
     Capabilities, ErrorCode, FileHandle, FsDriver, FsError, MemoryFs, OpenFlags, Result, Stats,
 };
-use mount_rs_fuse::{RequestHeader, session::FuseSession};
+use mount_rs_fuse::{RequestHeader, constants::FUSE_SYNCFS, session::FuseSession};
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -206,6 +206,29 @@ async fn default_syncfs_rejects_unimplemented_durable_barrier() {
 
     // MemoryFs is volatile, so the same default is a successful no-op.
     MemoryFs::empty().syncfs().await.unwrap();
+}
+
+#[tokio::test]
+async fn syncfs_dispatches_driver_barrier_and_propagates_errors() {
+    let driver = Arc::new(BarrierDriver::new(false));
+    let mut session = FuseSession::new(Arc::clone(&driver) as Arc<dyn FsDriver>);
+    let body = [0u8; 8];
+
+    success(&raw_request(&mut session, FUSE_SYNCFS, 1, &body).await);
+    assert_eq!(driver.syncfs_calls.load(Ordering::SeqCst), 1);
+
+    driver.fail_syncfs.store(true, Ordering::SeqCst);
+    let reply = raw_request(&mut session, FUSE_SYNCFS, 1, &body).await;
+    assert_eq!(errno(&reply), -ErrorCode::Eio.errno());
+    assert_eq!(driver.syncfs_calls.load(Ordering::SeqCst), 2);
+
+    let malformed = raw_request(&mut session, FUSE_SYNCFS, 1, &[0; 7]).await;
+    assert_eq!(errno(&malformed), -ErrorCode::Einval.errno());
+    let mut trailing = body.to_vec();
+    trailing.push(0);
+    let malformed = raw_request(&mut session, FUSE_SYNCFS, 1, &trailing).await;
+    assert_eq!(errno(&malformed), -ErrorCode::Einval.errno());
+    assert_eq!(driver.syncfs_calls.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

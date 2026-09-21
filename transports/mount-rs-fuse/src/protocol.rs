@@ -756,6 +756,11 @@ pub struct FuseFsyncIn {
     pub fsync_flags: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FuseSyncfsIn {
+    pub padding: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuseSetxattrIn {
     pub flags: u32,
@@ -1363,6 +1368,19 @@ fn encode_fsync_in(value: &FuseFsyncIn) -> Vec<u8> {
     writer.u64(value.fh);
     writer.u32(value.fsync_flags);
     writer.skip(4);
+    writer.finish()
+}
+
+fn decode_syncfs_in(body: &[u8]) -> Result<FuseSyncfsIn, ProtocolError> {
+    let mut reader = Reader::new(body);
+    let padding = reader.u64("fuse_syncfs_in.padding")?;
+    reader.end("fuse_syncfs_in")?;
+    Ok(FuseSyncfsIn { padding })
+}
+
+fn encode_syncfs_in(value: &FuseSyncfsIn) -> Vec<u8> {
+    let mut writer = Writer::with_capacity(8);
+    writer.u64(value.padding);
     writer.finish()
 }
 
@@ -2173,6 +2191,7 @@ pub enum FuseRequestBody {
     Release(FuseReleaseIn),
     Flush(FuseFlushIn),
     Fsync(FuseFsyncIn),
+    Syncfs(FuseSyncfsIn),
     Setxattr(FuseSetxattrIn),
     Getxattr(FuseGetxattrIn),
     Listxattr(FuseListxattrIn),
@@ -2265,6 +2284,7 @@ pub fn decode_request_body(
         FUSE_RELEASE | FUSE_RELEASEDIR => FuseRequestBody::Release(decode_release_in(body)?),
         FUSE_FLUSH => FuseRequestBody::Flush(decode_flush_in(body)?),
         FUSE_FSYNC | FUSE_FSYNCDIR => FuseRequestBody::Fsync(decode_fsync_in(body)?),
+        FUSE_SYNCFS => FuseRequestBody::Syncfs(decode_syncfs_in(body)?),
         FUSE_SETXATTR => FuseRequestBody::Setxattr(decode_setxattr_in(body, ctx)?),
         FUSE_GETXATTR => FuseRequestBody::Getxattr(decode_getxattr_in(body)?),
         FUSE_LISTXATTR => FuseRequestBody::Listxattr(decode_listxattr_in(body)?),
@@ -2364,6 +2384,10 @@ pub fn encode_request_body(
             FuseRequestBody::Fsync(value) => Ok(encode_fsync_in(value)),
             _ => Err(wrong_request_body(opcode, "fsync")),
         },
+        FUSE_SYNCFS => match body {
+            FuseRequestBody::Syncfs(value) => Ok(encode_syncfs_in(value)),
+            _ => Err(wrong_request_body(opcode, "syncfs")),
+        },
         FUSE_SETXATTR => match body {
             FuseRequestBody::Setxattr(value) => encode_setxattr_in(value, ctx),
             _ => Err(wrong_request_body(opcode, "setxattr")),
@@ -2439,7 +2463,7 @@ pub fn decode_reply_body(
         FUSE_FORGET | FUSE_BATCH_FORGET | FUSE_UNLINK | FUSE_RMDIR | FUSE_RENAME | FUSE_RENAME2
         | FUSE_RELEASE | FUSE_RELEASEDIR | FUSE_FSYNC | FUSE_FSYNCDIR | FUSE_FLUSH
         | FUSE_ACCESS | FUSE_DESTROY | FUSE_INTERRUPT | FUSE_SETXATTR | FUSE_REMOVEXATTR
-        | FUSE_FALLOCATE | FUSE_SETLK | FUSE_SETLKW => {
+        | FUSE_FALLOCATE | FUSE_SETLK | FUSE_SETLKW | FUSE_SYNCFS => {
             decode_empty(body, &opcode_name(opcode))?;
             FuseReplyBody::Empty
         }
@@ -2520,7 +2544,7 @@ pub fn encode_reply_body(
         FUSE_FORGET | FUSE_BATCH_FORGET | FUSE_UNLINK | FUSE_RMDIR | FUSE_RENAME | FUSE_RENAME2
         | FUSE_RELEASE | FUSE_RELEASEDIR | FUSE_FSYNC | FUSE_FSYNCDIR | FUSE_FLUSH
         | FUSE_ACCESS | FUSE_DESTROY | FUSE_INTERRUPT | FUSE_SETXATTR | FUSE_REMOVEXATTR
-        | FUSE_FALLOCATE | FUSE_SETLK | FUSE_SETLKW => match body {
+        | FUSE_FALLOCATE | FUSE_SETLK | FUSE_SETLKW | FUSE_SYNCFS => match body {
             FuseReplyBody::Empty => Ok(Vec::new()),
             _ => Err(wrong_reply_body(opcode, "empty")),
         },

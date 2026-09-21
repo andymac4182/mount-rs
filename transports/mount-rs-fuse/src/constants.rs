@@ -254,6 +254,7 @@ pub const SUPPORTED_OPCODES: &[u32] = &[
     FUSE_READDIRPLUS,
     FUSE_RENAME2,
     FUSE_LSEEK,
+    FUSE_SYNCFS,
 ];
 
 /// Known wire opcodes intentionally left without a body codec or session
@@ -264,7 +265,6 @@ pub const UNIMPLEMENTED_OPCODES: &[u32] = &[
     FUSE_COPY_FILE_RANGE,
     FUSE_SETUPMAPPING,
     FUSE_REMOVEMAPPING,
-    FUSE_SYNCFS,
     FUSE_TMPFILE,
     FUSE_STATX,
     CUSE_INIT,

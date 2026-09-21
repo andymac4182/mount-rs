@@ -243,6 +243,11 @@ qualified on Linux. The focused session target passed 19/19, the complete
 locked FUSE target and strict Clippy passed, and the packet remains separate
 from hosted native mount, callback-event, FSKit, crash/restart and durability
 acceptance; W01 stays NO-GO.
+The next focused FUSE packet adds the protocol 7.34 eight-byte `SYNCFS` body
+codec and routes the native request to the existing `FsDriver::syncfs` barrier.
+Success, backend failure, malformed/trailing bodies and empty replies are
+covered by focused tests; hosted kernel syncfs and the remaining native
+lifecycle/crash/durability gates remain external, so W01 stays NO-GO.
 The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
 session destroy in unwind isolation. A backend or cleanup panic now becomes
 one owned `Task` transport error, still closes the session, marks the mount
