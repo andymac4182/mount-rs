@@ -385,6 +385,7 @@ if [ -n "$rustfs_endpoint" ]; then
     --env R2_SECRET_ACCESS_KEY \
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
      apt-get update -qq

@@ -10,7 +10,10 @@ use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::driver::FsDriver;
 use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
 use mount_rs_core::{ErrorCode, Loopback, Result};
-use mount_rs_foundationdb::{FoundationDbStorage, FoundationDbStorageOptions, LeaseOracle};
+use mount_rs_foundationdb::{
+    FoundationDbLeaseAuthority, FoundationDbLimits, FoundationDbSharedLeaseOracle,
+    FoundationDbStorage, FoundationDbStorageOptions, LeaseOracle,
+};
 use mount_rs_r2::{R2BlockStore, R2Config};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
@@ -111,6 +114,13 @@ fn required_env(name: &str) -> String {
     env::var(name).unwrap_or_else(|_| panic!("{name} must be set for the real composition gate"))
 }
 
+fn configured_authority_prefix(combo_prefix: &str) -> String {
+    env::var("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
+        .ok()
+        .filter(|prefix| !prefix.trim().is_empty())
+        .unwrap_or_else(|| format!("{combo_prefix}/lease-authority"))
+}
+
 fn local_rustfs_config() -> R2Config {
     let config = R2Config::from_env().expect("RustFS R2-compatible environment is required");
     assert!(
@@ -143,19 +153,33 @@ fn expected_composition_bytes() -> Vec<u8> {
     expected
 }
 
+fn open_shared_storage(
+    cluster_file: &str,
+    volume_prefix: &str,
+    authority_prefix: &str,
+) -> Result<FoundationDbStorage> {
+    let oracle = FoundationDbSharedLeaseOracle::connect(
+        cluster_file,
+        authority_prefix,
+        FoundationDbLimits::default(),
+    )?;
+    FoundationDbStorage::connect(
+        cluster_file,
+        FoundationDbStorageOptions::new(volume_prefix)
+            .with_durable(true)
+            .with_production_lease_oracle(oracle),
+    )
+}
+
 async fn composition_round_trip(
     cluster_file: &str,
     config: &R2Config,
     volume_prefix: &str,
     block_prefix: &str,
+    authority_prefix: &str,
     created: Arc<Mutex<BTreeSet<BlockId>>>,
 ) -> Result<(Vec<u8>, u64)> {
-    let storage = FoundationDbStorage::from_cluster_file(
-        cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix)
-            .with_durable(true)
-            .with_persisted_lease_oracle(),
-    )?;
+    let storage = open_shared_storage(cluster_file, volume_prefix, authority_prefix)?;
     let metadata = storage.metadata();
     let blocks = TrackedRustFsBlocks::new(config, block_prefix, created);
     let filesystem = ChunkedFs::open(
@@ -220,15 +244,11 @@ async fn verify_reopen(
     config: &R2Config,
     volume_prefix: &str,
     block_prefix: &str,
+    authority_prefix: &str,
     expected: &[u8],
     created: Arc<Mutex<BTreeSet<BlockId>>>,
 ) -> Result<()> {
-    let storage = FoundationDbStorage::from_cluster_file(
-        cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix)
-            .with_durable(true)
-            .with_persisted_lease_oracle(),
-    )?;
+    let storage = open_shared_storage(cluster_file, volume_prefix, authority_prefix)?;
     let metadata = storage.metadata();
     let blocks = TrackedRustFsBlocks::new(config, block_prefix, created);
     let filesystem = ChunkedFs::open(
@@ -248,19 +268,14 @@ async fn verify_reopen(
     Ok(())
 }
 
-async fn verify_concurrent_acquire(cluster_file: &str, volume_prefix: &str) -> Result<()> {
-    let first = FoundationDbStorage::from_cluster_file(
-        cluster_file,
-        FoundationDbStorageOptions::new(format!("{volume_prefix}/concurrent-acquire"))
-            .with_durable(true)
-            .with_persisted_lease_oracle(),
-    )?;
-    let second = FoundationDbStorage::from_cluster_file(
-        cluster_file,
-        FoundationDbStorageOptions::new(format!("{volume_prefix}/concurrent-acquire"))
-            .with_durable(true)
-            .with_persisted_lease_oracle(),
-    )?;
+async fn verify_concurrent_acquire(
+    cluster_file: &str,
+    volume_prefix: &str,
+    authority_prefix: &str,
+) -> Result<()> {
+    let concurrent_prefix = format!("{volume_prefix}/concurrent-acquire");
+    let first = open_shared_storage(cluster_file, &concurrent_prefix, authority_prefix)?;
+    let second = open_shared_storage(cluster_file, &concurrent_prefix, authority_prefix)?;
     let first_metadata = first.metadata();
     let second_metadata = second.metadata();
     let (left, right) = tokio::join!(
@@ -293,19 +308,13 @@ async fn verify_concurrent_acquire(cluster_file: &str, volume_prefix: &str) -> R
     Ok(())
 }
 
-async fn verify_cas_and_fencing(cluster_file: &str, volume_prefix: &str) -> Result<()> {
-    let first = FoundationDbStorage::from_cluster_file(
-        cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix)
-            .with_durable(true)
-            .with_persisted_lease_oracle(),
-    )?;
-    let second = FoundationDbStorage::from_cluster_file(
-        cluster_file,
-        FoundationDbStorageOptions::new(volume_prefix)
-            .with_durable(true)
-            .with_persisted_lease_oracle(),
-    )?;
+async fn verify_cas_and_fencing(
+    cluster_file: &str,
+    volume_prefix: &str,
+    authority_prefix: &str,
+) -> Result<()> {
+    let first = open_shared_storage(cluster_file, volume_prefix, authority_prefix)?;
+    let second = open_shared_storage(cluster_file, volume_prefix, authority_prefix)?;
     let first_metadata = first.metadata();
     let second_metadata = second.metadata();
     let first_lease = first_metadata
@@ -361,7 +370,7 @@ async fn verify_chunked_lease_fencing(
     // FoundationDB cluster.
     let clock = Arc::new(DeterministicLeaseOracle::new(1_000_000));
     let oracle: Arc<dyn LeaseOracle> = clock.clone();
-    let old_storage = FoundationDbStorage::from_cluster_file(
+    let old_storage = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(volume_prefix)
             .with_durable(true)
@@ -378,7 +387,7 @@ async fn verify_chunked_lease_fencing(
 
     clock.advance_ms(30_000);
 
-    let new_storage = FoundationDbStorage::from_cluster_file(
+    let new_storage = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(volume_prefix)
             .with_durable(true)
@@ -516,14 +525,22 @@ async fn run_real_composition() -> Result<()> {
     let combo_prefix = required_env("RUSTFS_COMBO_PREFIX");
     let volume_prefix = format!("{combo_prefix}/foundationdb-metadata");
     let block_prefix = format!("{combo_prefix}/rustfs-blocks");
+    let authority_prefix = configured_authority_prefix(&combo_prefix);
     let created = Arc::new(Mutex::new(BTreeSet::new()));
 
-    let network = unsafe { foundationdb::boot() };
+    let authority = FoundationDbLeaseAuthority::connect(
+        &cluster_file,
+        &authority_prefix,
+        FoundationDbLimits::default(),
+    )?;
+    authority.publish_system_now_ms().await?;
+    drop(authority);
     let (expected, revision) = composition_round_trip(
         &cluster_file,
         &config,
         &volume_prefix,
         &block_prefix,
+        &authority_prefix,
         Arc::clone(&created),
     )
     .await?;
@@ -532,6 +549,7 @@ async fn run_real_composition() -> Result<()> {
         &config,
         &volume_prefix,
         &block_prefix,
+        &authority_prefix,
         &expected,
         Arc::clone(&created),
     )
@@ -544,15 +562,14 @@ async fn run_real_composition() -> Result<()> {
         Arc::clone(&created),
     )
     .await?;
-    verify_concurrent_acquire(&cluster_file, &volume_prefix).await?;
-    verify_cas_and_fencing(&cluster_file, &volume_prefix).await?;
+    verify_concurrent_acquire(&cluster_file, &volume_prefix, &authority_prefix).await?;
+    verify_cas_and_fencing(&cluster_file, &volume_prefix, &authority_prefix).await?;
 
     let blocks = TrackedRustFsBlocks::new(&config, block_prefix, created);
     let defer_cleanup = env::var_os("MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP").is_some();
     if !defer_cleanup {
         verify_exact_rustfs_cleanup(&config, &combo_prefix, blocks.inner.prefix(), &blocks).await?;
     }
-    drop(network);
     println!(
         "FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision={revision} volume_prefix={volume_prefix} cleanup_deferred={defer_cleanup}"
     );
@@ -565,25 +582,25 @@ async fn run_real_restart_reopen() -> Result<()> {
     let combo_prefix = required_env("RUSTFS_COMBO_PREFIX");
     let volume_prefix = format!("{combo_prefix}/foundationdb-metadata");
     let block_prefix = format!("{combo_prefix}/rustfs-blocks");
+    let authority_prefix = configured_authority_prefix(&combo_prefix);
     let created = Arc::new(Mutex::new(BTreeSet::new()));
 
-    let network = unsafe { foundationdb::boot() };
     verify_reopen(
         &cluster_file,
         &config,
         &volume_prefix,
         &block_prefix,
+        &authority_prefix,
         &expected_composition_bytes(),
         Arc::clone(&created),
     )
     .await?;
     // Re-run the metadata CAS and lease-fence checks after the service restart;
     // this is distinct from the first process's pre-restart evidence.
-    verify_cas_and_fencing(&cluster_file, &volume_prefix).await?;
+    verify_cas_and_fencing(&cluster_file, &volume_prefix, &authority_prefix).await?;
 
     let blocks = TrackedRustFsBlocks::new(&config, block_prefix, created);
     verify_exact_rustfs_cleanup(&config, &combo_prefix, blocks.inner.prefix(), &blocks).await?;
-    drop(network);
     println!("FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS volume_prefix={volume_prefix}");
     Ok(())
 }
