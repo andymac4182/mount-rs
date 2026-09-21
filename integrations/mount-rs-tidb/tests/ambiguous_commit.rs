@@ -17,7 +17,7 @@ use std::io::{Error, ErrorKind, Result as IoResult};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
 use url::Url;
 
 fn tidb_url() -> String {
@@ -197,30 +197,28 @@ async fn start_commit_drop_proxy(database_url: &str) -> (String, JoinHandle<IoRe
     proxy_url
         .set_port(Some(proxy_port))
         .expect("rewrite the proxy port");
-    proxy_url
-        .query_pairs_mut()
-        .append_pair("pool_min", "0")
-        .append_pair("pool_max", "1");
 
     let task = tokio::spawn(async move {
-        let (client, _) = listener.accept().await?;
-        let upstream = TcpStream::connect((target_host.as_str(), target_port)).await?;
-        // mysql_async may try to acquire another pooled connection after the
-        // commit connection is dropped. Close those extra attempts instead
-        // of leaving an established socket queued behind the single relay,
-        // which would make the failure-injection test wait forever.
-        let reject_extra: JoinHandle<IoResult<()>> = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((extra, _)) => drop(extra),
-                    Err(error) => return Err(error),
+        let mut relays = JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (client, _) = accepted?;
+                    let upstream = TcpStream::connect((target_host.as_str(), target_port)).await?;
+                    relays.spawn(async move { relay_until_commit_response(client, upstream).await });
+                }
+                relay = relays.join_next(), if !relays.is_empty() => {
+                    match relay {
+                        Some(Ok(Ok(()))) => {
+                            relays.abort_all();
+                            while relays.join_next().await.is_some() {}
+                            return Ok(());
+                        }
+                        Some(Ok(Err(_))) | Some(Err(_)) | None => {}
+                    }
                 }
             }
-        });
-        let result = relay_until_commit_response(client, upstream).await;
-        reject_extra.abort();
-        let _ = reject_extra.await;
-        result
+        }
     });
     (proxy_url.to_string(), task)
 }
