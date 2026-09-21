@@ -54,6 +54,12 @@ jobs:
             echo 'W07 production config policy accepted an insecure fixture' >&2
             exit 1
           fi
+          if node scripts/verify-w07-production-config.mjs \
+            tests/foundationdb/production-config-policy.invalid-lease-ttl.json \
+            2>&1 | tee -a artifacts/foundationdb-production-qualification.log; then
+            echo 'W07 production config policy accepted an unsafe lease TTL fixture' >&2
+            exit 1
+          fi
 
       - name: Install real PGlite and Node factory prerequisites
         run: |

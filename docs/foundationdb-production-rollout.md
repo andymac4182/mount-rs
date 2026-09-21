@@ -42,7 +42,9 @@ CI job, installation-only evidence, or a local qualification report.
 | [Hosted run `35641662353`](https://github.com/andymac4182/mount-rs/actions/runs/35641662353), job `106472188828`, revision `31e122b`, Ubuntu 24.04 | **PASS — latest mainline provenance-validated five-round hosted qualification** — the rollout-ledger guard passed with the repository still **NO-GO** and W07.7 open; production-config positive/negative fixtures passed with the expected outcomes; durable FoundationDB/RustFS composition; `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9861 p95_us=29367 p99_us=29367 total_ms=163 throughput_ops_per_sec=91.81`; five isolated soak rounds; live Node/N-API; native Linux CLI/FUSE mount and reopen; service restart; schema-2 provenance validation and retained artifact passed. | Terminal hosted Linux qualification for the tested revision `31e122bc2e5790bb3568c01aaea4b236d89dce96` only, completed in 11m37s. Artifact `foundationdb-production-qualification-35641662353-1` has SHA-256 `5f744788bd82fd52fd7e59f1201885dc79f80af2b0558eef917187abce222b50`; its provenance records source revision `31e122bc2e5790bb3568c01aaea4b236d89dce96`, run `35641662353`, attempt `1`, and runner `GitHub Actions 1000021349`. This remains bounded qualification and does not prove production identity/ACL/TLS, backup/restore, production load/capacity, multi-day duration, failover, macOS, or release approval. |
 | [Hosted run `35645459649`](https://github.com/andymac4182/mount-rs/actions/runs/35645459649), job `106484724044`, revision `b3a0a92`, Ubuntu 24.04 | **PASS — latest mainline qualification with rollout-ledger regression coverage** — the NO-GO consistency guard passed; `W07_ROLLOUT_LEDGER_TEST_PASS cases=6` passed; production-config positive/negative fixtures passed with the expected outcomes; durable FoundationDB/RustFS composition; `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9350 p95_us=49303 p99_us=49303 total_ms=182 throughput_ops_per_sec=82.07`; five isolated soak rounds; live Node/N-API; native Linux CLI/FUSE mount and reopen; service restart; schema-2 provenance validation and retained artifact passed. | Terminal hosted Linux qualification for the tested revision `b3a0a92d617e66ad58460f345c428e197f8c9e2d` only, completed in 11m28s. Artifact `foundationdb-production-qualification-35645459649-1` has SHA-256 `0bab89cbff4d36b68351d84978ad56991e2ac16621084dd987f8717d4b07e63e`; its provenance records source revision `b3a0a92d617e66ad58460f345c428e197f8c9e2d`, run `35645459649`, attempt `1`, and runner `GitHub Actions 1000021544`. This remains bounded qualification and does not prove production identity/ACL/TLS, backup/restore, production load/capacity, multi-day duration, failover, macOS, or release approval. |
 | [Hosted run `35648296386`](https://github.com/andymac4182/mount-rs/actions/runs/35648296386), job `106494088981`, revision `20fb445a`, Ubuntu 24.04 | **PASS — latest mainline qualification with rollout-ledger regression coverage** — the NO-GO consistency guard passed; `W07_ROLLOUT_LEDGER_TEST_PASS cases=6` passed; production-config positive/negative fixtures passed with the expected outcomes; durable FoundationDB/RustFS composition; `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=7654 p95_us=36558 p99_us=36558 total_ms=146 throughput_ops_per_sec=102.61`; five isolated soak rounds; live Node/N-API; native Linux CLI/FUSE mount and reopen; service restart; schema-2 provenance validation and retained artifact passed. | Terminal hosted Linux qualification for the tested revision `20fb445a02b16e3dcb62525fcbd84ff14d7c8dea` only, completed in 11m16s. Artifact `foundationdb-production-qualification-35648296386-1` has SHA-256 `8c93fc161217e7c032be17c6892791bb764a081ddad678ad601a0d6775a5962b`; its provenance records source revision `20fb445a02b16e3dcb62525fcbd84ff14d7c8dea`, run `35648296386`, attempt `1`, and runner `GitHub Actions 1000021765`. This remains bounded qualification and does not prove production identity/ACL/TLS, backup/restore, production load/capacity, multi-day duration, failover, macOS, or release approval. |
+| [Hosted run `35650634174`](https://github.com/andymac4182/mount-rs/actions/runs/35650634174), job `106501907695`, revision `8f3a19a`, Ubuntu 24.04 | **PASS — latest mainline qualification with rollout-ledger regression coverage** — the NO-GO consistency guard passed; `W07_ROLLOUT_LEDGER_TEST_PASS cases=6` passed; production-config positive/negative fixtures passed with the expected outcomes; durable FoundationDB/RustFS composition; base `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=12440 p95_us=117600 p99_us=117600 total_ms=385 throughput_ops_per_sec=38.88`; five isolated soak rounds with p95/p99 ranging from 31,686µs to 346,494µs and throughput from 23.53 to 97.18 ops/s; live Node/N-API; native Linux CLI/FUSE mount and reopen; service restart; schema-2 provenance validation and retained artifact passed. | Terminal hosted Linux qualification for the tested revision `8f3a19a891b8d432ff551c04789921575bb12f4f` only, completed in 10m19s. Artifact `foundationdb-production-qualification-35650634174-1` has SHA-256 `6a99d3778504fa2ab123c7256d168b4b52a424c2aea594f7dc03ce7d076a16f8`; its provenance records source revision `8f3a19a891b8d432ff551c04789921575bb12f4f`, run `35650634174`, attempt `1`, and runner `GitHub Actions 1000021966`. This remains bounded qualification; the latency variability is not production capacity evidence, and production identity/ACL/TLS, backup/restore, production load/capacity, multi-day duration, failover, macOS, or release approval remain open. |
 | Local source gate, 2026-09-22, revision `2641962a` | **PASS** — `./scripts/cargo-shared fmt --all -- --check`, strict locked workspace Clippy with `-D warnings`, and `./scripts/cargo-shared test --workspace --all-targets --locked` all passed on the current shared source tip; current FUSE sync-barrier/session, NFS, transport, SDK, CLI and provider unit coverage passed in the all-target run | Source qualification only. Provider, native-mount and external-service rows remained explicitly ignored where their required harnesses were unavailable; this does not close the hosted platform or production deployment gates. |
+| Local source gate, 2026-09-22, revision `4ea3268` | **PASS** — `./scripts/cargo-shared fmt --all -- --check`, strict locked workspace Clippy with `-D warnings`, and `./scripts/cargo-shared test --workspace --all-targets --locked` all passed on the published shared tip; current 9P/FUSE, NFS, transport, SDK, CLI and provider unit coverage passed in the all-target run | Source qualification only. Provider, native-mount and external-service rows remained explicitly ignored where their required harnesses were unavailable; this does not close the hosted platform or production deployment gates. |
 | Local source gate, 2026-09-22, revision `3cd4377` | **PASS** — `./scripts/cargo-shared fmt --all -- --check`, strict locked workspace Clippy with `-D warnings`, and `CARGO_TARGET_DIR=/private/tmp/mount-rs-w07-main-gate-3cd43779-test ./scripts/cargo-shared test --workspace --all-targets --locked` all passed; current FUSE sync-barrier/session and NFS coverage passed in the all-target run | Current-main source qualification only. Provider, native-mount and external-service rows remained explicitly ignored where their required harnesses were unavailable; this does not close the hosted platform or production deployment gates. |
 | Local source gate, 2026-09-22, revision `9d3a6e5` | **PASS** — `./scripts/cargo-shared fmt --all -- --check`, strict locked workspace Clippy with `-D warnings`, and `CARGO_TARGET_DIR=/private/tmp/mount-rs-w07-main-gate-9d3a6e50-test ./scripts/cargo-shared test --workspace --all-targets --locked` all passed; the FUSE sync-barrier/session coverage passed in the all-target run | Current-main source qualification only. Provider, native-mount and external-service rows remained explicitly ignored where their required harnesses were unavailable; this does not close the hosted platform or production deployment gates. |
 | Local source gate, 2026-09-22, revision `29365e9` | **PASS** — `./scripts/cargo-shared fmt --all -- --check`, strict locked workspace Clippy with `-D warnings`, and `CARGO_TARGET_DIR=/private/tmp/mount-rs-w07-main-gate-29365e9 ./scripts/cargo-shared test --workspace --all-targets --locked` all passed | Current-main source qualification only. Provider, native-mount and external-service rows remained explicitly ignored where their required harnesses were unavailable; this does not close the hosted platform or production deployment gates. |
@@ -187,7 +189,7 @@ It also passed `W07_ROLLOUT_LEDGER_POLICY_PASS` and
 It is the latest bounded hosted qualification evidence, not production
 acceptance.
 
-The latest hosted mainline run
+The previous hosted mainline run
 [`35648296386`](https://github.com/andymac4182/mount-rs/actions/runs/35648296386)
 (job `106494088981`, revision `20fb445a`) completed green on Ubuntu 24.04 in
 11m16s. Its retained artifact
@@ -203,9 +205,29 @@ It also passed `W07_ROLLOUT_LEDGER_POLICY_PASS`,
 `W07_ROLLOUT_LEDGER_TEST_PASS cases=6`, the credential-free production
 configuration policy fixtures, `RUSTFS_COMBO_PASS` and
 `RUSTFS_INTEGRATION_PASS` while preserving the NO-GO boundary. It is the
-latest bounded hosted qualification evidence, not production acceptance.
+prior bounded hosted qualification evidence, not production acceptance.
 
-The current shared-tip source gate tested revision
+The latest hosted mainline run
+[`35650634174`](https://github.com/andymac4182/mount-rs/actions/runs/35650634174)
+(job `106501907695`, revision `8f3a19a`) completed green on Ubuntu 24.04 in
+10m19s. Its retained artifact
+`foundationdb-production-qualification-35650634174-1` has SHA-256
+`6a99d3778504fa2ab123c7256d168b4b52a424c2aea594f7dc03ce7d076a16f8`.
+The schema-2 summary records
+`sourceRevision=8f3a19a891b8d432ff551c04789921575bb12f4f`,
+`runId=35650634174`, `runAttempt=1`, runner `GitHub Actions 1000021966`,
+five soak rounds, `FOUNDATIONDB_CLI_PASS`, native restart/reopen, and base
+`FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=12440
+p95_us=117600 p99_us=117600 total_ms=385 throughput_ops_per_sec=38.88`.
+The five soak-round p95/p99 values ranged from 31,686µs to 346,494µs and
+throughput ranged from 23.53 to 97.18 ops/s. It also passed
+`W07_ROLLOUT_LEDGER_POLICY_PASS`, `W07_ROLLOUT_LEDGER_TEST_PASS cases=6`,
+the credential-free production configuration policy fixtures,
+`RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS` while preserving the NO-GO
+boundary. It is the latest bounded hosted qualification evidence, not
+production capacity or production acceptance.
+
+The previous shared-tip source gate tested revision
 `2641962a6a65179abf4b8d785345fbe6af4be9b8` on 2026-09-22. Formatting, strict
 locked workspace Clippy and the locked all-target workspace test suite all
 passed; current FUSE sync-barrier/session, NFS, transport, SDK, CLI and
@@ -213,6 +235,15 @@ provider unit coverage passed. Provider, native-mount and external-service
 rows remained explicitly ignored where their required harnesses were
 unavailable. This is source qualification only, not hosted or production
 acceptance.
+
+The latest shared-tip source gate tested revision
+`4ea3268306d71fe96c537cd0f3c4d4393f173a60` on 2026-09-22. Formatting, strict
+locked workspace Clippy with `-D warnings`, and
+`./scripts/cargo-shared test --workspace --all-targets --locked` all passed;
+the current 9P/FUSE, NFS, transport, SDK, CLI and provider unit coverage
+passed. Provider, native-mount and external-service rows remained explicitly
+ignored where their required harnesses were unavailable. This is source
+qualification only, not hosted or production acceptance.
 
 The preceding hosted attempt
 [`35632139449`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35632139449)
@@ -258,10 +289,10 @@ evidence and cannot close the production gates below.
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification; local and hosted durable restart evidence | Secure multi-node tests covering stale writers, lease expiry/renewal, maybe-committed reconciliation, network delay/partition, authority loss, reviewed failover and no split-brain publication |
 | P6 — backup, restore and disaster recovery | Not started | Consistent metadata/authority/block backup definition, encrypted retention, clean-environment restore, hash/revision verification, measured RPO/RTO and provider/region-loss procedure |
 | P7 — observability, alerts and runbooks | Not started | Metrics and alerts for cluster health, authority publication age/errors, lease-fence/ESTALE, transaction retry/maybe-committed EIO, block errors, latency, capacity and cleanup/space pressure; tested on-call runbook |
-| P8 — load, capacity, soak and cost envelope | Harness + five-round local and hosted qualification; measured latency marker verified; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and emits p50/p95/p99 operation-latency and throughput markers; latest hosted run `35648296386` recorded five isolated durable composition rounds at revision `20fb445a` and `operations=15 p50_us=7654 p95_us=36558 p99_us=36558 total_ms=146 throughput_ops_per_sec=102.61`; production-shaped workload, concurrency, duration, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
+| P8 — load, capacity, soak and cost envelope | Harness + five-round local and hosted qualification; measured latency marker verified; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and emits p50/p95/p99 operation-latency and throughput markers; latest hosted run `35650634174` recorded five isolated durable composition rounds at revision `8f3a19a` with base `operations=15 p50_us=12440 p95_us=117600 p99_us=117600 total_ms=385 throughput_ops_per_sec=38.88`; soak p95/p99 ranged from 31,686µs to 346,494µs and throughput from 23.53 to 97.18 ops/s; production-shaped workload, concurrency, duration, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
 | P9 — upgrade, rollback and compatibility | Not started | Forward/backward keyspace and configuration compatibility, rolling provider/client upgrade, failed-upgrade rollback, retained-data downgrade boundary, lockfile/image/artifact provenance |
 | P10 — security, privacy, tenancy and audit | Not started | Threat-model review, prefix/tenant isolation, data classification, encryption, audit retention, dependency/image review, abuse/rate limits, closed findings or approved exceptions |
-| P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI/native FUSE evidence is green at `35648296386` for revision `20fb445a` | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
+| P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI/native FUSE evidence is green at `35650634174` for revision `8f3a19a` | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
 | P12 — release packaging, CI promotion and canary | Qualification CI plus policy gate | Locked and signed artifacts, SBOM/provenance, protected environment approvals, production-like canary, holdback, promotion checks, rollback automation and retained evidence packet |
 | P13 — incident, failover and recovery rehearsal | Not started | Timed operator exercises for authority loss, cluster loss, stale client, storage exhaustion, bad deploy, credential expiry and restore; paging, runbook, integrity and RTO evidence |
 | P14 — final launch audit and go/no-go | Not started | One-revision audit of P0–P13, known-limitations record, release-owner decision, canary exit evidence and explicit GO or NO-GO |
@@ -291,9 +322,11 @@ node scripts/verify-w07-production-config.mjs \
   tests/foundationdb/production-config-policy.json
 ```
 
-The dedicated hosted qualification workflow runs both fixtures. A
+The dedicated hosted qualification workflow runs the positive fixture plus
+the inline-secret and invalid-lease-TTL negative fixtures. A
 `W07_PRODUCTION_CONFIG_POLICY_PASS` line is only static deployment-shape
-evidence: the verifier does not open FoundationDB or RustFS, cannot prove
+evidence; it now requires an explicit positive lease TTL bounded to 24 hours,
+but the verifier does not open FoundationDB or RustFS, cannot prove
 ACLs, certificate trust, replication, backups, capacity, monitoring or owner
 approval, and does not change the **NO-GO** decision.
 

@@ -366,6 +366,8 @@ export declare class Nfs4Session {
   get stats(): NfsSessionStats
   get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean
+  /** Destroy the NFSv4.1 session and release its process-local state. */
+  destroy(): Promise<void>
 }
 
 /** Read-only N-API view of one accepted NFS client connection. */
@@ -415,6 +417,8 @@ export declare class NfsSession {
    */
   get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean
+  /** Destroy both versioned sessions and release their shared server state. */
+  destroy(): Promise<void>
 }
 
 /**

@@ -1485,6 +1485,13 @@ impl NfsSession {
     pub fn destroyed(&self) -> bool {
         self.inner.destroyed() && self.v4_inner.destroyed()
     }
+
+    /// Destroy both versioned sessions and release their shared server state.
+    #[napi]
+    pub async fn destroy(&self) {
+        self.inner.destroy().await;
+        self.v4_inner.destroy().await;
+    }
 }
 
 /// Read-only N-API view of the NFSv4.1 session routed by an [`NfsServer`].
@@ -1535,6 +1542,12 @@ impl Nfs4Session {
     #[napi(getter)]
     pub fn destroyed(&self) -> bool {
         self.inner.destroyed()
+    }
+
+    /// Destroy the NFSv4.1 session and release its process-local state.
+    #[napi]
+    pub async fn destroy(&self) {
+        self.inner.destroy().await;
     }
 }
 

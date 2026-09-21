@@ -1,4 +1,4 @@
-W07_PRODUCTION_CONFIG_POLICY_PASS config_shape=splitstore metadata=foundationdb durable_metadata=true durable_blocks=true lease_authority=shared-provider blocks_tls=https secrets=external
+W07_PRODUCTION_CONFIG_POLICY_PASS config_shape=splitstore metadata=foundationdb durable_metadata=true durable_blocks=true lease_authority=shared-provider lease_ttl=explicit-bounded blocks_tls=https secrets=external
 W07_PRODUCTION_CONFIG_POLICY_FAIL reason=config.driver.storage.blocks.secret_access_key-must-not-be-inline
 FOUNDATIONDB_RUSTFS_NETWORK_READY alias=mount-rs-rustfs container=mount-rs-rustfs-fixture
 FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403

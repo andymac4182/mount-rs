@@ -50,10 +50,12 @@ import {
 import {
   createNfsServer,
   type NfsConnection,
+  type Nfs4Session,
   type Nfs4IdMap,
   type Nfs4StateKnobs,
   type NfsServer,
   type NfsServerOptions,
+  type NfsSession,
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
@@ -446,6 +448,10 @@ function checkServerAndKvSubpaths(): void {
   }
 
   const nfsServer: NfsServer = createNfsServer(filesystem, nfsOptions)
+  const nfsSession: NfsSession = nfsServer.session
+  const nfsV4Session: Nfs4Session = nfsSession.v4
+  const nfsSessionDestroy: Promise<void> = nfsSession.destroy()
+  const nfsV4SessionDestroy: Promise<void> = nfsV4Session.destroy()
   const p9Server: P9Server = createP9Server(filesystem, p9Options)
   const s3Server: S3Server = createS3Server(filesystem, s3Options)
   const multiBucket: S3Server = createS3Server({ buckets: { files: filesystem } }, s3Options)
@@ -554,6 +560,10 @@ function checkServerAndKvSubpaths(): void {
   void kvFilesystem
   void nfsHost
   void nfsPort
+  void nfsSession
+  void nfsV4Session
+  void nfsSessionDestroy
+  void nfsV4SessionDestroy
   void nfsConnections
   void nfsListen
   void nfsClose

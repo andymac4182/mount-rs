@@ -30,7 +30,7 @@ planning result.
 
 | Gate | Status | Required exit evidence |
 | --- | --- | --- |
-| P01 — deployment scope, topology and support matrix | Open — 25% | Approved managed/self-hosted TiDB/PD/TiKV and block-store topology, regions, HA/quorum, network/TLS policy, resource limits, supported versions, tenancy, IaC and a production-like staging smoke/restart result; the checked-in policy gate now verifies the required deployment shape only |
+| P01 — deployment scope, topology and support matrix | Open — 25% | Approved managed/self-hosted TiDB/PD/TiKV and block-store topology, regions, HA/quorum, network/TLS policy, resource limits, supported versions, tenancy, IaC and a production-like staging smoke/restart result; the checked-in policy gate now verifies the required deployment shape only. A fresh local single-node v8.5.7 smoke attempt entered PD startup but exited 125 on `Bad response from Docker engine`; the preceding durable attempt failed closed below the 10 GiB Docker floor. Neither produced `TIDB_ACCEPTANCE` or production evidence. |
 | P02 — secrets, IAM, rotation and audit | Open — 20% | Secret-manager injection, least-privilege metadata/block identities, rotation and revocation without data loss, break-glass procedure, audit and redaction evidence; the policy gate rejects inline secret strings and requires external env references only |
 | P03 — backup, restore and disaster recovery | Open — 10% | Defined RPO/RTO and retention, encrypted backups/versioning, clean-environment restore, metadata/block consistency, corruption/partial-object handling and recovery sign-off |
 | P04 — upgrade, compatibility and rollback | Open — 10% | Rehearsed TiDB/RustFS/client version matrix, schema/config migration, rolling upgrade, interrupted-upgrade recovery, retained-data rollback and compatibility sign-off |
@@ -122,7 +122,12 @@ The first successful policy run after the change, `35650533691` at source
 `95437f67`, predates W08.34 and therefore does not qualify this validator. The
 current-tip run `35650626028` at source
 `8f3a19a891b8d432ff551c04789921575bb12f4f` cancelled before creating jobs
-(`jobs=[]`), so no hosted W08.34 packet result is claimed.
+(`jobs=[]`). A subsequent current-tip run `35651363875` at source
+`14f8c344a5a7f5b2e8cb08475db3d87ecbfc23d7`, job `106504528377`, completed
+successfully in 2m41s; the W08 policy step, including the evidence-packet
+validator/test, and the existing release-identity/provenance policy passed.
+This is hosted implementation/static qualification only; it does not close
+P01–P09 or supply production provider, canary, rollback or approval evidence.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
