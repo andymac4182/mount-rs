@@ -683,6 +683,7 @@ async function exerciseS3() {
     bucket: "mountx",
     host: "127.0.0.1",
     port: 0,
+    drainTimeout: 1000,
   });
   let listening;
   try {
