@@ -18,20 +18,20 @@ upstream stream/attach contract or hosted native mount behavior.
 | Session and connection objects | Local PASS for exposed scope | `P9Session.handleCall`/`destroy`, stats/lifecycle, clients, peer, `closed`, attached stream exposure, and identity tests |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
-| Linux native 9P | Hosted prior lifecycle PASS; current packet exposed a server-close cleanup failure; fix rerun pending | CI run `35616832528`, job `106389895603`, at `e168315c246061926a36e795f7332831cb1ab62f` passed the prior privileged lifecycle; current run `35625437327`, native-9p job `106418844564`, passed module probing and 3/4 ignored native tests, while `native_linux_server_close_releases_kernel_connection` found a live mountpoint after `P9Mount::unmount()` returned success; corrective runs `35626340158` at `c2290b269882c768ba64965e65cbe6626a971610` and `35626765411` at `6fc9a198813f0a5ed3c02ee4929d95d5d86cdfd3` were canceled before jobs materialized |
-| Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; native fault/crash evidence open | Focused Rust/N-API lifecycle and fault tests now cover broadcast shutdown, accept-loop close races, shutdown-aware in-flight permit waits, bounded task reaping, transport faults, and session destruction that wakes and drains `Tflush` waiters; ignored native harnesses cover eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, and bounded-unmount cleanup, while hosted/native reset, half-close, and process-crash evidence remains |
+| Linux native 9P | Hosted PASS for the supported Linux lifecycle scope; crash/reset/half-close recovery is outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2` passed `9p`/`9pnet_fd` probing and all four ignored native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Earlier failure/cancellation records remain below as history |
+| Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; supported hosted lifecycle PASS; crash/reset/half-close are supervisor-owned | Focused Rust/N-API lifecycle and fault tests cover broadcast shutdown, accept-loop close races, shutdown-aware in-flight permit waits, bounded task reaping, transport faults, and session destruction that wakes and drains `Tflush` waiters; the hosted native harness now passes eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, external umount, and bounded-unmount cleanup. Automatic recovery after process crash or arbitrary kernel reset/half-close remains explicitly outside the library contract |
 
 ## Current queue
 
-- Rerun and retain the hosted Linux `native-9p` job on the current packet,
-  including kernel `9p`/`9pnet_fd` module checks, the privileged lifecycle
-  test, the bounded concurrent file-I/O/unmount test, and the server-close
-  kernel-connection/unmount test.
-- Qualify cross-process mount I/O, cancellation/close, restart, reset,
-  half-close, concurrency, and crash behavior on the supported Linux runtime;
-  the local `Tflush` teardown regression and the new server-close harness do
-  not close these remaining native gates, and the prior hosted lifecycle result
-  does not close them either.
+- Retain the dedicated hosted Linux `Native 9P` workflow as the stable
+  regression gate for kernel `9p`/`9pnet_fd` prerequisites, mounted I/O,
+  concurrent file operations, server-close/kernel-connection teardown,
+  external umount, and bounded unmount. It supports manual dispatch when a
+  future 9P implementation packet needs an exact revision rerun.
+- If a deployment claims recovery after process crash, arbitrary kernel reset,
+  or half-close, qualify that behavior in a supervisor-level test and cleanup
+  policy. Those recovery properties are not automatic guarantees of this
+  library and are not promoted from the hosted lifecycle pass.
 - Keep unsupported platform/client results explicit and separate from passes.
 
 ## Supported-scope decisions
@@ -45,11 +45,11 @@ upstream stream/attach contract or hosted native mount behavior.
   low-level session exposes the direct call/destroy, stats, and lifecycle
   members listed in the parity ledger, not every upstream internal/debug/fid
   helper.
-- Graceful server close, external unmount, and retryable unmount are in scope.
+- Graceful server close, external unmount, and retryable unmount are in scope;
+  the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
   is not a library guarantee; a deployment claiming those properties needs a
-  supervisor-level test and cleanup policy. The current hosted/native packet
-  remains NO-GO until its corrected server-close test executes successfully.
+  supervisor-level test and cleanup policy.
 
 ## Evidence ledger
 
@@ -67,6 +67,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | 2026-09-22 | Current hosted native execution and unmount-race fix | Run `35625437327`, native-9p job `106418844564`, loaded `9p`/`9pnet_fd` and passed 3/4 ignored tests; `native_linux_server_close_releases_kernel_connection` failed because the connection-close monitor marked resource teardown complete before `P9Mount::unmount()` issued `umount(8)`. The local fix gives kernel unmount its own coordination state so server-close/EOF cannot suppress unmount; focused 9P tests 28/28, strict Clippy and formatting pass locally | Fresh hosted rerun must verify the fix, plus native reset/half-close/process-crash evidence and broader W01 acceptance remain open |
 | 2026-09-22 | Corrective hosted rerun attempt | CI run `35626340158` at `c2290b269882c768ba64965e65cbe6626a971610` was canceled before jobs materialized (`jobs: []`); the follow-up also hardens unmount serialization against outer-task cancellation with a Tokio mutex, and the focused 9P tests 28/28, strict Clippy and formatting pass locally | A hosted run containing the unmount fix is still required, plus native reset/half-close/process-crash evidence and broader W01 acceptance |
 | 2026-09-22 | Cancellation-safe unmount and supported-scope boundary | `P9Mount::unmount()` now has cancellation-safe mutex serialization and remains callable after `wait_closed()` resource teardown; the README and tracker define Linux-native, Node-attach, graceful-close, and supervisor-owned crash/reset boundaries. Focused 9P tests 28/28, strict Clippy and formatting pass locally | Hosted verification of the unmount fix remains required; unsupported crash/reset/half-close recovery is not a production claim |
+| 2026-09-22 | Stable hosted Linux 9P qualification | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at exact SHA `431affd660391a0b8ed99815e389ffe12ad229c2`, passed kernel-module probing and the four ignored native tests; the log reports `4 passed; 0 failed`, including `native_linux_server_close_releases_kernel_connection` | Public parity remains intentionally scoped/partial, and the overall W01/release decision remains NO-GO; crash/reset/half-close recovery is supervisor-owned rather than a library claim |
 
 ## Completion rule
 

@@ -29,15 +29,17 @@ passed 3/4 ignored tests but exposed a live-mount cleanup failure in the
 server-close test. Corrective runs `35626340158` at `c2290b2` and
 `35626765411` at `6fc9a19` were canceled before jobs materialized. The local
 follow-up separates kernel unmount coordination from resource teardown and
-uses cancellation-safe serialization; a fresh hosted run is required to
-verify it and the concurrent-I/O harness. `wait_closed()` releases server
-resources but does not implicitly detach a live kernel mount; callers must
-invoke `unmount()`.
+uses cancellation-safe serialization. The dedicated [Native 9P run
+`35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344)
+at exact SHA `431affd` passed module probing and all four ignored Linux native
+tests, including the concurrent-I/O and server-close/unmount cases.
+`wait_closed()` releases server resources but does not implicitly detach a live
+kernel mount; callers must invoke `unmount()`.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
-supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
-rerun, native reset/half-close/concurrency/crash evidence, and the remaining
-W01 gates.
+supported Node Duplex seam. Crash/reset/half-close recovery is supervisor-owned
+and not a library guarantee; overall production remains NO-GO for the remaining
+W01 gates and intentionally partial public parity.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
