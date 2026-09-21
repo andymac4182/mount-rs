@@ -678,22 +678,27 @@ impl MountState {
                 // lazy detach so a blocked backend future cannot deadlock the
                 // forced phase behind the same request.
                 self.request_stop();
-                let deadline = Instant::now() + timeout;
                 let task = self.task.lock().expect("mount task lock poisoned").take();
+                if let Some(task) = task {
+                    // Give a normally polling session a short opportunity to
+                    // observe the stop request and run its terminal cleanup.
+                    // A session blocked in the kernel's device read cannot
+                    // observe that request, so waiting for the full unmount
+                    // timeout here would make the forced phase exceed its
+                    // documented bound and leave fusermount waiting on an
+                    // open device descriptor. The drain helper aborts the
+                    // owner task when this grace period expires, which closes
+                    // the descriptor before lazy detach starts.
+                    let grace_deadline = Instant::now() + FORCED_STOP_GRACE;
+                    drain_session_task(&self, task, Some(grace_deadline)).await;
+                }
+                let deadline = Instant::now() + timeout;
                 let force = force_unmount_until(
                     self.mode,
                     &self.mountpoint,
                     self.helper.as_deref(),
                     deadline,
                 );
-                if let Some(task) = task {
-                    // The lazy helper may itself wait for the FUSE device to
-                    // close. Drain the stopped session first so the helper
-                    // observes a closed descriptor instead of consuming the
-                    // entire forced-teardown deadline while the session still
-                    // owns it.
-                    drain_session_task(&self, task, Some(deadline)).await;
-                }
                 force.await;
                 forced_deadline = Some(deadline);
                 let mount_still_present = mounted_at(&self.mountpoint);
@@ -840,6 +845,9 @@ const MAX_PENDING_READS: usize = 16;
 
 #[cfg(target_os = "linux")]
 const READ_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[cfg(target_os = "linux")]
+const FORCED_STOP_GRACE: Duration = Duration::from_millis(250);
 
 #[cfg(target_os = "linux")]
 type ReadTaskResult = (u64, Result<(), FuseTransportError>);
