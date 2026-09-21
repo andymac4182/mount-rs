@@ -2370,6 +2370,19 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification and implementation policy; production gates remain external.)*
   The evidence documentation commit `d293fe5b` was reconciled into public
   merge tip `682d2441` for other workstreams to consume.
+- [x] W08.32 **Production rollout ledger consistency guard:** added
+  `scripts/verify-w08-rollout-ledger.mjs` and its six-case
+  `scripts/test-w08-rollout-ledger.mjs` control. The verifier requires all
+  W08.1–W08.32 implementation items to be checked, keeps the nine W08-P01–P09
+  production gates open while the decision is NO-GO, and cross-checks the
+  tracker, production-rollout document, detailed ledger and operations runbook.
+  It fails closed if a gate is marked complete prematurely, a drill boundary
+  disappears, the decision changes to GO without all gate checkboxes, or the
+  documents disagree. The dedicated W08 release-policy workflow now runs both
+  the current NO-GO verifier and simulated invalid/GO transitions. This is a
+  repository tracking control only; it does not close any provider, hosted,
+  native or production gate. *(Implementation/static qualification; production
+  evidence and approval remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
