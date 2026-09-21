@@ -18,6 +18,14 @@ const PACKET_SPECS = Object.freeze([
     logKey: "compositionsLog",
     providers: ["mount-rs-split-sqlite-r2", "mount-rs-split-pglite-r2"],
     markers: [
+      "OZONE_SQLITE_CHUNKED_COMPOSITION_PASS ",
+      "OZONE_PGLITE_CHUNKED_COMPOSITION_PASS ",
+      "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-sqlite-seed ",
+      "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-pglite-seed ",
+      "test actual_binary_runs_live_ozone_split_provider_self_test ... ok",
+      "SUMMARY node-sdk pass=7 skip=1 fail=0",
+      "OZONE_NODE_CLI_PASS ",
+      "OZONE_CLI_REMOTE_HTTP_PASS ",
       "OZONE_COMPOSITION_PGLITE_READY ",
       "OZONE_IOPS_PASS providers=mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 target=1000 ",
       "OZONE_INTEGRATION_PASS ",
@@ -31,6 +39,10 @@ const PACKET_SPECS = Object.freeze([
     logKey: "tidbLog",
     providers: ["mount-rs-split-tidb-r2"],
     markers: [
+      "TIDB_RUSTFS_CHUNKED_BOUNDED_READDIR_PASS phase=seed ",
+      "TIDB_CHUNKED_RUSTFS_SEED_PASS",
+      "TIDB_NAPI_BOUNDED_READDIR_PASS phase=seed ",
+      "TIDB_NAPI_BOUNDED_READDIR_PASS phase=reopen ",
       "TIDB_ACCEPTANCE ",
       "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=1000 ",
       "OZONE_INTEGRATION_PASS ",
@@ -43,6 +55,12 @@ const PACKET_SPECS = Object.freeze([
     logKey: "foundationdbLog",
     providers: ["mount-rs-split-foundationdb-r2"],
     markers: [
+      "FOUNDATIONDB_RUSTFS_CHUNKED_BOUNDED_READDIR_PASS phase=seed ",
+      "FOUNDATIONDB_RUSTFS_CHUNKED_PASS ",
+      "FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS ",
+      "FOUNDATIONDB_NAPI_BOUNDED_READDIR_PASS phase=seed ",
+      "FOUNDATIONDB_NAPI_BOUNDED_READDIR_PASS phase=reopen ",
+      "FOUNDATIONDB_SERVICE_RESTART_READY ",
       "FOUNDATIONDB_NAPI_PASS image=",
       "FOUNDATIONDB_OZONE_IOPS_PASS provider=foundationdb-r2 target=1000 ",
       "FOUNDATIONDB_TEST_PASS ",
@@ -116,7 +134,10 @@ export function validateEvidencePacket(packet) {
     requireMarker(policyLog, marker, "policy-log")
   }
   for (const marker of [
+    "OZONE_HEALTHY ",
+    "OZONE_READY ",
     "OZONE_FAULT_WINDOW_PASS ",
+    "OZONE_RESTART_READY ",
     "OZONE_INTEGRATION_PASS ",
     "OZONE_CLEANUP_PASS ",
   ]) {

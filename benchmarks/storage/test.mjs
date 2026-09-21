@@ -345,11 +345,22 @@ async function testEvidencePacket() {
       "W26_OZONE_PRODUCTION_ROLLOUT_CONTRACT_NEGATIVE_PASS case=inline-secret",
     ].join("\n"),
     baseLog: [
+      "OZONE_HEALTHY endpoint=http://127.0.0.1:9876 release=2.2.1",
+      "OZONE_READY endpoint=http://127.0.0.1:9876 image=apache/ozone:2.2.1",
       "OZONE_FAULT_WINDOW_PASS container=ozone",
+      "OZONE_RESTART_READY endpoint=http://127.0.0.1:9876",
       "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
       "OZONE_CLEANUP_PASS container=ozone",
     ].join("\n"),
     compositionsLog: [
+      "OZONE_SQLITE_CHUNKED_COMPOSITION_PASS metadata=/tmp/ozone.sqlite revision=18",
+      "OZONE_PGLITE_CHUNKED_COMPOSITION_PASS volume=mount-rs-ozone/metadata revision=18",
+      "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-sqlite-seed entries=2",
+      "OZONE_CHUNKED_BOUNDED_READDIR_PASS provider_owner=ozone-pglite-seed entries=2",
+      "test actual_binary_runs_live_ozone_split_provider_self_test ... ok",
+      "SUMMARY node-sdk pass=7 skip=1 fail=0",
+      "OZONE_NODE_CLI_PASS prefix=mount-rs-ozone/cli",
+      "OZONE_CLI_REMOTE_HTTP_PASS mode=rust prefix=mount-rs-ozone/cli-http",
       "OZONE_COMPOSITION_PGLITE_READY endpoint=127.0.0.1:1",
       "OZONE_IOPS_PASS providers=mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 target=1000 output=artifacts/ozone-iops.json",
       "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
@@ -361,6 +372,10 @@ async function testEvidencePacket() {
       "mount-rs-split-pglite-r2",
     ]),
     tidbLog: [
+      "TIDB_RUSTFS_CHUNKED_BOUNDED_READDIR_PASS phase=seed entries=2",
+      "TIDB_CHUNKED_RUSTFS_SEED_PASS",
+      "TIDB_NAPI_BOUNDED_READDIR_PASS phase=seed prefix=mount-rs/tidb",
+      "TIDB_NAPI_BOUNDED_READDIR_PASS phase=reopen prefix=mount-rs/tidb",
       "TIDB_ACCEPTANCE evidence=durable",
       "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=1000 output=artifacts/ozone-tidb-iops.json",
       "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
@@ -368,6 +383,12 @@ async function testEvidencePacket() {
     ].join("\n"),
     tidbArtifact: qualificationArtifact("mount-rs-split-tidb-r2"),
     foundationdbLog: [
+      "FOUNDATIONDB_RUSTFS_CHUNKED_BOUNDED_READDIR_PASS phase=seed entries=2",
+      "FOUNDATIONDB_RUSTFS_CHUNKED_PASS revision=8 volume_prefix=fixture cleanup_deferred=false",
+      "FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS volume_prefix=fixture",
+      "FOUNDATIONDB_NAPI_BOUNDED_READDIR_PASS phase=seed prefix=mount-rs/foundationdb",
+      "FOUNDATIONDB_NAPI_BOUNDED_READDIR_PASS phase=reopen prefix=mount-rs/foundationdb",
+      "FOUNDATIONDB_SERVICE_RESTART_READY topology=durable server=fixture",
       "FOUNDATIONDB_NAPI_PASS image=node:24-bookworm",
       "FOUNDATIONDB_OZONE_IOPS_PASS provider=foundationdb-r2 target=1000 output=artifacts/ozone-foundationdb-iops.json",
       "FOUNDATIONDB_TEST_PASS topology=durable",
@@ -385,6 +406,13 @@ async function testEvidencePacket() {
   assert.throws(
     () => validateEvidencePacket({ ...packet, tidbLog: packet.tidbLog.replace("TIDB_ACCEPTANCE ", "") }),
     /tidb-log-missing-marker=TIDB_ACCEPTANCE/,
+  )
+  assert.throws(
+    () => validateEvidencePacket({
+      ...packet,
+      compositionsLog: packet.compositionsLog.replace("OZONE_NODE_CLI_PASS ", ""),
+    }),
+    /ozone-compositions-log-missing-marker=OZONE_NODE_CLI_PASS/,
   )
   const mismatchedFoundationDb = structuredClone(packet.foundationdbArtifact)
   mismatchedFoundationDb.environment.sourceControl.mountRs.revision = "b".repeat(40)
