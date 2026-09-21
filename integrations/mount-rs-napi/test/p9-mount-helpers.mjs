@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { createRequire } from "node:module"
 import {
   P9_DEFAULT_MOUNT_MSIZE,
   P9_MAX_MOUNT_MSIZE,
@@ -51,6 +52,56 @@ assert.match(socketPathRefusal("a".repeat(P9_UNIX_PATH_MAX)), /108/)
 assert.equal(tcpSourceRefusal("127.0.0.1"), undefined)
 assert.equal(tcpSourceRefusal("127.0.0.256")?.includes("dotted-quad"), true)
 assert.equal(tcpSourceRefusal("localhost")?.includes("dotted-quad"), true)
+
+const require = createRequire(import.meta.url)
+const p9Module = require("@mount-rs/core/9p")
+const nativeMount = p9Module.mount
+const nativeUnmountAll = p9Module.unmountAll
+const signalCounts = {
+  SIGINT: process.listenerCount("SIGINT"),
+  SIGTERM: process.listenerCount("SIGTERM"),
+}
+let resolveClosed
+const closed = new Promise((resolve) => { resolveClosed = resolve })
+const fakeMounted = { closed }
+p9Module.mount = async () => fakeMounted
+try {
+  assert.equal(await p9Module.mount9p({}, "/tmp/mount-rs-p9-signal-test"), fakeMounted)
+  assert.equal(process.listenerCount("SIGINT"), signalCounts.SIGINT + 1)
+  assert.equal(process.listenerCount("SIGTERM"), signalCounts.SIGTERM + 1)
+
+  let signalUnmounts = 0
+  p9Module.unmountAll = async () => {
+    signalUnmounts += 1
+    return []
+  }
+  const preserveExit = () => {}
+  process.on("SIGINT", preserveExit)
+  try {
+    process.emit("SIGINT")
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(signalUnmounts, 1)
+    assert.equal(process.listenerCount("SIGINT"), signalCounts.SIGINT + 1)
+    assert.equal(process.listenerCount("SIGTERM"), signalCounts.SIGTERM)
+  } finally {
+    process.off("SIGINT", preserveExit)
+    p9Module.unmountAll = nativeUnmountAll
+  }
+
+  resolveClosed()
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(process.listenerCount("SIGINT"), signalCounts.SIGINT)
+  assert.equal(process.listenerCount("SIGTERM"), signalCounts.SIGTERM)
+
+  p9Module.mount = async () => ({ closed: Promise.resolve() })
+  await p9Module.mount9p({}, "/tmp/mount-rs-p9-no-signal-test", { signals: false })
+  assert.equal(process.listenerCount("SIGINT"), signalCounts.SIGINT)
+  assert.equal(process.listenerCount("SIGTERM"), signalCounts.SIGTERM)
+} finally {
+  resolveClosed()
+  p9Module.mount = nativeMount
+  p9Module.unmountAll = nativeUnmountAll
+}
 
 const probe = p9ClientProbe()
 assert.equal(typeof probe.usable, "boolean")
