@@ -173,7 +173,8 @@ trap 'exit 143' TERM
 
 # If a profile is selected and the caller did not already provide credentials,
 # use the AWS CLI's normal credential chain to obtain temporary credentials.
-# Parse only the three expected credential variables; never print the file.
+# Parse only the credential variables and ignore the CLI's expiration metadata;
+# never print the file.
 if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
   unset AWS_SESSION_TOKEN
   credential_export_status=0
@@ -195,6 +196,8 @@ if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
     case "$name" in
       AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|AWS_SESSION_TOKEN)
         export "$name=$value"
+        ;;
+      AWS_CREDENTIAL_EXPIRATION)
         ;;
       '') ;;
       *)
