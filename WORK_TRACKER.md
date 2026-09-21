@@ -773,27 +773,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  Hosted run [35493696795](https://github.com/andymac4182/mount-rs/actions/runs/35493696795),
-  job [106032856390](https://github.com/andymac4182/mount-rs/actions/runs/35493696795/job/106032856390),
-  checked out `c6e6060` on `macos-26-arm64` and failed
-  `storage::tests::bounded_server_close_is_shared_cancellation_safe_and_reusable`
-  at the first `connect_with_key(connection_string, "close-reopened")` after
-  both providers had closed: `FsError { code: Eio, message: Some("error
-  communicating with the server") }`. This is pre-fix evidence; `571aa8a`
-  adds the graceful half-close detach path, tracked cleanup barrier and listener
-  restoration that target the race.
-
-  Tested current-tree revision `747b160` (the fetched `origin/main` before this
-  evidence commit) passes the deterministic Node slot-release and
-  injected-failure suites, the readiness and split-store Rust gates, the bounded
-  close/reopen regression 10/10 consecutive times, real-server versioned
-  snapshot/history reconnect, mount-free SQLite VFS reconnect, scoped Clippy,
-  formatting and `git diff --check`. Recent `ci.yml` runs were still queued when
-  inspected (including `35551786116` at `6f1ab93` and later `35552136578` at
-  `44cef6e`); no completed post-`571aa8a` hosted macOS/Linux rerun is available.
-  W04.2 remains open. Close it only after the post-fix macOS and Linux `node`
-  jobs complete and their `Verify PGlite integration and restart recovery` logs
-  pass; reproduce with `gh run view <run-id> --job <job-id> --log`.
+  The fresh post-fix run [35586624564](https://github.com/andymac4182/mount-rs/actions/runs/35586624564)
+  is running on `bdfcb11`: Linux Node job
+  [106291476004](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476004),
+  macOS-latest Node job
+  [106291476024](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476024),
+  and macOS-15-intel Node job
+  [106291476265](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476265)
+  have started. The historical run [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894)
+  is not closure evidence: macOS-latest passed its PGlite step, but
+  macOS-15-intel failed earlier in `test-http-early-rejection.mjs` with
+  `EPIPE`; the published `bdfcb11` fixture-shutdown fix is being requalified.
+  Close W04.2 only after all three fresh Node jobs complete successfully and
+  their exact `Verify PGlite integration and restart recovery` logs pass;
+  queued, skipped, cancelled, partial, or pre-fix evidence does not count.
+  Production rollout remains separately tracked in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and is NO-GO
+  until its artifact, persistence/rollback, provider, and operational gates
+  also close.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
