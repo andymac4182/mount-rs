@@ -72,6 +72,31 @@ single-authority clocks are rejected when the storage handle opens. The
 declaration is an application trust boundary, not a conversion of a local
 clock into a distributed authority.
 
+For a FoundationDB-hosted authority, `FoundationDbLeaseAuthority` is the
+write-side publisher and `FoundationDbSharedLeaseOracle` is the read-only
+consumer view:
+
+```rust,no_run
+let authority = mount_rs_foundationdb::FoundationDbLeaseAuthority::from_database(
+    std::sync::Arc::clone(&db),
+    "mount-rs/lease-authority",
+    mount_rs_foundationdb::FoundationDbLimits::default(),
+)?;
+authority.publish_system_now_ms().await?;
+let oracle = authority.shared_oracle();
+let storage = mount_rs_foundationdb::FoundationDbStorage::from_database(
+    db_for_volume,
+    mount_rs_foundationdb::FoundationDbStorageOptions::new("my-volume")
+        .with_production_lease_oracle(oracle),
+)?;
+```
+
+Run the publisher in one protected authority service and give storage workers
+only the read capability for its authority keyspace. The shared reader never
+advances time or falls back to a worker's local clock; an unpublished or
+unavailable authority returns an error and leases fail closed. The authority
+still needs an operational clock-skew bound and recovery policy.
+
 The crate also exposes an explicit `with_persisted_lease_oracle` option for a
 single trusted authority or development/test cluster. That oracle stores one
 encoded Unix-epoch millisecond value under the volume's `meta/lease-oracle` key
@@ -164,10 +189,12 @@ value limit and must make the corresponding chunker choice explicit.
 The opt-in integration test uses `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE` (or the
 platform default cluster file when `MOUNT_RS_FOUNDATIONDB_USE_DEFAULT=1`). It
 uses a unique key prefix, proves the ordinary constructor fails closed, then
-explicitly selects the persisted single-authority lease oracle and exercises
-block immutability, lease fencing, revision-conflict handling, metadata reload,
-and deletion against the real cluster. It separately exercises the explicit
-opt-out with
+exercises the FoundationDB-hosted shared authority with two independent
+readers, a backward time sample, forward recovery, and stale-writer fencing.
+It then explicitly selects the persisted single-authority lease oracle and
+exercises block immutability, lease fencing, revision-conflict handling,
+metadata reload, and deletion against the real cluster. It separately
+exercises the explicit opt-out with
 `without_lease_oracle` to prove the explicit fail-closed `ENOTSUP` path.
 
 The CI gate must be separate from the portable workspace gate:

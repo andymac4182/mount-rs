@@ -307,6 +307,159 @@ impl LeaseOracle for FoundationDbLeaseOracle {
     }
 }
 
+fn lease_oracle_parts(
+    db: Arc<Database>,
+    prefix: impl AsRef<[u8]>,
+    limits: FoundationDbLimits,
+) -> Result<(Arc<Database>, Vec<u8>, FoundationDbLimits)> {
+    let prefix = prefix.as_ref();
+    if prefix.is_empty() || prefix.contains(&0) {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_message("FoundationDB lease authority prefix is invalid"));
+    }
+    Ok((db, Keyspace::new(prefix).lease_oracle(), limits.validate()?))
+}
+
+/// Write-side authority for a protected shared FoundationDB lease time.
+///
+/// Run this from the one authority service that is allowed to publish the
+/// lease-time record. Storage workers should receive a
+/// [`FoundationDbSharedLeaseOracle`] backed by credentials that can read this
+/// record but cannot write it. Publishing is monotonic, so an authority clock
+/// that moves backwards cannot make an already-issued lease live longer than
+/// the previously published time. If the authority is unavailable, readers
+/// fail closed rather than substituting their local clocks.
+#[derive(Clone)]
+pub struct FoundationDbLeaseAuthority {
+    db: Arc<Database>,
+    key: Vec<u8>,
+    limits: FoundationDbLimits,
+}
+
+impl FoundationDbLeaseAuthority {
+    /// Build an authority over an already-open FoundationDB handle.
+    pub fn from_database(
+        db: Arc<Database>,
+        prefix: impl AsRef<[u8]>,
+        limits: FoundationDbLimits,
+    ) -> Result<Self> {
+        let (db, key, limits) = lease_oracle_parts(db, prefix, limits)?;
+        Ok(Self { db, key, limits })
+    }
+
+    /// Publish a provider-time sample, retaining the larger value already in
+    /// the record when the authority clock moved backwards.
+    pub async fn publish_now_ms(&self, now_ms: u64) -> Result<u64> {
+        if now_ms == 0 {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("FoundationDB lease authority time must be non-zero"));
+        }
+        let db = Arc::clone(&self.db);
+        let key = self.key.clone();
+        let limits = self.limits;
+        db.transact_boxed(
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let current = get_owned(trx, &key)
+                        .await?
+                        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
+                        .transpose()?;
+                    let published = current.unwrap_or(0).max(now_ms);
+                    trx.set(&key, &encode_oracle_time(published));
+                    Ok(published)
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs)
+    }
+
+    /// Publish the authority process's current wall-clock sample.
+    ///
+    /// This method belongs only in the authority service. Storage workers must
+    /// use [`FoundationDbSharedLeaseOracle`] and never call it themselves.
+    pub async fn publish_system_now_ms(&self) -> Result<u64> {
+        self.publish_now_ms(system_now_ms()?).await
+    }
+
+    /// Create the read-only oracle view for this authority key.
+    pub fn shared_oracle(&self) -> FoundationDbSharedLeaseOracle {
+        FoundationDbSharedLeaseOracle {
+            db: Arc::clone(&self.db),
+            key: self.key.clone(),
+            limits: self.limits,
+        }
+    }
+}
+
+/// Read-only view of a protected FoundationDB provider-time authority.
+///
+/// This oracle never writes the authority record and never consults a local
+/// clock. A missing or unavailable authority is an error, so writer-lease
+/// operations fail closed. The deployment must enforce the read-only boundary
+/// with its FoundationDB tenant/credential policy; this type's API itself has
+/// no write method.
+#[derive(Clone)]
+pub struct FoundationDbSharedLeaseOracle {
+    db: Arc<Database>,
+    key: Vec<u8>,
+    limits: FoundationDbLimits,
+}
+
+impl FoundationDbSharedLeaseOracle {
+    /// Build a read-only oracle over an already-open FoundationDB handle.
+    pub fn from_database(
+        db: Arc<Database>,
+        prefix: impl AsRef<[u8]>,
+        limits: FoundationDbLimits,
+    ) -> Result<Self> {
+        let (db, key, limits) = lease_oracle_parts(db, prefix, limits)?;
+        Ok(Self { db, key, limits })
+    }
+}
+
+#[async_trait]
+impl LeaseOracle for FoundationDbSharedLeaseOracle {
+    async fn now_ms(&self) -> Result<u64> {
+        let db = Arc::clone(&self.db);
+        let key = self.key.clone();
+        let limits = self.limits;
+        db.transact_boxed(
+            (),
+            move |trx, _| {
+                let key = key.clone();
+                Box::pin(async move {
+                    configure_transaction(trx, limits)?;
+                    let published = get_owned(trx, &key)
+                        .await?
+                        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
+                        .transpose()?
+                        .ok_or_else(|| {
+                            TxnError::Fs(
+                                FsError::enotsup("FoundationDB shared lease authority")
+                                    .with_message(
+                                        "the shared lease authority has not published a time sample",
+                                    ),
+                            )
+                        })?;
+                    Ok(published)
+                })
+            },
+            transaction_options(limits, TransactionPolicy::Idempotent),
+        )
+        .await
+        .map_err(TxnError::into_fs)
+    }
+
+    fn authority_kind(&self) -> LeaseAuthorityKind {
+        LeaseAuthorityKind::SharedProvider
+    }
+}
+
 /// Configuration for one independent FoundationDB keyspace.
 #[derive(Clone)]
 pub struct FoundationDbStorageOptions {
