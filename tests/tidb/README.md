@@ -18,7 +18,10 @@ The harness assigns stable, per-run IP addresses on a private Docker bridge so
 PD, TiKV, and TiDB do not depend on Docker's embedded DNS during bootstrap.
 Each TiKV mounts the scoped [tikv-test.toml](./tikv-test.toml) profile, which
 keeps caches, worker pools, and logging bounded without changing the real
-Raft-backed storage engine. Readiness and restart phases each have their own
+Raft-backed storage engine. Each TiKV container also receives an explicit
+`nofile` limit of 200,000 by default because v8.5.7 refuses to start below
+123,880 descriptors; override `MOUNT_RS_TIDB_TIKV_NOFILE_LIMIT` only with a
+value at or above that floor. Readiness and restart phases each have their own
 `MOUNT_RS_TIDB_STARTUP_TIMEOUT_SECONDS` deadline (default 300 seconds), and
 the harness requires at least 10 GiB of Docker memory and 4 CPUs before
 launching the full durable topology. Set

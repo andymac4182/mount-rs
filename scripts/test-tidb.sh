@@ -35,6 +35,18 @@ if [ "$startup_timeout_seconds" -lt 30 ]; then
   exit 2
 fi
 
+tikv_nofile_limit=${MOUNT_RS_TIDB_TIKV_NOFILE_LIMIT:-200000}
+case "$tikv_nofile_limit" in
+  ''|*[!0-9]*)
+    echo "test-tidb.sh: MOUNT_RS_TIDB_TIKV_NOFILE_LIMIT must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+if [ "$tikv_nofile_limit" -lt 123880 ]; then
+  echo "test-tidb.sh: MOUNT_RS_TIDB_TIKV_NOFILE_LIMIT must be at least 123880 for TiKV v8.5.7" >&2
+  exit 2
+fi
+
 topology=${MOUNT_RS_TIDB_TOPOLOGY:-durable}
 case "$topology" in
   durable)
@@ -424,6 +436,7 @@ start_tikv() {
   tikv_ip=$(tikv_ip_for_number "$tikv_number")
   docker run --detach \
     --platform "$docker_platform" \
+    --ulimit "nofile=$tikv_nofile_limit:$tikv_nofile_limit" \
     --name "$tikv_container" \
     --label "$resource_label" \
     --network "$network_name" \
