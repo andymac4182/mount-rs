@@ -85,6 +85,7 @@ export function parseArgs(argv) {
   let networkContext = "not-provided"
   let payloadBytes
   let minIops
+  let requireConfigured = false
   let help = false
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -125,6 +126,9 @@ export function parseArgs(argv) {
       case "--min-iops":
         minIops = integer(takeValue(argv, index++, argument), argument)
         break
+      case "--require-configured":
+        requireConfigured = true
+        break
       case "--providers":
       case "--provider":
         providers = takeValue(argv, index++, argument)
@@ -163,6 +167,7 @@ export function parseArgs(argv) {
     networkContext,
     payloadBytes,
     minIops,
+    requireConfigured,
   }
 }
 
@@ -185,6 +190,7 @@ Options:
   --chunk-size-bytes N     fixed chunk size for split providers (default 65536)
   --payload-bytes N         override the generated payload size for each lifecycle
   --min-iops N              fail a result below the successful lifecycle IOPS target
+  --require-configured      fail when any requested provider is not configured
   --output PATH             also write machine-readable JSON to PATH
   --payload-seed TEXT       deterministic payload seed
   --network-context TEXT    recorded remote network context
@@ -1000,9 +1006,16 @@ export async function runBenchmark(options, environment = process.env) {
 
   const failedProviders = providerRuns.filter((providerRun) => providerRun.status === "failed")
   const skippedProviders = providerRuns.filter((providerRun) => providerRun.status === "skipped")
+  const configurationFailures = options.requireConfigured
+    ? skippedProviders.map((providerRun) => ({
+        provider: providerRun.provider,
+        missingConfiguration: providerRun.missingConfiguration,
+        reason: providerRun.skipReason,
+      }))
+    : []
   return {
     schemaVersion: "mount-rs.storage-benchmark.v1",
-    status: failedProviders.length > 0 ? "failed" : "ok",
+    status: failedProviders.length > 0 || configurationFailures.length > 0 ? "failed" : "ok",
     generatedAt: new Date().toISOString(),
     runId,
     reference: {
@@ -1025,6 +1038,7 @@ export async function runBenchmark(options, environment = process.env) {
       chunkSizeBytes: options.chunkSizeBytes,
       payloadBytes: options.payloadBytes ?? null,
       minIops: options.minIops ?? null,
+      requireConfigured: options.requireConfigured,
       iopsDefinition: "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
       payloadSeed: options.payloadSeed,
       setupExcludedFromTimings: true,
@@ -1048,11 +1062,13 @@ export async function runBenchmark(options, environment = process.env) {
       providersRequested: providerRuns.length,
       providersFailed: failedProviders.length,
       providersSkipped: skippedProviders.length,
+      configurationFailures: configurationFailures.length,
       sizeResults: results.length,
       sizeResultsFailed: results.filter((result) => result.status === "failed").length,
       sizeResultsSkipped: results.filter((result) => result.status === "skipped").length,
     },
     providers: providerRuns,
+    configurationFailures,
     results,
   }
 }

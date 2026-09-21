@@ -583,7 +583,7 @@ if [ "$run_napi" -eq 1 ]; then
           ;;
       esac
     done
-    node_command="$node_command && node benchmarks/storage/runner.mjs --providers mount-rs-split-foundationdb-r2 --sizes $iops_size_mib --payload-bytes $iops_payload_bytes --iterations $iops_iterations --concurrency $iops_concurrency --min-iops $iops_minimum --network-context ozone-ci --output /fdb/foundationdb-ozone-iops.json"
+    node_command="$node_command && node benchmarks/storage/runner.mjs --providers mount-rs-split-foundationdb-r2 --sizes $iops_size_mib --payload-bytes $iops_payload_bytes --iterations $iops_iterations --concurrency $iops_concurrency --min-iops $iops_minimum --require-configured --network-context ozone-ci --output /fdb/foundationdb-ozone-iops.json"
   fi
   napi_status=0
   if [ -n "$rustfs_endpoint" ]; then

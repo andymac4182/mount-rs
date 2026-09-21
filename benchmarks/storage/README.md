@@ -69,7 +69,11 @@ fields needed to interpret failures.
 
 Useful options include `--providers`, `--timeout-ms`,
 `--cleanup-timeout-ms`, `--chunk-size-bytes`, `--payload-seed`, and
-`--network-context`. A sequential run is explicit with `--concurrency 1`.
+`--network-context`. Use `--require-configured` for a qualification lane that
+must run every requested provider; without it, missing external configuration
+is recorded as an explicit skip and the overall result can remain `ok` for a
+mixed local/provider matrix. A sequential run is explicit with
+`--concurrency 1`.
 
 The PGlite script requires `pnpm --dir tests/pglite install --frozen-lockfile`
 and a built native addon. It starts an isolated real PGlite socket server,
@@ -87,6 +91,7 @@ node benchmarks/storage/runner.mjs \
   --providers mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 \
   --sizes 1 --payload-bytes 4096 \
   --iterations 400 --concurrency 64 --min-iops 1000 \
+  --require-configured \
   --output artifacts/ozone-iops.json
 ```
 
@@ -120,11 +125,13 @@ pinned checkout (or the repository-local `vendor/mountx` checkout exists).
 Otherwise `mountx-memory` is explicitly reported as `skipped`; the runner does
 not infer a host-specific `/tmp` location.
 
-The Ozone IOPS gate requests every Ozone-backed provider that can be configured
-in the job: SQLite/R2 is always eligible, PGlite/R2 requires the PGlite service,
-and TiDB/R2 or FoundationDB/R2 become eligible when their provider-specific
-CI environment is present. An absent provider is recorded as an explicit skip,
-not silently replaced with another metadata backend. The R2 providers use
+The Ozone IOPS gate requests the providers owned by each job with
+`--require-configured`: the generic composition job qualifies SQLite/R2 and
+PGlite/R2, while the dedicated TiDB and FoundationDB jobs qualify their
+provider-specific R2 row. An absent provider therefore fails that qualification
+lane instead of being reported as an all-provider pass. A non-qualification
+matrix may omit `--require-configured`; an absent provider is then recorded as
+an explicit skip, not silently replaced with another metadata backend. The R2 providers use
 `createChunkedDriver` with fixed-size chunking, so metadata and block labels
 are not collapsed into one “R2” label. The default chunk size is 65,536 bytes
 and the selected value is recorded in the JSON. Set `MOUNT_RS_R2_DURABLE=0`

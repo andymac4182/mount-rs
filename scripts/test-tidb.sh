@@ -683,6 +683,7 @@ run_node_provider_test() {
         --iterations "$iops_iterations" \
         --concurrency "$iops_concurrency" \
         --min-iops "$iops_minimum" \
+        --require-configured \
         --network-context "ozone-ci" \
         --output "$iops_output"
     echo "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=$iops_minimum output=$iops_output"

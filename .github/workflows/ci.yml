@@ -99,6 +99,7 @@ jobs:
           MOUNT_RS_OZONE_COMPOSITIONS: '1'
           MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
           MOUNT_RS_OZONE_IOPS: '1'
+          MOUNT_RS_OZONE_IOPS_PROVIDERS: 'mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2'
           MOUNT_RS_OZONE_IOPS_OUTPUT: artifacts/ozone-iops.json
           MOUNT_RS_OZONE_IOPS_MIN: '1000'
           MOUNT_RS_OZONE_IOPS_ITERATIONS: '400'
