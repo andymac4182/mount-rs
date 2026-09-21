@@ -180,6 +180,16 @@ recovery, DR, and operational sign-off remain open.
   passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted.
   This remains qualification-account and local-metadata evidence only, not
   production deployment acceptance.
+The current shared-mainline qualification at pushed source
+`0d017f09453af530517a2dfef5dc251c1a827932` passed on 2026-09-22 under `myroot`
+and the dedicated test role. The scoped packet passed sibling-prefix denial,
+public SDK/CLI self-test, composed AWS S3 filesystem, process reopen,
+independent PGlite metadata, writer fencing, PGlite backup/restore,
+fresh-server reopen, and exact owned-prefix cleanup under
+`mount-rs-tests/aws-s3/20260921T190207Z-39577-3e389412508fea6c7c806b9477ffaf8f`.
+Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+current qualification-account and local-metadata evidence only; production
+resource, metadata, DR, hosted release, and operational gates remain open.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
