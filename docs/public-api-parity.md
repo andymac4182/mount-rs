@@ -168,6 +168,7 @@ protocol, record, and session, including a broad request/reply body codec.
 - The N-API FUSE codec now adds raw-layout `IOCTL` request/reply support: the 32-byte request header, declared input payload, 16-byte reply, signed result and protocol-context fields are differentially tested against the pinned oracle, including malformed/trailing inputs. The post-publication full N-API suite passed; this remains focused codec evidence rather than full session/native-mount parity.
 - The N-API FUSE codec now also exposes typed `BMAP` request/reply bodies. Valid protocol-minor layouts, every truncation boundary, trailing bytes and wrong-shape cases are pinned-oracle differentials; the post-publication full N-API suite passed. Full FUSE session/native-mount parity remains open.
 - The latest N-API FUSE codec packet exposes typed `SYMLINK`, `MKNOD`, `MKDIR`, `UNLINK`, `RMDIR`, `RENAME`, `RENAME2`, `LINK`, `ACCESS`, `FALLOCATE`, and `LSEEK` request/reply bodies with generated declarations and explicit CommonJS/ESM exports. Pinned mountx byte/decode differentials and the full artifact-aggregation suite passed; this remains mount-free codec evidence, and native session/device/mount parity remains open.
+- The Rust FUSE session packet now covers the already-supported simple namespace operations at the frame boundary, including successful mutation, error-state preservation, MKNOD fallback, ACCESS credential behavior and the 255-byte POSIX name limit. The focused 16-test session suite and strict Clippy passed; native device/mount acceptance and advanced operation semantics remain open.
 
 The N-API package still does not expose the complete request/reply body codec,
 init negotiation, session, or native mount objects. Therefore this packet
@@ -288,8 +289,9 @@ from the smallest contract boundary to the larger environment boundary:
    explicit unsupported results on platforms that cannot provide the mount.
 2. **Capability-limited Unstorage behavior (P1):** focused oracle-backed
    capability, unsupported-operation, ownership-overlay and timestamp metadata
-   checks now pass. The remaining inventory now identifies hardlinks (2 rows still open after
-   four exact unsupported rows), symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
+   checks now pass. The remaining inventory now identifies hardlink support as a
+   six-row exact `ENOSYS` boundary in direct/N-API tests (generic inode-sharing
+   implementation remains open), symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
    creation (16 rows), and root-only permission cases (18 rows). Each remaining
    row needs an explicit unsupported assertion or adapter implementation; a
    passing MemoryFs or ChunkedFs case cannot close an Unstorage row.
@@ -576,6 +578,15 @@ the closure items listed above.
   zero `ENOTSUP` mismatches and zero skips; every row retained errno `-38`,
   syscall `link`, and null path/destination fields. The packet was published
   through `2bce444`.
+- **PASS** — `66c79e0` Rust FUSE session parity packet: 16 frame-level tests
+  cover simple namespace operations, MKNOD fallback, ACCESS semantics, error
+  cleanup and POSIX name limits; focused FUSE tests, strict Clippy and formatting
+  passed. Native device/mount acceptance and FALLOCATE/LSEEK semantics remain
+  open.
+- **PASS** — `6972fbe` Unstorage hardlink alias packet: six exact `ENOSYS`
+  rows now cover inode-sharing, destination/source errors, alias write-through
+  and unlink lifetime in direct and N-API execution, with zero `ENOTSUP`
+  mismatches and zero skips. Generic hardlink inode support remains open.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
