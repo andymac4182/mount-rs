@@ -2466,14 +2466,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   tests, S3 gateway tests, SDK/CLI tests, and the current W01/W26 workspace
   changes. Explicitly ignored native/service rows remain separate prerequisites
   and are not promoted to production evidence.
-- [x] The current integrated `origin/main` boundary `75b900f` passed on
-  2026-09-22 after rebase: `cargo fmt --all -- --check`, the full locked
-  offline workspace test gate, and strict workspace Clippy with `-D warnings`
-  using the explicitly isolated Cargo target. The first unprivileged test
-  attempt was refused only because the sandbox denied the 9P loopback listener;
-  the same command rerun with the required local-network permission passed,
-  including the 9P loopback integration and the AWS provider, S3 gateway,
-  SDK/CLI, N-API, W01, W04, W26, and other non-ignored workspace rows.
+- [x] The latest tested integrated boundary `00d2b80` passed on 2026-09-22
+  after rebase onto `origin/main`: `cargo fmt --all -- --check`, the full
+  locked offline workspace test gate, and strict workspace Clippy with
+  `-D warnings` using the explicitly isolated Cargo target and required local
+  loopback permission. The gate includes the 9P loopback integration and the
+  AWS provider, S3 gateway, SDK/CLI, N-API, W01, W04, W26, and other
+  non-ignored workspace rows.
   Explicitly ignored native/service rows remain separate prerequisites and are
   not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
