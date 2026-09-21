@@ -126,7 +126,7 @@ jobs:
         with:
           name: ozone-iops
           path: artifacts/ozone-iops.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   ozone-tidb:
     # W26.3 needs the real Ozone gateway and the durable TiDB topology in the
@@ -171,7 +171,7 @@ jobs:
         with:
           name: ozone-tidb-iops
           path: artifacts/ozone-tidb-iops.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   ozone-foundationdb:
     # W26 requires a provider-specific Ozone packet for every feasible
@@ -207,7 +207,7 @@ jobs:
         with:
           name: ozone-foundationdb-iops
           path: artifacts/ozone-foundationdb-iops.json
-          if-no-files-found: warn
+          if-no-files-found: error
 
   rustfs:
     runs-on: ubuntu-latest
