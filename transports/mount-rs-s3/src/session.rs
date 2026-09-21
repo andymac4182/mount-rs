@@ -103,6 +103,79 @@ impl StagingQuota {
     }
 }
 
+struct RequestTicketGuard {
+    inflight: Arc<StdMutex<HashSet<u64>>>,
+    ticket: Option<u64>,
+}
+
+impl RequestTicketGuard {
+    fn new(inflight: Arc<StdMutex<HashSet<u64>>>, ticket: Option<u64>) -> Self {
+        Self { inflight, ticket }
+    }
+
+    fn disarm(&mut self) {
+        self.ticket = None;
+    }
+}
+
+impl Drop for RequestTicketGuard {
+    fn drop(&mut self) {
+        let Some(ticket) = self.ticket.take() else {
+            return;
+        };
+        if let Ok(mut inflight) = self.inflight.lock() {
+            inflight.remove(&ticket);
+        }
+    }
+}
+
+/// Remove a private staging path if the owning request is cancelled before it
+/// reaches its normal async cleanup. `Drop` cannot await, so cancellation
+/// schedules the unlink on the current Tokio runtime and ignores a missing
+/// path or a driver that has already removed it.
+struct StagedPathCleanup {
+    driver: Arc<dyn FsDriver>,
+    path: String,
+    armed: bool,
+}
+
+impl StagedPathCleanup {
+    fn new(driver: Arc<dyn FsDriver>, path: impl Into<String>) -> Self {
+        Self {
+            driver,
+            path: path.into(),
+            armed: true,
+        }
+    }
+
+    async fn cleanup_now(&mut self) {
+        if self.armed {
+            let _ = self.driver.unlink(&self.path).await;
+            self.armed = false;
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StagedPathCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let driver = Arc::clone(&self.driver);
+        let path = self.path.clone();
+        runtime.spawn(async move {
+            let _ = driver.unlink(&path).await;
+        });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct S3SessionOptions {
     pub credentials: Option<Credentials>,
@@ -393,6 +466,7 @@ impl S3Session {
             stats.requests += 1;
         }
         let ticket = self.begin_request();
+        let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
         let request_id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -418,6 +492,7 @@ impl S3Session {
             }
         };
         self.finish_request(ticket, &head).await;
+        ticket_guard.disarm();
         self.record_response_stats(
             started,
             body.len() as u64,
@@ -446,6 +521,7 @@ impl S3Session {
             stats.requests += 1;
         }
         let ticket = self.begin_request();
+        let mut ticket_guard = RequestTicketGuard::new(Arc::clone(&self.inflight), ticket);
         let request_id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -488,6 +564,7 @@ impl S3Session {
             body => body,
         };
         self.finish_request(ticket, &head).await;
+        ticket_guard.disarm();
         let response_bytes = match &response.body {
             Some(S3StreamBody::Bytes(bytes)) => bytes.len() as u64,
             Some(S3StreamBody::Stream(_)) | None => 0,
@@ -1076,7 +1153,8 @@ impl S3Session {
             staging_quota(&driver, self.options.multipart_staging_max_bytes, None).await?;
         let exclusive = existing.is_none() && check_create_only(&head.headers);
         let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
-        write_stream_body(StreamWriteRequest {
+        let mut cleanup = StagedPathCleanup::new(Arc::clone(&driver), staging_path.clone());
+        let write_result = write_stream_body(StreamWriteRequest {
             driver: &driver,
             path: &staging_path,
             headers: &head.headers,
@@ -1089,24 +1167,29 @@ impl S3Session {
             cleanup_on_error: true,
             staging_quota: Some(staging_quota),
         })
-        .await?;
+        .await;
+        if let Err(error) = write_result {
+            cleanup.cleanup_now().await;
+            return Err(error);
+        }
         if exclusive {
             match driver.stat(&target.path).await {
                 Ok(_) => {
-                    let _ = driver.unlink(&staging_path).await;
+                    cleanup.cleanup_now().await;
                     return Err(S3Failure::s3("PreconditionFailed"));
                 }
                 Err(error) if error.code == mount_rs_core::ErrorCode::Enoent => {}
                 Err(error) => {
-                    let _ = driver.unlink(&staging_path).await;
+                    cleanup.cleanup_now().await;
                     return Err(S3Failure::Fs(error));
                 }
             }
         }
         if let Err(error) = driver.rename(&staging_path, &target.path).await {
-            let _ = driver.unlink(&staging_path).await;
+            cleanup.cleanup_now().await;
             return Err(S3Failure::Fs(error));
         }
+        cleanup.disarm();
         if let Some(mtime) = requested_mtime {
             apply_mtime(&driver, &target.path, mtime).await?;
         }
@@ -1246,6 +1329,8 @@ impl S3Session {
             source_stats.mtime_ms
         };
         let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
+        let mut cleanup =
+            StagedPathCleanup::new(Arc::clone(&destination_driver), staging_path.clone());
         let copy_result: S3Result<()> = async {
             let destination_handle = destination_driver
                 .open(&staging_path, "w", 0o666)
@@ -1271,9 +1356,10 @@ impl S3Session {
         }
         .await;
         if let Err(error) = copy_result {
-            let _ = destination_driver.unlink(&staging_path).await;
+            cleanup.cleanup_now().await;
             return Err(error);
         }
+        cleanup.disarm();
         let destination_stats = destination_driver
             .stat(&destination.path)
             .await
@@ -1450,17 +1536,29 @@ impl S3Session {
             return Err(S3Failure::s3("EntityTooLarge"));
         }
         let path = part_path(upload_id, part_number);
+        require_atomic_rename(&driver)?;
         ensure_staging_capacity(
             &driver,
             self.options.multipart_staging_max_bytes,
-            Some(&path),
+            None,
             body.len() as u64,
         )
         .await?;
         ensure_upload_not_finalizing(&driver, upload_id).await?;
-        write_bytes(&driver, &path, &body, false)
-            .await
-            .map_err(|error| match error {
+        let staging_path = part_staging_path(upload_id);
+        let mut cleanup = StagedPathCleanup::new(Arc::clone(&driver), staging_path.clone());
+        let result: S3Result<()> = async {
+            write_bytes(&driver, &staging_path, &body, true).await?;
+            ensure_upload_not_finalizing(&driver, upload_id).await?;
+            driver
+                .rename(&staging_path, &path)
+                .await
+                .map_err(S3Failure::Fs)
+        }
+        .await;
+        if let Err(error) = result {
+            cleanup.cleanup_now().await;
+            return Err(match error {
                 S3Failure::Fs(ref fs_error)
                     if matches!(
                         fs_error.code,
@@ -1470,8 +1568,9 @@ impl S3Session {
                     S3Failure::s3("NoSuchUpload")
                 }
                 other => other,
-            })?;
-        ensure_upload_not_finalizing(&driver, upload_id).await?;
+            });
+        }
+        cleanup.disarm();
         let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
         Ok(S3Response::empty(200)
             .header("etag", protocol::etag_header(&object_etag(&stats)))
@@ -1490,43 +1589,52 @@ impl S3Session {
         let _manifest = read_manifest(&driver, upload_id, &target.key).await?;
         ensure_upload_not_finalizing(&driver, upload_id).await?;
         let path = part_path(upload_id, part_number);
-        let staging_quota = staging_quota(
-            &driver,
-            self.options.multipart_staging_max_bytes,
-            Some(&path),
-        )
-        .await?;
+        require_atomic_rename(&driver)?;
+        let staging_path = part_staging_path(upload_id);
+        let staging_quota =
+            staging_quota(&driver, self.options.multipart_staging_max_bytes, None).await?;
         let max_part_bytes = self
             .options
             .max_body_bytes
             .min(usize::try_from(MAX_PART_SIZE).unwrap_or(usize::MAX));
-        let cleanup_on_error = driver.stat(&path).await.is_err();
-        write_stream_body(StreamWriteRequest {
-            driver: &driver,
-            path: &path,
-            headers: &request.head.headers,
-            body: request.body,
-            verified: request.verified,
-            credentials: self.options.credentials.as_ref(),
-            max_body_bytes: max_part_bytes,
-            exclusive: false,
-            create_parent: false,
-            cleanup_on_error,
-            staging_quota: Some(staging_quota),
-        })
-        .await
-        .map_err(|error| match error {
-            S3Failure::Fs(ref fs_error)
-                if matches!(
-                    fs_error.code,
-                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
-                ) =>
-            {
-                S3Failure::s3("NoSuchUpload")
-            }
-            other => other,
-        })?;
-        ensure_upload_not_finalizing(&driver, upload_id).await?;
+        let mut cleanup = StagedPathCleanup::new(Arc::clone(&driver), staging_path.clone());
+        let result: S3Result<()> = async {
+            write_stream_body(StreamWriteRequest {
+                driver: &driver,
+                path: &staging_path,
+                headers: &request.head.headers,
+                body: request.body,
+                verified: request.verified,
+                credentials: self.options.credentials.as_ref(),
+                max_body_bytes: max_part_bytes,
+                exclusive: true,
+                create_parent: false,
+                cleanup_on_error: true,
+                staging_quota: Some(staging_quota),
+            })
+            .await?;
+            ensure_upload_not_finalizing(&driver, upload_id).await?;
+            driver
+                .rename(&staging_path, &path)
+                .await
+                .map_err(S3Failure::Fs)
+        }
+        .await;
+        if let Err(error) = result {
+            cleanup.cleanup_now().await;
+            return Err(match error {
+                S3Failure::Fs(ref fs_error)
+                    if matches!(
+                        fs_error.code,
+                        mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                    ) =>
+                {
+                    S3Failure::s3("NoSuchUpload")
+                }
+                other => other,
+            });
+        }
+        cleanup.disarm();
         let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
         Ok(S3StreamResponse::from(
             S3Response::empty(200)
@@ -1555,7 +1663,7 @@ impl S3Session {
         )?;
         let requested = parse_complete_document(&body, self.options.max_xml_bytes)?;
         let marker = claim_multipart_finalization(&driver, upload_id, &target.key).await?;
-        let mut published = false;
+        let mut marker_cleanup = StagedPathCleanup::new(Arc::clone(&driver), marker.clone());
         let result: S3Result<S3Response> = async {
             let manifest = read_manifest(&driver, upload_id, &target.key).await?;
             let mut previous = 0_u32;
@@ -1605,6 +1713,8 @@ impl S3Session {
                 upload_directory(upload_id),
                 new_upload_id()
             );
+            let mut staging_cleanup =
+                StagedPathCleanup::new(Arc::clone(&driver), staging_path.clone());
             let assemble_result: S3Result<()> = async {
                 let destination = driver
                     .open(&staging_path, "w", 0o666)
@@ -1638,10 +1748,10 @@ impl S3Session {
             }
             .await;
             if let Err(error) = assemble_result {
-                let _ = driver.unlink(&staging_path).await;
+                staging_cleanup.cleanup_now().await;
                 return Err(error);
             }
-            published = true;
+            staging_cleanup.disarm();
             let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
             remove_tree(&driver, &upload_directory(upload_id)).await?;
             let location = object_location(request.head, &target.bucket, &target.key);
@@ -1657,8 +1767,10 @@ impl S3Session {
             ))
         }
         .await;
-        if result.is_err() && !published {
-            let _ = release_multipart_finalization(&driver, &marker).await;
+        if result.is_err() {
+            marker_cleanup.cleanup_now().await;
+        } else {
+            marker_cleanup.disarm();
         }
         result
     }
@@ -1671,10 +1783,12 @@ impl S3Session {
     ) -> S3Result<S3Response> {
         reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let marker = claim_multipart_finalization(&driver, upload_id, &target.key).await?;
+        let mut marker_cleanup = StagedPathCleanup::new(Arc::clone(&driver), marker);
         if let Err(error) = remove_tree(&driver, &upload_directory(upload_id)).await {
-            let _ = release_multipart_finalization(&driver, &marker).await;
+            marker_cleanup.cleanup_now().await;
             return Err(error);
         }
+        marker_cleanup.disarm();
         Ok(S3Response::empty(204))
     }
 
@@ -1909,6 +2023,10 @@ fn upload_directory(upload_id: &str) -> String {
 
 fn part_path(upload_id: &str, part_number: u32) -> String {
     format!("{}/part-{part_number}", upload_directory(upload_id))
+}
+
+fn part_staging_path(upload_id: &str) -> String {
+    format!("{}/.part-{}", upload_directory(upload_id), new_upload_id())
 }
 
 fn new_upload_id() -> String {
@@ -3738,14 +3856,6 @@ async fn ensure_upload_not_finalizing(driver: &Arc<dyn FsDriver>, upload_id: &st
         {
             Ok(())
         }
-        Err(error) => Err(S3Failure::Fs(error)),
-    }
-}
-
-async fn release_multipart_finalization(driver: &Arc<dyn FsDriver>, marker: &str) -> S3Result<()> {
-    match driver.unlink(marker).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.code == mount_rs_core::ErrorCode::Enoent => Ok(()),
         Err(error) => Err(S3Failure::Fs(error)),
     }
 }

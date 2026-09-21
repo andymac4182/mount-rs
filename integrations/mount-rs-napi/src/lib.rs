@@ -54,7 +54,7 @@ use mount_rs_pglite::{
 use mount_rs_r2::{R2BlockStore, R2Config, open_r2};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore, open_sqlite};
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
-use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw};
+use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw, Reference};
 use napi::{Error, Status};
 use napi_derive::napi;
 
@@ -1170,6 +1170,10 @@ pub struct JsP9MountOptions {
     pub use_driver_ino: Option<bool>,
     pub mount_options: Option<Vec<String>>,
     pub unmount_timeout_ms: Option<f64>,
+    /// Reuse a configured native 9P server. The server must be listening
+    /// before the native mount is started; the JavaScript mount helper starts
+    /// it when the Linux client probe is usable.
+    pub server: Option<Reference<crate::servers::P9Server>>,
 }
 
 #[napi(object)]
@@ -2223,7 +2227,10 @@ fn p9_mount_options(
     };
     let mount_msize = p9_mount_msize(options.mount_msize);
     Ok(Some(mount_rs_9p::P9MountOptions {
-        server: None,
+        server: options
+            .server
+            .map(|server| server.transport_server())
+            .transpose()?,
         server_hooks: mount_rs_9p::P9ServerHooks::default(),
         transport: parse_p9_mount_transport(options.transport)?,
         host: options.host.unwrap_or(defaults.host),

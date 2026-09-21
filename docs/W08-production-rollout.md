@@ -137,6 +137,14 @@ and a clear prerequisite-boundary message, without emitting `TIDB_ACCEPTANCE`
 or attempting partial topology setup. This is harness safety evidence only; it
 does not close P01 or promote local Docker capacity into production evidence.
 
+W08.36 hardens GO-packet completeness by rejecting placeholder-shaped values
+such as `TBD`, `pending`, `unknown`, `TODO`, template markers and
+angle-bracket substitutions in provider versions, topology, environment, run,
+owner, cleanup, rollback and evidence-reference fields. The synthetic
+regression case fails closed, while the checked-in packet remains NO-GO with
+zero evidence records. This is evidence-shape protection only; it cannot
+authenticate a provider result or create production approval.
+
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
 tests and strict Clippy with `-D warnings` using a bounded external Cargo

@@ -114,6 +114,8 @@ pub struct MountOptions {
     pub mount_options: Vec<String>,
     /// Device used by the privileged path. Rootless mounting never opens it.
     pub device: PathBuf,
+    /// Maximum bytes accepted from one native FUSE device read. Native Linux
+    /// mounts require enough room for a modern WRITE frame plus one page.
     pub max_frame: usize,
     pub init_timeout: Duration,
     pub unmount_timeout: Duration,
@@ -137,6 +139,14 @@ impl Default for MountOptions {
         }
     }
 }
+
+// Native mounts only accept modern protocol sessions (7.12+), whose WRITE
+// request body is 40 bytes. FUSE negotiation floors max_write at one page, so
+// the receive frame must fit the request header, that body, and one page of
+// payload. Keeping this floor at the mount boundary prevents INIT from
+// advertising a write frame that FuseDevice would reject as oversized.
+#[cfg(target_os = "linux")]
+const MIN_NATIVE_MAX_FRAME: usize = crate::IN_HEADER_SIZE + 40 + crate::FUSE_PAGE_SIZE;
 
 /// Errors from validation, the native helper, or the session lifecycle.
 #[derive(Debug)]
@@ -1027,10 +1037,10 @@ fn validate_options(options: &MountOptions) -> Result<(), MountError> {
     for (index, option) in options.mount_options.iter().enumerate() {
         validate_mount_option(index, option)?;
     }
-    if options.max_frame < crate::IN_HEADER_SIZE {
-        return Err(MountError::InvalidOption(
-            "max_frame is smaller than the FUSE request header".to_owned(),
-        ));
+    if options.max_frame < MIN_NATIVE_MAX_FRAME {
+        return Err(MountError::InvalidOption(format!(
+            "max_frame must fit a modern FUSE WRITE frame of at least {MIN_NATIVE_MAX_FRAME} bytes"
+        )));
     }
     if options.max_read == Some(0) {
         return Err(MountError::InvalidOption(
@@ -2628,6 +2638,17 @@ mod tests {
                 ..MountOptions::default()
             };
             assert!(validate_options(&options).is_err());
+
+            let options = MountOptions {
+                max_frame: MIN_NATIVE_MAX_FRAME - 1,
+                ..MountOptions::default()
+            };
+            assert!(validate_options(&options).is_err());
+            let options = MountOptions {
+                max_frame: MIN_NATIVE_MAX_FRAME,
+                ..MountOptions::default()
+            };
+            assert!(validate_options(&options).is_ok());
         }
     }
 
