@@ -17,8 +17,8 @@ use mount_rs_core::{
 };
 use mount_rs_nfs::v4::{
     CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS_V4, NFS4_PROGRAM, NFS4ERR_IO, NFS4ERR_PERM, OP_COMMIT,
-    OP_CREATE_SESSION, OP_EXCHANGE_ID, OP_GETFH, OP_OPEN, OP_PUTFH, OP_PUTROOTFH, OP_SEQUENCE,
-    OP_WRITE, UNSTABLE4,
+    OP_CREATE_SESSION, OP_EXCHANGE_ID, OP_GETFH, OP_OPEN, OP_PUTFH, OP_PUTROOTFH,
+    OP_RECLAIM_COMPLETE, OP_SEQUENCE, OP_WRITE, UNSTABLE4,
 };
 use mount_rs_nfs::{
     NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter, decode_reply, encode_call,
@@ -466,6 +466,24 @@ fn nfs_v4_unstable_write_defers_flush_and_commit_propagates_barrier_faults() {
                         sequence: 1,
                     };
 
+                    let mut response = rpc(
+                        &mut stream,
+                        3,
+                        compound(
+                            "reclaim-complete",
+                            &[
+                                sequence(&client),
+                                op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 2), 0);
+                    consume_sequence(&mut response);
+                    assert_eq!(parse_result_status(&mut response, OP_RECLAIM_COMPLETE), 0);
+                    response.end("reclaim-complete response").unwrap();
+                    client.sequence += 1;
+
                     let open = op(OP_OPEN, |writer| {
                         writer.u32(0);
                         writer.u32(OPEN4_SHARE_ACCESS_BOTH);
@@ -482,7 +500,7 @@ fn nfs_v4_unstable_write_defers_flush_and_commit_propagates_barrier_faults() {
                     let (stateid, file_handle) = parse_open(
                         rpc(
                             &mut stream,
-                            3,
+                            4,
                             compound(
                                 "open",
                                 &[
@@ -499,7 +517,7 @@ fn nfs_v4_unstable_write_defers_flush_and_commit_propagates_barrier_faults() {
                     client.sequence += 1;
                     let response = rpc(
                         &mut stream,
-                        4,
+                        5,
                         compound(
                             "unstable-write",
                             &[
@@ -525,7 +543,7 @@ fn nfs_v4_unstable_write_defers_flush_and_commit_propagates_barrier_faults() {
                     controls.fail_sync.store(true, Ordering::SeqCst);
                     let close_before_sync_fault = controls.close_calls.load(Ordering::SeqCst);
                     assert_eq!(
-                        commit(&mut stream, &mut client, 5, &file_handle, 4, 8).await,
+                        commit(&mut stream, &mut client, 6, &file_handle, 4, 8).await,
                         NFS4ERR_IO,
                         "injected sync error must reach the COMMIT result"
                     );
@@ -539,7 +557,7 @@ fn nfs_v4_unstable_write_defers_flush_and_commit_propagates_barrier_faults() {
                     controls.fail_close.store(true, Ordering::SeqCst);
                     let close_before_close_fault = controls.close_calls.load(Ordering::SeqCst);
                     assert_eq!(
-                        commit(&mut stream, &mut client, 6, &file_handle, 4, 8).await,
+                        commit(&mut stream, &mut client, 7, &file_handle, 4, 8).await,
                         NFS4ERR_PERM,
                         "injected close error must reach the COMMIT result"
                     );
@@ -550,7 +568,7 @@ fn nfs_v4_unstable_write_defers_flush_and_commit_propagates_barrier_faults() {
                     );
 
                     assert_eq!(
-                        commit(&mut stream, &mut client, 7, &file_handle, 4, 8).await,
+                        commit(&mut stream, &mut client, 8, &file_handle, 4, 8).await,
                         0,
                         "a later COMMIT succeeds after one-shot faults"
                     );

@@ -68,7 +68,8 @@ session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
 options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
 an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
-and refused-`CREATE_SESSION` replay followed by a next-sequence retry. Upstream ID-map, deterministic clock/seed,
+refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
+`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Upstream ID-map, deterministic clock/seed,
 and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -1155,6 +1156,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The NFSv4 `CREATE_SESSION` sequence slot now caches refusal replies for
   retransmission and advances to the next sequence for a retry; the focused
   wire test proves the refusal replay and successful next-sequence creation.
+- [x] The NFSv4 reclaim policy now gates both `OPEN` and `LOCK` state
+  establishment with `NFS4ERR_GRACE` until `RECLAIM_COMPLETE`; the affected
+  rootless v4.1 round-trip and same-owner/cross-client share tests pass.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

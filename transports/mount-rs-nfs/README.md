@@ -44,10 +44,11 @@ NFSv4.1 channel and state ceilings are available through
 `maxRequestSize`, `maxCachedResponseSize`, `maxOpensPerFile`,
 `maxLocksPerFile`, and `requireReclaimComplete`. The channel-size and count
 values are clamped during `CREATE_SESSION`; operation, session, open-state,
-and lock-range limits are enforced by the v4 state machine. The defaults match
-the pinned oracle's 90-second lease, 64 fore slots/operations, 1 MiB request
-ceiling, 64 KiB replay cache, 256 opens per file, and 1024 lock ranges per
-file.
+and lock-range limits are enforced by the v4 state machine. When enabled,
+`requireReclaimComplete` gates both `OPEN` and `LOCK` state establishment
+until the client sends `RECLAIM_COMPLETE`. The defaults match the pinned
+oracle's 90-second lease, 64 fore slots/operations, 1 MiB request ceiling,
+64 KiB replay cache, 256 opens per file, and 1024 lock ranges per file.
 
 ## Native macOS/Linux mount lifecycle
 

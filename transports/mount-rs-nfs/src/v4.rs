@@ -475,7 +475,6 @@ struct OpenArgs {
     _seqid: u32,
     share_access: u32,
     share_deny: u32,
-    owner_clientid: u64,
     owner: Vec<u8>,
     open_type: u32,
     create_mode: Option<u32>,
@@ -1005,7 +1004,7 @@ fn read_open(reader: &mut XdrReader<'_>) -> Result<OpenArgs, XdrError> {
     let seqid = reader.u32("OPEN.seqid")?;
     let share_access = reader.u32("OPEN.share_access")?;
     let share_deny = reader.u32("OPEN.share_deny")?;
-    let owner_clientid = reader.u64("OPEN.owner.clientid")?;
+    let _owner_clientid = reader.u64("OPEN.owner.clientid")?;
     let owner = reader.var_opaque(NFS4_OPAQUE_LIMIT, "OPEN.owner.owner")?;
     let open_type = reader.u32("OPEN.openhow")?;
     let mut create_mode = None;
@@ -1050,7 +1049,6 @@ fn read_open(reader: &mut XdrReader<'_>) -> Result<OpenArgs, XdrError> {
         _seqid: seqid,
         share_access,
         share_deny,
-        owner_clientid,
         owner,
         open_type,
         create_mode,
@@ -3720,6 +3718,18 @@ impl Nfs4Session {
         if args.share_deny > OPEN4_SHARE_DENY_BOTH {
             return V4OpResult::new(OP_OPEN, NFS4ERR_INVAL);
         }
+        let Some(clientid) = cursor.clientid else {
+            return V4OpResult::new(OP_OPEN, NFS4ERR_OP_NOT_IN_SESSION);
+        };
+        {
+            let state = self.state.lock().expect("NFSv4 state lock");
+            let Some(client) = state.clients.get(&clientid) else {
+                return V4OpResult::new(OP_OPEN, NFS4ERR_STALE_CLIENTID);
+            };
+            if self.options.nfs4.require_reclaim_complete && !client.reclaim_complete {
+                return V4OpResult::new(OP_OPEN, NFS4ERR_GRACE);
+            }
+        }
         let path = if args.claim == CLAIM_NULL {
             let directory = match self.current_path(cursor) {
                 Ok(path) => path,
@@ -3841,7 +3851,6 @@ impl Nfs4Session {
         // Pin before taking the state lock: a concurrent v3 lookup may bind
         // more names while this OPEN is checking share conflicts.
         self.handles.pin(entry.id);
-        let clientid = cursor.clientid.unwrap_or(args.owner_clientid);
         let share_conflict = self
             .state
             .lock()
