@@ -141,6 +141,26 @@ Never blind-replay a request with an unknown or maybe-committed outcome, delete
 the only copy during cleanup, or downgrade a persisted data directory without
 an explicit compatibility decision and restore point.
 
+### Repository-local rehearsal
+
+The focused local harness now exercises the control flow against a real
+disk-backed PGlite server:
+
+```sh
+MOUNT_RS_RUN_PGLITE_SERVER_LIFECYCLE=1 \
+  ./scripts/cargo-shared test --locked -p mount-rs-core \
+  --test pglite_server_lifecycle -- --ignored --nocapture
+```
+
+It quiesces the filesystem, copies the data directory to an isolated restore
+directory, adds a marker through a bad-release candidate, restores the
+pre-candidate copy, and verifies a fresh server reads the original marker and
+returns `ENOENT` for the candidate marker. A passing run emits
+`PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`. This is supporting local rehearsal
+evidence only: the copy is not an encrypted production backup, and it does not
+measure production RPO/RTO, power-loss consistency, retention, access control,
+or deployment-owner approval.
+
 ## Signals, limits, and operator response
 
 These are required mappings to the selected collector and pager. They are not
