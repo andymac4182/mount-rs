@@ -83,6 +83,13 @@ then passed real mounted write/read/unmount, and the Node CLI native gate passed
 with independent Rust and Node clients writing to the same mount, Rust reading
 Node bytes, clean unmount, and both payloads retained in the backing root.
 
+The same tree also passed `./scripts/cargo-shared test --locked --workspace
+--all-targets --all-features --offline` on macOS. Core, every registered
+integration/transport crate, the SDK/CLI/HTTP/N-API paths, SQLite/VFS,
+chunked, versioned and observability tests completed with exit 0; live R2,
+PGlite, TiDB, RustFS and privileged native tests remained explicit prerequisite
+skips rather than being counted as service acceptance.
+
 The follow-up PGlite CLI consumer check in `dcc3aa4` also exited 0: the Rust
 CLI now performs the same configured PGlite split-store write, shutdown,
 reopen and readback that the Node CLI already performed. The live CLI matrix
