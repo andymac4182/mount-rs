@@ -104,7 +104,7 @@ cleanup() {
       --bucket "${AWS_S3_TEST_BUCKET}" \
       --key "$owner_key" \
       --region "$region" \
-      --query 'Metadata.mount-rs-run-id' \
+      --query 'Metadata."mount-rs-run-id"' \
       --output text 2>/dev/null) || {
         echo "AWS_S3_CLEANUP_OWNERSHIP_VERIFY_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix" >&2
         cleanup_status=1
