@@ -120,13 +120,32 @@ import {
 } from "@mount-rs/core/webdav"
 import type { Duplex } from "node:stream"
 import {
+  decodeRequest,
+  decodeReply,
+  encodeRequest,
+  encodeReplyFor,
+  type EncodeRequestInit,
+  type FuseReply,
+  type FuseRequest,
+  type OpcodeSpec,
   decodeLkIn,
   decodeLkOut,
   encodeLkIn,
   encodeLkOut,
   FUSE_ASYNC_DIO,
+  FUSE_ASYNC_READ,
+  FUSE_INIT_EXT,
+  FUSE_MIN_READ_BUFFER,
+  FUSE_SYNCFS,
+  FUSE_NOTIFY_UNIQUE,
   FUSE_PARALLEL_DIROPS,
   FUSE_SETXATTR_EXT,
+  FATTR_UID,
+  FOPEN_DIRECT_IO,
+  DT_DIR,
+  O_TRUNC,
+  SEEK_HOLE,
+  FUSE_DIRENT_HEADER_SIZE,
   FUSE_LK_FLOCK,
   F_UNLCK,
   FuseSession,
@@ -198,6 +217,33 @@ declare const mounted: Mounted
 const mountedDisposal: Promise<void> = mounted[Symbol.asyncDispose]()
 void mountedDisposal
 void (FUSE_ASYNC_DIO | FUSE_PARALLEL_DIROPS | FUSE_SETXATTR_EXT)
+const fuseWireNumbers: number[] = [
+  FUSE_MIN_READ_BUFFER,
+  FUSE_SYNCFS,
+  FATTR_UID,
+  FOPEN_DIRECT_IO,
+  DT_DIR,
+  O_TRUNC,
+  SEEK_HOLE,
+  FUSE_DIRENT_HEADER_SIZE,
+]
+const fuseWireFlags: bigint = FUSE_ASYNC_READ | FUSE_INIT_EXT | FUSE_NOTIFY_UNIQUE
+void fuseWireNumbers
+void fuseWireFlags
+const genericRequestInit: EncodeRequestInit = {
+  opcode: 1,
+  unique: 1n,
+  body: { name: "typecheck" },
+}
+const genericRequest: FuseRequest = decodeRequest(new Uint8Array(), undefined)
+const genericReply: FuseReply = decodeReply(new Uint8Array(), 1)
+const genericOpcode: OpcodeSpec | undefined = undefined
+void encodeRequest
+void encodeReplyFor
+void genericRequestInit
+void genericRequest
+void genericReply
+void genericOpcode
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
   __napiBindingTarget

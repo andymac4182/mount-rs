@@ -172,9 +172,38 @@ export type FuseFlushMechanism = "sync" | "enosys" | "noflush"
 
 export interface FuseRequest {
   header: NativeFuseInHeader
+  name: string
   payload: Buffer
   extensions: Buffer
   body: unknown
+}
+
+export interface FuseReply {
+  header: NativeFuseOutHeader
+  payload: Buffer
+  body: unknown
+}
+
+export interface EncodeRequestInit {
+  opcode: number
+  unique: bigint
+  nodeid?: bigint
+  uid?: number
+  gid?: number
+  pid?: number
+  body?: unknown
+  payload?: Uint8Array
+  extensions?: Uint8Array
+}
+
+export interface OpcodeSpec {
+  readonly opcode: number
+  readonly name: string
+  readonly hasReply: boolean
+  decodeRequest(body: Uint8Array, context?: NativeFuseProtocolContext): unknown
+  encodeRequest(value: unknown, context?: NativeFuseProtocolContext): Buffer
+  decodeReply(body: Uint8Array, context?: NativeFuseProtocolContext): unknown
+  encodeReply(value: unknown, context?: NativeFuseProtocolContext): Buffer
 }
 
 export type FuseSessionOptions = Omit<NativeFuseSessionOptions, "flushMechanism"> & {
@@ -320,6 +349,12 @@ export declare const FUSE_NAME_MAX: number
 export declare const FUSE_KERNEL_VERSION: number
 export declare const FUSE_KERNEL_MINOR_VERSION: number
 export declare const FUSE_ROOT_ID: bigint
+export declare const FUSE_MIN_READ_BUFFER: number
+export declare const FUSE_PAGE_SIZE: number
+export declare const FUSE_MAX_MAX_PAGES: number
+export declare const FUSE_DEFAULT_MAX_PAGES_PER_REQ: number
+export declare const FUSE_LOOKUP: number
+export declare const FUSE_FORGET: number
 export declare const FUSE_RELEASE: number
 export declare const FUSE_RELEASEDIR: number
 export declare const FUSE_FLUSH: number
@@ -332,18 +367,108 @@ export declare const FUSE_GETATTR: number
 export declare const FUSE_SETATTR: number
 export declare const FUSE_GETATTR_FH: number
 export declare const FUSE_READLINK: number
+export declare const FUSE_SYMLINK: number
+export declare const FUSE_MKNOD: number
+export declare const FUSE_MKDIR: number
+export declare const FUSE_UNLINK: number
+export declare const FUSE_RMDIR: number
+export declare const FUSE_RENAME: number
+export declare const FUSE_LINK: number
+export declare const FUSE_OPEN: number
+export declare const FUSE_READ: number
+export declare const FUSE_WRITE: number
 export declare const FUSE_STATFS: number
+export declare const FUSE_INIT: number
+export declare const FUSE_OPENDIR: number
+export declare const FUSE_READDIR: number
+export declare const FUSE_ACCESS: number
+export declare const FUSE_CREATE: number
+export declare const FUSE_DESTROY: number
+export declare const FUSE_NOTIFY_REPLY: number
 export declare const FUSE_INTERRUPT: number
 export declare const FUSE_IOCTL: number
 export declare const FUSE_BATCH_FORGET: number
 export declare const FUSE_POLL: number
 export declare const FUSE_BMAP: number
+export declare const FUSE_FALLOCATE: number
+export declare const FUSE_READDIRPLUS: number
+export declare const FUSE_RENAME2: number
+export declare const FUSE_LSEEK: number
+export declare const FUSE_COPY_FILE_RANGE: number
+export declare const FUSE_SETUPMAPPING: number
+export declare const FUSE_REMOVEMAPPING: number
+export declare const FUSE_SYNCFS: number
+export declare const FUSE_TMPFILE: number
+export declare const FUSE_STATX: number
+export declare const CUSE_INIT: number
+export declare const FUSE_NOTIFY_POLL: number
+export declare const FUSE_NOTIFY_INVAL_INODE: number
+export declare const FUSE_NOTIFY_INVAL_ENTRY: number
+export declare const FUSE_NOTIFY_STORE: number
+export declare const FUSE_NOTIFY_RETRIEVE: number
+export declare const FUSE_NOTIFY_DELETE: number
+export declare const FUSE_NOTIFY_RESEND: number
+export declare const FUSE_NOTIFY_UNIQUE: bigint
 export declare const FUSE_SETXATTR: number
 export declare const FUSE_GETXATTR: number
 export declare const FUSE_LISTXATTR: number
 export declare const FUSE_REMOVEXATTR: number
+export declare const FATTR_UID: number
+export declare const FATTR_GID: number
+export declare const FATTR_FH: number
+export declare const FATTR_ATIME_NOW: number
+export declare const FATTR_MTIME_NOW: number
+export declare const FATTR_LOCKOWNER: number
+export declare const FATTR_CTIME: number
+export declare const FATTR_KILL_SUIDGID: number
+export declare const FOPEN_DIRECT_IO: number
+export declare const FOPEN_KEEP_CACHE: number
+export declare const FOPEN_NONSEEKABLE: number
+export declare const FOPEN_CACHE_DIR: number
+export declare const FOPEN_STREAM: number
+export declare const FOPEN_NOFLUSH: number
+export declare const FOPEN_PARALLEL_DIRECT_WRITES: number
+export declare const FOPEN_PASSTHROUGH: number
+export declare const FUSE_ASYNC_READ: bigint
+export declare const FUSE_POSIX_LOCKS: bigint
+export declare const FUSE_FILE_OPS: bigint
+export declare const FUSE_ATOMIC_O_TRUNC: bigint
+export declare const FUSE_EXPORT_SUPPORT: bigint
+export declare const FUSE_BIG_WRITES: bigint
+export declare const FUSE_DONT_MASK: bigint
+export declare const FUSE_SPLICE_WRITE: bigint
+export declare const FUSE_SPLICE_MOVE: bigint
+export declare const FUSE_SPLICE_READ: bigint
+export declare const FUSE_FLOCK_LOCKS: bigint
+export declare const FUSE_HAS_IOCTL_DIR: bigint
+export declare const FUSE_AUTO_INVAL_DATA: bigint
+export declare const FUSE_DO_READDIRPLUS: bigint
+export declare const FUSE_READDIRPLUS_AUTO: bigint
 export declare const FUSE_ASYNC_DIO: bigint
+export declare const FUSE_WRITEBACK_CACHE: bigint
+export declare const FUSE_NO_OPEN_SUPPORT: bigint
 export declare const FUSE_PARALLEL_DIROPS: bigint
+export declare const FUSE_HANDLE_KILLPRIV: bigint
+export declare const FUSE_POSIX_ACL: bigint
+export declare const FUSE_ABORT_ERROR: bigint
+export declare const FUSE_MAX_PAGES: bigint
+export declare const FUSE_CACHE_SYMLINKS: bigint
+export declare const FUSE_NO_OPENDIR_SUPPORT: bigint
+export declare const FUSE_EXPLICIT_INVAL_DATA: bigint
+export declare const FUSE_MAP_ALIGNMENT: bigint
+export declare const FUSE_SUBMOUNTS: bigint
+export declare const FUSE_HANDLE_KILLPRIV_V2: bigint
+export declare const FUSE_INIT_EXT: bigint
+export declare const FUSE_INIT_RESERVED: bigint
+export declare const FUSE_SECURITY_CTX: bigint
+export declare const FUSE_HAS_INODE_DAX: bigint
+export declare const FUSE_CREATE_SUPP_GROUP: bigint
+export declare const FUSE_HAS_EXPIRE_ONLY: bigint
+export declare const FUSE_DIRECT_IO_ALLOW_MMAP: bigint
+export declare const FUSE_PASSTHROUGH: bigint
+export declare const FUSE_NO_EXPORT_SUPPORT: bigint
+export declare const FUSE_HAS_RESEND: bigint
+export declare const FUSE_ALLOW_IDMAP: bigint
 export declare const FUSE_GETLK: number
 export declare const FUSE_SETLK: number
 export declare const FUSE_SETLKW: number
@@ -353,6 +478,40 @@ export declare const F_WRLCK: number
 export declare const F_UNLCK: number
 export declare const FUSE_SETXATTR_EXT: bigint
 export declare const FUSE_SETXATTR_ACL_KILL_SGID: number
+export declare const FUSE_WRITE_CACHE: number
+export declare const FUSE_WRITE_LOCKOWNER: number
+export declare const FUSE_WRITE_KILL_SUIDGID: number
+export declare const FUSE_READ_LOCKOWNER: number
+export declare const FUSE_POLL_SCHEDULE_NOTIFY: number
+export declare const FUSE_ATTR_SUBMOUNT: number
+export declare const FUSE_ATTR_DAX: number
+export declare const FUSE_OPEN_KILL_SUIDGID: number
+export declare const FUSE_EXPIRE_ONLY: number
+export declare const FUSE_UNIQUE_RESEND: bigint
+export declare const FUSE_INVALID_UIDGID: number
+export declare const FUSE_MAX_NR_SECCTX: number
+export declare const FUSE_EXT_GROUPS: number
+export declare const DT_UNKNOWN: number
+export declare const DT_FIFO: number
+export declare const DT_CHR: number
+export declare const DT_DIR: number
+export declare const DT_BLK: number
+export declare const DT_REG: number
+export declare const DT_LNK: number
+export declare const DT_SOCK: number
+export declare const O_ACCMODE: number
+export declare const O_RDONLY: number
+export declare const O_WRONLY: number
+export declare const O_RDWR: number
+export declare const O_CREAT: number
+export declare const O_EXCL: number
+export declare const O_TRUNC: number
+export declare const O_APPEND: number
+export declare const SEEK_SET: number
+export declare const SEEK_CUR: number
+export declare const SEEK_END: number
+export declare const SEEK_DATA: number
+export declare const SEEK_HOLE: number
 export declare const XATTR_CREATE: number
 export declare const XATTR_REPLACE: number
 export declare const FATTR_MODE: number
@@ -361,9 +520,20 @@ export declare const FATTR_ATIME: number
 export declare const FATTR_MTIME: number
 export declare const FUSE_IN_HEADER_SIZE: number
 export declare const FUSE_OUT_HEADER_SIZE: number
+export declare const FUSE_DIRENT_HEADER_SIZE: number
+export declare const FUSE_INIT_OUT_SIZE: number
+export declare const FUSE_COMPAT_INIT_OUT_SIZE: number
+export declare const FUSE_COMPAT_22_INIT_OUT_SIZE: number
+export declare const FUSE_COMPAT_ENTRY_OUT_SIZE: number
+export declare const FUSE_COMPAT_ATTR_OUT_SIZE: number
+export declare const FUSE_COMPAT_STATFS_SIZE: number
+export declare const FUSE_COMPAT_WRITE_IN_SIZE: number
+export declare const FUSE_COMPAT_MKNOD_IN_SIZE: number
+export declare const FUSE_COMPAT_SETXATTR_IN_SIZE: number
 export declare const DEFAULT_MAX_WRITE: number
 export declare const DEFAULT_PROTOCOL: Readonly<NativeFuseProtocolContext>
 export declare const OPCODE_NAMES: Readonly<Record<number, string>>
+export declare const OPCODES: ReadonlyMap<number, OpcodeSpec>
 export declare const SUPPORTED_OPCODES: ReadonlyArray<number>
 export declare const UNIMPLEMENTED_OPCODES: ReadonlyArray<number>
 
@@ -380,6 +550,14 @@ export declare function encodeInHeader(value: NativeFuseInHeader): Buffer
 export declare function decodeOutHeader(bytes: Uint8Array): NativeFuseOutHeader
 export declare function encodeOutHeader(value: NativeFuseOutHeader): Buffer
 export declare function writeOutHeaderInto(target: Uint8Array, value: NativeFuseOutHeader): void
+export declare function decodeRequestBody(opcode: number, body: Uint8Array, context?: NativeFuseProtocolContext): unknown
+export declare function encodeRequestBody(opcode: number, value: unknown, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeReplyBody(opcode: number, body: Uint8Array, context?: NativeFuseProtocolContext): unknown
+export declare function encodeReplyBody(opcode: number, value: unknown, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeRequest(bytes: Uint8Array, context?: NativeFuseProtocolContext): FuseRequest
+export declare function encodeRequest(init: EncodeRequestInit, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeReply(bytes: Uint8Array, opcode: number, context?: NativeFuseProtocolContext): FuseReply
+export declare function encodeReplyFor(unique: bigint, opcode: number, value: unknown, context?: NativeFuseProtocolContext): Buffer
 export declare function fuseErrno(code: number | string): number
 export declare function allocReply(size: number): { message: Buffer; body: Buffer }
 export declare function finishReply(reply: { message: Buffer; body: Buffer }, unique: bigint, bytesUsed?: number): Buffer

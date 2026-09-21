@@ -371,6 +371,20 @@ it ended `FSKIT_ACTIVATION=BLOCKED`. This is compile/in-process evidence only:
 signed installation, FSClient enablement, mounted read/write, hosted Linux
 FUSE, callback/lifecycle, crash/restart, concurrency, locks, and durability
 remain open, so W01 stays NO-GO.
+The latest mount-free N-API FUSE public-surface packet closes a verified
+barrel gap: all 185 pinned wire constants are statically discoverable through
+CommonJS and ESM named imports with `./fuse` declarations, and the facade now
+exposes opcode body dispatch plus complete request/reply framing, 8-byte
+extension validation, raw/unknown handling, and current `SYNCFS` support.
+`npm run build:debug`, oracle-enabled `test/fuse-codec.mjs`,
+`test/fuse-session.mjs`, `test/fuse-inodes.mjs`, generated `test/typecheck.mjs`,
+and `CARGO_TARGET_DIR=/private/tmp/mount-rs-napi-public-20260922
+./scripts/cargo-shared test -p mount-rs-napi --all-targets --locked` (16/16)
+pass. The pinned oracle still marks `SYNCFS` unimplemented, so no oracle
+differential is claimed for that extension. The oracle-enabled package suite
+reached NFS and stopped on this environment's `Operation not permitted` socket
+bind; hosted Linux FUSE, callback/lifecycle, close/crash/restart, concurrency,
+locks, and durability remain open, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure

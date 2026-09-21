@@ -195,6 +195,17 @@ cancel after the helper returned; the forced path now requests session stop
 before lazy detach, with a Linux-gated helper-ordering regression. Local host
 and Linux-target checks pass, but the corrected hosted native run is still
 required, so W01 remains **NO-GO**.
+The latest mount-free N-API FUSE packet closes a verified public-surface gap:
+all 185 pinned FUSE wire constants are statically available through the
+CommonJS and ESM `./fuse` barrel with declarations, and the barrel now also
+exposes typed opcode body dispatch plus complete request/reply framing,
+extension validation, raw/unknown handling, and the current `SYNCFS` codec.
+The rebuilt debug addon, oracle-enabled codec/session/inode tests, generated
+typecheck, and locked N-API Rust target pass. The pinned oracle still marks
+`SYNCFS` unimplemented, so that extension has no oracle differential. The
+oracle-enabled package suite reached NFS and stopped on this environment's
+`Operation not permitted` socket bind; hosted Linux FUSE and remaining native
+lifecycle gates remain external, so W01 stays NO-GO.
 
 The next FUSE teardown attempt reached hosted Linux at exact commit
 `962e981f`: native-FUSE job `106530560678` in CI run `35659287961` still

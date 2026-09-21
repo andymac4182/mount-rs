@@ -1029,6 +1029,182 @@ function install(binding) {
     }
   }
 
+  // The native binding exposes per-struct codecs. Keep the protocol-level
+  // dispatch table in this postlude so callers can frame complete requests and
+  // replies without opening a device or depending on the native mount path.
+  const withContext = (name, value, ctx) =>
+    ctx === undefined ? binding[name](value) : binding[name](value, context(ctx))
+  const emptyValue = Object.freeze({})
+  const decodeEmptyBody = (body) => {
+    if (body.length !== 0) {
+      throw new ProtocolError(`expected an empty body, got ${body.length} byte(s)`)
+    }
+    return emptyValue
+  }
+  const encodeEmptyBody = () => Buffer.alloc(0)
+  const decodeRawBody = (body) => ({ data: copyBytes(body) })
+  const encodeRawBody = (value) => {
+    if (value == null || value.data === undefined) {
+      throw new ProtocolError("raw FUSE body needs a data field")
+    }
+    return copyBytes(value.data)
+  }
+  const decodeForgetBody = (body) => {
+    if (body.length !== 8) {
+      throw new ProtocolError(`fuse_forget_in needs 8 bytes, got ${body.length}`)
+    }
+    return { nlookup: Buffer.from(body).readBigUInt64LE(0) }
+  }
+  const encodeForgetBody = (value) => {
+    if (value == null || value.nlookup === undefined) {
+      throw new ProtocolError("fuse_forget_in needs an nlookup field")
+    }
+    const body = Buffer.alloc(8)
+    body.writeBigUInt64LE(BigInt.asUintN(64, BigInt(value.nlookup)), 0)
+    return body
+  }
+  const decodeCodec = (name) => (body, ctx) => withContext(name, body, ctx)
+  const encodeCodec = (name) => (value, ctx) => withContext(name, value, ctx)
+  const specs = new Map()
+  const addSpec = (opcode, decodeRequest, encodeRequest, decodeReply, encodeReply, hasReply = true) => {
+    specs.set(opcode, Object.freeze({
+      opcode,
+      name: binding.opcodeName(opcode),
+      hasReply,
+      decodeRequest,
+      encodeRequest,
+      decodeReply,
+      encodeReply,
+    }))
+  }
+  const emptyReply = [decodeEmptyBody, encodeEmptyBody]
+  const rawReply = [decodeRawBody, encodeRawBody]
+
+  addSpec(binding.FUSE_LOOKUP, decodeCodec("decodeLookupIn"), encodeCodec("encodeLookupIn"), decodeCodec("decodeLookupOut"), encodeCodec("encodeLookupOut"))
+  addSpec(binding.FUSE_FORGET, decodeForgetBody, encodeForgetBody, ...emptyReply, false)
+  addSpec(binding.FUSE_BATCH_FORGET, decodeCodec("decodeBatchForgetIn"), encodeCodec("encodeBatchForgetIn"), ...emptyReply, false)
+  addSpec(binding.FUSE_GETATTR, decodeCodec("decodeGetattrIn"), encodeCodec("encodeGetattrIn"), decodeCodec("decodeGetattrOut"), encodeCodec("encodeGetattrOut"))
+  addSpec(binding.FUSE_SETATTR, decodeCodec("decodeSetattrIn"), encodeCodec("encodeSetattrIn"), decodeCodec("decodeSetattrOut"), encodeCodec("encodeSetattrOut"))
+  addSpec(binding.FUSE_READLINK, decodeCodec("decodeReadlinkIn"), encodeCodec("encodeReadlinkIn"), decodeCodec("decodeReadlinkOut"), encodeCodec("encodeReadlinkOut"))
+  addSpec(binding.FUSE_SYMLINK, decodeCodec("decodeSymlinkIn"), encodeCodec("encodeSymlinkIn"), decodeCodec("decodeSymlinkOut"), encodeCodec("encodeSymlinkOut"))
+  addSpec(binding.FUSE_MKNOD, decodeCodec("decodeMknodIn"), encodeCodec("encodeMknodIn"), decodeCodec("decodeMknodOut"), encodeCodec("encodeMknodOut"))
+  addSpec(binding.FUSE_MKDIR, decodeCodec("decodeMkdirIn"), encodeCodec("encodeMkdirIn"), decodeCodec("decodeMkdirOut"), encodeCodec("encodeMkdirOut"))
+  addSpec(binding.FUSE_UNLINK, decodeCodec("decodeUnlinkIn"), encodeCodec("encodeUnlinkIn"), ...emptyReply)
+  addSpec(binding.FUSE_RMDIR, decodeCodec("decodeRmdirIn"), encodeCodec("encodeRmdirIn"), ...emptyReply)
+  addSpec(binding.FUSE_RENAME, decodeCodec("decodeRenameIn"), encodeCodec("encodeRenameIn"), ...emptyReply)
+  addSpec(binding.FUSE_RENAME2, decodeCodec("decodeRename2In"), encodeCodec("encodeRename2In"), ...emptyReply)
+  addSpec(binding.FUSE_LINK, decodeCodec("decodeLinkIn"), encodeCodec("encodeLinkIn"), decodeCodec("decodeLinkOut"), encodeCodec("encodeLinkOut"))
+  addSpec(binding.FUSE_OPEN, decodeCodec("decodeOpenIn"), encodeCodec("encodeOpenIn"), decodeCodec("decodeOpenOut"), encodeCodec("encodeOpenOut"))
+  addSpec(binding.FUSE_OPENDIR, decodeCodec("decodeOpenIn"), encodeCodec("encodeOpenIn"), decodeCodec("decodeOpenOut"), encodeCodec("encodeOpenOut"))
+  addSpec(binding.FUSE_CREATE, decodeCodec("decodeCreateIn"), encodeCodec("encodeCreateIn"), decodeCodec("decodeCreateOut"), encodeCodec("encodeCreateOut"))
+  addSpec(binding.FUSE_READ, decodeCodec("decodeReadIn"), encodeCodec("encodeReadIn"), ...rawReply)
+  addSpec(binding.FUSE_WRITE, decodeCodec("decodeWriteIn"), encodeCodec("encodeWriteIn"), decodeCodec("decodeWriteOut"), encodeCodec("encodeWriteOut"))
+  addSpec(binding.FUSE_RELEASE, decodeCodec("decodeReleaseIn"), encodeCodec("encodeReleaseIn"), ...emptyReply)
+  addSpec(binding.FUSE_RELEASEDIR, decodeCodec("decodeReleaseIn"), encodeCodec("encodeReleaseIn"), ...emptyReply)
+  addSpec(binding.FUSE_FSYNC, decodeCodec("decodeFsyncIn"), encodeCodec("encodeFsyncIn"), ...emptyReply)
+  addSpec(binding.FUSE_FSYNCDIR, decodeCodec("decodeFsyncIn"), encodeCodec("encodeFsyncIn"), ...emptyReply)
+  addSpec(binding.FUSE_FLUSH, decodeCodec("decodeFlushIn"), encodeCodec("encodeFlushIn"), ...emptyReply)
+  addSpec(binding.FUSE_READDIR, decodeCodec("decodeReadIn"), encodeCodec("encodeReadIn"),
+    (body) => ({ entries: binding.unpackDirents(body) }),
+    (value) => binding.packDirents(value.entries, Number.MAX_SAFE_INTEGER).buffer)
+  addSpec(binding.FUSE_READDIRPLUS, decodeCodec("decodeReadIn"), encodeCodec("encodeReadIn"),
+    (body, ctx) => ({ entries: binding.unpackDirentsPlus(body, ctx) }),
+    (value, ctx) => binding.packDirentsPlus(value.entries, Number.MAX_SAFE_INTEGER, ctx).buffer)
+  addSpec(binding.FUSE_STATFS, decodeCodec("decodeStatfsIn"), encodeCodec("encodeStatfsIn"), decodeCodec("decodeStatfsOut"), encodeCodec("encodeStatfsOut"))
+  addSpec(binding.FUSE_ACCESS, decodeCodec("decodeAccessIn"), encodeCodec("encodeAccessIn"), ...emptyReply)
+  addSpec(binding.FUSE_INIT, decodeCodec("decodeInitIn"), encodeCodec("encodeInitIn"), decodeCodec("decodeInitOut"), encodeCodec("encodeInitOut"))
+  addSpec(binding.FUSE_DESTROY, decodeEmptyBody, encodeEmptyBody, ...emptyReply)
+  addSpec(binding.FUSE_INTERRUPT, decodeCodec("decodeInterruptIn"), encodeCodec("encodeInterruptIn"), ...emptyReply)
+  addSpec(binding.FUSE_SETXATTR, decodeCodec("decodeSetxattrIn"), encodeCodec("encodeSetxattrIn"), ...emptyReply)
+  addSpec(binding.FUSE_GETXATTR, decodeCodec("decodeGetxattrIn"), encodeCodec("encodeGetxattrIn"), ...rawReply)
+  addSpec(binding.FUSE_LISTXATTR, decodeCodec("decodeListxattrIn"), encodeCodec("encodeListxattrIn"), ...rawReply)
+  addSpec(binding.FUSE_REMOVEXATTR, decodeCodec("decodeRemovexattrIn"), encodeCodec("encodeRemovexattrIn"), ...emptyReply)
+  addSpec(binding.FUSE_FALLOCATE, decodeCodec("decodeFallocateIn"), encodeCodec("encodeFallocateIn"), ...emptyReply)
+  addSpec(binding.FUSE_LSEEK, decodeCodec("decodeLseekIn"), encodeCodec("encodeLseekIn"), decodeCodec("decodeLseekOut"), encodeCodec("encodeLseekOut"))
+  addSpec(binding.FUSE_GETLK, decodeCodec("decodeLkIn"), encodeCodec("encodeLkIn"), decodeCodec("decodeLkOut"), encodeCodec("encodeLkOut"))
+  addSpec(binding.FUSE_SETLK, decodeCodec("decodeLkIn"), encodeCodec("encodeLkIn"), ...emptyReply)
+  addSpec(binding.FUSE_SETLKW, decodeCodec("decodeLkIn"), encodeCodec("encodeLkIn"), ...emptyReply)
+  addSpec(binding.FUSE_POLL, decodeCodec("decodePollIn"), encodeCodec("encodePollIn"), decodeCodec("decodePollOut"), encodeCodec("encodePollOut"))
+  addSpec(binding.FUSE_BMAP, decodeCodec("decodeBmapIn"), encodeCodec("encodeBmapIn"), decodeCodec("decodeBmapOut"), encodeCodec("encodeBmapOut"))
+  addSpec(binding.FUSE_SYNCFS, decodeCodec("decodeSyncfsIn"), encodeCodec("encodeSyncfsIn"), ...emptyReply)
+
+  binding.OPCODES = specs
+  const specFor = (opcode) => {
+    const spec = specs.get(opcode)
+    if (spec === undefined) {
+      throw new ProtocolError(`no codec for opcode ${binding.opcodeName(opcode)}`)
+    }
+    return spec
+  }
+  binding.decodeRequestBody = (opcode, body, ctx) => specFor(opcode).decodeRequest(copyBytes(body), ctx)
+  binding.encodeRequestBody = (opcode, value, ctx) => specFor(opcode).encodeRequest(value, ctx)
+  binding.decodeReplyBody = (opcode, body, ctx) => specFor(opcode).decodeReply(copyBytes(body), ctx)
+  binding.encodeReplyBody = (opcode, value, ctx) => specFor(opcode).encodeReply(value, ctx)
+  binding.decodeRequest = (buffer, ctx) => {
+    const bytes = copyBytes(buffer)
+    const header = binding.decodeInHeader(bytes)
+    if (header.len > bytes.length) {
+      throw new ProtocolError(`fuse_in_header.len is ${header.len} but only ${bytes.length} byte(s) were read`)
+    }
+    const extensionBytes = header.totalExtlen * 8
+    const bodyEnd = header.len - extensionBytes
+    if (bodyEnd < binding.FUSE_IN_HEADER_SIZE) {
+      throw new ProtocolError(
+        `fuse_in_header.total_extlen is ${header.totalExtlen} (${extensionBytes} bytes), more than the ${header.len - binding.FUSE_IN_HEADER_SIZE}-byte body`,
+      )
+    }
+    const payload = bytes.subarray(binding.FUSE_IN_HEADER_SIZE, bodyEnd)
+    const extensions = copyBytes(bytes.subarray(bodyEnd, header.len))
+    const spec = specs.get(header.opcode)
+    return {
+      header,
+      name: binding.opcodeName(header.opcode),
+      payload: copyBytes(payload),
+      extensions,
+      body: spec === undefined ? undefined : spec.decodeRequest(payload, ctx),
+    }
+  }
+  binding.encodeRequest = (init, ctx) => {
+    if (init == null || typeof init !== "object") {
+      throw new ProtocolError("FUSE request options must be an object")
+    }
+    const payload = init.body === undefined
+      ? (init.payload === undefined ? Buffer.alloc(0) : copyBytes(init.payload))
+      : binding.encodeRequestBody(init.opcode, init.body, ctx)
+    const extensions = init.extensions === undefined ? Buffer.alloc(0) : copyBytes(init.extensions)
+    if (extensions.length % 8 !== 0) {
+      throw new ProtocolError(`request extensions must be a multiple of 8 bytes, got ${extensions.length}`)
+    }
+    const len = binding.FUSE_IN_HEADER_SIZE + payload.length + extensions.length
+    const header = binding.encodeInHeader({
+      len,
+      opcode: init.opcode,
+      unique: init.unique,
+      nodeid: init.nodeid ?? 0n,
+      uid: init.uid ?? 0,
+      gid: init.gid ?? 0,
+      pid: init.pid ?? 0,
+      totalExtlen: extensions.length / 8,
+    })
+    return Buffer.concat([header, payload, extensions], len)
+  }
+  binding.decodeReply = (buffer, opcode, ctx) => {
+    const bytes = copyBytes(buffer)
+    const header = binding.decodeOutHeader(bytes)
+    if (header.len > bytes.length) {
+      throw new ProtocolError(`fuse_out_header.len is ${header.len} but only ${bytes.length} byte(s) were read`)
+    }
+    const payload = copyBytes(bytes.subarray(binding.FUSE_OUT_HEADER_SIZE, header.len))
+    const spec = specs.get(opcode)
+    return {
+      header,
+      payload,
+      body: header.error !== 0 || spec === undefined ? undefined : spec.decodeReply(payload, ctx),
+    }
+  }
+  binding.encodeReplyFor = (unique, opcode, value, ctx) =>
+    binding.encodeReply(unique, binding.encodeReplyBody(opcode, value, ctx))
+
   // These helpers are pure JS in the oracle and do not touch the native mount.
   binding.translateOpenFlags = (wire, host) => {
     let flags = wire & binding.O_ACCMODE
