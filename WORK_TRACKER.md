@@ -2665,6 +2665,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   with `cargo metadata --locked` before any AWS authentication. This improves
   evidence integrity but does not create AWS authentication or deployment
   evidence. A fresh
+  hosted rerun `35629600687` at pushed head `62383df` passed the new root and
+  standalone AWS manifest provenance capture, including the standalone
+  `tests/aws/Cargo.lock` hash, plus the seven-case validator, bucket-policy,
+  CloudFormation, and environment-approval contract suites. It then stopped
+  safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS credentials,
+  identity, and acceptance were skipped. Its non-expired artifact is
+  `aws-s3-qualification-35629600687-1` (7,649 bytes). This is a successful
+  safety refusal and provenance-contract result, not hosted AWS acceptance.
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
