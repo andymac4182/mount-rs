@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 09:30 AEST (2026-09-21 23:30 UTC)
+Last updated: 2026-09-22 09:35 AEST (2026-09-21 23:35 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -128,11 +128,13 @@ operations. PGlite lifecycle, backup/restore rollback, split-store/VFS,
 cleanup-failure fail-closed, WebDAV NodeFs crash/restart, 64-way WebDAV
 concurrency, NFS process-crash/restart, FUSE package tests, chunked concurrent
 publication, and artifact aggregation also passed. This is exact local
-evidence only: after the push, `origin/main` advanced to `61b904c3` with new
-WebDAV/9P/NFS changes, so `61b904c3` remains the current unqualified
-successor. The GitHub API was unreachable during this refresh; no hosted
-status is inferred, and no hosted/native/provider/package-publication or final
-audit acceptance is promoted.
+evidence only: before ledger publication, `origin/main` had advanced to
+`61b904c3` with new WebDAV/9P/NFS changes. The ledger was then rebased onto
+concurrent `0ad4928e` and published as `0aa25ad7`; current `origin/main` is
+that ledger checkpoint, and its underlying successor code remains unqualified.
+The GitHub API was unreachable during this refresh; no hosted status is
+inferred, and no hosted/native/provider/package-publication or final-audit
+acceptance is promoted.
 The latest completed R2 safety refusal `35628414156` failed closed at
 `count=139 limit=20`, and the latest documented AWS gate failed closed at
 `missing_bucket`; current provider, native, package-publication, and
@@ -267,7 +269,7 @@ necessary provider gate, not a substitute for these release criteria.
 
 | Surface | Result | Acceptance meaning |
 | --- | --- | --- |
-| Repository implementation | `61b904c3` is the latest observed origin/main; the full packet covers pushed `9354362a`, and the current successor adds newer WebDAV/9P/NFS changes | The tested ancestry includes the W05 ledger ancestry, CI workflow, budget guard, hosted orchestration, shared Cargo wrapper use, provider-matrix R2 CLI coverage, lease-refresh fix, strict-Clippy TiDB fix, Windows release-gate repairs, AWS protected-input/PGlite pairing and preflight hardening, release-package declaration fixes, S3 publication/staged-upload retention/ETag fixes, W08 release-manifest checks, Ozone provider matrix, W07 FoundationDB workflow, N-API S3 drain-timeout, 9P property-shaped clients and mount helpers, FUSE lifecycle/syncfs and bounded native frames, NFS session hooks plus owner/lease callbacks, session-member views and shutdown cancellation, WebDAV lifecycle plus timed-out drain preservation/concurrent-client coverage, chunked stale-read/concurrency plus atime coalescing and bounded mutation cancellation, W04 lease-TTL configuration, generated N-API declarations, FoundationDB lease-policy validation, the standalone provider lock repair, FUSE teardown/read-worker/native-session fixes, and the newer WebDAV/9P/NFS changes. |
+| Repository implementation | `0aa25ad7` is the latest observed origin/main ledger checkpoint, rebased onto concurrent code/docs through `0ad4928e`; the full packet covers pushed `9354362a`, and the current successor adds newer WebDAV/9P/NFS changes | The tested ancestry includes the W05 ledger ancestry, CI workflow, budget guard, hosted orchestration, shared Cargo wrapper use, provider-matrix R2 CLI coverage, lease-refresh fix, strict-Clippy TiDB fix, Windows release-gate repairs, AWS protected-input/PGlite pairing and preflight hardening, release-package declaration fixes, S3 publication/staged-upload retention/ETag fixes, W08 release-manifest checks, Ozone provider matrix, W07 FoundationDB workflow, N-API S3 drain-timeout, 9P property-shaped clients and mount helpers, FUSE lifecycle/syncfs and bounded native frames, NFS session hooks plus owner/lease callbacks, session-member views and shutdown cancellation, WebDAV lifecycle plus timed-out drain preservation/concurrent-client coverage, chunked stale-read/concurrency plus atime coalescing and bounded mutation cancellation, W04 lease-TTL configuration, generated N-API declarations, FoundationDB lease-policy validation, the standalone provider lock repair, FUSE teardown/read-worker/native-session fixes, and the newer WebDAV/9P/NFS changes. |
 | Isolated current-head Rust gates | Full workspace and strict Clippy green on pushed `9354362a`; `61b904c3` successor qualification pending; final hosted release evidence remains open | The full locked Rust/Clippy/optimized-N-API packet passed exactly on `9354362a`; the later `61b904c3` WebDAV/9P/NFS successor has not yet been promoted from its focused changed-surface boundary. Live-provider and privileged-native opt-ins remain explicit skips. |
 | Current-head local SDK/CLI/PGlite | Full local Rust/Node/PGlite qualification passed on pushed `9354362a`; newer origin successor is unqualified | `scripts/test-pglite.sh` passed exactly on `9354362a`, including the repaired standalone `--locked` provider matrix, real PGlite reconnect/versioned/VFS/lifecycle/split-store/FUSE checks, N-API PGlite/factory/chunked checks, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40 five-seed trace/backend combinations at 621 operations. |
 | Local Node SDK/N-API | Passed with pinned `mountx` oracle and rebuilt release artifact on exact `9354362a` | The optimized release build and full `pnpm --dir integrations/mount-rs-napi test` passed typecheck, harness, smoke/contract, 9P property/lock/observability/mount-helper surfaces, factories including WebDAV SQLite reopen and structural factory parity, lifecycle, codecs including FUSE syncfs, WebDAV server callbacks/concurrency, JS driver, bounded-unstorage parity, differential, restart, distribution, and artifact aggregation. Native host mount is explicitly unavailable; R2, PGlite factory, and FoundationDB opt-ins remain separately classified. |
@@ -302,8 +304,8 @@ necessary provider gate, not a substitute for these release criteria.
 2. Select one final release SHA and let the required CI, fault, W07, AWS, and
    package workflows reach terminal results on it. Pushed `9354362a` is the
    latest complete local Rust/Node/PGlite/CLI packet, while current
-   origin/main `61b904c3` is a newer WebDAV/9P/NFS successor with no full
-   qualification yet. No hosted result currently qualifies the final
+   origin/main `0aa25ad7` is the latest ledger checkpoint on top of a newer
+   WebDAV/9P/NFS successor with no full qualification yet. No hosted result currently qualifies the final
    SHA. Requalify
    any later code tip before promoting a hosted result. Record every failed,
    cancelled, skipped, or externally blocked job rather than treating a
@@ -436,6 +438,7 @@ shown separately from active engineering time.
 | 2026-09-22 08:50–08:57 | Fast-forwarded to `d391f9b7`, reran exact-tip NFS tests/strict Clippy, ran widened WebDAV direct-session and network concurrency probes, and refreshed Actions | Local changed-surface qualification / hosted evidence | NFS package tests (38 plus process-crash/restart, rootless, transport, and v4 suites) and strict Clippy passed; WebDAV direct-session and network probes passed 64 concurrent PUT/GET pairs with streaming/auth/error coverage. Local direct 9P correctly skipped at the macOS/kernel boundary. Current Actions are queued/pending across R2, Native 9P, W04, W08, fault, and CI; full current-tip packet and hosted release evidence remain open. |
 | 2026-09-22 08:57–09:13 | Completed the pushed `b65d4e31` full local packet: format, locked Rust workspace, strict Clippy, optimized N-API, complete oracle-enabled Node/N-API suite, real PGlite lifecycle/matrix, upstream suite, and trace parity; refreshed shared main and Actions | Local production qualification / hosted evidence | Full packet passed: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces; 64-way WebDAV, NFS process-crash/restart, cleanup fail-closed, and artifact aggregation passed. Oracle dependencies were installed frozen without lifecycle scripts after the first environment-only `unstorage` module gate. Origin advanced to `9b2dabd7`; its hosted R2/Native 9P/CI/W04/W08/fault runs are queued or pending and do not qualify the current successor. |
 | 2026-09-22 09:13–09:30 | Completed the exact pushed `9354362a` successor packet with format, full locked Rust workspace, strict workspace Clippy, optimized N-API build, complete oracle-enabled Node/N-API suite, and the full PGlite/provider matrix; refreshed shared main | Local production qualification / hosted evidence / ledger maintenance | `9354362a` passed Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, all 40×621 oracle traces, PGlite lifecycle/backup-restore/split-store/VFS/FUSE, cleanup-failure fail-closed, WebDAV NodeFs crash/restart and 64-way concurrency, NFS process-crash/restart, chunked publication, and artifact aggregation. After the checkpoint push, `origin/main` advanced to `61b904c3` with WebDAV/9P/NFS successors; GitHub API refresh was unreachable, so no hosted status was promoted. Production decision remains NO-GO. |
+| 2026-09-22 09:30–09:35 | Reconciled concurrent main, rebased the W05 ledger onto `0ad4928e`, pushed `0aa25ad7` to `origin/main`, and verified remote/local equality | Release engineering / documentation | The published W05 ledger checkpoint is exactly `0aa25ad7`; `git fetch origin main` confirms `HEAD == FETCH_HEAD`, the worktree is clean, and no hosted or provider result was inferred from the unavailable GitHub API. Production decision remains NO-GO. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program: **about 25–26 h total active work so far**. The
