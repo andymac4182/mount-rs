@@ -162,11 +162,12 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Final public source `49778fde94440749f7bcb4ccb571ed72104ff7c6` was freshly
-reverified locally: the full locked workspace test suite exited 0 and strict
-workspace Clippy with `-D warnings` exited 0. Provider/native tests that
-require TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips,
-so this is source-health evidence only and does not close any production gate.
+Latest public source `6e27d46c` was freshly reverified locally after the
+concurrent NFS process-restart test update: the full locked workspace test
+suite exited 0 and strict workspace Clippy with `-D warnings` exited 0.
+Provider/native tests that require TiDB, RustFS, PGlite, R2, FUSE or NFS
+remained explicit opt-in skips, so this is source-health evidence only and
+does not close any production gate.
 
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
