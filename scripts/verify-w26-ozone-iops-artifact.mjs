@@ -44,6 +44,13 @@ function requireInteger(value, field, minimum = 1) {
   return value
 }
 
+function requireFiniteNumber(value, field, minimum = 0) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < minimum) {
+    failure(`${field}-must-be-finite-number-at-least-${minimum}`)
+  }
+  return value
+}
+
 function requireEqual(value, expected, field) {
   if (value !== expected) failure(`${field}-must-equal-${expected}`)
 }
@@ -79,6 +86,13 @@ export function validateArtifact(document, options = {}) {
     config.sizesMiB.some((size) => !Number.isSafeInteger(size) || size <= 0)
   ) {
     failure("config.sizesMiB-must-contain-positive-safe-integers")
+  }
+  if (
+    !Array.isArray(config.payloadSizesBytes) ||
+    config.payloadSizesBytes.length !== config.sizesMiB.length ||
+    config.payloadSizesBytes.some((size) => size !== W26_IOPS_PROFILE.payloadBytes)
+  ) {
+    failure("config.payloadSizesBytes-must-match-fixed-payload-profile")
   }
 
   const counts = requireObject(root.counts, "counts")
@@ -121,6 +135,27 @@ export function validateArtifact(document, options = {}) {
       requireObject(size, `${provider.provider}.size`)
       requireEqual(size.status, "ok", `${provider.provider}.size.status`)
       const summary = requireObject(size.summary, `${provider.provider}.size.summary`)
+      requireFiniteNumber(
+        summary.successRate,
+        `${provider.provider}.size.summary.successRate`,
+      )
+      requireEqual(summary.successRate, 1, `${provider.provider}.size.summary.successRate`)
+      requireFiniteNumber(
+        summary.elapsedMs,
+        `${provider.provider}.size.summary.elapsedMs`,
+        Number.MIN_VALUE,
+      )
+      requireEqual(
+        summary.operationsPerLifecycle,
+        3,
+        `${provider.provider}.size.summary.operationsPerLifecycle`,
+      )
+      requireEqual(summary.timeoutCount, 0, `${provider.provider}.size.summary.timeoutCount`)
+      requireEqual(
+        summary.cleanupFailureCount,
+        0,
+        `${provider.provider}.size.summary.cleanupFailureCount`,
+      )
       requireEqual(
         summary.successfulIterations,
         config.iterations,
@@ -141,6 +176,40 @@ export function validateArtifact(document, options = {}) {
         config.iterations * 3,
         `${provider.provider}.size.summary.attemptedOperations`,
       )
+      const operationSuccess = requireObject(
+        summary.operationSuccess,
+        `${provider.provider}.size.summary.operationSuccess`,
+      )
+      for (const operation of ["write", "read", "delete", "verifiedReads"]) {
+        requireEqual(
+          operationSuccess[operation],
+          config.iterations,
+          `${provider.provider}.size.summary.operationSuccess.${operation}`,
+        )
+      }
+      const statSampleCounts = requireObject(
+        summary.statSampleCounts,
+        `${provider.provider}.size.summary.statSampleCounts`,
+      )
+      for (const operation of ["writeMs", "readMs", "throughputMbps", "deleteMs"]) {
+        requireEqual(
+          statSampleCounts[operation],
+          config.iterations,
+          `${provider.provider}.size.summary.statSampleCounts.${operation}`,
+        )
+      }
+      for (const metric of ["writeMs", "readMs", "throughputMbps", "deleteMs"]) {
+        const stats = requireObject(
+          summary[metric],
+          `${provider.provider}.size.summary.${metric}`,
+        )
+        for (const percentile of ["median", "p95", "p99"]) {
+          requireFiniteNumber(
+            stats[percentile],
+            `${provider.provider}.size.summary.${metric}.${percentile}`,
+          )
+        }
+      }
       if (!Number.isFinite(summary.iops) || summary.iops < minimumIops) {
         failure(`${provider.provider}.size.summary.iops-below-${minimumIops}`)
       }

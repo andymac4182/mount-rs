@@ -200,6 +200,13 @@ function qualificationArtifact(
   const size = {
     status: "ok",
     summary: {
+      writeMs: { median: 1, p95: 2, p99: 3 },
+      readMs: { median: 1, p95: 2, p99: 3 },
+      throughputMbps: { median: 1, p95: 2, p99: 3 },
+      deleteMs: { median: 1, p95: 2, p99: 3 },
+      successRate: 1,
+      elapsedMs: 1_000,
+      operationsPerLifecycle: 3,
       successfulIterations: W26_IOPS_PROFILE.iterations,
       failedIterations: 0,
       successfulOperations: W26_IOPS_PROFILE.iterations * 3,
@@ -207,6 +214,20 @@ function qualificationArtifact(
       iops: 1_200,
       iopsTarget: W26_IOPS_MINIMUM,
       iopsTargetMet: true,
+      timeoutCount: 0,
+      cleanupFailureCount: 0,
+      operationSuccess: {
+        write: W26_IOPS_PROFILE.iterations,
+        read: W26_IOPS_PROFILE.iterations,
+        delete: W26_IOPS_PROFILE.iterations,
+        verifiedReads: W26_IOPS_PROFILE.iterations,
+      },
+      statSampleCounts: {
+        writeMs: W26_IOPS_PROFILE.iterations,
+        readMs: W26_IOPS_PROFILE.iterations,
+        throughputMbps: W26_IOPS_PROFILE.iterations,
+        deleteMs: W26_IOPS_PROFILE.iterations,
+      },
     },
   }
   return {
@@ -224,6 +245,7 @@ function qualificationArtifact(
     },
     config: {
       sizesMiB: [1],
+      payloadSizesBytes: [W26_IOPS_PROFILE.payloadBytes],
       payloadBytes: W26_IOPS_PROFILE.payloadBytes,
       iterations: W26_IOPS_PROFILE.iterations,
       concurrency: W26_IOPS_PROFILE.concurrency,
@@ -277,6 +299,30 @@ async function testQualificationArtifact() {
       providers: ["mount-rs-split-sqlite-r2"],
     }),
     /counts\.providersSkipped-must-equal-0/,
+  )
+  assert.throws(
+    () => validateArtifact({
+      ...artifact,
+      config: { ...artifact.config, payloadSizesBytes: [8192] },
+    }, {
+      providers: ["mount-rs-split-sqlite-r2"],
+    }),
+    /config\.payloadSizesBytes-must-match-fixed-payload-profile/,
+  )
+  assert.throws(
+    () => validateArtifact({
+      ...artifact,
+      providers: [{
+        ...artifact.providers[0],
+        sizes: [{
+          ...artifact.providers[0].sizes[0],
+          summary: { ...artifact.providers[0].sizes[0].summary, timeoutCount: 1 },
+        }],
+      }],
+    }, {
+      providers: ["mount-rs-split-sqlite-r2"],
+    }),
+    /size\.summary\.timeoutCount-must-equal-0/,
   )
 }
 
