@@ -501,7 +501,7 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Private myroot test bucket and scoped role provisioned; Rust tests pending | Main |
+| W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
 | W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite and durable FoundationDB composition gates added, hosted result pending; durable TiDB mixed store remains open | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
@@ -1443,14 +1443,22 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `arn:aws:iam::922978963556:role/mount-rs/mount-rs-aws-s3-integration-test`.
   The role grants only prefix-scoped list/object access plus caller identity,
   and credentials remain outside chat and source control.
-- [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
+- [x] W25.3 Execute actual AWS S3 block and composed-filesystem integration
   tests with restart/reopen, ranges, conditional immutable writes and cleanup.
-  AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance. The
-  checked-in Rust crate compiles with `cargo test --manifest-path
-  tests/aws/Cargo.toml --locked --lib --no-run`; the actual two ignored service
-  tests still require the live `myroot` run before Rust `ChunkedFs`, SQLite+S3,
-  or fresh-process reopen acceptance can be claimed.
-- [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The harness now emits the secret-free `AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` and exits 3 when local credentials cannot be exported, making the AWS MCP/OAuth-to-local-Cargo boundary explicit. The W25 worker verified the AWS-crate compile and ordinary ignored-test gate; the two actual AWS-service tests remain blocked until the local `myroot` SSO session is renewed. No live Rust acceptance is claimed yet.
+  The clean 2026-09-21 live run used `AWS_PROFILE=myroot` and the scoped role
+  in `ap-southeast-2` and passed both ignored service tests in separate Cargo
+  processes: `actual_aws_s3_block_and_composed_filesystem` (1 passed) and
+  `actual_aws_s3_reopen_after_process_restart` (1 passed). The run covered
+  immutable blocks, ranges, conditional/CAS behavior, multi-chunk writes and
+  overwrite/truncate/extend/sparse-tail behavior, SQLite metadata composition,
+  fresh-process reopen, and exact owner-verified prefix cleanup with zero
+  remaining objects. AWS S3 evidence does not replace Cloudflare R2 or RustFS
+  acceptance.
+- [x] The live AWS packet is present in the provider/test crates: immutable
+  block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen,
+  nonce-owned cleanup and credential-safe validation. The harness emits the
+  secret-free `AWS_S3_TEST_BLOCKED` result when local credentials are absent,
+  while the renewed `myroot` run above provides the live Rust acceptance.
 - [x] The harness accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that
   caller-provided role with a one-hour session, and uses the resulting temporary
   credentials for all S3 requests and cleanup. It does not create IAM resources
