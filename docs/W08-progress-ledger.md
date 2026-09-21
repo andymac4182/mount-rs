@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-21 10:08 UTC / 20:08 AEST**
+Status snapshot: **2026-09-21 10:29 UTC / 20:29 AEST**
 Repository: `andymac4182/mount-rs`  
 Functional evidence tip (before this documentation chunk): `origin/main` at
 `bb27fe0`
@@ -125,6 +125,7 @@ for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
 | CI `35585066458`, source `9c098e5`, `native-nfs (ubuntu-latest)` job `106286459483` | PASS — native Ubuntu | Terminal success for native NFS lifecycle and SQLite split-store coverage. |
 | CI `35585066458`, source `9c098e5`, `native-nfs (macos-latest)` job `106286459246` | PASS — native macOS | Terminal success for macOS ARM native NFS lifecycle and SQLite split-store coverage; this does not claim live TiDB/RustFS on macOS. |
 | CI `35585066458` aggregate | Cancelled after W08 jobs completed | `main` concurrency superseded the workflow; unrelated FoundationDB, Windows Node and macOS/Windows Rust jobs were also reported separately. The W08 job conclusions above are terminal successes and are the evidence counted here. |
+| CI `35588858142`, source `e515036`, `tidb-tls-compile` job `106298487587` | PASS — P01/P07 implementation capability | Hosted compile gate passed for `mount-rs-tidb`, Rust SDK, CLI and N-API with `rustls`. This proves feature propagation, not certificates, secret injection, a live TLS handshake, provider IAM, or production deployment. |
 
 The W08 rows above use exact terminal job IDs and markers. The aggregate
 workflow conclusion is retained as `Cancelled` because later `main` pushes
@@ -190,6 +191,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 08:24–08:30 | Reconciled run `35574581481` native pass, run `35576142240` restart failure, and the superseded queue; refreshed this ledger against `origin/main` `6d59d20`. | ~10 min | ~5 min queue observation | W08 remains open pending the next terminal durable and macOS/native results. |
 | 2026-09-21 09:56–10:17 | Reconciled terminal W08 run `35585066458`, added the P01–P09 production rollout ledger and tracker, committed the documentation chunk as `d8f8893`, merged concurrent `origin/main` changes, and published the reconciled tip at `8e42efb`. | ~15 min | ~6 min remote fetch/merge/push wait | W08 functional acceptance is complete; production rollout tracking is a separate no-go scope and is now published. |
 | 2026-09-21 10:17–10:26 | Added and locally compiled the opt-in TiDB TLS feature through the provider, Rust SDK, CLI and N-API; added a dedicated CI compile gate and documented the boundary between TLS capability and a credentialed production handshake. Implementation commit `3a70238` was reconciled with concurrent main and published at `7b76556`. | ~10 min | ~4 min compile/remote wait | Public consumers can ship the TLS client graph; P01/P07 remain open pending target topology, certificates, secrets and live provider evidence. |
+| 2026-09-21 10:26–10:29 | Followed hosted run `35588858142` and retained `tidb-tls-compile` job `106298487587` as terminal success for source `e515036`. | ~2 min | ~1 min hosted wait | Hosted TLS feature compilation passed; live TLS/provider and production rollout gates remain open. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
