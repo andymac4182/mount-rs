@@ -100,6 +100,13 @@ facade boundary, observes `active == false`, and completes bounded unmount and
 cleanup. Locked host compilation and Linux-target strict Clippy pass; hosted
 execution is still required for root automatic callback-event acceptance, so
 W01 remains NO-GO.
+The Linux request pump now aborts and drains registered positional-read
+workers before dispatching `FUSE_DESTROY`, so a pending backend read cannot
+block session cleanup. A Linux-gated Unix-stream regression proves the destroy
+reply and bounded close while a read is blocked. Host all-target tests, host and
+Linux-target strict Clippy, formatting, and diff checks pass; hosted kernel
+unmount/close-race and crash/restart execution remain external, so W01 remains
+NO-GO.
 The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
 non-Linux mount regression returns `UnsupportedPlatform` without touching its
 requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the

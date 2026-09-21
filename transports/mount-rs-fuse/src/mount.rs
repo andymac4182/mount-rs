@@ -835,13 +835,30 @@ async fn run_session_loop(
                 continue;
             }
             Ok(None) => {
-                match session.interrupt_target(&frame) {
-                    Ok(Some(target)) => {
-                        if let Some(abort) = in_flight.remove(&target) {
+                match session.is_destroy_frame(&frame) {
+                    Ok(true) => {
+                        // DESTROY is a lifecycle boundary rather than a
+                        // stateful operation. Do not wait for a backend read
+                        // that the kernel is already trying to tear down.
+                        for abort in in_flight.drain().map(|(_, abort)| abort) {
                             abort.abort();
                         }
                     }
-                    Ok(None) => {}
+                    Ok(false) => match session.interrupt_target(&frame) {
+                        Ok(Some(target)) => {
+                            if let Some(abort) = in_flight.remove(&target) {
+                                abort.abort();
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            failure = Some(FuseTransportError::from_message(
+                                FuseTransportErrorKind::Protocol,
+                                error.to_string(),
+                            ));
+                            break;
+                        }
+                    },
                     Err(error) => {
                         failure = Some(FuseTransportError::from_message(
                             FuseTransportErrorKind::Protocol,
@@ -2327,6 +2344,104 @@ mod tests {
             .await
             .expect("stop should close the interrupted session")
             .expect("interrupted session task should finish");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(
+            observed
+                .lock()
+                .expect("callback observation lock")
+                .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn destroy_aborts_inflight_read_workers_before_session_cleanup() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::sync::atomic::AtomicUsize;
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.write(b"data", Some(0)).await.expect("seed file");
+        file.close().await.expect("close seed file");
+        let driver = Arc::new(ReadBarrierDriver {
+            inner,
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            entered: Arc::new(tokio::sync::Notify::new()),
+        });
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-destroy-read-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let entered = Arc::clone(&driver.entered);
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        let _ = read_test_reply(&mut peer).await;
+        peer.write_all(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_reply(&mut peer).await;
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+        peer.write_all(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_reply(&mut peer).await;
+        let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
+
+        peer.write_all(&test_frame(15, 4, nodeid, &read_body(handle)))
+            .await
+            .expect("send blocking read");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("read should enter the worker");
+
+        peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 5, 0, &[]))
+            .await
+            .expect("send destroy");
+        let destroy = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
+            .await
+            .expect("destroy reply");
+        assert_eq!(i32::from_le_bytes(destroy[4..8].try_into().unwrap()), 0);
+        assert_eq!(u64::from_le_bytes(destroy[8..16].try_into().unwrap()), 5);
+
+        state.request_stop();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop should close the destroyed session")
+            .expect("destroyed session task should finish");
         assert!(state.closed.load(Ordering::Acquire));
         assert!(
             observed

@@ -1,7 +1,7 @@
 //! Driver-backed requests for modern FUSE (7.9+). Negotiation and mount
 //! lifecycle are separate and remain under implementation.
 #[cfg(target_os = "linux")]
-use crate::constants::FUSE_READ;
+use crate::constants::{FUSE_DESTROY, FUSE_READ};
 use crate::{
     Request,
     constants::{
@@ -701,6 +701,16 @@ impl FuseSession {
             return Ok(None);
         };
         Ok(Some(target))
+    }
+
+    /// Whether the native request pump should abort asynchronous read workers
+    /// before dispatching this lifecycle request.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn is_destroy_frame(
+        &self,
+        bytes: &[u8],
+    ) -> std::result::Result<bool, crate::ProtocolError> {
+        Ok(Request::decode(bytes, self.max_request)?.header.opcode == FUSE_DESTROY)
     }
 
     /// Returns no frame for FORGET and BATCH_FORGET. Malformed FORGET bodies
