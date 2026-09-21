@@ -937,9 +937,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   shared-provider/read-only configuration. The authority publisher now also
   exposes an explicit bounded-forward-jump API that fails closed before an
   unsafe wall-clock sample is written; unit coverage and the real-cluster
-  authority/composition paths use that guard. Deployment-level authority
-  credentials, clock monitoring/cadence and hosted evidence for the new guard
-  remain pending, so this item is not yet marked complete.
+  authority/composition paths use that guard. Hosted run
+  [35606741719](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719)
+  at revision `4aadbb1` passed the guarded authority/composition, restart and
+  consumer paths on `ubuntu-24.04`; deployment-level authority credentials,
+  clock monitoring/cadence and failover evidence remain pending, so this item
+  is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -1041,6 +1044,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   missing the `futures-util` dependency declared by `mount-rs-r2`. It is not
   runtime acceptance evidence; the lockfile correction is being published
   before the guarded-authority run is retried.
+  The retry
+  [35606741719](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719)
+  at revision `4aadbb1` completed green in 10m55s. It emitted
+  `FOUNDATIONDB_RUSTFS_NETWORK_READY`, `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE
+  status=403`, `FOUNDATIONDB_LATENCY_PASS workload=composition operations=11
+  p50_us=11702 p95_us=26193 p99_us=26193 total_ms=120
+  throughput_ops_per_sec=91.24`, `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`,
+  `FOUNDATIONDB_SOAK_PASS rounds=1`, `FOUNDATIONDB_NAPI_PASS`,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=1`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. This is terminal hosted Linux qualification and
+  bounded workload/clock-guard evidence only; production identity/ACL/TLS,
+  backup/recovery, capacity, observability, macOS and release-owner gates
+  remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1081,8 +1099,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; hosted run `35601357569` recorded the marker at
-    revision `622d0d1`. This is bounded qualification evidence and does not
+    latency and throughput; hosted run `35606741719` recorded the marker at
+    revision `4aadbb1`. This is bounded qualification evidence and does not
     convert the one-round result into production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
@@ -1823,6 +1841,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   isolated real PGlite socket server, a fresh metadata connection, a fresh
   signed AWS client, filesystem reopen, and exact parent-prefix cleanup at
   `mount-rs-tests/aws-s3/20260921T133321Z-23452-0493c0f8fe5454cbfd42f48dfd58f728/pglite`.
+  The expanded opt-in run at `mount-rs-tests/aws-s3/20260921T134403Z-54972-b8831d9b39f99263ce764ba298b05302`
+  also passed `live_aws_s3_pglite_prepare_for_restart` with independent-writer
+  fencing and `live_aws_s3_pglite_reopen_after_restore` after restoring a
+  temporary on-disk PGlite data directory into a fresh server process.
+  This is local metadata backup/restore and restart evidence only.
   This does not close W25.6: production metadata ownership, multi-writer
   fencing, backup/restore, schema migration, failure recovery, and DR evidence
   remain open.

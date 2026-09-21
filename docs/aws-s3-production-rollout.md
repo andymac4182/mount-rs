@@ -61,6 +61,11 @@ acceptance tests, then `live_aws_s3_blocks_with_independent_pglite_metadata`
 passed with a real PGlite socket server, a fresh metadata connection, a fresh
 signed AWS client, filesystem reopen, and exact parent-prefix cleanup at
 `mount-rs-tests/aws-s3/20260921T133321Z-23452-0493c0f8fe5454cbfd42f48dfd58f728/pglite`.
+The expanded run at
+`mount-rs-tests/aws-s3/20260921T134403Z-54972-b8831d9b39f99263ce764ba298b05302`
+also passed independent-writer fencing, restored a temporary on-disk PGlite
+data directory into a fresh server process, and reopened the same AWS-backed
+filesystem. This is local metadata backup/restore and restart evidence only.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership

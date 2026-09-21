@@ -14,6 +14,7 @@ import { Route as BrandLabRouteImport } from './routes/brand-lab'
 import { Route as DocsRouteImport } from './routes/docs'
 import { Route as DownloadsRouteImport } from './routes/downloads'
 import { Route as DocsIndexRouteImport } from './routes/docs/index'
+import { Route as DocsCliRouteImport } from './routes/docs/cli'
 import { Route as DocsNodeRouteImport } from './routes/docs/node'
 import { Route as DocsProvidersRouteImport } from './routes/docs/providers'
 import { Route as DocsRustRouteImport } from './routes/docs/rust'
@@ -59,6 +60,11 @@ const DownloadsRoute = DownloadsRouteImport.update({
 const DocsIndexRoute = DocsIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => DocsRoute,
+} as any)
+const DocsCliRoute = DocsCliRouteImport.update({
+  id: '/cli',
+  path: '/cli',
   getParentRoute: () => DocsRoute,
 } as any)
 const DocsNodeRoute = DocsNodeRouteImport.update({
@@ -173,6 +179,7 @@ export interface FileRoutesByFullPath {
   '/brand-lab': typeof BrandLabRoute
   '/docs': typeof DocsRouteWithChildren
   '/downloads': typeof DownloadsRoute
+  '/docs/cli': typeof DocsCliRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/providers': typeof DocsProvidersRouteWithChildren
   '/docs/rust': typeof DocsRustRoute
@@ -200,6 +207,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/brand-lab': typeof BrandLabRoute
   '/downloads': typeof DownloadsRoute
+  '/docs/cli': typeof DocsCliRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/rust': typeof DocsRustRoute
   '/docs': typeof DocsIndexRoute
@@ -227,6 +235,7 @@ export interface FileRoutesById {
   '/brand-lab': typeof BrandLabRoute
   '/docs': typeof DocsRouteWithChildren
   '/downloads': typeof DownloadsRoute
+  '/docs/cli': typeof DocsCliRoute
   '/docs/node': typeof DocsNodeRoute
   '/docs/providers': typeof DocsProvidersRouteWithChildren
   '/docs/rust': typeof DocsRustRoute
@@ -257,6 +266,7 @@ export interface FileRouteTypes {
     | '/brand-lab'
     | '/docs'
     | '/downloads'
+    | '/docs/cli'
     | '/docs/node'
     | '/docs/providers'
     | '/docs/rust'
@@ -284,6 +294,7 @@ export interface FileRouteTypes {
     | '/'
     | '/brand-lab'
     | '/downloads'
+    | '/docs/cli'
     | '/docs/node'
     | '/docs/rust'
     | '/docs'
@@ -310,6 +321,7 @@ export interface FileRouteTypes {
     | '/brand-lab'
     | '/docs'
     | '/downloads'
+    | '/docs/cli'
     | '/docs/node'
     | '/docs/providers'
     | '/docs/rust'
@@ -376,6 +388,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/docs/'
       preLoaderRoute: typeof DocsIndexRouteImport
+      parentRoute: typeof DocsRoute
+    }
+    '/docs/cli': {
+      id: '/docs/cli'
+      path: '/cli'
+      fullPath: '/docs/cli'
+      preLoaderRoute: typeof DocsCliRouteImport
       parentRoute: typeof DocsRoute
     }
     '/docs/node': {
@@ -583,6 +602,7 @@ const DocsTransportsRouteWithChildren = DocsTransportsRoute._addFileChildren(
 )
 
 interface DocsRouteChildren {
+  DocsCliRoute: typeof DocsCliRoute
   DocsNodeRoute: typeof DocsNodeRoute
   DocsProvidersRoute: typeof DocsProvidersRouteWithChildren
   DocsRustRoute: typeof DocsRustRoute
@@ -591,6 +611,7 @@ interface DocsRouteChildren {
 }
 
 const DocsRouteChildren: DocsRouteChildren = {
+  DocsCliRoute: DocsCliRoute,
   DocsNodeRoute: DocsNodeRoute,
   DocsProvidersRoute: DocsProvidersRouteWithChildren,
   DocsRustRoute: DocsRustRoute,

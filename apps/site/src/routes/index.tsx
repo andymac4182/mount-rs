@@ -200,7 +200,7 @@ let bytes = fs.read_file("/hello").await?;`}</CodeBlock>
 });
 await fs.writeFile('/hello', Buffer.from('hello'));`}</CodeBlock>
         </div>
-        <div className="use-links"><Link className="button button-primary" to="/docs/rust">Start with Rust</Link><Link className="button button-secondary" to="/docs/node">Use Node</Link><Link className="button button-secondary" to="/docs/transports">Mounts and transports</Link><Link className="text-link" to="/downloads">Download the CLI preview <span aria-hidden="true">↗</span></Link></div>
+        <div className="use-links"><Link className="button button-primary" to="/docs/cli">Start with the CLI</Link><Link className="button button-secondary" to="/docs/rust">Embed with Rust</Link><Link className="button button-secondary" to="/docs/node">Use Node</Link><Link className="button button-secondary" to="/docs/transports">Mounts and transports</Link><Link className="text-link" to="/downloads">Download the CLI preview <span aria-hidden="true">↗</span></Link></div>
       </section>
 
       <section className="page-frame fit-section" id="fit">

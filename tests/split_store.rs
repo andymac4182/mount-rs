@@ -2,10 +2,11 @@
 use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{
-    FsDriver, Loopback, MkdirOptions,
+    ErrorCode, FsDriver, Loopback, MkdirOptions,
     storage::{BlockId, BlockStore, MetadataStore},
 };
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
@@ -604,6 +605,137 @@ async fn live_aws_s3_blocks_with_independent_pglite_metadata() {
         println!("AWS_S3_PGLITE_PASS prefix={}", blocks.inner.prefix());
     })
     .await;
+}
+
+#[tokio::test]
+#[ignore = "requires the selected AWS S3 bucket and a persistent real PGlite server"]
+async fn live_aws_s3_pglite_prepare_for_restart() {
+    use mount_rs_pglite::{PgliteMetadataStore, PgliteStorageOptions};
+
+    let bucket = std::env::var("AWS_S3_TEST_BUCKET").expect("AWS_S3_TEST_BUCKET required");
+    let region = std::env::var("AWS_S3_TEST_REGION").expect("AWS_S3_TEST_REGION required");
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let scope = std::env::var("AWS_S3_PGLITE_SCOPE")
+        .expect("AWS_S3_PGLITE_SCOPE required for persistent restart qualification");
+    let prefix = std::env::var("AWS_S3_TEST_PREFIX")
+        .expect("AWS_S3_TEST_PREFIX required for persistent restart qualification");
+    let config = AwsS3Config { bucket, region };
+    let blocks = TrackedObjectStoreBlocks::from_object_store(
+        config.build_store().expect("live AWS S3 object store"),
+        prefix,
+    );
+    let options = PgliteStorageOptions::new(&scope).with_durable(true);
+    let metadata = PgliteMetadataStore::connect_with_options(&url, options.clone())
+        .await
+        .unwrap();
+
+    // Keep the external connection alive only long enough to verify the
+    // durable composition and then close it explicitly before the harness
+    // snapshots the PGlite data directory.
+    exercise(metadata.clone(), blocks.clone()).await;
+    metadata.close().await.unwrap();
+
+    let first = PgliteMetadataStore::connect_with_options(&url, options.clone())
+        .await
+        .unwrap();
+    let competitor = PgliteMetadataStore::connect_with_options(&url, options)
+        .await
+        .unwrap();
+    let first_lease = first
+        .acquire_writer("aws-pglite-first", Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(
+        competitor
+            .acquire_writer("aws-pglite-competitor", Duration::from_secs(60))
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Eagain),
+        "a live PGlite metadata volume must reject a concurrent writer"
+    );
+    let loaded = first.load().await.unwrap();
+    let namespace = loaded
+        .namespace
+        .clone()
+        .expect("exercise must publish a namespace before fencing checks");
+    let renewed = first
+        .renew_writer(&first_lease, Duration::from_secs(120))
+        .await
+        .unwrap();
+    assert!(
+        first
+            .publish(loaded.revision, &first_lease, namespace.clone())
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Estale),
+        "a superseded lease must fail closed"
+    );
+    let revision = first
+        .publish(loaded.revision, &renewed, namespace.clone())
+        .await
+        .unwrap();
+    first.release_writer(&renewed).await.unwrap();
+    let second_lease = competitor
+        .acquire_writer("aws-pglite-competitor", Duration::from_secs(60))
+        .await
+        .unwrap();
+    assert!(second_lease.fence > renewed.fence);
+    assert!(
+        first
+            .publish(revision, &renewed, namespace)
+            .await
+            .unwrap_err()
+            .is(ErrorCode::Estale),
+        "a released lease must not publish after another writer is fenced in"
+    );
+    competitor.release_writer(&second_lease).await.unwrap();
+    first.close().await.unwrap();
+    competitor.close().await.unwrap();
+    println!("AWS_S3_PGLITE_PREPARE_PASS scope={scope}");
+}
+
+#[tokio::test]
+#[ignore = "requires the selected AWS S3 bucket and a restored real PGlite server"]
+async fn live_aws_s3_pglite_reopen_after_restore() {
+    use mount_rs_pglite::{PgliteMetadataStore, PgliteStorageOptions};
+
+    let bucket = std::env::var("AWS_S3_TEST_BUCKET").expect("AWS_S3_TEST_BUCKET required");
+    let region = std::env::var("AWS_S3_TEST_REGION").expect("AWS_S3_TEST_REGION required");
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let scope = std::env::var("AWS_S3_PGLITE_SCOPE")
+        .expect("AWS_S3_PGLITE_SCOPE required for persistent restart qualification");
+    let prefix = std::env::var("AWS_S3_TEST_PREFIX")
+        .expect("AWS_S3_TEST_PREFIX required for persistent restart qualification");
+    let config = AwsS3Config { bucket, region };
+    let metadata = PgliteMetadataStore::connect_with_options(
+        &url,
+        PgliteStorageOptions::new(&scope).with_durable(true),
+    )
+    .await
+    .unwrap();
+    let blocks = R2BlockStore::new(config.build_store().unwrap(), prefix, true).unwrap();
+    let reopened = ChunkedFs::open(
+        metadata.clone(),
+        blocks,
+        ChunkedOptions::fixed("aws-s3-pglite-restore", 65536).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(reopened.capabilities().durable_writes);
+    let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+    expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
+    expected.resize(84, 0);
+    expected[82..].copy_from_slice(&[99, 98]);
+    assert_eq!(
+        Loopback::new(reopened.clone())
+            .read_file("/alias")
+            .await
+            .unwrap(),
+        expected
+    );
+    reopened.shutdown().await.unwrap();
+    metadata.close().await.unwrap();
+    println!("AWS_S3_PGLITE_RESTORE_PASS scope={scope}");
 }
 
 #[tokio::test]

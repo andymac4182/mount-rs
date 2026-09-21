@@ -7,6 +7,9 @@ export function DocsNav() {
       <Link to="/docs" activeOptions={{ exact: true }}>
         Overview
       </Link>
+      <Link to="/docs/cli" activeOptions={{ exact: true }}>
+        CLI / run it
+      </Link>
       <Link to="/docs/rust" activeOptions={{ exact: true }}>
         Rust API
       </Link>
