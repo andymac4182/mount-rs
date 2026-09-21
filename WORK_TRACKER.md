@@ -2156,6 +2156,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   credentials for all S3 requests and cleanup. It does not create IAM resources
   or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
   run is now recorded above.
+- [x] A fresh end-to-end qualification rerun at audit commit `d7ccdc7` on
+  2026-09-22 passed scoped-role sibling-prefix denial, the public SDK/CLI
+  self-test, composed AWS S3 filesystem, process reopen, independent PGlite
+  metadata, writer fencing, restored-PGlite reopen, and exact owned-prefix
+  cleanup under
+  `mount-rs-tests/aws-s3/20260921T152108Z-66596-90bba238142882ef153e6e3c246d0003`.
+  The read-only resource audit at the same source passed account/region
+  binding, public-access blocks, BucketOwnerEnforced ownership, AES256,
+  versioning readback, seven-day lifecycle, and one-day multipart-abort checks.
+  This remains qualification-account evidence, not production deployment
+  acceptance.
 - [x] Repository qualification after the AWS packet passed on 2026-09-21 at
   local `4a72d85` (an ancestor of current `origin/main` `7488aa8`):
   `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
