@@ -149,8 +149,13 @@ pd_image="pingcap/pd:$image_version"
 tikv_image="pingcap/tikv:$image_version"
 tidb_image="pingcap/tidb:$image_version"
 tikv_config="$repo_dir/tests/tidb/tikv-test.toml"
+tidb_config="$repo_dir/tests/tidb/tidb-test.toml"
 if [ ! -r "$tikv_config" ]; then
   echo "test-tidb.sh: missing readable TiKV test config: $tikv_config" >&2
+  exit 2
+fi
+if [ ! -r "$tidb_config" ]; then
+  echo "test-tidb.sh: missing readable TiDB test config: $tidb_config" >&2
   exit 2
 fi
 created_network=0
@@ -668,7 +673,9 @@ docker run --detach \
   --network-alias tidb \
   --publish 127.0.0.1::4000/tcp \
   --publish 127.0.0.1::10080/tcp \
+  --volume "$tidb_config:/etc/tidb-test.toml:ro" \
   "$tidb_image" \
+  --config=/etc/tidb-test.toml \
   --store=tikv \
   --path="$pd_endpoints" \
   --host=0.0.0.0 \
@@ -676,7 +683,6 @@ docker run --detach \
   -P=4000 \
   -L=warn \
   --status=10080 \
-  --force-init-stats=false \
   >/dev/null
 created_containers="$created_containers $tidb_container"
 tidb_container_name=$tidb_container

@@ -1,0 +1,4 @@
+# Keep SQL/status readiness independent of TiDB's optional optimizer-statistics
+# warm-up. The W08 gate validates provider and replicated-store durability.
+[performance]
+force-init-stats = false
