@@ -304,9 +304,10 @@ records with expiry cleanup. The direct probe covers the class 1/2/3 method
 matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
 return, deliberate request-body failure mapping, one typed peer-aware callback
 from a Node socket reset, one malformed-HTTP callback, and same-driver server
-recreation preserving file bytes while resetting session locks. The
-pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
-provider/native, restart, and complete member-parity gates remain open.
+recreation preserving file bytes while resetting session locks. It also
+completes eight parallel unique-file PUT/GET requests through one direct
+session with exact body readback; this is in-process same-driver evidence only.
+The pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
 
 ### P2 — CLI parity: PARTIAL; UNVERIFIED
 

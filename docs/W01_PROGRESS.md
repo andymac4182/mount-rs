@@ -188,8 +188,11 @@ direct LOCK/UNLOCK check observes one record and then zero. A host-enabled
 Node socket reset during a large WebDAV response delivers one typed peer-aware
 transport callback, and an isolated malformed request delivers one typed
 peer-aware callback. An unsubmitted-token write returns `423` before a
-one-second lock expires and is removed. Complete session/member parity, direct
-listener lifecycle, and the external provider/native/restart gates remain open.
+one-second lock expires and is removed. Eight parallel unique-file PUTs and
+GETs through one direct WebDAV session also pass with byte-for-byte readback;
+this is in-process same-driver concurrency evidence only. Complete
+session/member parity, direct listener lifecycle, network/native/hosted
+concurrency, and the external provider/native/restart gates remain open.
 Same-driver server recreation preserves file bytes but resets session locks;
 crash/power-loss and provider durability remain unqualified.
 
@@ -320,6 +323,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | The host-enabled `node test/servers.mjs` WebDAV phase observed `423 Locked` for an unsubmitted-token write and expiry cleanup for a `Second-1` lock; local lock conflict/expiry evidence passed, while malformed-connection, provider/native/hosted lifecycle, restart, concurrency, and durability remain open | — | 72% W01.1 planning view | `MOUNTX_SOURCE` oracle differential, complete session/member parity, provider/native/hosted lifecycle, restart, concurrency, and durability gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | The host-enabled `node test/servers.mjs` WebDAV phase isolated malformed HTTP on a second server and observed one typed peer-aware callback with clean socket/server teardown; local malformed-connection evidence passed while provider/native/hosted lifecycle, restart, concurrency, and durability remain open | — | 72% W01.1 planning view | `MOUNTX_SOURCE` oracle differential, complete session/member parity, provider/native/hosted lifecycle, restart, concurrency, and durability gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | The host-enabled `node test/servers.mjs` WebDAV phase recreated a server over the same driver, preserved a seeded file, and reset the session lock table; this classifies local same-process recreation only, not crash/power-loss or provider durability | — | 72% W01.1 planning view | `MOUNTX_SOURCE` oracle differential, complete session/member parity, provider/native/hosted lifecycle, crash/restart, concurrency, and durability gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | The host-enabled `node test/servers.mjs` WebDAV phase created `/concurrent`, completed eight parallel unique-file PUTs and eight parallel GETs through one `WebdavSession.handleRequest`, and verified every body byte-for-byte | — | 72% W01.1 planning view | This is in-process same-driver evidence only; network-client, native, hosted, crash/power-loss restart, provider durability, complete session/member parity, and oracle differential remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 

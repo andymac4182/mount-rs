@@ -1113,6 +1113,28 @@ async function exerciseWebdav() {
     const remove = await directRequest("DELETE", "/direct-methods/moved.txt");
     assert.equal(remove.status, 204);
 
+    const concurrentCollection = await directRequest("MKCOL", "/concurrent");
+    assert.ok([201, 204].includes(concurrentCollection.status));
+    const concurrentObjects = Array.from({ length: 8 }, (_, index) =>
+      Buffer.from(`concurrent WebDAV object ${index}`),
+    );
+    const concurrentPutReplies = await Promise.all(
+      concurrentObjects.map((value, index) =>
+        directRequest("PUT", `/concurrent/${index}.txt`, [], value),
+      ),
+    );
+    assert.ok(concurrentPutReplies.every((reply) => [200, 201, 204].includes(reply.status)));
+    const concurrentGetReplies = await Promise.all(
+      concurrentObjects.map(async (value, index) => {
+        const reply = await directRequest("GET", `/concurrent/${index}.txt`);
+        return { body: reply.body, status: reply.status, value };
+      }),
+    );
+    for (const reply of concurrentGetReplies) {
+      assert.equal(reply.status, 200);
+      assert.deepEqual(reply.body, reply.value);
+    }
+
     const put = await fetchBody(
       `${server.url}/servers-webdav.txt`,
       { method: "PUT", body: object },
