@@ -21,9 +21,9 @@ pub use constants::*;
 pub use handles::{DirectorySnapshots, FH_SIZE, FileHandleTable, HandleEntry};
 pub use native::{
     MountEntry, NativeNfsMount, NfsClientProbe, NfsMountError, NfsMountOptions, NfsPlatform,
-    NfsVersion, consent_advice, live_nfs_mounts, mount_entry_at, mount_nfs, nfs_client_probe,
-    nfs_mount_options, nfs_platform, nfs_platform_for, parse_mount_table, unmount_all_nfs,
-    version_refusal,
+    NfsVersion, consent_advice, live_nfs_mounts, mount_entry_at, mount_nfs, mount_nfs_with_hooks,
+    nfs_client_probe, nfs_mount_options, nfs_platform, nfs_platform_for, parse_mount_table,
+    unmount_all_nfs, version_refusal,
 };
 pub use protocol::*;
 pub use rpc::{

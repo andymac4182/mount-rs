@@ -23,7 +23,7 @@ use mount_rs_core::FsDriver;
 use tokio::process::Command;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::server::{NfsServer, NfsServerOptions, create_nfs_server};
+use crate::server::{NfsServer, NfsServerHooks, NfsServerOptions, create_nfs_server_with_hooks};
 
 const MACOS_MOUNT_TABLE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_UNMOUNT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -849,6 +849,21 @@ pub async fn mount_nfs<D>(
 where
     D: FsDriver + 'static,
 {
+    mount_nfs_with_hooks(driver, mountpoint, options, NfsServerHooks::default()).await
+}
+
+/// Start an NFS server and put the host kernel NFS client in front of it with
+/// transport lifecycle hooks. The hook object is separate from
+/// [`NfsMountOptions`] so existing option literals remain source-compatible.
+pub async fn mount_nfs_with_hooks<D>(
+    driver: D,
+    mountpoint: impl AsRef<Path>,
+    options: NfsMountOptions,
+    hooks: NfsServerHooks,
+) -> Result<NativeNfsMount, NfsMountError>
+where
+    D: FsDriver + 'static,
+{
     let platform = nfs_platform().ok_or_else(|| {
         NfsMountError::UnsupportedPlatform(format!(
             "native NFS mounts are supported on Linux and macOS, not {}",
@@ -911,7 +926,7 @@ where
         )));
     }
 
-    let server = create_nfs_server(driver, options.server_options.clone());
+    let server = create_nfs_server_with_hooks(driver, options.server_options.clone(), hooks);
     let address = server.listen().await.map_err(NfsMountError::Server)?;
     let port = address.port();
     let source = format!(
