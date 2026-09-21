@@ -11,6 +11,8 @@ on:
       - 'crates/mount-rs-cli/**'
       - 'crates/mount-rs-sdk/**'
       - 'integrations/mount-rs-r2/**'
+      - 'infra/aws-s3-production.yaml'
+      - 'scripts/audit-aws-s3-ci-oidc.sh'
       - 'scripts/cargo-shared*'
       - 'scripts/test-aws-s3.sh'
       - 'scripts/validate-aws-s3-ci-config.sh'
