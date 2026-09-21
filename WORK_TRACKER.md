@@ -1406,6 +1406,14 @@ reproducible in a production-like environment.
 - [x] Land HTTP early-rejection regression (`aa44413`).
 - [x] Land incremental S3 chunked codec helpers (`e218d18`); all 27 S3 tests and
   strict Clippy passed locally.
+- [x] The W01-S3 peer-fault packet preserves the current loopback-only S3
+  boundary while adding bounded drain timeout, live accepted-TCP connection
+  accounting, peer-aware `Connection`/`Server` transport hooks, and a
+  reset-on-close gateway fault. The locked S3 target passed 4 unit, 6
+  chunked, 17 gateway, and 5 public-API tests with host loopback permission.
+  S3 N-API streaming/member parity, direct JavaScript peer-fault evidence,
+  live AWS/R2, and broader restart/durability/concurrency/native gates remain
+  open; W01-S3 remains **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.

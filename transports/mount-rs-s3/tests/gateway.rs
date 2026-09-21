@@ -8,11 +8,12 @@ use async_trait::async_trait;
 use mount_rs_core::{Capabilities, FileHandle, FsDriver, MemoryFs, Result as FsResult};
 use mount_rs_s3::{
     CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, PresignRequest, S3BindError,
-    S3ErrorClass, S3Request, S3Response, S3Server, S3ServerOptions, S3Session, S3SessionOptions,
-    STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest,
-    canonical_query, format_amz_date, presign_request, sha256_hex, sign_chunk, sign_request,
-    sign_trailer,
+    S3ErrorClass, S3Request, S3Response, S3Server, S3ServerHooks, S3ServerOptions, S3Session,
+    S3SessionOptions, S3TransportErrorKind, STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER,
+    STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest, canonical_query, format_amz_date,
+    presign_request, sha256_hex, sign_chunk, sign_request, sign_trailer,
 };
+use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
@@ -863,6 +864,98 @@ async fn multipart_staging_is_bounded_reaped_and_deleted_honestly() {
 }
 
 #[tokio::test]
+async fn http_server_reports_live_connections_and_cleans_them_after_disconnect() {
+    let session = Arc::new(S3Session::new(MemoryFs::empty()));
+    let server = S3Server::start(session, S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    assert_eq!(server.connections(), 0);
+
+    let stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if server.connections() >= 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("accepted connection count");
+    assert!(server.connections() >= 1);
+
+    drop(stream);
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if server.connections() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnected connection count");
+    server.close().await.expect("clean shutdown");
+    assert_eq!(server.connections(), 0);
+}
+
+#[tokio::test]
+async fn http_server_reports_peer_for_connection_io_failure() {
+    let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let notified = Arc::new(Notify::new());
+    let callback_reports = Arc::clone(&reports);
+    let callback_notified = Arc::clone(&notified);
+    let hooks = S3ServerHooks {
+        on_transport_error: Some(Arc::new(move |error| {
+            callback_reports.lock().expect("S3 hook lock").push(error);
+            callback_notified.notify_waiters();
+        })),
+    };
+    let server = S3Server::start_with_hooks(
+        Arc::new(S3Session::new(MemoryFs::empty())),
+        S3ServerOptions::default(),
+        hooks,
+    )
+    .await
+    .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    stream
+        .write_all(b"GET /mountx/incomplete HTTP/1.1\r\nHost: ")
+        .await
+        .expect("write partial request");
+    let stream = stream.into_std().expect("convert client stream");
+    SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .expect("set reset-on-close");
+    drop(stream);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !reports.lock().expect("S3 report lock").is_empty() {
+                break;
+            }
+            notified.notified().await;
+        }
+    })
+    .await
+    .expect("peer transport callback");
+    let report = reports.lock().expect("S3 report lock")[0].clone();
+    assert_eq!(report.kind, S3TransportErrorKind::Connection);
+    assert!(
+        report
+            .peer
+            .as_deref()
+            .is_some_and(|peer| peer.starts_with("127.0.0.1:"))
+    );
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn http_server_is_rootless_and_sigv4_supports_header_and_presigned_forms() {
     let credentials = Credentials::new("AKIAMOUNTX7GATEWAY9", "test-secret-key");
     let session_options = S3SessionOptions {
@@ -1182,6 +1275,7 @@ async fn unauthenticated_server_refuses_non_loopback_bind() {
         S3ServerOptions {
             host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 0,
+            ..S3ServerOptions::default()
         },
     )
     .await;
@@ -1206,6 +1300,7 @@ async fn credentialed_server_refuses_non_loopback_without_tls() {
         S3ServerOptions {
             host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             port: 0,
+            ..S3ServerOptions::default()
         },
     )
     .await;
