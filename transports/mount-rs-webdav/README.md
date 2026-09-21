@@ -11,8 +11,11 @@ ETags, dates, byte ranges, recursive transfer/delete, and errno-to-HTTP mapping.
 Class-2 locking and `PROPPATCH` are implemented for the driver properties that
 the core contract can represent. `PUT` request bodies are consumed as bounded
 transport chunks and written incrementally; XML request bodies are bounded and
-buffered for parsing. Regular-file GET responses are streamed with positional
-reads and are closed on completion or connection shutdown.
+buffered for parsing. A `PUT` opens its destination at the first non-empty
+body chunk, matching the pinned oracle: a request-body failure may therefore
+leave the bytes already written, and this transport does not claim atomic PUT
+publication. Regular-file GET responses are streamed with positional reads
+and are closed on completion or connection shutdown.
 
 The HTTP integration tests bind an ephemeral loopback TCP socket and run as an
 ordinary user on both macOS and Linux. They are protocol tests; they do not

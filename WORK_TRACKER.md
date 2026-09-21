@@ -80,7 +80,8 @@ W01 gates and unresolved public parity.
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state,
-including cancellation while a queued request waits for an in-flight slot.
+including cancellation while a queued request waits for an in-flight slot and
+serialized concurrent listen/close lifecycle calls.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch. The forced-crash boundary tests
@@ -1045,6 +1046,14 @@ pending and [fault-injection run
 35633547086](https://github.com/andymac4182/mount-rs/actions/runs/35633547086)
 in progress at the read-only check; W04 policy succeeded, but no hosted
 WebDAV PASS was claimable.
+
+The WebDAV streamed `PUT` atomicity boundary is now explicit and tested:
+matching the pinned oracle, the destination opens at the first non-empty body
+chunk, so a body failure returns `500` while preserving the exact written
+prefix. The Rust focused regression and host-enabled N-API WebDAV phase both
+assert `partial` remains after the deliberate failure. This is an accepted
+oracle-compatible protocol scope decision, not atomic publication or
+power-loss/live-provider durability evidence; those gates remain open.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 

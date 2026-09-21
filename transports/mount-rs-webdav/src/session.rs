@@ -504,6 +504,11 @@ impl WebdavSession {
     where
         B: WebdavRequestBody + Unpin,
     {
+        // Keep the destination write in place. The pinned WebDAV oracle opens
+        // the resource at the first body byte and deliberately leaves a
+        // written prefix when the request body fails; staging here would
+        // change that supported protocol contract and would require a
+        // stronger atomic-replace guarantee than FsDriver exposes.
         let cap = self.options.max_body_bytes;
         let mut handle = None;
         let mut written = 0_u64;

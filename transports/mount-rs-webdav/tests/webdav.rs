@@ -1,16 +1,20 @@
+use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
-use mount_rs_core::MemoryFs;
+use bytes::Bytes;
+use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_webdav::protocol::{
     RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_info,
     parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
 };
 use mount_rs_webdav::{
-    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavRequestHead, WebdavServer,
-    WebdavServerError, WebdavServerHooks, WebdavServerOptions, WebdavSession, WebdavSessionHooks,
-    WebdavSessionOptions, WebdavTransportErrorKind, create_webdav_server,
-    create_webdav_server_with_hooks, status_for_error, status_line, status_text,
+    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavError, WebdavRequestBody,
+    WebdavRequestHead, WebdavServer, WebdavServerError, WebdavServerHooks, WebdavServerOptions,
+    WebdavSession, WebdavSessionHooks, WebdavSessionOptions, WebdavTransportErrorKind,
+    create_webdav_server, create_webdav_server_with_hooks, status_for_error, status_line,
+    status_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -271,6 +275,71 @@ async fn session_errors_are_reported_once_with_the_request_head() {
     assert_eq!(reports[0].1.target, unsupported_head.target);
     assert_eq!(reports[1].1.method, unauthorized_head.method);
     assert_eq!(reports[1].1.target, unauthorized_head.target);
+}
+
+struct FailingRequestBody {
+    state: FailingRequestBodyState,
+}
+
+enum FailingRequestBodyState {
+    Prefix,
+    Error,
+    End,
+}
+
+impl FailingRequestBody {
+    fn new() -> Self {
+        Self {
+            state: FailingRequestBodyState::Prefix,
+        }
+    }
+}
+
+impl WebdavRequestBody for FailingRequestBody {
+    fn poll_next_chunk(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, WebdavError>>> {
+        match self.state {
+            FailingRequestBodyState::Prefix => {
+                self.state = FailingRequestBodyState::Error;
+                Poll::Ready(Some(Ok(Bytes::from_static(b"partial"))))
+            }
+            FailingRequestBodyState::Error => {
+                self.state = FailingRequestBodyState::End;
+                Poll::Ready(Some(Err(WebdavError::Body(
+                    "deliberate WebDAV request stream failure".to_owned(),
+                ))))
+            }
+            FailingRequestBodyState::End => Poll::Ready(None),
+        }
+    }
+}
+
+#[tokio::test]
+async fn failed_streaming_put_preserves_the_written_prefix_by_contract() {
+    let filesystem: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let session = WebdavSession::new(Arc::clone(&filesystem), WebdavSessionOptions::default());
+    let response = session
+        .handle_request_stream(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/streamed-failure.txt".to_owned(),
+                headers: Default::default(),
+            },
+            FailingRequestBody::new(),
+        )
+        .await;
+    assert_eq!(response.status, 500);
+
+    let handle = filesystem
+        .open("/streamed-failure.txt", "r", 0)
+        .await
+        .expect("failed PUT must leave its in-place destination");
+    let mut bytes = [0_u8; 7];
+    assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
+    assert_eq!(&bytes, b"partial");
+    handle.close().await.unwrap();
 }
 
 #[tokio::test]

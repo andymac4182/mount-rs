@@ -1080,6 +1080,7 @@ impl S3Session {
             if let Some(mtime) = requested_mtime {
                 apply_mtime(&driver, &target.path, mtime).await?;
             }
+            durability_barrier(&driver).await?;
             let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
             return Ok(S3Response::empty(200)
                 .header("etag", protocol::etag_header(&object_etag(&stats)))
@@ -1096,6 +1097,7 @@ impl S3Session {
         if let Some(mtime) = requested_mtime {
             apply_mtime(&driver, &target.path, mtime).await?;
         }
+        durability_barrier(&driver).await?;
         let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
         Ok(S3Response::empty(200)
             .header("etag", protocol::etag_header(&object_etag(&stats)))
@@ -1137,6 +1139,7 @@ impl S3Session {
             if let Some(mtime) = requested_mtime {
                 apply_mtime(&driver, &target.path, mtime).await?;
             }
+            durability_barrier(&driver).await?;
             let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
             return Ok(S3StreamResponse::from(
                 S3Response::empty(200)
@@ -1193,6 +1196,7 @@ impl S3Session {
         if let Some(mtime) = requested_mtime {
             apply_mtime(&driver, &target.path, mtime).await?;
         }
+        durability_barrier(&driver).await?;
         let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
         Ok(S3StreamResponse::from(
             S3Response::empty(200)
@@ -1230,6 +1234,7 @@ impl S3Session {
             }
             driver.unlink(&target.path).await.map_err(S3Failure::Fs)?;
         }
+        durability_barrier(&driver).await?;
         Ok(S3Response::empty(204))
     }
 
@@ -1280,6 +1285,9 @@ impl S3Session {
                 Ok(_) => deleted.push(key),
                 Err(error) => errors.push((key, error.error())),
             }
+        }
+        if !deleted.is_empty() {
+            durability_barrier(&driver).await?;
         }
         Ok(xml_response(
             200,
@@ -1360,6 +1368,7 @@ impl S3Session {
             return Err(error);
         }
         cleanup.disarm();
+        durability_barrier(&destination_driver).await?;
         let destination_stats = destination_driver
             .stat(&destination.path)
             .await
@@ -1504,6 +1513,7 @@ impl S3Session {
             let _ = remove_tree(&driver, &directory).await;
             return Err(error);
         }
+        durability_barrier(&driver).await?;
         Ok(xml_response(
             200,
             initiate_multipart_xml(&target.bucket, &target.key, &upload_id),
@@ -1571,6 +1581,7 @@ impl S3Session {
             });
         }
         cleanup.disarm();
+        durability_barrier(&driver).await?;
         let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
         Ok(S3Response::empty(200)
             .header("etag", protocol::etag_header(&object_etag(&stats)))
@@ -1635,6 +1646,7 @@ impl S3Session {
             });
         }
         cleanup.disarm();
+        durability_barrier(&driver).await?;
         let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
         Ok(S3StreamResponse::from(
             S3Response::empty(200)
@@ -1763,6 +1775,7 @@ impl S3Session {
             staging_cleanup.disarm();
             let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
             remove_tree(&driver, &upload_directory(upload_id)).await?;
+            durability_barrier(&driver).await?;
             let location = object_location(request.head, &target.bucket, &target.key);
             Ok(xml_response(
                 200,
@@ -1799,6 +1812,7 @@ impl S3Session {
             return Err(error);
         }
         marker_cleanup.disarm();
+        durability_barrier(&driver).await?;
         Ok(S3Response::empty(204))
     }
 
@@ -1881,6 +1895,7 @@ impl S3Session {
                 }
             }
             let _ = driver.rmdir(&root).await;
+            durability_barrier(driver).await?;
         }
         Ok(())
     }
@@ -2403,6 +2418,17 @@ fn require_atomic_rename(driver: &Arc<dyn FsDriver>) -> S3Result<()> {
     } else {
         Err(S3Failure::s3("NotImplemented"))
     }
+}
+
+/// Await the driver's persistence barrier before acknowledging a mutation.
+/// Volatile drivers intentionally remain unchanged; drivers that advertise
+/// durable writes must implement `syncfs` or return an explicit error rather
+/// than allowing S3 to report a false durable success.
+async fn durability_barrier(driver: &Arc<dyn FsDriver>) -> S3Result<()> {
+    if driver.capabilities().durable_writes {
+        driver.syncfs().await.map_err(S3Failure::Fs)?;
+    }
+    Ok(())
 }
 
 struct StreamingPayloadHash {

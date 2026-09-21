@@ -1105,6 +1105,9 @@ async fn cancelled_streaming_part_preserves_existing_part_and_staging_budget() {
 struct FaultOnReadFs {
     inner: MemoryFs,
     fail_next_read: Arc<AtomicBool>,
+    durable_writes: bool,
+    sync_calls: Arc<AtomicUsize>,
+    fail_syncfs: Arc<AtomicBool>,
 }
 
 struct FaultOnReadHandle {
@@ -1143,7 +1146,19 @@ impl FileHandle for FaultOnReadHandle {
 #[async_trait]
 impl FsDriver for FaultOnReadFs {
     fn capabilities(&self) -> Capabilities {
-        self.inner.capabilities()
+        let mut capabilities = self.inner.capabilities();
+        capabilities.durable_writes = self.durable_writes;
+        capabilities
+    }
+
+    async fn syncfs(&self) -> FsResult<()> {
+        self.sync_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_syncfs.swap(false, Ordering::SeqCst) {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio).with_syscall("syncfs")
+            );
+        }
+        Ok(())
     }
 
     async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
@@ -1188,6 +1203,9 @@ async fn failed_multipart_assembly_releases_finalization_claim_for_retry() {
     let driver = FaultOnReadFs {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
+        durable_writes: false,
+        sync_calls: Arc::new(AtomicUsize::new(0)),
+        fail_syncfs: Arc::new(AtomicBool::new(false)),
     };
     let session = S3Session::new(driver.clone());
     let initiated = session
@@ -1241,6 +1259,69 @@ async fn failed_multipart_assembly_releases_finalization_claim_for_retry() {
         .await;
     assert_eq!(object.status, 200);
     assert_eq!(object.body, b"fault-retry bytes");
+}
+
+#[tokio::test]
+async fn durable_mutations_wait_for_and_report_syncfs_barriers() {
+    let driver = FaultOnReadFs {
+        inner: MemoryFs::empty(),
+        fail_next_read: Arc::new(AtomicBool::new(false)),
+        durable_writes: true,
+        sync_calls: Arc::new(AtomicUsize::new(0)),
+        fail_syncfs: Arc::new(AtomicBool::new(false)),
+    };
+    let session = S3Session::new(driver.clone());
+
+    let put = session
+        .handle(request("PUT", "/mountx/durable.txt", b"durable", &[]))
+        .await;
+    assert_eq!(put.status, 200);
+    assert_eq!(driver.sync_calls.load(Ordering::SeqCst), 1);
+
+    driver.fail_syncfs.store(true, Ordering::SeqCst);
+    let failed = session
+        .handle(request("PUT", "/mountx/retry.txt", b"retry", &[]))
+        .await;
+    assert_eq!(failed.status, 500);
+    assert_eq!(driver.sync_calls.load(Ordering::SeqCst), 2);
+
+    let retried = session
+        .handle(request("PUT", "/mountx/retry.txt", b"retry", &[]))
+        .await;
+    assert_eq!(retried.status, 200);
+    assert_eq!(driver.sync_calls.load(Ordering::SeqCst), 3);
+
+    let initiated = session
+        .handle(request("POST", "/mountx/multipart.txt?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    assert_eq!(driver.sync_calls.load(Ordering::SeqCst), 4);
+
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/multipart.txt?uploadId={upload_id}&partNumber=1"),
+            b"part",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+    assert_eq!(driver.sync_calls.load(Ordering::SeqCst), 5);
+    let part_etag = header(&part, "etag").expect("part ETag");
+
+    let complete = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/multipart.txt?uploadId={upload_id}"),
+            format!(
+                "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+            ),
+            &[],
+        ))
+        .await;
+    assert_eq!(complete.status, 200);
+    assert_eq!(driver.sync_calls.load(Ordering::SeqCst), 6);
 }
 
 #[tokio::test]
