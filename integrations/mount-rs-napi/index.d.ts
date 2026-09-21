@@ -1922,6 +1922,7 @@ export interface S3ServerOptions {
   maxBodyBytes?: number
   maxXmlBytes?: number
   readChunkBytes?: number
+  drainTimeout?: number
 }
 
 export declare function splitPath(path: string): Array<string>

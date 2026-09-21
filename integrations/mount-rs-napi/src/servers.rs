@@ -829,6 +829,7 @@ pub struct S3ServerOptions {
     pub max_body_bytes: Option<f64>,
     pub max_xml_bytes: Option<f64>,
     pub read_chunk_bytes: Option<f64>,
+    pub drain_timeout: Option<f64>,
 }
 
 fn s3_options(
@@ -852,6 +853,7 @@ fn s3_options(
         max_body_bytes: None,
         max_xml_bytes: None,
         read_chunk_bytes: None,
+        drain_timeout: None,
     });
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
@@ -878,16 +880,17 @@ fn s3_options(
         options.read_chunk_bytes,
         session.read_chunk_bytes,
     )?;
-    Ok((
-        host,
+    let mut server_options = TransportS3ServerOptions {
+        host: address,
         port,
-        options.bucket,
-        TransportS3ServerOptions {
-            host: address,
-            port,
-        },
-        session,
-    ))
+        ..TransportS3ServerOptions::default()
+    };
+    server_options.drain_timeout = duration_ms(
+        "drainTimeout",
+        options.drain_timeout,
+        server_options.drain_timeout,
+    )?;
+    Ok((host, port, options.bucket, server_options, session))
 }
 
 type S3BucketEntries = Vec<(String, Arc<dyn FsDriver>)>;
