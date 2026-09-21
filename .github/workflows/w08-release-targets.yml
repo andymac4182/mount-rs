@@ -132,7 +132,7 @@ jobs:
 
   verify-download:
     name: Verify downloaded ${{ matrix.label }} assets
-    needs: [build, verify-download]
+    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
@@ -192,7 +192,7 @@ jobs:
   attest:
     name: Attest ${{ matrix.label }} release target
     if: github.event_name == 'workflow_dispatch' && inputs.attest == true
-    needs: build
+    needs: [build, verify-download]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
