@@ -84,7 +84,7 @@ the real Ozone S3 Gateway and fail below a requested threshold:
 
 ```sh
 node benchmarks/storage/runner.mjs \
-  --providers mount-rs-split-pglite-r2 \
+  --providers mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 \
   --sizes 1 --payload-bytes 4096 \
   --iterations 400 --concurrency 64 --min-iops 1000 \
   --output artifacts/ozone-iops.json
@@ -107,9 +107,12 @@ customer Ozone deployment can sustain 1,000 IOPS or meet the customer's
 | `mount-rs-memory` | mount-rs public NAPI | memory | memory | combined | always available when the native package is loadable |
 | `mount-rs-sqlite` | mount-rs public NAPI | SQLite | SQLite | combined | temporary SQLite file, removed after shutdown |
 | `mount-rs-split-sqlite` | mount-rs public NAPI | SQLite | SQLite | split stores | temporary metadata and block databases |
+| `mount-rs-split-sqlite-r2` | mount-rs public NAPI | SQLite | Cloudflare R2 | split stores | R2 endpoint/bucket/key variables; temporary SQLite metadata file |
 | `mount-rs-pglite` | mount-rs public NAPI | PGlite | PGlite | combined | `MOUNT_RS_PGLITE_DATABASE_URL` or `PGLITE_DATABASE_URL` |
 | `mount-rs-split-pglite` | mount-rs public NAPI | PGlite | PGlite | split stores | same PGlite URL variables |
 | `mount-rs-split-pglite-r2` | mount-rs public NAPI | PGlite | Cloudflare R2 | split stores | PGlite URL plus R2 endpoint/bucket/key variables |
+| `mount-rs-split-tidb-r2` | mount-rs public NAPI | TiDB | Cloudflare R2 | split stores | `MOUNT_RS_TIDB_URL` plus R2 endpoint/bucket/key variables |
+| `mount-rs-split-foundationdb-r2` | mount-rs public NAPI | FoundationDB | Cloudflare R2 | split stores | FoundationDB N-API feature/cluster file plus R2 endpoint/bucket/key variables |
 | `mountx-memory` | actual mountx TypeScript | memory | memory | combined | `MOUNTX_SOURCE`, or pinned checkout at repo-local `vendor/mountx` |
 
 The actual TypeScript oracle is used only when `MOUNTX_SOURCE` points to the
@@ -117,12 +120,16 @@ pinned checkout (or the repository-local `vendor/mountx` checkout exists).
 Otherwise `mountx-memory` is explicitly reported as `skipped`; the runner does
 not infer a host-specific `/tmp` location.
 
-The R2 provider uses `createChunkedDriver` with fixed-size chunking and a
-PGlite metadata store, so its metadata and block labels are not collapsed into
-one “R2” label. The default chunk size is 65,536 bytes and the selected value
-is recorded in the JSON. Set `MOUNT_RS_R2_DURABLE=0` only when deliberately
-measuring a volatile remote-block configuration; otherwise the requested R2
-provider declares durable remote blocks. The runner records the configured
+The Ozone IOPS gate requests every Ozone-backed provider that can be configured
+in the job: SQLite/R2 is always eligible, PGlite/R2 requires the PGlite service,
+and TiDB/R2 or FoundationDB/R2 become eligible when their provider-specific
+CI environment is present. An absent provider is recorded as an explicit skip,
+not silently replaced with another metadata backend. The R2 providers use
+`createChunkedDriver` with fixed-size chunking, so metadata and block labels
+are not collapsed into one “R2” label. The default chunk size is 65,536 bytes
+and the selected value is recorded in the JSON. Set `MOUNT_RS_R2_DURABLE=0`
+only when deliberately measuring a volatile remote-block configuration;
+otherwise the requested R2 provider declares durable remote blocks. The runner records the configured
 remote region if `MOUNT_RS_R2_REGION` or `R2_REGION` is set, but never records
 credentials.
 

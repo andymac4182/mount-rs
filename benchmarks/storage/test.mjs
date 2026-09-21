@@ -7,7 +7,7 @@ import {
   usageError,
   withTimeout,
 } from "./errors.mjs"
-import { providerById } from "./providers.mjs"
+import { providerById, providerSummary } from "./providers.mjs"
 import { cleanupOwnedPaths, parseArgs, runSample } from "./runner.mjs"
 import { computeStats, percentile, round, roundStats } from "./stats.mjs"
 
@@ -171,9 +171,73 @@ async function testExecutionSurfaceLabels() {
   })
 }
 
+async function testOzoneProviderMatrix() {
+  const r2Environment = {
+    MOUNT_RS_R2_ENDPOINT: "https://ozone.example.test",
+    MOUNT_RS_R2_BUCKET: "bucket",
+    MOUNT_RS_R2_ACCESS_KEY_ID: "access-key",
+    MOUNT_RS_R2_SECRET_ACCESS_KEY: "secret-value",
+  }
+  const definitions = providerById(r2Environment)
+  for (const provider of [
+    "mount-rs-split-sqlite-r2",
+    "mount-rs-split-pglite-r2",
+    "mount-rs-split-tidb-r2",
+    "mount-rs-split-foundationdb-r2",
+  ]) {
+    assert.ok(definitions.has(provider), `missing Ozone provider definition: ${provider}`)
+  }
+  assert.equal(
+    definitions.get("mount-rs-split-sqlite-r2").availability(r2Environment).configured,
+    true,
+  )
+  assert.equal(
+    definitions.get("mount-rs-split-pglite-r2").availability(r2Environment).configured,
+    false,
+  )
+  assert.equal(
+    definitions.get("mount-rs-split-tidb-r2").availability(r2Environment).configured,
+    false,
+  )
+  assert.equal(
+    definitions.get("mount-rs-split-foundationdb-r2").availability(r2Environment).configured,
+    false,
+  )
+
+  const configuredDefinitions = providerById({
+    ...r2Environment,
+    MOUNT_RS_PGLITE_DATABASE_URL: "postgres://pglite",
+    MOUNT_RS_TIDB_URL: "mysql://tidb",
+    MOUNT_RS_NAPI_FOUNDATIONDB: "1",
+    MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE: "/run/fdb/fdb.cluster",
+  })
+  assert.equal(
+    configuredDefinitions.get("mount-rs-split-pglite-r2").availability({}).configured,
+    true,
+  )
+  assert.equal(
+    configuredDefinitions.get("mount-rs-split-tidb-r2").availability({}).configured,
+    true,
+  )
+  assert.equal(
+    configuredDefinitions.get("mount-rs-split-foundationdb-r2").availability({}).configured,
+    true,
+  )
+
+  const summary = JSON.stringify(
+    providerSummary(
+      configuredDefinitions.get("mount-rs-split-pglite-r2"),
+      65_536,
+    ),
+  )
+  assert.equal(summary.includes("secret-value"), false)
+  assert.equal(summary.includes("access-key"), false)
+}
+
 await testStats()
 await testErrors()
 await testCli()
 await testExecutionSurfaceLabels()
+await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()
 console.log("storage benchmark unit tests: PASS")

@@ -661,7 +661,6 @@ fi
 
 if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
   : "${MOUNT_RS_OZONE_COMPOSITIONS:?MOUNT_RS_OZONE_IOPS requires the Ozone composition harness}"
-  : "${PGLITE_DATABASE_URL:?MOUNT_RS_OZONE_IOPS requires PGLITE_DATABASE_URL}"
   iops_output=${MOUNT_RS_OZONE_IOPS_OUTPUT:-$run_dir/ozone-iops.json}
   iops_size_mib=${MOUNT_RS_OZONE_IOPS_SIZE_MIB:-1}
   iops_payload_bytes=${MOUNT_RS_OZONE_IOPS_PAYLOAD_BYTES:-4096}
@@ -669,13 +668,14 @@ if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
   iops_concurrency=${MOUNT_RS_OZONE_IOPS_CONCURRENCY:-64}
   iops_minimum=${MOUNT_RS_OZONE_IOPS_MIN:-1000}
   export MOUNT_RS_PGLITE_DATABASE_URL="$PGLITE_DATABASE_URL"
+  export MOUNT_RS_PGLITE_DURABLE=1
   export MOUNT_RS_R2_ENDPOINT="$R2_ENDPOINT"
   export MOUNT_RS_R2_BUCKET="$R2_BUCKET"
   export MOUNT_RS_R2_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID"
   export MOUNT_RS_R2_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY"
   export MOUNT_RS_R2_DURABLE=1
   bounded_node_test "iops" "$repo_dir/benchmarks/storage/runner.mjs" \
-    --providers mount-rs-split-pglite-r2 \
+    --providers mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2,mount-rs-split-tidb-r2,mount-rs-split-foundationdb-r2 \
     --sizes "$iops_size_mib" \
     --payload-bytes "$iops_payload_bytes" \
     --iterations "$iops_iterations" \
@@ -683,7 +683,7 @@ if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
     --min-iops "$iops_minimum" \
     --network-context "ozone-ci" \
     --output "$iops_output"
-  echo "OZONE_IOPS_PASS provider=mount-rs-split-pglite-r2 target=$iops_minimum output=$iops_output"
+  echo "OZONE_IOPS_PASS providers=sqlite-r2,pglite-r2,tidb-r2,foundationdb-r2 target=$iops_minimum output=$iops_output"
 fi
 
 if [ "${MOUNT_RS_OZONE_TIDB_COMPOSITION:-0}" = "1" ]; then
