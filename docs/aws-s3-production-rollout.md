@@ -280,6 +280,11 @@ protected environment inputs/secret, `missing_github_oidc_provider`, and
 `role_missing_immutable_github_subject_trust`. It made no GitHub or AWS
 changes; hosted OIDC evidence remains blocked until the deployment owner
 configures and approves those controls.
+The latest read-only rerun at pushed source
+`9b5acfbac3d88d5f17a969defd447f5d44ee3023` on 2026-09-22 returned the same
+fail-closed blocker set and made no GitHub or AWS changes; hosted OIDC evidence
+remains blocked until the deployment owner configures and approves those
+controls.
 
 ## Rollout sequence
 
@@ -362,6 +367,12 @@ BucketOwnerEnforced ownership, AES256 encryption, `None` versioning, seven-day
 `mount-rs-tests/` lifecycle, and one-day incomplete-multipart abort checks. It
 made no AWS changes and remains qualification-account evidence only; the
 production bucket, policy, roles, and approved change set remain open.
+The latest read-only audit at pushed source
+`9b5acfbac3d88d5f17a969defd447f5d44ee3023` on 2026-09-22 repeated the same
+account/region, public-access, ownership, AES256 encryption, `None` versioning,
+seven-day lifecycle, and one-day incomplete-multipart abort controls without
+mutating AWS. It remains qualification-account evidence only; the production
+bucket, policy, roles, and approved change set remain open.
 The latest full integrated qualification is the current shared-source
 `2101e555` run recorded above. This is qualification-account evidence only;
 production

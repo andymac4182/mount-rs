@@ -2994,6 +2994,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   abort checks. It made no AWS changes and remains qualification-account
   evidence only; the production bucket, policy, roles, and approved change
   set remain open.
+- [x] The latest read-only qualification-bucket audit at pushed source
+  `9b5acfbac3d88d5f17a969defd447f5d44ee3023` on 2026-09-22 passed the same
+  account/region, public-access, ownership, AES256 encryption, `None`
+  versioning, seven-day lifecycle, and one-day incomplete-multipart abort
+  controls. It made no AWS changes and remains qualification-account evidence
+  only; the production bucket, policy, roles, and approved change set remain
+  open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -3107,6 +3114,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `role_missing_immutable_github_subject_trust`. It made no GitHub or AWS
   changes; hosted OIDC evidence remains blocked until the deployment owner
   configures and approves those controls.
+- [x] The latest read-only OIDC audit at pushed source
+  `9b5acfbac3d88d5f17a969defd447f5d44ee3023` on 2026-09-22 returned the same
+  fail-closed blocker set: missing environment protection, protected-branch
+  policy, non-self-approvable reviewer, the four protected environment
+  inputs/secret, GitHub OIDC provider, and immutable-subject role trust. It
+  made no GitHub or AWS changes; hosted OIDC evidence remains blocked until
+  the deployment owner configures and approves those controls.
   The workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free seven-case regression matrix covers valid, missing,
