@@ -211,6 +211,28 @@ async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()>
     Ok(())
 }
 
+async fn publish_authority_with_bounded_retry(
+    authority: &FoundationDbLeaseAuthority,
+) -> Result<u64> {
+    const MAX_ATTEMPTS: usize = 5;
+    const RETRY_DELAY: Duration = Duration::from_secs(2);
+
+    let mut last_error = None;
+    for attempt in 0..MAX_ATTEMPTS {
+        match authority.publish_system_now_ms().await {
+            Ok(published) => return Ok(published),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < MAX_ATTEMPTS {
+                    tokio::time::sleep(RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.expect("bounded authority publication attempts must record an error"))
+}
+
 async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -400,11 +422,17 @@ async fn publish_foundationdb_authority_for_consumers() {
     let authority =
         FoundationDbLeaseAuthority::connect(&cluster_file, &prefix, FoundationDbLimits::default())
             .expect("connect FoundationDB consumer-gate authority");
-    let published =
-        tokio::time::timeout(Duration::from_secs(15), authority.publish_system_now_ms())
-            .await
-            .expect("FoundationDB authority publication exceeded its bounded timeout")
-            .expect("publish FoundationDB consumer-gate authority time");
+    // A restarted FoundationDB process can report status before its client
+    // transaction path is ready. Publication is an idempotent monotonic
+    // operation, so retry it in a bounded window instead of turning that
+    // readiness race into a false restart failure.
+    let published = tokio::time::timeout(
+        Duration::from_secs(60),
+        publish_authority_with_bounded_retry(&authority),
+    )
+    .await
+    .expect("FoundationDB authority publication exceeded its bounded timeout")
+    .expect("publish FoundationDB consumer-gate authority time");
     assert!(published > 0, "published authority time must be non-zero");
 }
 
