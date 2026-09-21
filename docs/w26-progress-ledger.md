@@ -12,7 +12,7 @@ for engineering planning, not a commitment.
 | Workstream | W26 — Apache Ozone S3 backend |
 | Ledger snapshot | 2026-09-21, Australia/Brisbane |
 | Repository | `mount-rs` |
-| Snapshot base | `bad5fbb` (directory response-boundary chunk is pushed; Ozone provider-matrix/IOPS expansion is the current working chunk) |
+| Snapshot base | `a0b2fae` (provider-matrix/IOPS expansion is published over concurrent mainline changes; hosted qualification is pending) |
 | Checklist completion | 4 of 4 W26 tracker rows checked: 100% |
 | Provisional execution completion | W26 qualification: 100%; production-rollout readiness: 20% (scope, benchmark matrix and CI acceptance baseline captured; no terminal production gates yet). Customer deployment, native, provider-durability and release-stream gates remain separately bounded |
 | Current acceptance state | Local Ozone, SQLite/PGlite, single-node TiDB/Ozone, durable three-node FoundationDB/Ozone, hosted Ozone, hosted SQLite/PGlite, Ozone-backed durable TiDB, generic durable TiDB, Node SDK, and CLI evidence passed; W26 is complete within its documented provider/platform boundaries |
@@ -294,3 +294,8 @@ The HTTP security-boundary chunk was committed as `f74ffce`, merged with
 concurrent mainline changes, and pushed as `b997696`. The current-head hosted
 workflow is tracked separately above; a queued or in-progress run is not
 promoted to production evidence.
+
+The Ozone provider-matrix/IOPS chunk was committed as `333c764`, merged with
+concurrent mainline changes, and pushed as `a0b2fae`. Its local evidence is
+recorded above; the hosted workflow created from `a0b2fae` must reach terminal
+success before the provider or 1,000-IOPS gates move beyond pending.
