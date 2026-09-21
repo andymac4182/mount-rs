@@ -13,6 +13,12 @@ mount-rs probe
 mount-rs validate-config --config PATH
 mount-rs sdk-self-test [--config PATH] [--reopen]
 
+For a TLS-required TiDB connection in structured configuration, build the CLI
+with `--features rustls` and use a connection environment variable whose URL
+includes `require_ssl=true`. The URL and credentials remain environment
+references; the feature build does not replace the required credentialed
+provider handshake and deployment certificate checks.
+
 ## Optional observability
 
 Build the CLI with `--features observability` to enable the application-owned

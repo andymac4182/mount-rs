@@ -173,6 +173,27 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
         run: ./scripts/test-tidb.sh
 
+  tidb-tls-compile:
+    # This verifies that every public TiDB consumer can ship the TLS-capable
+    # client graph. It is intentionally a compile gate; credentials, CA
+    # policy, and a real TLS handshake remain production provider gates.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Compile TLS-enabled TiDB consumers
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-tls-cargo-target
+        run: |
+          cargo check --locked -p mount-rs-tidb --features rustls
+          cargo check --locked -p mount-rs-sdk --features rustls
+          cargo check --locked -p mount-rs-cli --features rustls
+          cargo check --locked -p mount-rs-napi --features rustls
+
   tidb-rustfs:
     # This job keeps the real RustFS service alive while test-tidb.sh owns the
     # TiDB/PD/TiKV topology. The second composition phase reopens the scoped

@@ -42,6 +42,17 @@ choice does not provide that shared time authority.
 The default SDK build remains portable and returns ENOTSUP if a FoundationDB
 store is selected without the native feature or on an unsupported target.
 
+TiDB TLS is also opt-in so the default graph remains small and portable:
+
+~~~toml
+mount-rs-sdk = { version = "0.1", features = ["rustls"] }
+~~~
+
+Use a TiDB connection URL with `require_ssl=true` for a TLS-required endpoint.
+The deployment remains responsible for the URL, certificate roots, secret
+injection and a credentialed handshake test; compiling the feature alone is
+not provider or production acceptance.
+
 ## Optional observability
 
 Enable the `observability` feature when the application wants the SDK to

@@ -112,3 +112,14 @@ module to activate the bounded operation spans and local metrics. A Rust host
 embedding this crate may install an application-owned telemetry handle before
 constructing a filesystem. Exporter/provider lifecycle remains owned by that
 host; Node operation failures are never made dependent on telemetry export.
+
+For a TLS-required TiDB endpoint, build the addon with the `rustls` feature so
+the TiDB client TLS implementation is included:
+
+```sh
+CARGOFLAGS="--locked --features rustls" pnpm --dir integrations/mount-rs-napi build
+```
+
+This is a build capability, not live TLS/provider acceptance. The deployment
+still owns the TiDB URL, CA/certificate policy, secret injection, rotation and
+the credentialed handshake test.

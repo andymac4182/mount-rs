@@ -113,7 +113,7 @@ paths; native-mount selection remains a separate evidence boundary.
 | Single-node real TiDB smoke | `MOUNT_RS_TIDB_TOPOLOGY=single ./scripts/test-tidb.sh` | Actual TiDB identity and provider contract against one PD and one TiKV. | Replicated/durable topology, quorum recovery, or restart acceptance; the result is labeled `single-node-smoke-not-replicated-acceptance`. |
 | Underprovisioned diagnostic | `MOUNT_RS_TIDB_ALLOW_UNDERPROVISIONED=1 ./scripts/test-tidb.sh` | A diagnostic attempt when the Docker host is below the durable resource floor. | Durable acceptance; the result is labeled `diagnostic-underprovisioned-not-durable-acceptance`. |
 | Direct TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@127.0.0.1:4000/test' ./scripts/cargo-shared test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture` | A reachable server that passes `SELECT tidb_version(), VERSION()` before provider schemas are opened, then schema, UTF-8/trailing-space, provider-clock, fencing, concurrent-CAS, reconnect, block, and flush checks. | Docker topology or component restart evidence. A `mysql://` URL is only a protocol URL; MySQL or another compatible server is rejected by the identity check. |
-| TLS TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@host:4000/test' cargo test --locked -p mount-rs-tidb --features rustls --test tidb -- --ignored --nocapture` | The same direct provider contract for a TLS-required endpoint, subject to the endpoint's certificate/URL configuration. | Any proof that the public CLI, Node, or native mount can select TiDB. |
+| TLS TiDB provider contract | `MOUNT_RS_TIDB_URL='mysql://user:password@host:4000/test?require_ssl=true' cargo test --locked -p mount-rs-tidb --features rustls --test tidb -- --ignored --nocapture` | The same direct provider contract for a TLS-required endpoint, subject to the endpoint's certificate/URL configuration. | Any proof that the public CLI, Node, or native mount can select TiDB. |
 | TiDB plus RustFS ChunkedFs | Use the opt-in command in [TiDB metadata plus RustFS chunks](#tidb-metadata-plus-rustfs-chunks). | Real TiDB identity, RustFS-backed immutable blocks, partial writes/truncate, close/reopen, fencing/CAS, and scoped block/metadata cleanup. A successful reopen prints `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`. | Node/N-API, CLI, FUSE/NFS/9P/WebDAV, FSKit, or hosted-CI acceptance. RustFS is not TiDB and S3-compatible evidence is not Cloudflare R2 evidence. |
 
 The direct provider and ambiguous-commit tests are `#[ignore]` and require an
@@ -155,6 +155,13 @@ TiDB/RustFS consumer rows. Do not turn those rows, a generic native transport
 test, or a macOS/Linux compile into TiDB native-mount acceptance; that remaining
 boundary requires a revision-matched service-backed native test on each claimed
 platform.
+
+For a TLS-required production endpoint, compile the selected public consumer
+with its `rustls` feature: `cargo check --locked -p mount-rs-sdk --features
+rustls`, `cargo check --locked -p mount-rs-cli --features rustls`, or
+`cargo check --locked -p mount-rs-napi --features rustls`. The feature only
+enables the TLS-capable client graph; the endpoint URL, certificate policy,
+secret injection and live handshake still require a provider-backed test.
 
 The provider's `durable(true)` flag remains caller-declared. The `flush` hook
 is an acknowledged TiDB round trip, not proof of storage-engine fsync, and a

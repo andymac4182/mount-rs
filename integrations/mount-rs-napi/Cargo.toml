@@ -10,6 +10,7 @@ license = "Apache-2.0"
 default = []
 observability = ["dep:mount-rs-observability"]
 foundationdb = ["dep:mount-rs-foundationdb", "mount-rs-foundationdb/foundationdb"]
+rustls = ["mount-rs-tidb/rustls"]
 
 [lib]
 crate-type = ["cdylib"]

@@ -12,6 +12,7 @@ readme = "README.md"
 default = []
 observability = ["dep:mount-rs-observability"]
 foundationdb = ["dep:mount-rs-foundationdb", "mount-rs-foundationdb/foundationdb"]
+rustls = ["mount-rs-tidb/rustls"]
 
 [dependencies]
 async-trait = "0.1"
