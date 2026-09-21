@@ -1884,12 +1884,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   and provider-specific topologies remain open.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
-  writer lease and protects committed namespace roots plus open-unlinked
-  handles; R2/Ozone lists only its validated prefix, retains live/recent
-  objects, deletes only aged unreferenced blocks and returns scanned/protected/
-  recent/deleted counts. Rust SDK, observability and fault-injection wrappers
-  forward the capability, while N-API exposes `reconcileBlocks(graceMs)` with
-  positive-range validation and `ENOTSUP` for providers without enumeration.
+  writer lease, rejects zero grace at the coordinator, and protects committed
+  namespace roots plus open-unlinked handles; R2/Ozone streams only its
+  validated prefix, retains live/recent objects, deletes only aged unreferenced
+  blocks and returns scanned/protected/recent/deleted counts. Rust SDK,
+  observability and fault-injection wrappers forward the capability, while
+  N-API exposes `reconcileBlocks(graceMs)` with positive-range validation and
+  `ENOTSUP` for providers without enumeration.
   R2 14/14, ChunkedFs 14/14, SDK 2/2, observability 4/4, strict affected-
   package Clippy, formatting, diff checks and the rebuilt N-API chunked test
   passed locally; hosted provider retention/alert/security evidence remains

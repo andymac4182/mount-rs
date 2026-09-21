@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
@@ -139,13 +140,7 @@ impl BlockStore for R2BlockStore {
                 .with_syscall("reconcile blocks")
                 .with_message("reconciliation grace period must be positive"));
         }
-        let listing = self
-            .store
-            .list_with_delimiter(Some(&self.prefix))
-            .await
-            .map_err(|error| {
-                backend_error(format!("list R2 blocks for reconciliation: {error}"))
-            })?;
+        let mut listing = self.store.list(Some(&self.prefix));
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -154,7 +149,10 @@ impl BlockStore for R2BlockStore {
         let prefix = format!("{}/", self.prefix);
         let mut report = BlockReconcileReport::default();
 
-        for object in listing.objects {
+        while let Some(object) = listing.next().await {
+            let object = object.map_err(|error| {
+                backend_error(format!("list R2 blocks for reconciliation: {error}"))
+            })?;
             let Some(relative) = object.location.as_ref().strip_prefix(&prefix) else {
                 continue;
             };

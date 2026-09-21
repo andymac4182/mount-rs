@@ -296,6 +296,11 @@ where
     /// crashed or ambiguous publication in another process. Open unlinked
     /// files remain roots until their final handle closes.
     pub async fn reconcile_blocks(&self, grace: Duration) -> Result<BlockReconcileReport> {
+        if grace.is_zero() {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("reconcile blocks")
+                .with_message("reconciliation grace period must be positive"));
+        }
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
         let (namespace, _) = self.snapshot()?;
@@ -2615,6 +2620,10 @@ mod tests {
             options("put-fault"),
         ))
         .unwrap();
+        let invalid = block_on(filesystem.reconcile_blocks(Duration::ZERO)).unwrap_err();
+        assert_eq!(invalid.code, ErrorCode::Einval);
+        assert!(blocks.reconciled.lock().unwrap().is_none());
+
         let file = block_on(filesystem.open("/file", "w+", 0o600)).unwrap();
         let before = block_on(metadata.load()).unwrap().revision;
 
