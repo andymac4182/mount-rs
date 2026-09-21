@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "repository": "andymac4182/mount-rs",
+  "sourceRevision": null,
+  "decision": "NO-GO",
+  "gates": [
+    {
+      "id": "W07-P01",
+      "name": "Identity and least privilege",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Assign the production IAM owner and deploy one write-capable authority identity per prefix plus read-only consumer identities.",
+        "Run the credentialed ACL-negative test, secret injection/rotation and redacted-log review against the actual production tenant."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "W07-P02",
+      "name": "Time and authority failure policy",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Assign the authority/on-call owner and prove the production clock-skew bound, publication-age alerting and cadence against the shortest lease TTL.",
+        "Rehearse authority restart, loss, republish and reviewed failover/recovery with readers failing closed."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "W07-P03",
+      "name": "FoundationDB durability and recovery",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Record the production FoundationDB replication/storage policy, pinned images, keyspace compatibility and service-failover owner.",
+        "Complete backup/restore, disk/process/power-loss and clean-environment recovery drills with measured RPO/RTO."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "W07-P04",
+      "name": "Production-like workload and soak",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Run production-shaped multi-chunk, partial-write, truncate/extend, fencing, lease-expiry, reconnect and fresh-client workloads at agreed duration/load.",
+        "Record latency, retries, errors, resource growth, capacity headroom, cost envelope and error-budget result with an accountable performance owner."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "W07-P05",
+      "name": "Observability and operations",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Assign the on-call owner and publish dashboards/alerts for cluster health, authority age/errors, lease fencing, transaction retries, block errors and space pressure.",
+        "Exercise the incident, escalation and recovery runbook end to end and retain acknowledgement evidence."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "W07-P06",
+      "name": "Rollout and rollback",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Assign the release owner, define canary holdback and explicit go/no-go/abort criteria, and verify keyspace/configuration compatibility.",
+        "Rehearse rollback and authority recovery in the production-like environment before any consumer is enabled."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "W07-P07",
+      "name": "Hosted and platform evidence",
+      "status": "open",
+      "accountableOwner": null,
+      "targetEnvironment": null,
+      "testOrRunId": null,
+      "remainingActions": [
+        "Assign the platform/package owner and complete the advertised macOS/Linux native-client, Node, CLI, FUSE/NFS/FSKit and clean-install matrix.",
+        "Retain signed/package provenance and terminal evidence for every advertised platform; hosted Linux qualification alone is insufficient."
+      ],
+      "evidence": []
+    }
+  ]
+}
