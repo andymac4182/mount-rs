@@ -180,6 +180,16 @@ try {
     [],
     Buffer.from("method differential"),
   )
+  // The oracle and native memory drivers allocate their nodes independently.
+  // Pin the writable metadata before comparing the exact XML document so a
+  // millisecond boundary cannot make the derived ETag differ by platform.
+  const parityTime = 1_700_000_000
+  await Promise.all([
+    nativeFilesystem.utimes("/method-parity", parityTime, parityTime),
+    nativeFilesystem.utimes("/method-parity/source.txt", parityTime, parityTime),
+    oracleDriver.utimes("/method-parity", parityTime, parityTime),
+    oracleDriver.utimes("/method-parity/source.txt", parityTime, parityTime),
+  ])
   await pair(
     "PROPFIND",
     "PROPFIND",
