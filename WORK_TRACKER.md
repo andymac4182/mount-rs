@@ -1672,7 +1672,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   storage `connect` paths. The hosted native CLI lane now publishes a current
   authority sample in a separate process before running the consumer with the
   shared-provider/read-only configuration. The authority publisher now also
-  exposes an explicit bounded-forward-jump API that fails closed before an
+  exposes a validated `LeasePublicationPolicy`: publication cadence must be
+  shorter than the lease TTL and the accepted forward-jump bound cannot exceed
+  that TTL. Its policy and bounded-forward-jump APIs fail closed before an
   unsafe wall-clock sample is written; unit coverage and the real-cluster
   authority/composition paths use that guard. Hosted run
   [35606741719](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719)

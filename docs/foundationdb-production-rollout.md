@@ -422,13 +422,15 @@ The deployment must prove and continuously enforce all of the following:
 - credentials, cluster files, certificates, and rotation material are injected
   at runtime and never committed or printed.
 
-The provider now exposes
-`publish_system_now_ms_with_max_forward_jump` and its explicit-sample
-counterpart. They fail closed before writing when one proposed authority-time
-advance exceeds the configured bound; the unit and real-cluster authority
-paths exercise this guard. This is an implementation safety boundary, not
-evidence of the production host's clock monitor, identity policy, publication
-cadence or failover procedure.
+The provider now exposes a validated `LeasePublicationPolicy` plus
+`publish_system_now_ms_with_policy` and its explicit-sample counterpart. The
+policy requires a publication cadence shorter than the lease TTL and a
+forward-jump bound no larger than that TTL; publication fails closed before
+writing when one proposed authority-time advance exceeds the bound. Unit and
+real-cluster authority paths exercise the bounded publication guard. The
+policy is an implementation safety boundary, not evidence of the production
+host's clock monitor, identity policy, scheduler cadence or failover
+procedure.
 
 These are deployment controls. The library API and a shared FoundationDB
 `Database` handle cannot prove the credential/tenant/ACL boundary by

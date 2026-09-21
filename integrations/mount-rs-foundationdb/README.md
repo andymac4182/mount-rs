@@ -86,8 +86,13 @@ let authority = mount_rs_foundationdb::FoundationDbLeaseAuthority::connect(
     "mount-rs/lease-authority",
     mount_rs_foundationdb::FoundationDbLimits::default(),
 )?;
+let authority_policy = mount_rs_foundationdb::LeasePublicationPolicy::new(
+    std::time::Duration::from_secs(120),
+    std::time::Duration::from_secs(30),
+    std::time::Duration::from_secs(120),
+)?;
 authority
-    .publish_system_now_ms_with_max_forward_jump(std::time::Duration::from_secs(300))
+    .publish_system_now_ms_with_policy(authority_policy)
     .await?;
 // In a separate worker process, use read-only FoundationDB credentials.
 let oracle = mount_rs_foundationdb::FoundationDbSharedLeaseOracle::connect(
@@ -106,10 +111,12 @@ Run the publisher in one protected authority service and give storage workers
 only the read capability for its authority keyspace. The shared reader never
 advances time or falls back to a worker's local clock; an unpublished or
 unavailable authority returns an error and leases fail closed. The authority
-publisher's bounded-forward-jump API fails closed if one observed wall-clock
-advance exceeds the configured safety bound. The authority still needs an
-operational clock-skew monitor, a publish cadence shorter than the shortest
-lease TTL and a recovery policy.
+publisher's policy API validates that the publication cadence is shorter than
+the lease TTL and that one accepted forward jump cannot exceed that TTL; it
+fails closed if one observed wall-clock advance exceeds the configured safety
+bound. The authority still needs an operational clock-skew monitor, a
+scheduler that actually invokes the publisher on the configured cadence and a
+recovery policy.
 
 Before enabling this mode in production, the deployment must enforce one
 write-capable authority identity per authority prefix, a consumer identity that
