@@ -97,6 +97,10 @@ struct LocalMetrics {
     duration_ms_max: AtomicU64,
     bytes_read: AtomicU64,
     bytes_written: AtomicU64,
+    reconcile_scanned: AtomicU64,
+    reconcile_protected: AtomicU64,
+    reconcile_recent: AtomicU64,
+    reconcile_deleted: AtomicU64,
 }
 
 #[cfg(feature = "otlp")]
@@ -106,6 +110,10 @@ struct OtelMetrics {
     duration_ms: opentelemetry::metrics::Histogram<f64>,
     bytes_read: opentelemetry::metrics::Counter<u64>,
     bytes_written: opentelemetry::metrics::Counter<u64>,
+    reconcile_scanned: opentelemetry::metrics::Counter<u64>,
+    reconcile_protected: opentelemetry::metrics::Counter<u64>,
+    reconcile_recent: opentelemetry::metrics::Counter<u64>,
+    reconcile_deleted: opentelemetry::metrics::Counter<u64>,
 }
 
 struct TelemetryState {
@@ -167,6 +175,18 @@ impl Telemetry {
                     .build(),
                 bytes_read: meter.u64_counter("mount_rs.bytes.read").build(),
                 bytes_written: meter.u64_counter("mount_rs.bytes.written").build(),
+                reconcile_scanned: meter
+                    .u64_counter("mount_rs.blocks.reconcile.scanned")
+                    .build(),
+                reconcile_protected: meter
+                    .u64_counter("mount_rs.blocks.reconcile.protected")
+                    .build(),
+                reconcile_recent: meter
+                    .u64_counter("mount_rs.blocks.reconcile.recent")
+                    .build(),
+                reconcile_deleted: meter
+                    .u64_counter("mount_rs.blocks.reconcile.deleted")
+                    .build(),
             }
         };
 
@@ -357,6 +377,66 @@ impl Telemetry {
         }
     }
 
+    /// Record bounded orphan-reconciliation counts without exposing object
+    /// keys, provider messages, or other high-cardinality values.
+    pub fn record_reconcile(&self, report: &BlockReconcileReport) {
+        let Some(state) = &self.state else {
+            return;
+        };
+        state
+            .metrics
+            .reconcile_scanned
+            .fetch_add(report.scanned, Ordering::Relaxed);
+        state
+            .metrics
+            .reconcile_protected
+            .fetch_add(report.protected, Ordering::Relaxed);
+        state
+            .metrics
+            .reconcile_recent
+            .fetch_add(report.recent, Ordering::Relaxed);
+        state
+            .metrics
+            .reconcile_deleted
+            .fetch_add(report.deleted, Ordering::Relaxed);
+        tracing::event!(
+            target: "mount_rs.event",
+            Level::INFO,
+            telemetry_schema = TELEMETRY_SCHEMA,
+            event_name = "mount_rs.blocks.reconciled",
+            boundary = "provider.blocks",
+            operation = "reconcile",
+            scanned = report.scanned,
+            protected = report.protected,
+            recent = report.recent,
+            deleted = report.deleted,
+        );
+        #[cfg(feature = "otlp")]
+        {
+            use opentelemetry::KeyValue;
+            let attributes = [
+                KeyValue::new("mount_rs.boundary", "provider.blocks"),
+                KeyValue::new("mount_rs.operation", "reconcile"),
+            ];
+            state
+                .otel_metrics
+                .reconcile_scanned
+                .add(report.scanned, &attributes);
+            state
+                .otel_metrics
+                .reconcile_protected
+                .add(report.protected, &attributes);
+            state
+                .otel_metrics
+                .reconcile_recent
+                .add(report.recent, &attributes);
+            state
+                .otel_metrics
+                .reconcile_deleted
+                .add(report.deleted, &attributes);
+        }
+    }
+
     fn record_outcome(
         &self,
         boundary: &'static str,
@@ -442,6 +522,10 @@ impl Telemetry {
             duration_ms_max: state.metrics.duration_ms_max.load(Ordering::Relaxed),
             bytes_read: state.metrics.bytes_read.load(Ordering::Relaxed),
             bytes_written: state.metrics.bytes_written.load(Ordering::Relaxed),
+            reconcile_scanned: state.metrics.reconcile_scanned.load(Ordering::Relaxed),
+            reconcile_protected: state.metrics.reconcile_protected.load(Ordering::Relaxed),
+            reconcile_recent: state.metrics.reconcile_recent.load(Ordering::Relaxed),
+            reconcile_deleted: state.metrics.reconcile_deleted.load(Ordering::Relaxed),
         }
     }
 }
@@ -456,6 +540,10 @@ pub struct MetricsSnapshot {
     pub duration_ms_max: u64,
     pub bytes_read: u64,
     pub bytes_written: u64,
+    pub reconcile_scanned: u64,
+    pub reconcile_protected: u64,
+    pub reconcile_recent: u64,
+    pub reconcile_deleted: u64,
 }
 
 fn update_max(value: &AtomicU64, candidate: u64) {
@@ -1053,14 +1141,17 @@ where
         live: &BTreeSet<BlockId>,
         grace: Duration,
     ) -> Result<BlockReconcileReport> {
-        self.telemetry
+        let report = self
+            .telemetry
             .observe_fs(
                 "provider.blocks",
                 "reconcile",
                 None,
                 self.inner.reconcile(live, grace),
             )
-            .await
+            .await?;
+        self.telemetry.record_reconcile(&report);
+        Ok(report)
     }
 }
 
@@ -1391,6 +1482,22 @@ mod tests {
                 size_bucket: 2,
             }
         );
+    }
+
+    #[test]
+    fn enabled_telemetry_records_bounded_reconciliation_counts() {
+        let telemetry = Telemetry::new(TelemetryConfig::enabled("reconcile-test"));
+        telemetry.record_reconcile(&BlockReconcileReport {
+            scanned: 11,
+            protected: 7,
+            recent: 3,
+            deleted: 1,
+        });
+        let snapshot = telemetry.snapshot();
+        assert_eq!(snapshot.reconcile_scanned, 11);
+        assert_eq!(snapshot.reconcile_protected, 7);
+        assert_eq!(snapshot.reconcile_recent, 3);
+        assert_eq!(snapshot.reconcile_deleted, 1);
     }
 
     #[tokio::test]
