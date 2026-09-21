@@ -2495,6 +2495,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   TTL is at most 24 hours. These checks harden evidence integrity only; they
   do not close any production identity, failover, recovery, capacity,
   observability, native-platform or release-owner gate.
+  The hosted workflow also validates the machine-readable
+  `docs/W07-production-evidence.json` packet with
+  `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
+  packet cases through `scripts/test-w07-production-evidence.mjs`. The packet
+  has one row for each W07.7 production gate and requires explicit remaining
+  actions while **NO-GO**; any future **GO** packet must carry a concrete
+  source revision, accountable owner, target environment, terminal run,
+  provider versions, cleanup/rollback outcome and evidence reference for every
+  closed gate. This is admission/tracking integrity only and cannot
+  authenticate production evidence or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove

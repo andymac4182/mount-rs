@@ -403,6 +403,17 @@ NO-GO ledger plus premature-GO, missing-nested-gate and missing-drill-boundary
 cases, including a synthetic complete-GO document set. These are regression
 tests for the tracking control only; they do not create production evidence.
 
+The workflow also validates the machine-readable
+`docs/W07-production-evidence.json` packet with
+`scripts/verify-w07-production-evidence.mjs` and exercises twelve
+credential-free packet cases with `scripts/test-w07-production-evidence.mjs`.
+The packet has one record for each W07.7 production gate and requires explicit
+remaining actions while **NO-GO**; any future **GO** packet must provide a
+concrete source revision, owner, target environment, terminal run, provider
+versions, cleanup/rollback outcome and evidence reference for every closed
+gate. This is admission/tracking integrity only and cannot authenticate any
+production result or release approval.
+
 The real composition test now emits
 `FOUNDATIONDB_LATENCY_PASS workload=composition` with operation count,
 p50/p95/p99 microsecond latency, total duration and aggregate operation

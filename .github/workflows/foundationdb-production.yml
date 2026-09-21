@@ -44,6 +44,15 @@ jobs:
       - name: Test W07 qualification evidence verifier fail-closed cases
         run: node scripts/test-w07-qualification-log.mjs
 
+      - name: Verify W07 production evidence packet shape
+        run: >-
+          node scripts/verify-w07-production-evidence.mjs
+          docs/W07-production-evidence.json
+          docs/foundationdb-production-rollout.md
+
+      - name: Test W07 production evidence packet fail-closed cases
+        run: node scripts/test-w07-production-evidence.mjs
+
       - name: Verify W07 production config policy without credentials or network
         run: |
           set -o pipefail
