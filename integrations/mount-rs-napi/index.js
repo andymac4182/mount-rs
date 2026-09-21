@@ -794,6 +794,7 @@ module.exports.NativeP9Writer = nativeBinding.NativeP9Writer
 module.exports.Nfs4Session = nativeBinding.Nfs4Session
 module.exports.NfsRecordAssembler = nativeBinding.NfsRecordAssembler
 module.exports.NfsServer = nativeBinding.NfsServer
+module.exports.NfsSession = nativeBinding.NfsSession
 module.exports.NfsXdrReader = nativeBinding.NfsXdrReader
 module.exports.NfsXdrWriter = nativeBinding.NfsXdrWriter
 module.exports.P9Connection = nativeBinding.P9Connection

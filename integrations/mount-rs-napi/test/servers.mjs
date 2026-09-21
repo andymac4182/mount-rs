@@ -297,6 +297,9 @@ async function exerciseNfs() {
     assert.equal(server.session.stats.requests, 2);
     assert.equal(server.session.stats.procedures["NFS4:NULL"], 1);
     assert.equal(server.session.v4.stats.requests, 2);
+    const rootHandle = [{ id: 1n, fileid: 1n, path: "/" }];
+    assert.deepEqual(server.session.handles, rootHandle);
+    assert.deepEqual(server.session.v4.handles, rootHandle);
 
     ({ socket, reader: serverReader } = await connectLoopback(server.port));
     await writeSocket(socket, nfsRecord(nfsNullCall(41)), "NFS NULL call");
@@ -309,6 +312,7 @@ async function exerciseNfs() {
     assert.equal(reply.readUInt32BE(0), 41);
     assert.equal(reply.readUInt32BE(4), 1);
     assert.equal(reply.readUInt32BE(20), 0);
+    assert.ok(server.connections >= 1);
 
     // MOUNT '/' then GETATTR drives the filesystem stat callback over real
     // RPC, including when the input is a structural JavaScript driver.

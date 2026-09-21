@@ -582,7 +582,7 @@ transport tracker together.
 | --- | --- | --- |
 | W01-FUSE | [`docs/W01_FUSE_PROGRESS.md`](docs/W01_FUSE_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 | W01-9P | [`docs/W01_9P_PROGRESS.md`](docs/W01_9P_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
-| W01-NFS | [`docs/W01_NFS_PROGRESS.md`](docs/W01_NFS_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
+| W01-NFS | [`docs/W01_NFS_PROGRESS.md`](docs/W01_NFS_PROGRESS.md) | Delegated task; thread `01a0c456-a28e-7cb3-9b48-a3d23e7ec8c0` |
 | W01-S3 | [`docs/W01_S3_PROGRESS.md`](docs/W01_S3_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 | W01-WebDAV | [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 
@@ -893,6 +893,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and lint gates stayed green. The Rust server now shares the v3/v4 handle
   table, path lock, and counters; connection-object, N-API shared-state view,
   handle parity, and complete direct-session parity remain open.
+- [x] The NFS transport now reports active TCP connection tasks through
+  `NfsServer::connections()`, uses an abort-safe guard, and awaits aborted
+  connection tasks during close. The N-API server exposes that live count, and
+  both `NfsSession.handles` and `Nfs4Session.handles` expose deterministic
+  BigInt-backed snapshots of the shared table. Rust NFS tests (31 unit,
+  rootless wire 1, transport errors 4, v4 barrier 1, v4 wire 2), the release
+  addon, generated typecheck, and live N-API server integration passed; native
+  mount, hosted/provider, full v4 state, connection-object, crash, and
+  durability gates remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

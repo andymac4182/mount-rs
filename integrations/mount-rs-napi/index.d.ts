@@ -339,6 +339,7 @@ export declare class Nfs4Session {
    */
   handleCall(bytes: Buffer): Promise<Buffer | null>
   get stats(): NfsSessionStats
+  get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean
 }
 
@@ -349,8 +350,10 @@ export declare class NfsRecordAssembler {
 }
 
 export declare class NfsServer {
+  get session(): NfsSession
   get host(): string
   get port(): number
+  get connections(): number
   listen(): Promise<NfsServer>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
@@ -369,8 +372,14 @@ export declare class NfsSession {
   get v4(): Nfs4Session
   get stats(): NfsSessionStats
   get mounts(): Array<Array<string>>
+  /**
+   * Stable read-only snapshots of the shared v3/v4 file-handle table.
+   * Handles are BigInts because the transport identity is u64.
+   */
+  get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean
 }
+
 /**
  * An owned XDR reader.  The transport reader remains borrowed internally for
  * each operation, so no N-API object can retain a view into JavaScript memory.
@@ -1789,6 +1798,13 @@ export declare function nfsFrameFragments(message: Uint8Array, size: number): Bu
 
 export declare function nfsFrameRecord(message: Uint8Array): Buffer
 
+export interface NfsHandleEntry {
+  id: bigint
+  fileid: bigint
+  key?: string
+  path: string
+}
+
 export interface NfsOpaqueAuth {
   flavor: number
   body: Uint8Array
@@ -1887,6 +1903,14 @@ export interface NfsServerOptions {
   snapshotCache?: number
   claimOwnership?: boolean
   onTransportError?: (error: unknown, peer: string | undefined) => void
+}
+
+export interface NfsSessionStats {
+  requests: number
+  replies: number
+  errors: number
+  dropped: number
+  procedures: Record<string, number>
 }
 
 export declare function nfsStringByteLength(value: string): number

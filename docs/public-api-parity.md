@@ -220,8 +220,14 @@ Current focused behavior:
   connection accepted by the native Tokio listener intentionally reports
   `stream: undefined`: the listener owns a Tokio stream rather than a Node
   `Duplex`; the supported Node stream-injection boundary is `attach`.
-- NFS and S3 do not expose the oracle's session/connections members at the
-  N-API object boundary. WebDAV exposes `connections` but not the oracle
+- NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
+  routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
+  error/drop/procedure stats, mount records, destroyed-state readback, and the
+  server's active `connections` count. Both N-API session views expose
+  deterministic BigInt-backed snapshots of the Rust server's shared v3/v4
+  handle table; the oracle's connection-object parity and complete stateful
+  surface remain open. S3 does not yet expose the oracle's session/connections
+  members at the N-API object boundary. WebDAV exposes `connections` but not the oracle
   session member. S3 lacks the oracle's `drainTimeout` and
   `onTransportError` options; WebDAV currently has `drainTimeout` but still
   lacks `onTransportError`. Compare the current native options and objects in

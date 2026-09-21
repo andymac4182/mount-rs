@@ -20,7 +20,8 @@ use mount_rs_9p::{
 };
 use mount_rs_core::{ErrorCode, FsDriver, FsError};
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
+    FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
+    Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
     NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
     NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
     NfsTransportError as TransportNfsError, NfsTransportErrorHook as TransportNfsErrorHook,
@@ -33,7 +34,7 @@ use mount_rs_webdav::{
     WebdavServer as TransportWebdavServer, WebdavServerOptions as TransportWebdavServerOptions,
 };
 use napi::bindgen_prelude::{
-    Buffer, Either, FnArgs, Function, JsObjectValue, Object, Reference, Unknown,
+    BigInt, Buffer, Either, FnArgs, Function, JsObjectValue, Object, Reference, Unknown,
 };
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Status, sys};
@@ -380,6 +381,27 @@ pub struct NfsSessionStats {
     pub procedures: HashMap<String, f64>,
 }
 
+#[napi(object)]
+pub struct NfsHandleEntry {
+    pub id: BigInt,
+    pub fileid: BigInt,
+    pub key: Option<String>,
+    pub path: String,
+}
+
+fn nfs_handle_entries(table: &TransportNfsHandleTable) -> Vec<NfsHandleEntry> {
+    table
+        .entries()
+        .into_iter()
+        .map(|entry| NfsHandleEntry {
+            id: BigInt::from(entry.id),
+            fileid: BigInt::from(entry.fileid),
+            key: entry.key,
+            path: entry.path,
+        })
+        .collect()
+}
+
 /// Read-only N-API view of the versioned NFS sessions owned by a server.
 #[napi]
 impl NfsSession {
@@ -430,6 +452,13 @@ impl NfsSession {
             .collect()
     }
 
+    /// Stable read-only snapshots of the shared v3/v4 file-handle table.
+    /// Handles are BigInts because the transport identity is u64.
+    #[napi(getter)]
+    pub fn handles(&self) -> Vec<NfsHandleEntry> {
+        nfs_handle_entries(&self.inner.handles)
+    }
+
     #[napi(getter)]
     pub fn destroyed(&self) -> bool {
         self.inner.destroyed() && self.v4_inner.destroyed()
@@ -471,6 +500,11 @@ impl Nfs4Session {
     }
 
     #[napi(getter)]
+    pub fn handles(&self) -> Vec<NfsHandleEntry> {
+        nfs_handle_entries(&self.inner.handles)
+    }
+
+    #[napi(getter)]
     pub fn destroyed(&self) -> bool {
         self.inner.destroyed()
     }
@@ -496,10 +530,6 @@ pub struct NfsServer {
 
 #[napi]
 impl NfsServer {
-    pub(crate) fn native_server(&self) -> Arc<TransportNfsServer> {
-        Arc::clone(&self.inner)
-    }
-
     #[napi(getter)]
     pub fn session(&self) -> NfsSession {
         NfsSession {
@@ -516,6 +546,11 @@ impl NfsServer {
     #[napi(getter)]
     pub fn port(&self) -> u32 {
         self.inner.port().unwrap_or(self.requested_port) as u32
+    }
+
+    #[napi(getter)]
+    pub fn connections(&self) -> u32 {
+        self.inner.connections() as u32
     }
 
     #[napi]
