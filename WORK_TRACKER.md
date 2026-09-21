@@ -1711,13 +1711,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
-  references. Both remediations are landed at current head `da4d36c`; the
-  follow-up Standard scan reports zero reportable findings in the 20 directly
-  reviewed W25 surfaces, with partial repository coverage (590 files, 20
-  closed review rows). Hosted OIDC trust, the protected versioning-status
-  input, and the deployment evidence remain open. The latest hosted run
-  `35597712935` failed before acceptance because the `aws-s3-ci` environment
-  has no variables or secrets, leaving `aws-region` empty. The existing test
+  references. Both remediations and the secret-safe CI preflight are landed at
+  current head `82ffeb9`; the follow-up Standard scan reports zero reportable
+  findings in the 21 directly reviewed W25 surfaces, with partial repository
+  coverage (592 files, 21 closed review rows). Hosted OIDC trust, the protected
+  versioning-status input, and the deployment evidence remain open. The latest
+  hosted run `35598843178` stopped before AWS authentication with
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a successful safety
+  refusal, not acceptance evidence. The existing test
   role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
