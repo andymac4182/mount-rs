@@ -208,12 +208,14 @@ injection, and direct session `onError`/`onAssertion` callbacks), access/cache/
 uname/aname, mount msize, mount options, `signals`, unmount timeout,
 transport-error callback, and configured shared-server injection. The direct session callbacks
 apply when the mount creates its own listener; an injected shared server retains
-its configured hooks. It does not claim automatic cross-transport signal
-ownership or remaining mount controls. The
+its configured hooks. The pinned oracle comparison found no additional
+unrepresented direct `MountP9Options` fields, and `P9Mount.source` is declared
+and runtime-asserted as a non-empty `string`. Automatic cross-transport signal
+ownership remains explicitly outside the root automatic-mount scope. The
 callback is retained by the `Mounted` lifecycle and is wired to the selected
-native FUSE, 9P, or NFS transport hook; a hosted native fault event and a
-hosted N-API native-mount run are still required before this boundary can be
-treated as runtime-qualified. The Rust auto layer has typed transport
+native FUSE, 9P, or NFS transport hook; a hosted native fault event is still
+required before this callback boundary can be treated as runtime-qualified.
+The hosted N-API native-mount run now qualifies the supported lifecycle. The Rust auto layer has typed transport
 selection and timeout handling, but this does not close the upstream option or
 lifecycle surface.
 
@@ -275,11 +277,13 @@ Current focused behavior:
   listener. Mount-created listeners now receive the scalar server-policy
   fields, lock table, and direct session `onError`/`onAssertion` callbacks from
   the same option bag. This is not full oracle mount parity: automatic
-  cross-transport signal ownership and the remaining mount controls are
-  explicitly unsupported in this packet. Exact SHA
-  `1dcf4dee4d01fb5e3807335579659b54efd74351` passed the hosted N-API Linux
+  cross-transport signal ownership remains explicitly outside the root
+  automatic-mount scope. The direct `MountP9Options` fields are complete
+  against the pinned oracle, and `P9Mount.source` is narrowed to `string` and
+  runtime-asserted by the hosted direct mount. Exact SHA
+  `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed the hosted N-API Linux
   automatic, direct `./9p`, and structural-driver 9P mounted-I/O/cleanup gate
-  in run `35664614270`, job `106547449823`; crash/reset/half-close recovery
+  in run `35665824215`, job `106552944097`; crash/reset/half-close recovery
   remains supervisor-owned.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
