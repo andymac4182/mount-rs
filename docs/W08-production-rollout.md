@@ -122,7 +122,12 @@ The first successful policy run after the change, `35650533691` at source
 `95437f67`, predates W08.34 and therefore does not qualify this validator. The
 current-tip run `35650626028` at source
 `8f3a19a891b8d432ff551c04789921575bb12f4f` cancelled before creating jobs
-(`jobs=[]`), so no hosted W08.34 packet result is claimed.
+(`jobs=[]`). A subsequent current-tip run `35651363875` at source
+`14f8c344a5a7f5b2e8cb08475db3d87ecbfc23d7`, job `106504528377`, completed
+successfully in 2m41s; the W08 policy step, including the evidence-packet
+validator/test, and the existing release-identity/provenance policy passed.
+This is hosted implementation/static qualification only; it does not close
+P01–P09 or supply production provider, canary, rollback or approval evidence.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

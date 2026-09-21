@@ -2493,7 +2493,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   The current-tip push run `35650626028` at source
   `8f3a19a891b8d432ff551c04789921575bb12f4f` cancelled before creating jobs
   (`jobs=[]`); the earlier successful run `35650533691` at source `95437f6`
-  predates W08.34 and is not counted as packet-validator evidence.
+  predates W08.34 and is not counted as packet-validator evidence. Current-tip
+  run `35651363875` at source `14f8c344a5a7f5b2e8cb08475db3d87ecbfc23d7`,
+  job `106504528377`, later completed successfully with the W08 policy and
+  release-identity/provenance steps green.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
