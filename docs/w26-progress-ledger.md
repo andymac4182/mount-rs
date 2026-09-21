@@ -14,12 +14,35 @@ for engineering planning, not a commitment.
 | Repository | `mount-rs` |
 | Snapshot base | `9c098e58327c5851100aa0536e4939d5deb96a72` (`origin/main` after the final combined W25/W26 tree was verified) |
 | Checklist completion | 4 of 4 W26 tracker rows checked: 100% |
-| Provisional execution completion | W26 qualification: 100%; production-rollout readiness: 5% (tracking baseline only). Native, production-authentication, power-loss and other separately bounded gates remain open |
+| Provisional execution completion | W26 qualification: 100%; production-rollout readiness: 15% (scope and CI acceptance baseline captured; no terminal production gates yet). Customer deployment, native, provider-durability and release-stream gates remain separately bounded |
 | Current acceptance state | Local Ozone, SQLite/PGlite, single-node TiDB/Ozone, durable three-node FoundationDB/Ozone, hosted Ozone, hosted SQLite/PGlite, Ozone-backed durable TiDB, generic durable TiDB, Node SDK, and CLI evidence passed; W26 is complete within its documented provider/platform boundaries |
 | Latest hosted workflow | GitHub Actions run `35585066458` on `9c098e5`; W26 jobs `ozone` `106286459564`, `ozone-compositions` `106286459622`, and `ozone-tidb` `106286459540` completed successfully, with generic `tidb` job `106286459436` also green. Unrelated provider/native jobs are tracked separately and are not required to close W26. |
 | Local Docker boundary | Docker Desktop capacity was about 5 CPUs and 8.2 GiB; this is sufficient for the durable FoundationDB proof but below the TiDB harness's 10 GiB durable-topology minimum |
-| Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 5% figure reflects the published tracking baseline, not deployable readiness |
+| Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 15% figure reflects scope decisions and an acceptance baseline, not deployable readiness |
+| W26 production target | Customer-deployed Ozone integration; W26 owns provider/client correctness and CI qualification, not customer deployment, backup/DR or release promotion |
+| Required service envelope | Target 1,000 IOPS per drive; Tier 1 99.99% reliability; 5-minute RPO and 5-minute RTO. RPO/RTO and availability remain dependent on the customer's Ozone topology and operations |
+| Available qualification environment | CI only; no staging environment is available. Production-like evidence must therefore be achieved through controlled hosted CI/provider fixtures and clearly labeled customer-owned prerequisites |
 | Release/acceptance decision | W26 qualification accepted within the documented local/hosted provider scope on terminal run `35585066458`; production rollout remains **NO-GO** and no broader native release claim is made |
+
+## Scope decisions recorded from product direction
+
+These decisions were supplied on 2026-09-21 and supersede the earlier
+assumption that W26 might own a deployable staging or customer production
+environment. They define what W26 must make ready for other streams and
+customers to deploy.
+
+| Decision | Recorded answer | W26 consequence and evidence boundary |
+| --- | --- | --- |
+| Deployment ownership | Customers deploy Ozone; W26 is not the deployment operator | W26 must provide a production-grade Ozone-compatible integration and CI qualification packet. Customer topology, capacity placement, backup/DR and on-call execution are external gates. |
+| Metadata providers | Support all available metadata providers where feasible | Qualify SQLite, PGlite, TiDB and FoundationDB against Ozone where the provider can run in CI; publish provider-specific limitations rather than treating one provider's result as universal. |
+| Performance target | Each drive must sustain 1,000 IOPS | Add a repeatable CI workload and report operations, latency percentiles, concurrency, errors, resource envelope and provider/topology. CI performance is qualification evidence, not a customer capacity guarantee. |
+| Reliability target | Tier 1 service, 99.99% reliability | W26 must test client retry, fencing, idempotency, restart/failover and error observability; 99.99% service availability is ultimately a customer Ozone deployment/SLO responsibility. |
+| Recovery objectives | 5-minute RPO and 5-minute RTO | W26 must preserve acknowledged-commit and reopen/recovery semantics; Ozone backup/replication/restore mechanisms and measured RPO/RTO are customer/provider-owned. |
+| Security | Proper production security requirements are required | Add secure endpoint/authentication/TLS/secret-reference, least-privilege, redaction, negative-path and audit-boundary checks that can run in CI; do not place credentials in the repository or ledger. |
+| End-to-end surface | Everything must work end to end | Qualify Rust, Node, CLI, HTTP and advertised native/mount surfaces through the Ozone-backed path; native platform implementation and runner availability remain cross-workstream gates. |
+| Backup/DR | Ozone owns backup and DR | Do not implement a competing W26 backup system. Record Ozone/customer backup, restore and failure-domain requirements as an external acceptance dependency and test W26 recovery behavior around them. |
+| Release process | Another stream owns releases | W26 supplies reproducible CI evidence, compatibility notes and release inputs; promotion, signing, canary and rollback execution remain external. |
+| Test environment | CI only; no staging | Do not claim staging or production acceptance. Build the strongest bounded hosted CI matrix possible and label customer-environment evidence as pending until supplied by the deployment stream. |
 
 ## Work-item ledger
 
@@ -49,29 +72,29 @@ qualification evidence but are not production approval.
 
 | Decision | Status | Evidence now available | Exit condition |
 | --- | --- | --- | --- |
-| Production rollout | **NO-GO** | W26 qualification is green on hosted run `35585066458`, but the Ozone deployment is non-secure/loopback and the provider tests do not prove production authentication, power-loss durability, DR, native mounting, capacity, or operational sign-off | All P0–P14 rows below have terminal evidence or an explicitly approved, documented non-goal; the release owner records GO/NO-GO against the same revision |
-| Production target | Not defined | No named production topology, SLOs, RPO/RTO, supported metadata provider, traffic envelope, or on-call owner is recorded in the W26 packet | Product and operations name the target environment, support matrix, SLOs, RPO/RTO, owners and rollback authority |
+| W26 integration readiness | **NO-GO** | W26 qualification is green on hosted run `35585066458`, but all-feasible-provider CI, secure integration checks, 1,000-IOPS results and complete end-to-end/security coverage are not yet terminal | All W26-owned P0–P5, P7–P8, P10–P11 and P14 evidence is terminal on one retained revision; customer Ozone deployment, DR and release remain explicit external dependencies |
+| Customer production target | Customer-deployed Ozone; topology not supplied | Product direction fixes the service envelope at 1,000 IOPS per drive, 99.99% reliability and five-minute RPO/RTO, but W26 does not operate the customer topology | W26 documents the Ozone/provider/client contract; customers and deployment streams provide secure topology, backup/DR, monitoring and measured availability/recovery evidence |
 | Qualification baseline | Complete for W26 only | Revision `9c098e5` and hosted run `35585066458` are the retained W26 acceptance packet | Any production implementation change gets a fresh qualification and production evidence packet on the tested revision |
 
 ### Production gate ledger
 
 | Gate / work item | Work type | Status | Completion | Evidence now available | Remaining actions / exit evidence | Provisional engineering time | External blockers / hosted or native gates |
 | --- | --- | --- | ---: | --- | --- | ---: | --- |
-| P0 — production scope, support matrix, SLO/RPO/RTO and ownership | Implementation / operations | Open — tracking baseline published | 10% | W26 provider boundaries and the explicit non-production decision are documented; no production target or service objectives are approved | Name the supported Ozone version/topology, metadata providers, traffic/capacity envelope, SLOs, RPO/RTO, on-call owner, rollback authority and approved non-goals; publish the signed baseline | 0.5–1.5 d | Product and operations decisions; provider support commitments; no code can close this gate alone |
-| P1 — production Ozone topology and deployment rehearsal | Hosted/provider | Not started | 0% | Current Ozone evidence is a pinned all-in-one, non-secure, loopback test deployment with anonymous volumes and no production replication claim | Provision a production-like multi-node Ozone/SCM/OM topology, pinned images, persistent storage, network policy, capacity limits and repeatable deploy/destroy/rehearsal scripts; capture clean-client health and failover evidence | 3–7 d | Ozone/cluster infrastructure, persistent storage, image architecture, network access and environment credentials |
-| P2 — production metadata-provider support matrix | Hosted/provider | Open — qualification only | 10% | SQLite, disk-backed PGlite, single-node TiDB and durable FoundationDB/TiDB compositions have separate local/hosted qualification evidence | Select the production-supported provider set; define version/upgrade policy, HA topology, failure semantics and unsupported combinations; run each selected provider through the secure staging matrix | 1–3 d | Provider versions, managed-service access, capacity and operator support; local composition is not a production approval |
-| P3 — authentication, TLS, secret lifecycle and redaction | Implementation / hosted/provider | Not started | 0% | W26 gateway tests intentionally use non-secure loopback access; no production credential or TLS evidence is claimed | Implement and test certificate validation/rotation, service and client authentication, secret injection, least privilege, log redaction, expiry/revocation and clean-client negative cases | 2–5 d | Security review, certificate/secret manager, identity provider, Ozone Kerberos/TLS configuration and production network policy |
-| P4 — replicated block durability and storage failure protection | Hosted/provider | Not started | 0% | Restart/reopen checks passed in bounded test topologies; no power-loss, disk-loss, storage-corruption or production replication guarantee exists | Define and test replication, fsync/barrier assumptions, disk/node loss, corrupt/torn block handling, object integrity, capacity exhaustion and recovery on the actual storage class; retain before/after hashes and namespace evidence | 3–7 d | Production storage, failure-injection controls, host access and provider durability semantics; SIGKILL/container restart is not automatically power-loss evidence |
-| P5 — fencing, ambiguous commit and stale-writer recovery under failover | Implementation / hosted/provider | Partial qualification | 25% | W26 exercises CAS, stale fencing, ambiguous commit and durable restart in bounded provider compositions; hosted TiDB marker reports `ambiguous_commit=pass` | Repeat the matrix over secure multi-node production topology, node loss, network delay/partition and client retry; prove no stale publication, duplicate block, lost acknowledged commit or split-brain writer after recovery | 2–5 d | Distributed test controls, provider failover behavior, multiple clients and network fault tooling |
-| P6 — backup, restore, disaster recovery and retention | Operations / hosted/provider | Not started | 0% | Existing versioning design distinguishes application-consistent backup concerns, but W26 has no production backup/restore or DR packet | Define backup contents and consistency fence, encrypt/store copies, restore into clean infrastructure, verify hashes/revisions/metadata, measure RPO/RTO, test retention/deletion and document regional/provider loss procedure | 3–6 d | Backup destination, KMS, second failure domain/region, restore capacity and operator access |
-| P7 — observability, alerts, dashboards and runbooks | Implementation / operations | Not started | 0% | W26 emits bounded harness markers and cleanup evidence; these are test evidence, not production SLO telemetry or alerting | Add redacted structured logs, metrics/traces for gateway/provider latency/errors, queue/retry/fencing/recovery states, health/readiness, dashboards, alert thresholds, escalation and operator runbooks; test alert delivery | 2–5 d | Collector/monitoring provider, alert routing, SLO ownership and external-collector acceptance; W30 evidence is separate until connected to this topology |
-| P8 — load, capacity, soak and cost envelope | Hosted/provider | Not started | 0% | No sustained production-shaped load, throughput/latency budget, concurrency limit, cost envelope or soak result is in the W26 packet | Define representative object/chunk/metadata workload, run load and multi-day soak, measure p50/p95/p99, memory/CPU/storage growth, throttling and recovery; record safe capacity and scaling trigger | 3–7 d | Dedicated environment, traffic generator, monitoring, service quotas, cost budget and stable provider capacity |
-| P9 — upgrade, rollback and compatibility | Implementation / operations | Not started | 0% | W26 pins Ozone 2.2.1 and provider fixture versions for qualification only; no production migration rehearsal is recorded | Test forward/backward compatibility, schema/object compatibility, rolling upgrade, failed upgrade rollback, image/digest provenance, lockfile/release reproducibility and downgrade boundaries on restored data | 2–5 d | Maintained provider versions, release artifact signing, change window and operator approval |
-| P10 — security, privacy, tenancy and audit review | Implementation / hosted/provider | Not started | 0% | No production threat model, tenant isolation, audit-log, vulnerability/dependency or security sign-off is attached to W26 | Review trust boundaries, authorization/isolation, data classification, encryption, audit retention, abuse/rate limits, dependency/image provenance and incident response; close findings or record approved exceptions | 2–5 d | Security reviewer, identity/tenant model, compliance requirements and scanning infrastructure |
-| P11 — native client, mount and platform qualification | Native/provider | Not started | 0% | W26 covers Rust/Node CLI and hosted Linux composition; it does not claim FUSE/NFS/FSKit/Windows mount or native runtime acceptance | Decide supported client/platform matrix, then run clean native installs, mount/unmount, concurrent access, locks, restart/recovery, package signing and negative capability tests on every advertised platform | 3–8 d per included platform | macOS/Linux/Windows hosts, privileged mount facilities, native CI runners, signing/notarization and provider connectivity |
-| P12 — release packaging, CI promotion, canary and rollback automation | Implementation / hosted | Open — qualification CI exists | 10% | W26 has pinned-image hosted jobs and terminal markers on `35585066458`; that pipeline is not a production promotion or canary control | Produce signed versioned artifacts, SBOM/provenance, environment promotion checks, migration gates, canary/rollback automation, protected approvals and a retained release evidence packet | 2–5 d | CI/CD permissions, artifact registry, signing keys, deployment platform and change-management policy |
-| P13 — incident, failover and recovery rehearsal | Operations / hosted/provider | Not started | 0% | W26 restart and cleanup tests are bounded qualification checks, not an operator incident rehearsal | Run timed exercises for gateway loss, metadata-provider loss, stale client, storage exhaustion, bad deploy, credential expiry and restore; verify paging, runbooks, RTO, data integrity and post-incident evidence | 2–5 d | On-call participants, production-like failure controls, paging/incident tooling and maintenance window |
-| P14 — final launch review and go/no-go | Operations / release | Not started | 0% | Current decision is explicitly NO-GO with the open rows above | Audit every gate on one retained revision, attach provider/native/hosted evidence, record known limitations and approvals, execute canary exit criteria, and obtain release-owner GO or documented NO-GO | 0.5–1.5 d | Release owner, product/operations/security sign-off and all upstream gates |
+| P0 — production scope, support matrix, SLO/RPO/RTO and ownership | Implementation / operations | Scope captured; CI acceptance baseline open | 60% | Product direction now records customer-deployed Ozone, all feasible metadata providers, 1,000 IOPS per drive, 99.99% reliability and 5-minute RPO/RTO; no customer topology is supplied | Turn these targets into provider-specific CI assertions, define the advertised client/platform matrix, document customer/Ozone-owned prerequisites and obtain owner sign-off on the support matrix | 0.5–1.5 d | Product/support decisions are mostly supplied; provider support limits and customer deployment owners remain external |
+| P1 — customer Ozone topology and deployment rehearsal | External dependency — not a W26 deployment task | Customer-owned / not measured by W26 | 0% W26 deployment evidence | Current Ozone evidence is a pinned all-in-one, non-secure, loopback CI fixture with anonymous volumes and no production replication claim | Customer/deployment stream must provision and operate secure multi-node Ozone; W26 consumes CI-accessible endpoints or fixtures and documents the required topology contract | 0–1 d W26 contract review | Customer infrastructure, persistent storage, network policy, image architecture, certificates and environment access |
+| P2 — production metadata-provider support matrix | Hosted/provider CI | Open — qualify all feasible providers | 20% | SQLite, disk-backed PGlite, single-node TiDB and durable FoundationDB/TiDB compositions have separate local/hosted qualification evidence | Run the Ozone-backed CI matrix for every feasible provider, record version/HA/failure semantics and unsupported combinations; do not promote a provider without its own terminal packet | 3–8 d | CI capacity, provider images/versions, managed-service access if required and provider-specific operator limits |
+| P3 — authentication, TLS, secret lifecycle and redaction | Implementation / hosted/provider CI | Open — integration security gate | 20% | Credentials are already environment references and live tests use bounded cleanup; Ozone fixture coverage is intentionally non-secure loopback | Add HTTPS/TLS validation, authenticated secure-endpoint CI where available, secret injection/rotation references, least privilege, redaction and clean-client negative tests; retain no secret values | 3–7 d | Secure Ozone CI endpoint or customer-supplied fixture, certificates/identity, secret manager integration and security review |
+| P4 — replicated block durability and storage failure protection | Provider/customer deployment dependency plus CI contract | Partial qualification only | 10% | Restart/reopen and durable provider checks pass in bounded CI topologies; no customer storage, power-loss or Ozone replication guarantee exists | Test client behavior for object loss, unavailable gateway, retries, integrity mismatch and recovery in CI; document Ozone replication/fsync/storage requirements that customers must satisfy | 2–5 d W26 CI work; deployment work external | Ozone storage and replication semantics, failure controls and customer topology; CI restart is not power-loss evidence |
+| P5 — fencing, ambiguous commit and stale-writer recovery under failover | Implementation / hosted/provider CI | Partial qualification | 30% | W26 exercises CAS, stale fencing, ambiguous commit and durable restart in bounded provider compositions; hosted TiDB marker reports `ambiguous_commit=pass` | Extend all feasible Ozone/provider CI lanes with concurrent clients, retry, gateway/provider loss and delayed responses; prove no stale publication, duplicate block or lost acknowledged commit | 3–7 d | Distributed CI fault controls, provider failover behavior and multiple-client scheduling |
+| P6 — backup, restore, disaster recovery and retention | External dependency — Ozone/customer owned | Not a W26 implementation task | 0% W26 DR evidence | Product direction assigns backup and DR to Ozone/customer deployment; W26 has no competing backup system | Document the Ozone/customer requirements needed to meet 5-minute RPO/RTO and test W26 reopen/error behavior around supplied recovery scenarios when CI fixtures expose them | 0.5–1.5 d W26 contract documentation | Ozone backup/replication/restore design, failure domains, KMS and customer operations |
+| P7 — observability, alerts, dashboards and runbooks | Implementation / CI contract / cross-workstream | Open — integration telemetry boundary | 10% | W26 emits bounded harness markers and cleanup evidence; these are not production alerting | Define and test redacted client/provider error categories, retry/fencing/recovery metrics and machine-readable health evidence; coordinate deployment dashboards/runbooks with W30/customer streams | 2–5 d W26 contract/tests | Collector and alerting are external; W30 and customer operations own deployed dashboards/paging |
+| P8 — load, capacity, soak and cost envelope | Hosted/provider CI | Open — 1,000 IOPS target added | 5% | No production-shaped performance packet exists; current tests prove correctness, not sustained IOPS | Add a repeatable per-drive CI workload targeting 1,000 IOPS, with operation mix, concurrency, p50/p95/p99 latency, errors, resource limits, warm-up/soak and provider-specific results; label CI variability and avoid claiming customer capacity | 4–10 d | Dedicated or stable CI runners, traffic generator, provider quotas and enough runtime for meaningful soak |
+| P9 — upgrade, rollback and compatibility | External release/deployment dependency | Not a W26 release task | 0% W26 migration evidence | W26 pins Ozone 2.2.1 and provider fixture versions for qualification only; release execution belongs to another stream | Supply compatibility notes, config/schema/object invariants and requalification commands for the release stream; do not own promotion or rollback automation here | 1–3 d W26 compatibility notes | Release stream, maintained provider versions, change window and customer deployment approval |
+| P10 — security, privacy, tenancy and audit review | Implementation / hosted CI / security review | Open — security requirements defined | 15% | Scope requires proper security; current config keeps credentials in environment references and redacts diagnostics, but no full W26 threat-model packet is closed | Complete trust-boundary/threat-model review, dependency/image provenance, authorization/isolation, encryption expectations, audit fields, abuse limits and security CI/scan evidence; close or record exceptions | 4–10 d | Security reviewer, customer identity/tenancy model, compliance requirements and scanning infrastructure |
+| P11 — end-to-end client, mount and platform qualification | Native/provider CI / cross-workstream | Open — full end-to-end matrix required | 20% | W26 covers Rust/Node CLI and hosted Linux composition; native mount and every platform are not yet accepted | Exercise the Ozone-backed path through Rust, Node, CLI, HTTP and every advertised native/mount surface; retain platform/provider matrices, restart/recovery and negative capability evidence | 5–15 d depending on advertised platforms | macOS/Linux/Windows runners, privileged mount facilities, native workstreams, signing and provider connectivity |
+| P12 — release packaging, CI promotion, canary and rollback automation | External release stream | Not a W26 release task | 0% W26 release evidence | Product direction assigns releases to another stream; W26 hosted jobs provide qualification inputs only | Publish reproducible CI commands, version/image pins, evidence markers and compatibility notes for the release stream; no W26 canary claim | 0.5–2 d W26 handoff | CI/CD, artifact registry, signing keys, deployment platform and release owner |
+| P13 — incident, failover and recovery rehearsal | External customer/Ozone operations plus CI fault contract | Not a W26 operator task | 0% W26 rehearsal evidence | W26 restart and cleanup tests are bounded qualification checks, not customer incident exercises | Add CI fault/recovery cases where controllable and document the operator scenarios customers must rehearse to meet 99.99% and 5-minute RTO | 1–3 d W26 fault contract | Customer on-call, Ozone operations, paging/incident tooling and maintenance windows |
+| P14 — final W26 integration-readiness review | W26 implementation / hosted CI / handoff | Not started | 0% | Current decision remains NO-GO because the all-provider, performance, security and end-to-end CI packet is incomplete | Audit the CI matrix on one retained revision, attach provider/platform/security/performance evidence, list customer/Ozone dependencies and hand off an explicit integration-ready or NO-GO decision to the release/deployment streams | 1–2 d | All W26-owned CI gates plus external customer Ozone and release-stream confirmations |
 
 ### Production rollout phases and provisional effort
 
@@ -81,12 +104,11 @@ other elapsed wall-clock gates.
 
 | Phase | Gates | Provisional engineering effort | Exit |
 | --- | --- | ---: | --- |
-| Define | P0 | 0.5–1.5 d | Approved target, support matrix, SLO/RPO/RTO, owners and non-goals |
-| Secure staging | P1–P4 | 9–22 d | Repeatable secure Ozone/provider topology with auth, TLS, secrets and durability evidence |
-| Resilience and operations | P5–P7, P13 | 9–21 d | Failure, backup/restore, telemetry and incident-recovery evidence meets the approved objectives |
-| Capacity and release | P8–P12 | 12–30 d | Load/soak, upgrade/rollback, security, native and canary/release gates pass for the advertised matrix |
-| Launch decision | P14 | 0.5–1.5 d | Evidence-backed GO or an explicit NO-GO with blockers and owners |
-| **Total provisional engineering range** | **P0–P14** | **31–76 d, plus external waits** | **Not currently scheduled or committed; refine after P0 decisions** |
+| Scope and support matrix | P0 | 0.5–1.5 d | Provider-specific CI assertions, client/platform matrix, 1,000-IOPS definition, 99.99% boundary and five-minute recovery-objective contract |
+| Provider, security and failure CI | P2–P5, P7, P10 | 17–42 d | All feasible Ozone/provider lanes, secure endpoint checks, redaction, failure semantics, telemetry contract and security evidence |
+| Performance and end-to-end CI | P8, P11, P14 | 10–27 d | Per-drive 1,000-IOPS workload plus Rust/Node/CLI/HTTP/native advertised surfaces and one-revision evidence audit |
+| Customer/Ozone and release handoffs | P1, P6, P9, P12, P13 | 3–10 d W26 contract work | W26 supplies requirements and CI evidence; customer deployment, Ozone DR/backup, incident operations and release execution remain external |
+| **Total provisional W26 engineering/contract range** | **P0–P14** | **31–82 d, plus external waits** | **Planning range only; customer deployment, Ozone DR and release execution are not W26 estimates** |
 
 ### Production evidence rules
 
@@ -103,6 +125,10 @@ other elapsed wall-clock gates.
   versions, topology, test start/end, terminal status, redacted markers and
   cleanup/rollback outcome. Queued, skipped, canceled or failed jobs remain
   non-evidence.
+- Because no staging environment exists, W26 may claim only controlled CI and
+  provider-fixture evidence. CI can qualify integration behavior and measured
+  performance; it cannot by itself prove a customer's 99.99% availability,
+  five-minute RPO/RTO or Ozone deployment topology.
 - Missing credentials, infrastructure, certificates, provider access, native
   runners or approvers are recorded as blockers; they are not worked around by
   synthesizing local evidence or weakening the gate.
@@ -137,6 +163,10 @@ record:
   hosted fixture jobs, and demo behavior are not evidence of production TLS,
   authentication, replicated/power-loss durability, backup/restore, native
   mounting, capacity, security or operational readiness.
+- The 1,000-IOPS target is a W26 CI qualification target, not a universal
+  customer capacity guarantee. The 99.99% availability and five-minute RPO/RTO
+  objectives depend on the customer's Ozone replication, backup, storage,
+  monitoring and recovery design.
 
 ## Remaining-action checklist
 
@@ -160,21 +190,27 @@ record:
 
 ### Production rollout checklist (open)
 
-- [ ] P0: approve the production target, supported provider/platform matrix,
-  SLOs, RPO/RTO, owners and non-goals.
-- [ ] P1–P2: provision and rehearse the secure production-like Ozone topology
-  and select the metadata providers that are actually supported in production.
-- [ ] P3–P4: close authentication/TLS/secrets and replicated storage durability
-  evidence, including storage/node failure and integrity recovery.
-- [ ] P5–P7: close failover/fencing, backup/restore/DR, observability, alerts
-  and operator runbooks against the approved objectives.
-- [ ] P8–P10: close load/soak/capacity, upgrade/rollback and security/privacy
-  review for the advertised workload and tenancy model.
-- [ ] P11: run the native client/mount matrix for every platform that will be
-  advertised; keep unsupported platforms explicitly out of the release.
-- [ ] P12–P13: produce signed artifacts, promotion/canary controls and execute
-  incident/recovery rehearsals.
-- [ ] P14: perform the final evidence audit and record an explicit GO or NO-GO.
+- [x] Record customer deployment ownership, all-feasible-provider intent,
+  1,000 IOPS per drive, 99.99% reliability, five-minute RPO/RTO, end-to-end
+  scope, external DR/release ownership and CI-only qualification.
+- [ ] P0: convert those decisions into the supported provider/platform matrix,
+  provider-specific assertions, owners and approved non-goals.
+- [ ] P1: document the secure Ozone topology and customer deployment contract;
+  do not claim W26 staging or deployment ownership.
+- [ ] P2–P5: close all feasible Ozone/provider CI lanes, secure endpoint tests,
+  durability/error contracts and concurrent failover/fencing evidence.
+- [ ] P6: document the Ozone/customer backup and DR prerequisites for five-minute
+  RPO/RTO; do not build a competing W26 backup system.
+- [ ] P7/P10: close integration telemetry, redaction, threat-model, security
+  CI and audit-boundary evidence.
+- [ ] P8: run the per-drive 1,000-IOPS CI workload with latency, errors,
+  resource and provider-specific results.
+- [ ] P9/P12/P13: hand compatibility, CI evidence, customer incident scenarios
+  and release inputs to the owning streams.
+- [ ] P11: run every advertised Rust/Node/CLI/HTTP/native surface end to end
+  through Ozone, retaining cross-workstream native blockers.
+- [ ] P14: audit one retained CI revision and record W26 integration-ready or
+  NO-GO before another stream promotes a release.
 
 ## Provisional remaining effort and blockers
 
@@ -185,12 +221,12 @@ record:
 | Tracker/ledger publication | 15–30 min for this closeout chunk | Includes fast-forwarding concurrent `origin/main` changes, `git diff --check`, commit, push, and remote verification. |
 | External CI waiting | Unbounded wall-clock; not engineering time | GitHub runner queue, workflow concurrency, and concurrent pushes have repeatedly canceled otherwise useful runs. |
 | Native/provider acceptance | Separate gate | Linux hosted NAPI/PGlite, TiDB/PD/TiKV, FoundationDB, and Ozone container behavior cannot be fully inferred from the local arm64 run. |
-| Production rollout definition (P0) | 0.5–1.5 d engineering | Production target, support matrix, SLO/RPO/RTO, owners and non-goals are not yet approved. |
-| Secure provider/staging gates (P1–P4) | 9–22 d engineering | Requires production-like Ozone/storage/provider environments, identity/certificates, secret management and external capacity. |
-| Resilience, DR and operations (P5–P7, P13) | 9–21 d engineering | Requires fault controls, backup destination, monitoring/paging and operator participation; elapsed waits are separate. |
-| Capacity, security, native and release (P8–P12) | 12–30 d engineering | Scope depends on advertised platforms/providers and requires hosted/native runners, signing, security and deployment access. |
-| Production launch decision (P14) | 0.5–1.5 d engineering | Cannot close until upstream evidence and named release-owner approvals exist. |
-| **Production track total** | **31–76 d engineering plus external waits** | Provisional planning range only; refine after P0 is approved. |
+| Scope and provider-matrix definition (P0–P2) | 4–11 d engineering | Product targets are recorded; provider-specific support, platform scope and CI assertions remain to be defined and qualified. |
+| Security, failure and integration CI (P3–P7, P10) | 14–36 d engineering | Requires secure CI fixtures where available, fault controls, redacted telemetry and security review; customer deployment remains external. |
+| Performance and end-to-end matrix (P8, P11, P14) | 10–27 d engineering | Requires stable hosted CI runners, 1,000-IOPS workload design, native runners and one-revision audit. |
+| Customer/Ozone and release handoff (P1, P6, P9, P12, P13) | 3–10 d W26 contract work | Ozone backup/DR, customer operations, deployment and release execution are external and not estimated as W26 implementation. |
+| External CI waiting | Unbounded wall-clock; not engineering time | CI queues, provider image startup, fixture credentials and runner/platform availability remain elapsed gates. |
+| **W26-owned production-readiness total** | **31–82 d engineering/contract work plus external waits** | Provisional planning range; no customer deployment or release commitment is implied. |
 
 ## Session time log
 
@@ -211,6 +247,7 @@ separately because they are elapsed wall-clock, not implementation effort.
 | 2026-09-21 — Final hosted W26 acceptance | Reviewed run `35585066458` on `9c098e5`: hosted Ozone, SQLite/PGlite composition, Ozone-backed durable TiDB, and generic durable TiDB all passed their terminal jobs and redacted success markers. | ~0.25 h | ~1 h hosted queue/retries | W26 acceptance is complete within scope; unrelated native/RustFS jobs remain separate gates. |
 | 2026-09-21 — W26 closeout publication | Fast-forwarded the combined tree and updated this ledger plus `WORK_TRACKER.md` with the final run, job IDs, completion percentages, evidence, boundaries, estimates, and session record. | ~0.5 h | ~0.25 h log retrieval | Closeout commit `b7e2758` was pushed to `origin/main`; no implementation action remains for W26. |
 | 2026-09-21 — Production rollout tracking expansion | Added the separate P0–P14 production gate matrix, current NO-GO decision, implementation versus hosted/provider/native boundaries, provisional phase estimates, external blockers, open checklist and rollout evidence rules. | ~0.75 h | ~0.25 h remote reconciliation/push | W26 qualification remains accepted; production readiness is explicitly open and must be requalified on the retained implementation revision. |
+| 2026-09-21 — Product production-scope decisions | Recorded customer-deployed Ozone ownership, all-feasible-provider intent, 1,000 IOPS per drive, 99.99% reliability, five-minute RPO/RTO, end-to-end/security scope, customer/Ozone DR ownership, separate release stream and CI-only testing. | ~0.5 h | 0 h | Reframed P0–P14 around W26 CI qualification and explicit external deployment/DR/release gates; production remains NO-GO until the CI packet is complete. |
 
 ## Publication record
 
@@ -227,4 +264,6 @@ the terminal W26 provider jobs into queued or canceled evidence.
 The production rollout track is intentionally separate from that packet. Its
 current decision is **NO-GO** with 0 of 15 P0–P14 gates terminally accepted;
 the open gate ledger above is the source of truth for production work, estimates
-and blockers.
+and blockers. Product direction now makes W26 a customer-deployed integration
+qualification stream: its next acceptance target is a complete, secure,
+all-feasible-provider, end-to-end CI packet, not a customer deployment.
