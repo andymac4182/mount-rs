@@ -39,8 +39,8 @@ planning result.
 | P09 — release provenance, canary and go/no-go | Open — 10% | Immutable signed artifacts, SBOM/provenance, target-platform verification, staged canary, live SLO window, rollback result and explicit release-owner approval |
 
 No P01–P09 item is terminally accepted. P01/P07 implementation progress is
-supported by the hosted `tidb-tls-compile` job `106303655177` in run
-`35590503133`; that job did not connect to TiDB and does not close the live
+supported by the hosted `tidb-tls-compile` job `106304951579` in run
+`35590919645`; that job did not connect to TiDB and does not close the live
 provider, IAM, certificate, or production-deployment gates.
 
 ## Deployment contract
@@ -116,7 +116,7 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 | `MOUNT_RS_TIDB_TLS_URL=... ./scripts/test-tidb-tls.sh` | Credentialed TLS-required TiDB provider contract and URL verification policy | Production IAM/rotation, certificate lifecycle, target topology, public consumer package and canary evidence |
 | `MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 ... ./scripts/test-tidb-tls.sh` | Credential-free configuration-policy validation | Any provider, TLS handshake, credential or production claim |
 | `./scripts/cargo-shared check/test/clippy ... --features rustls` | Public TLS graph compilation, unit tests and lint | A network endpoint, certificate trust, provider identity or deployment |
-| Hosted `tidb-tls-compile` job `106303655177` | Revision-specific TLS feature and fail-closed guard evidence | Live provider, production identity, capacity, observability or release gates |
+| Hosted `tidb-tls-compile` job `106304951579` | Revision-specific TLS feature and fail-closed guard evidence | Live provider, production identity, capacity, observability or release gates |
 
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate
