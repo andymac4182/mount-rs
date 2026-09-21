@@ -1069,13 +1069,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   - [ ] **Hosted and platform evidence:** obtain green hosted
     FoundationDB/RustFS, Node, CLI/native Linux and macOS/Linux build/native
     acceptance runs. Record the actual runner, cluster/image, revision and
-    result; failed, skipped, cancelled or unavailable evidence remains open.
+  result; failed, skipped, cancelled or unavailable evidence remains open.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
   result may be promoted to a production PASS.
-  The production gate ledger, deployment contract and rollout sequence are
-  tracked in [`docs/foundationdb-production-rollout.md`](docs/foundationdb-production-rollout.md).
+  The production gate ledger, deployment contract, operational runbook and
+  rollout sequence are tracked in
+  [`docs/foundationdb-production-rollout.md`](docs/foundationdb-production-rollout.md)
+  and [`docs/W07-operations-runbook.md`](docs/W07-operations-runbook.md).
 
 ## W08 — TiDB
 

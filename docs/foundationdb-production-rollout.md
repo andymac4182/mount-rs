@@ -108,6 +108,13 @@ evidence: the verifier does not open FoundationDB or RustFS, cannot prove
 ACLs, certificate trust, replication, backups, capacity, monitoring or owner
 approval, and does not change the **NO-GO** decision.
 
+The operational execution template is
+[`W07-operations-runbook.md`](W07-operations-runbook.md). It defines the
+admission checks, failure responses, backup/restore procedure, timed D01–D09
+drills, observability handoff and evidence fields. Every drill remains
+`Not executed — external production gate` until it runs against the named
+production-like environment.
+
 ## FoundationDB deployment contract
 
 The production lease path must use `with_production_lease_oracle` with a
@@ -141,7 +148,9 @@ required.
 2. Rehearse the secure, replicated FoundationDB/RustFS topology and record the
    exact images, cluster configuration, identity policy and storage class.
 3. Run the locked provider, composition, native, failure, backup/restore,
-   observability, load/soak and security gates against that staging topology.
+   observability, load/soak and security gates using the procedures in
+   [`W07-operations-runbook.md`](W07-operations-runbook.md) against that
+   staging topology.
 4. Deploy one canary with a holdback. Record the artifact digest, configuration
    digest, authority identity, smoke result, metrics, cleanup and rollback
    result before expanding.
