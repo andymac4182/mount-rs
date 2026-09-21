@@ -225,7 +225,8 @@ AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID=<approved-audit-account-id> \
 The command fails closed on inherited AWS endpoint or service-profile overrides,
 checks the caller account and bucket region, then checks all four Block Public
 Access settings, BucketOwnerEnforced ownership, default server-side encryption,
-the configured lifecycle expiry and multipart-abort days, and reports rather
+the configured current-object lifecycle expiry, matching noncurrent-version
+expiry when versioning is enabled, and multipart-abort days. It reports rather
 than changes bucket versioning. It is safe to run during review, but a passing
 qualification-bucket audit does not close the production-resource gate.
 

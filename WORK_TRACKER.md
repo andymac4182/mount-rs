@@ -2257,8 +2257,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   components, the revised template also passed the read-only validation API
   on 2026-09-22 without creating a stack or change set. The audit still fails
   closed on inherited endpoint/service-profile
-  overrides, requires an expected caller account, and verifies bucket
-  location before reporting controls; approved production parameters, role
+  overrides, requires an expected caller account, verifies bucket location,
+  and checks noncurrent-version retention whenever versioning is enabled
+  before reporting controls; approved production parameters, role
   trust, change-set review, and live production audit remain open. The bucket
   policy transport-deny resource now covers every object key in the bucket,
   not only the owned prefix; the revised template passed the read-only
