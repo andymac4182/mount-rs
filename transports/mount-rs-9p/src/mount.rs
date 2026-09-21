@@ -22,6 +22,7 @@ use tokio::time::timeout;
 
 use crate::constants::{P9_IOHDRSZ, P9_MIN_MSIZE};
 use crate::server::{P9Server, P9ServerHooks, P9ServerOptions};
+use crate::session::P9SessionHooks;
 
 pub const P9_DEFAULT_MOUNT_MSIZE: u32 = 128 * 1024 + P9_IOHDRSZ;
 pub const P9_MAX_MOUNT_MSIZE: u32 = 1024 * 1024;
@@ -113,6 +114,10 @@ pub struct P9MountOptions {
     /// Hooks used only when this mount creates its own in-process server. A
     /// supplied shared server keeps the hooks it was created with.
     pub server_hooks: P9ServerHooks,
+    /// Session-level error and assertion hooks used only when this mount
+    /// creates its own in-process server. A supplied shared server keeps the
+    /// hooks it was created with.
+    pub session_hooks: P9SessionHooks,
     pub transport: P9MountTransport,
     pub host: String,
     pub port: Option<u16>,
@@ -136,6 +141,7 @@ impl Default for P9MountOptions {
             server: None,
             server_options: P9ServerOptions::default(),
             server_hooks: P9ServerHooks::default(),
+            session_hooks: P9SessionHooks::default(),
             transport: P9MountTransport::Unix,
             host: "127.0.0.1".to_owned(),
             port: None,
@@ -420,6 +426,8 @@ where
         ));
     }
 
+    let driver: Arc<dyn FsDriver> = Arc::new(driver);
+
     let (server, source, target, socket_dir) = if let Some(server) = options.server.clone() {
         let transport = if server.unix_path().is_some() {
             P9MountTransport::Unix
@@ -479,11 +487,11 @@ where
                 }
                 let server_options =
                     options.server_options_for_mount(P9MountTransport::Unix, Some(&socket));
-                let server = match P9Server::bind_unix_with_hooks(
-                    driver,
-                    &socket,
+                let server = match P9Server::bind_arc_with_hooks_and_session_hooks(
+                    Arc::clone(&driver),
                     server_options,
                     options.server_hooks.clone(),
+                    options.session_hooks.clone(),
                 )
                 .await
                 {
@@ -509,9 +517,13 @@ where
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
                 }
                 let server_options = options.server_options_for_mount(P9MountTransport::Tcp, None);
-                let server =
-                    P9Server::bind_with_hooks(driver, server_options, options.server_hooks.clone())
-                        .await?;
+                let server = P9Server::bind_arc_with_hooks_and_session_hooks(
+                    Arc::clone(&driver),
+                    server_options,
+                    options.server_hooks.clone(),
+                    options.session_hooks.clone(),
+                )
+                .await?;
                 let port = server.local_addr()?.port();
                 (
                     Arc::new(server),

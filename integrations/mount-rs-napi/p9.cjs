@@ -639,6 +639,8 @@ async function mount9p(driver, mountpoint, options = {}) {
     claimOwnership: options.claimOwnership,
     debug: options.debug,
     locks: options.locks,
+    onError: options.onError,
+    onAssertion: options.onAssertion,
     mountOptions: options.mountOptions,
     unmountTimeoutMs: options.unmountTimeout,
     server,

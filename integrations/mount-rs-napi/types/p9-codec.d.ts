@@ -9,6 +9,7 @@ import type {
   P9FidTable,
   P9LockTable,
   P9Server,
+  NativeP9Header,
 } from "../index.js"
 
 // The 9P entrypoint retains the existing package exports (including the P9
@@ -247,6 +248,8 @@ export interface MountP9Options {
   claimOwnership?: boolean
   debug?: boolean
   locks?: P9LockTable
+  onError?: (error: unknown, header: NativeP9Header | undefined) => void
+  onAssertion?: (message: string) => void
   mountOptions?: readonly string[]
   unmountTimeout?: number
   onTransportError?: (error: unknown, peer: string | undefined) => void
