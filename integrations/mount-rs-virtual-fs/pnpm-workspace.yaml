@@ -1,0 +1,3 @@
+allowBuilds:
+  '@mongodb-js/zstd': false
+  node-liblzma: false
