@@ -3500,15 +3500,24 @@ listing a source does not mean it has been reviewed or its code can be reused.
   qualification, customer secure-runtime evidence and measured SLO/RPO/RTO
   remain open.
 - [ ] W26.15 Resolve the terminal per-drive IOPS qualification blocker. The
-  hosted packet exposed that `ChunkedFs` holds its volume-wide async gate across
+  hosted packet exposed that `ChunkedFs` held its volume-wide async gate across
   remote block I/O and full namespace publication, yielding 61.97/63.56/14.14/
-  23.07 IOPS in the fixed 4 KiB/400-iteration/concurrency-64 profile. Design,
-  implement and test a correctness-preserving concurrency/publication path, or
-  obtain a production-like Ozone capacity/topology qualification that
-  demonstrates the fixture is not representative. Preserve fencing, revision
-  CAS, immutable-block ordering, POSIX semantics, cleanup and fail-closed
-  artifact verification; do not lower the 1,000 target or convert failed rows
-  into skips.
+  23.07 IOPS in the fixed 4 KiB/400-iteration/concurrency-64 profile. The first
+  W26-owned remediation is implemented and published: commit `a2075af0` added
+  optimistic immutable-block writes with revision/base checks and serialized
+  conflict fallback; commit `c4378dc1` extends the same safe overlap to remote
+  reads, adds orphan-atime handling and a lifecycle read barrier for shutdown,
+  and adds a blocked-read gate-release/shutdown regression. The 8-test
+  concurrency suite, 14 chunked unit tests, full locked workspace tests and
+  strict workspace Clippy pass. Fresh hosted qualification run
+  `35641941218` on merged `origin/main` tip `88b707ba` is active and is not yet
+  evidence. If any provider remains below 1,000 IOPS, continue the
+  correctness-preserving concurrency/publication work or obtain a
+  production-like Ozone capacity/topology qualification that demonstrates the
+  fixture is not representative. Preserve fencing, revision CAS,
+  immutable-block ordering, POSIX semantics, cleanup and fail-closed artifact
+  verification; do not lower the 1,000 target or convert failed rows into
+  skips.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
