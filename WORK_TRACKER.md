@@ -63,8 +63,8 @@ new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
 session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
 options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
-an existing lock state, `NFS4ERR_TOOSMALL` for an undersized fore response
-offer, and `NFS4ERR_NOSPC` for an exhausted session cap. Upstream ID-map, deterministic clock/seed,
+an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
+and refused-`CREATE_SESSION` replay followed by a next-sequence retry. Upstream ID-map, deterministic clock/seed,
 and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -1088,6 +1088,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   negotiation boundary: undersized fore responses return `NFS4ERR_TOOSMALL`,
   per-client exhaustion returns `NFS4ERR_NOSPC`, and back-channel count offers
   are preserved. The complete NFS target and scoped Clippy pass.
+- [x] The NFSv4 `CREATE_SESSION` sequence slot now caches refusal replies for
+  retransmission and advances to the next sequence for a retry; the focused
+  wire test proves the refusal replay and successful next-sequence creation.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

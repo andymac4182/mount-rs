@@ -1189,6 +1189,38 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
                         &mut stream,
                         405,
                         compound(
+                            "too-small-replay",
+                            &[create_session_args_with_response_size(
+                                small_clientid,
+                                1,
+                                1 << 20,
+                            )],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), NFS4ERR_TOOSMALL);
+                    assert_eq!(
+                        parse_result_status(&mut response, OP_CREATE_SESSION),
+                        NFS4ERR_TOOSMALL
+                    );
+                    response.end("too-small replay response").unwrap();
+
+                    let _small_session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            406,
+                            compound(
+                                "too-small-retry",
+                                &[create_session_args_with_sequence(small_clientid, 2)],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    let mut response = rpc(
+                        &mut stream,
+                        407,
+                        compound(
                             "second-session",
                             &[create_session_args_with_sequence(clientid, 2)],
                         ),
