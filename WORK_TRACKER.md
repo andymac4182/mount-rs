@@ -2154,6 +2154,26 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   *(Implementation/static qualification; environment approval, release
   registry and rollout evidence remain external.)*
 
+- [x] W08.29 **Current published-main hosted target and attestation
+  qualification:** manual `workflow_dispatch` with `attest=true` run
+  `35638433010` at source
+  `9d3a6e502eccec9ba54c00e80c98e6e1da175177` passed both target builds,
+  downloaded-asset checks, provenance attestations, CycloneDX SBOM attestations
+  and final `gh attestation verify` jobs. Linux job `106461545303` built
+  `x86_64-unknown-linux-gnu` SHA-256
+  `29130f9d1a753bdcf7dbd2412146585bfc4bdce55c5ddbb4946a79a653696c20`
+  (8,347,688 bytes); macOS job `106461544977` built
+  `aarch64-apple-darwin` SHA-256
+  `1530afd0325416db239776c843343e6c99e37406a0cc82be27490d26060ba27c`
+  (6,943,737 bytes). Download jobs `106463019865` and `106463019693`, and
+  attestation jobs `106463113298` and `106463113247`, all passed; both
+  `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed. The downloaded assets'
+  checksums, manifests, 288-component SBOMs and tar contents were independently
+  reverified locally. This is hosted target qualification only; no candidate
+  tag, protected-environment approval, release registry publication, canary,
+  rollback or production GO evidence is claimed. *(Hosted/provider
+  qualification; production release gates remain external.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the
@@ -2257,7 +2277,9 @@ reproducible in a production-like environment.
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
   target/download matrix and W08.17–W08.24's pinned attestation wiring,
   dispatch isolation, full-pin correction, verifier identity fix and terminal
-  target qualification. W08.28 adds the protected
+  target qualification. W08.29's current published-main run `35638433010`,
+  source `9d3a6e5`, passed both target builds/downloads and both final
+  provenance/SBOM attestation verifiers. W08.28 adds the protected
   `v*-cli-production-candidate*` workflow, which builds both targets, verifies
   final release assets and attestations, and requires the `w08-production`
   environment before publishing a prerelease. It has not been run from an
