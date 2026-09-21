@@ -220,6 +220,8 @@ Current focused behavior:
   connection accepted by the native Tokio listener intentionally reports
   `stream: undefined`: the listener owns a Tokio stream rather than a Node
   `Duplex`; the supported Node stream-injection boundary is `attach`.
+  The public `peer` type retains the native listener's `null` absence while
+  allowing the attached-stream contract's `undefined` absence.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
