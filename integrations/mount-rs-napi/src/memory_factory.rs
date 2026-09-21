@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mount_rs_core::{MemoryFs, MemoryOptions};
 use napi::bindgen_prelude::{Env, Function, JsObjectValue, Object};
@@ -76,6 +76,6 @@ pub fn create_memory_driver(
             root_mode,
         }))),
         shutdown: None,
-        reconcile: None,
+        reconcile: Mutex::new(None),
     })
 }

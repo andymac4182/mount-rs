@@ -451,3 +451,8 @@ echo "AWS_S3_CLI_PASS prefix=$prefix"
   actual_aws_s3_reopen_after_process_restart \
   -- \
   --exact --ignored --nocapture
+
+if [ "${MOUNT_RS_RUN_AWS_S3_PGLITE:-0}" = "1" ]; then
+  AWS_S3_TEST_PREFIX="${prefix}/pglite" \
+    "$repo_dir/scripts/test-aws-s3-pglite.sh"
+fi

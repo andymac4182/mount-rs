@@ -1816,7 +1816,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
-  The current SQLite composition is single-host reopen evidence only.
+  The current SQLite composition is single-host reopen evidence only. Partial
+  pairing evidence now exists: on 2026-09-21, the scoped AWS role passed the
+  AWS CLI/block/restart gates and the new
+  `live_aws_s3_blocks_with_independent_pglite_metadata` row passed with an
+  isolated real PGlite socket server, a fresh metadata connection, a fresh
+  signed AWS client, filesystem reopen, and exact parent-prefix cleanup at
+  `mount-rs-tests/aws-s3/20260921T133321Z-23452-0493c0f8fe5454cbfd42f48dfd58f728/pglite`.
+  This does not close W25.6: production metadata ownership, multi-writer
+  fencing, backup/restore, schema migration, failure recovery, and DR evidence
+  remain open.
 - [ ] W25.7 Add deployment observability and operations: S3 latency/error and
   retry metrics, conditional-conflict and orphan/cleanup signals, credential
   expiry detection, capacity/cost alerts, SLOs, incident runbooks, and

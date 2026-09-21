@@ -21,7 +21,7 @@ for a production deployment result.
 | Provider contract | `kind: "aws-s3"` uses the real region, signed AWS workload credentials, immutable create, conditional update, and block-only semantics | Passed in local code gates and the live public SDK/CLI run |
 | AWS resource controls | Reviewable IaC or equivalent, private bucket, Block Public Access, Object Ownership, encryption/KMS decision, lifecycle/versioning decision, and prefix ownership | Reviewable CloudFormation contract added and AWS syntax-validated; production parameters, change set, and resource review open |
 | Identity | Runtime and maintenance roles are least-privilege, short-lived, trusted only by the intended workload, and have no committed access keys | Test role and sibling-prefix denial passed; production workload identity open |
-| Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Open; SQLite is single-host evidence only |
+| Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Partial AWS S3 plus external PGlite qualification passed; production provider selection, multi-writer, backup/restore, and failure-recovery evidence remain open |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open; the S3 gateway now exposes a bounded `S3Session::stats()` snapshot for latency, buffered bytes, operation counts, and authentication/conditional/throttling/client/server error classes. The public SDK's optional observability path also records provider block latency, errors, and bytes. These are instrumentation surfaces only: exporter wiring, retry visibility, credential-expiry detection, cost/retention alerts, SLO thresholds, and an exercised incident runbook remain deployment gates |
 | Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the Standard scan `bb69ddae-798a-4387-bb87-f3e7acd496cb` at pushed head `227f81932b48fa1fe8b4999ed619add812a88e42` reports zero reportable findings in the 22 directly reviewed W25 surfaces, with the remaining repository inventory of 596 files explicitly deferred for follow-up. The AWS transport override, mutable workflow references, bounded S3 metrics, and account-binding preflight from baseline `89992ce3406f3f7586e5b072af488df4b565ea90` are remediated, but hosted OIDC/deployment evidence, repository-coverage follow-up, load/soak/fault/recovery drills, canary, rollback, and post-deploy smoke remain open. Latest hosted run `35601403560` at head `2159976` fails safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` before AWS authentication; the existing test-role trust still allows only the SSO administrator, not GitHub OIDC, so an approved IAM trust/environment change is required. Bounded publication, listing, quota/TTL, and backing-file-aware staging cleanup remediations have landed |
@@ -54,6 +54,17 @@ audited. Decide explicitly whether versioning and SSE-KMS are enabled; if they
 are enabled, the cleanup, restore, key-policy, and cost procedures must cover
 object versions and KMS access rather than treating current-object deletion as
 complete cleanup.
+
+The live qualification harness also has an opt-in AWS S3 plus external PGlite
+metadata row. On 2026-09-21, the scoped role passed the AWS CLI and block
+acceptance tests, then `live_aws_s3_blocks_with_independent_pglite_metadata`
+passed with a real PGlite socket server, a fresh metadata connection, a fresh
+signed AWS client, filesystem reopen, and exact parent-prefix cleanup at
+`mount-rs-tests/aws-s3/20260921T133321Z-23452-0493c0f8fe5454cbfd42f48dfd58f728/pglite`.
+This is provider-pairing qualification only: the PGlite process is an
+isolated test service, and production multi-writer fencing, independent
+backup/restore, schema migration, failure recovery, and operational ownership
+remain open.
 
 ## Reviewable infrastructure contract
 

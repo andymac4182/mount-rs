@@ -141,6 +141,26 @@ The corresponding versioned CLI provider shape is:
 }
 ```
 
+When the AWS harness has already assumed the scoped test role, set
+`MOUNT_RS_RUN_AWS_S3_PGLITE=1` to add the external PGlite metadata pairing
+row. The parent run starts the pinned PGlite socket server, passes its
+exported short-lived AWS credentials to the Rust test, and removes the child
+prefix during the same version-aware cleanup:
+
+```sh
+MOUNT_RS_RUN_AWS_S3=1 \
+MOUNT_RS_RUN_AWS_S3_PGLITE=1 \
+AWS_PROFILE=myroot \
+AWS_S3_TEST_ROLE_ARN=arn:aws:iam::922978963556:role/mount-rs/mount-rs-aws-s3-integration-test \
+AWS_S3_TEST_BUCKET=mount-rs-integration-922978963556-ap-southeast-2 \
+AWS_S3_TEST_REGION=ap-southeast-2 \
+./scripts/test-aws-s3.sh
+```
+
+The pairing row proves an actual AWS S3 block store can reopen with fresh
+PGlite metadata and a fresh signed client. It is not production metadata,
+multi-writer, backup/restore, or disaster-recovery evidence.
+
 The AWS provider accepts credentials through the `object_store` workload
 chain (environment credentials, web identity, ECS task credentials, or EC2
 instance credentials). It intentionally has no endpoint or static-secret

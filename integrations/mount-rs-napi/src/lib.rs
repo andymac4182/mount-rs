@@ -2601,7 +2601,7 @@ async fn run_shutdown(
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
     shutdown: Option<Arc<ShutdownCallback>>,
-    reconcile: Option<Arc<ReconcileCallback>>,
+    reconcile: Mutex<Option<Arc<ReconcileCallback>>>,
 }
 
 #[napi]
@@ -2616,7 +2616,7 @@ impl Filesystem {
         Self {
             driver: slot,
             shutdown: Some(ShutdownController::callback(controller)),
-            reconcile,
+            reconcile: Mutex::new(reconcile),
         }
     }
 
@@ -2696,6 +2696,14 @@ impl Filesystem {
         if let Some(shutdown) = &self.shutdown {
             shutdown().await.map_err(to_js_error)?;
         }
+        // A reconciliation callback may own a provider clone independently
+        // of DriverSlot. Detach it after the provider shutdown succeeds so
+        // durable SQLite files can be removed immediately on Windows rather
+        // than waiting for JavaScript garbage collection.
+        self.reconcile
+            .lock()
+            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
+            .take();
         Ok(())
     }
 
@@ -2706,13 +2714,18 @@ impl Filesystem {
     #[napi(js_name = "reconcileBlocks")]
     pub async fn reconcile_blocks(&self, grace_ms: f64) -> napi::Result<JsBlockReconcileReport> {
         let grace = validate_reconcile_grace(grace_ms)?;
-        let callback = self.reconcile.as_ref().ok_or_else(|| {
-            to_js_error(
-                FsError::new(ErrorCode::Enotsup)
-                    .with_syscall("reconcile blocks")
-                    .with_message("filesystem does not expose chunked block reconciliation"),
-            )
-        })?;
+        let callback = self
+            .reconcile
+            .lock()
+            .map_err(|_| to_js_error(FsError::new(ErrorCode::Eio)))?
+            .clone()
+            .ok_or_else(|| {
+                to_js_error(
+                    FsError::new(ErrorCode::Enotsup)
+                        .with_syscall("reconcile blocks")
+                        .with_message("filesystem does not expose chunked block reconciliation"),
+                )
+            })?;
         callback(grace).await.map(Into::into).map_err(to_js_error)
     }
 
