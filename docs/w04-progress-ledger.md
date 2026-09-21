@@ -11,19 +11,20 @@ macOS/Linux gate required by W04.2.
 
 | Field | Current value |
 | --- | --- |
-| Snapshot base revision | `577fe6d` (`origin/main` before this hosted-acceptance closure update; W04 code fix remains `bdfcb11`) |
+| Snapshot base revision | `c5532e3` (`origin/main` before this production package/consumer-gate publication; W04 code fix remains `bdfcb11`) |
 | Ledger publication | This current ledger revision is published on `origin/main`; the exact commit is recorded in Git history |
 | Current-head local evidence revision | `bdfcb114033f77c3a454ecf84db7bffc52cef9d1` (the published EPIPE fixture-shutdown fix) |
 | Latest synced verification revision | `113724487e9efc172ab69254d995377cfcfab296` (workspace test and scoped Clippy evidence; unrelated W26/TiDB/CLI changes are included) |
 | Latest full W04 gate revision | `6d59d204af80c883bf47a59ffb5a4b77829f8ec8` (current `origin/main` after the chunked-shutdown fix; exact pinned oracle; full `scripts/test-pglite.sh` exited 0) |
-| Latest published repository revision | `577fe6d` (latest remote tip before this hosted-acceptance closure update; W04 code fix remains `bdfcb11`) |
-| Snapshot time | 2026-09-21 20:55 AEST / 2026-09-21 10:55 UTC |
+| Latest published repository revision | `c5532e3` (latest remote tip before this production package/consumer-gate publication; W04 code fix remains `bdfcb11`) |
+| Qualification evidence revision | `7fda354818cedf8857203ff17b9a29117dbaf121` on `andymac4182/c/w04-production-gate-artifacts-20260921`, based on accepted W04 base `e515036`; the Windows N-API `.cmd` fix is already published on main as `581833f` |
+| Snapshot time | 2026-09-21 21:58 AEST / 2026-09-21 11:58 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
 | Checklist completion | **100%**: 8 of 8 W04 checklist items are checked; W04.2 hosted acceptance is closed |
 | Implementation/local qualification | **Complete for the recorded packet**; the fresh post-fix oracle-enabled W04 gate passed at `6d59d20`, and synced workspace tests plus scoped W04 Clippy passed at `1137244` |
-| Hosted/native/provider acceptance | **W04.2 hosted acceptance complete**: isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864) passed the exact PGlite recovery step on Linux, macOS-latest, and macOS-15-intel; provider credentials/services remain explicit gates |
+| Hosted/native/provider acceptance | **W04.2 hosted acceptance complete**: isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864) passed the exact PGlite recovery step on Linux, macOS-latest, and macOS-15-intel. The isolated package qualification [35594536095](https://github.com/andymac4182/mount-rs/actions/runs/35594536095) also passed all four Node platform jobs, Windows Node packaging, and `aggregate-native`; provider credentials/services remain explicit gates |
 | Production rollout decision | **NO-GO**: the demo was successful, but production readiness still requires fresh hosted evidence plus artifact, durability, operational, and rollback gates |
-| Current external blocker | W04.2 is no longer blocked by hosted Node execution. The dependent `aggregate-native` job [106305282002](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106305282002) was skipped, so production package/artifact acceptance remains open alongside deployment-owner, provider, rollback, and operational gates. |
+| Current external blocker | W04.2 and the native package qualification are evidenced, but the full qualification run still concluded failure because provider job [106316231929](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316231929) and Windows Rust job [106316232156](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316232156) failed. Production rollout remains NO-GO pending deployment-owner, provider-scope, rollback, observability, and release-approval evidence. |
 
 The 100% figure is a checklist ratio, not a production-readiness claim. W04.2
 hosted acceptance is closed; the remaining production matrix determines
@@ -43,7 +44,7 @@ every required gate has evidence on the published revision.
 | Hosted Linux Node acceptance | Complete | 100% | Isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864), job [106298858958](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298858958), completed successfully; direct logs and job metadata show the exact PGlite recovery and fragmented early-rejection steps passed, with upstream/trace evidence and explicit provider skips. | None for the hosted Linux W04.2 gate. | 0h | Hosted gate |
 | Hosted macOS-latest Node acceptance | Complete | 100% | Isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864), job [106298859119](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859119), completed successfully; direct logs and job metadata show the exact PGlite recovery and fragmented early-rejection steps passed. | None for the hosted macOS-latest W04.2 gate. | 0h | Hosted/native gate |
 | Hosted macOS-15-intel Node acceptance | Complete | 100% | Isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864), job [106298859135](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859135), completed successfully; direct logs and job metadata show the exact PGlite recovery and fragmented early-rejection steps passed, with no recurrence of the historical EPIPE. | None for the hosted macOS-15-intel W04.2 gate. | 0h | Hosted/native gate |
-| Native package/artifact and consumer validation | Blocked / not accepted | 0% | `ci.yml` builds the N-API addon on each Node platform and uploads `native-*` artifacts, but dependent `aggregate-native` job [106305282002](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106305282002) was skipped. | Obtain a completed aggregate-native result, inspect each supported artifact, and run/record a clean consumer install smoke check before production approval. | 0.5–1h after an uncancelled aggregate run | Hosted/package gate |
+| Native package/artifact and consumer validation | Complete for the qualified packet; CI enforcement added | 100% | Qualification run [35594536095](https://github.com/andymac4182/mount-rs/actions/runs/35594536095) passed Windows Node package distribution [106316232053](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316232053) and `aggregate-native` [106320575411](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106320575411). The aggregate log reports `mount-rs N-API artifact aggregation: PASS` and successful validation of all five native packages; the downloaded run artifacts were then packed and installed in a clean pnpm consumer with all five platform-package overrides, and the memory write/read/shutdown smoke reported `mount-rs clean consumer install/smoke: PASS`. | Retain a hosted result for the new CI consumer-smoke step on a published main revision; do not treat the overall run as green because unrelated provider/Windows Rust jobs failed. | 0.25–0.5h for hosted enforcement; no package implementation remaining | Hosted/package gate |
 | Production-like persistence, restart, and version recovery | Hosted W04.2 complete; deployment policy pending | 80% | The isolated Linux, macOS-latest, and macOS-15-intel jobs all passed the PGlite integration/restart-recovery step; local evidence also covers disk restart and reconnect/version history. | Confirm the production data directory/configuration, version compatibility, backup/restore expectation, and rollback behavior for the actual deployment shape. | 1–2h | Engineering plus deployment decision |
 | Provider and durability matrix | Explicitly bounded; not inferred | 40% for local scope / 0% for any unrun provider | R2 and TiDB/RustFS rows remain explicit credential/service skips; the ledger does not promote those skips to production acceptance. | If production will use those providers, obtain the real credentials/services and run the corresponding restart, cleanup, and recovery gates; otherwise record the launch scope as PGlite-only. | 1–4h plus provider wait | External provider gate |
 | Operational readiness: observability, runbook, limits, rollback, and ownership | Not started as a production gate | 0% | No demo or local test is being treated as evidence for alerting, SLOs, capacity limits, incident response, rollback, or on-call ownership. | Record the launch runbook, health/metric/log signals, failure thresholds, rollback procedure, data protection/restore procedure, capacity limits, and named owner. | 1–2h engineering plus review | Production operations gate |
@@ -58,9 +59,14 @@ item alone does not satisfy them.
   macOS-latest Node, and macOS-15-intel Node jobs successfully, with the exact
   `Verify PGlite integration and restart recovery` step passing in all three
   logs. Queued, skipped, cancelled, partial, or pre-fix evidence does not count.
-- [ ] The dependent native artifact aggregation and package-distribution
+- [x] The dependent native artifact aggregation and package-distribution
   checks pass, and a clean consumer install/smoke result is recorded for the
-  supported release outputs.
+  supported release outputs. Qualification run [35594536095](https://github.com/andymac4182/mount-rs/actions/runs/35594536095)
+  passed `aggregate-native` [106320575411](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106320575411)
+  for all five native packages; a clean pnpm consumer installed the exact
+  downloaded artifacts and passed the memory write/read/shutdown smoke. The
+  new `test:distribution:consumer` CI step now enforces that check from the
+  staged package.
 - [ ] The actual production PGlite configuration has an explicit persistence,
   version-compatibility, restart-recovery, backup/restore, and rollback result;
   local disk tests remain supporting evidence only.
@@ -85,6 +91,7 @@ item alone does not satisfy them.
 | Fresh current-tree rerun, SDK/CLI users, upstream, and trace lanes | Complete — local qualification | 100% | The latest post-fix current-tree run with the exact pinned oracle `pithings/mountx@85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` exited 0: Rust SDK `pass=6 skip=3 fail=0`, Node SDK `pass=5 skip=3 fail=0`, CLI `pass=12 skip=2 fail=0`, upstream `1,200 passed / 82 skipped`, and trace `40/40` across five seeds and eight backends, including PGlite and chunked-PGlite. R2/TiDB/RustFS credentials/services remained explicit skips; hosted/provider claims are not inferred from this local result. | None for the current local result; hosted W04.2 remains separate. | 0h remaining |
 | Teardown-race fix and bounded close/reopen safety | Complete — implementation and local regression | 100% | Tracker records the PostgreSQL Terminate-frame cleanup path, I/O-turn barrier, listener restoration, and tracked cleanup barrier. Readiness passed 10/10; bounded close/reopen passed 5/5 in the recorded gate; focused current-tree runs also passed the bounded regression repeatedly. | None unless hosted macOS reproduces the historical `Eio` failure. | 0h remaining; 2–6h contingency if hosted failure reproduces |
 | W04.2 hosted macOS/Linux reconnect acceptance | **Complete — isolated external hosted gate** | **100%** | Isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864) on `andymac4182/c/w04-production-gate` completed Linux Node job [106298858958](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298858958), macOS-latest Node job [106298859119](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859119), and macOS-15-intel Node job [106298859135](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859135) successfully. Direct logs and job metadata confirm the exact `Verify PGlite integration and restart recovery` step passed on all three platforms; fragmented early rejection also passed and the historical Intel EPIPE did not recur. | None for W04.2. Keep the production rollout matrix open: `aggregate-native` was skipped and production configuration, provider scope, rollback, observability, and ownership still need evidence. | 0h remaining; production gates remain 3–6h plus external/provider wait | Hosted acceptance |
+| W04 production native package and clean-consumer gate | **Complete — qualification; hosted enforcement added** | **100%** | Run [35594536095](https://github.com/andymac4182/mount-rs/actions/runs/35594536095) passed Windows Node distribution/export coverage in job [106316232053](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316232053) and five-package `aggregate-native` validation in job [106320575411](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106320575411). The exact hosted artifacts were downloaded, staged, packed, installed into a clean pnpm consumer with local platform-package overrides, and exercised through a memory write/read/shutdown smoke: `mount-rs clean consumer install/smoke: PASS`. | Run and retain the new consumer-smoke step on a published-main CI result; production release remains NO-GO until persistence/rollback, provider scope, operations, and ownership gates close. | 0.25–0.5h hosted enforcement; 0h package implementation | Hosted/package gate |
 | W04.3 versioning, mount-free VFS, and native SQLite-hosting tests | Complete — implementation and local qualification | 100% | Tracker records the rebased packet published through `90c33949`; durable PGlite version metadata, reconnect/version history, mount-free SQLite VFS, native SQLite-hosting tests, and the configuration-driven gate are present. Focused versioning/VFS, locked compilation, formatting, Clippy, and script checks passed in the recorded evidence. | None for W04.3; hosted reconnect remains W04.2's separate gate. | 0h remaining |
 
 ## Evidence boundaries
@@ -146,6 +153,30 @@ item alone does not satisfy them.
 - The active heartbeat monitor inspected each isolated job's completed log and
   exact PGlite step before this closure. The dependent `aggregate-native` job
   was skipped, so artifact/package production acceptance remains separate.
+- Qualification run `35594536095` on accepted W04 base `e515036` requalified
+  the package path with the published Windows N-API aggregator fix. Linux
+  Node `106316232279`, Linux ARM Node `106316232261`, macOS-latest Node
+  `106316232225`, and macOS-15-intel Node `106316232268` all completed
+  successfully; each exact `Verify PGlite integration and restart recovery`
+  step and fragmented early-rejection step passed. Windows Node
+  `106316232053` passed `Verify Windows package distribution` and uploaded
+  `native-win32-x64-msvc` (artifact `10635493620`, SHA-256
+  `037b91b7e7cd02232a4603044b48dc62f5a1f45ac5efa7e0a9f17b4d10f248ac`).
+- The dependent `aggregate-native` job `106320575411` completed successfully:
+  `Check packaging validation regressions` reported
+  `mount-rs N-API artifact aggregation: PASS`, and
+  `Validate all five native distribution packages without publishing` packed
+  the root package plus all five platform packages. The exact downloaded
+  artifacts were then used by the new clean-consumer smoke gate locally; a
+  fresh pnpm install and memory write/read/shutdown test reported
+  `mount-rs clean consumer install/smoke: PASS`.
+- The overall `35594536095` run is not a release pass: unrelated
+  `foundationdb-rustfs` job `106316231929` failed its provider gate, and
+  `rust (windows-latest)` job `106316232156` still fails
+  `windows_long_symlink_creation_uses_extended_path_fallback` with
+  `FsError { code: Enoent, syscall: Some("symlink") }`. Those failures remain
+  visible blockers for broader production qualification and are not promoted
+  into the W04 package or PGlite acceptance result.
 - As a diagnostic only, newer run `35578377706` started its Ubuntu Node jobs
   while its `macos-latest` and `macos-15-intel` Node jobs remained queued. This
   corroborated the historical macOS runner-capacity/platform queue; it is not
@@ -163,15 +194,17 @@ item alone does not satisfy them.
    macOS-latest, and macOS-15-intel; record benchmark/trace/provider skips.
 3. [x] Change W04.2 to `[x]` only after all three jobs passed; the historical
    Intel EPIPE and all queued/cancelled runs were excluded.
-4. Require the dependent native artifact aggregation/package checks and a
+4. [x] Require the dependent native artifact aggregation/package checks and a
    clean supported-consumer smoke result before changing the production
-   decision to GO.
+   decision to GO; run `35594536095` and the local exact-artifact consumer
+   smoke satisfy this package gate, while the new CI step awaits a published
+   main result.
 5. Confirm the actual launch configuration's persistence, versioning,
    backup/restore, rollback, observability, limits, and ownership gates; keep
    R2/TiDB/RustFS skips explicit unless those providers are in launch scope.
-6. Publish the W04.2 closure with the exact run/job links, run
-   `git diff --check` and the relevant formatting check, commit the
-   documentation closure, and push it to `origin/main`.
+6. [x] Publish the W04.2 and package-gate evidence with exact run/job links,
+   run `git diff --check` and the relevant formatting check, commit the
+   workflow/test/ledger chunk, and push it to `origin/main`.
 7. If a hosted job fails, treat it as a new engineering chunk: capture the
    failure, patch the smallest evidence-backed root cause, run focused tests
    plus the relevant W04 gate, and commit/push before proceeding.
@@ -181,19 +214,20 @@ item alone does not satisfy them.
 | Category | Estimate | Classification |
 | --- | ---: | --- |
 | Hosted macOS log inspection after runners start | Complete, ~0.5h actual | Engineering/verification |
-| Tracker/dashboard closure, formatting, commit, and push | 0.5–1h | Engineering/documentation |
+| Tracker/dashboard closure, formatting, commit, and push | Complete, ~0.5h actual | Engineering/documentation |
 | Potential remediation if hosted macOS exposes a regression | 2–6h | Engineering contingency |
 | GitHub Actions queue delay | Resolved for W04.2 by isolated qualification branch; future shared-main churn remains external | External blocker; not engineering time |
 | R2/TiDB local credential/service skips | Unknown | External provider prerequisites; not W04.2's macOS/Linux closure criterion |
-| Native artifact aggregation and clean consumer smoke | 0.5–1h | Hosted/package gate; depends on completed CI artifacts |
+| Native artifact aggregation and clean consumer smoke | Complete for qualification; 0.25–0.5h hosted enforcement remains | Hosted/package gate |
 | Production persistence/backup/rollback and version policy | 1–2h | Engineering plus deployment-owner decision |
 | Runbook, observability, limits, and operational ownership | 1–2h | Production operations gate; review/ownership dependent |
 
-Best-case remaining active engineering for W04.2 is approximately
-**0.75–1.5h after runner completion**. Production rollout readiness adds
-approximately **3–6h** for artifact/consumer, persistence/rollback, and
-operational gates, excluding provider setup and hosted runner time. A hosted
-regression would add approximately **2–6h** to the W04 engineering estimate.
+Best-case remaining active engineering for W04.2 is approximately **0h**;
+the W04.2 hosted gate and package qualification are complete. Production
+rollout readiness still adds approximately **2.5–5h** for hosted consumer
+enforcement, persistence/rollback, and operational gates, excluding provider
+setup, release-owner decisions, and hosted runner time. The Windows Rust
+long-symlink and provider failures remain separate remediation tracks.
 
 ## Session time log
 
@@ -222,11 +256,14 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 | 2026-09-21 19:25–19:45 AEST | Installed a persistent stdin error listener for expected shutdown errors, reran the focused test, and ran 20 repetitions with no EPIPE; published the fix as `bdfcb11`. | Focused and repeated local regression passed; formatting and diff checks passed. | Engineering/verification, ~0.35h |
 | 2026-09-21 20:06–20:14 AEST | Expanded this ledger from demo/local/hosted tracking to a production rollout matrix with explicit exit criteria, package/artifact gates, persistence/rollback, provider boundaries, and operational readiness; then retargeted it to the CI run created by the publication push. | Latest run `35587575994` is in progress on Linux, macOS-latest, and macOS-15-intel; release decision remains NO-GO until the matrix closes. | Engineering/documentation, ~0.35h; hosted execution remains external |
 | 2026-09-21 20:20–20:55 AEST | Isolated the hosted gate from shared-main churn, inspected the completed Linux, macOS-latest, and macOS-15-intel logs, and verified the exact PGlite recovery step plus early-rejection step on each platform. | Run `35588994864` passed all three Node jobs; W04.2 is closed. The dependent `aggregate-native` job was skipped, so production artifact/package acceptance remains open and the rollout decision stays NO-GO. | Hosted verification/documentation, ~0.75h; remaining production gates are separate |
+| 2026-09-21 21:20–21:42 AEST | Diagnosed and corrected the Windows N-API artifact aggregator's `.cmd` executable handling, then requalified the package path on accepted W04 base `e515036`. | Windows Node, all four Node platform jobs, and `aggregate-native` passed in run `35594536095`; the overall run remained failed only on unrelated provider and Windows Rust gates. | Engineering/hosted verification, ~0.75h; provider/native failures remain external/remediation tracks |
+| 2026-09-21 21:43–21:58 AEST | Downloaded the exact hosted artifacts, assembled and packed the staged root plus five platform packages, added the reusable clean-consumer smoke script and CI step, and ran focused formatting/package checks. | Clean pnpm consumer install and memory write/read/shutdown smoke passed; `test:distribution:aggregate`, `node --check`, `git diff --check`, and shared Cargo formatting check passed. | Engineering/verification, ~0.5h; hosted enforcement will be rechecked after publication |
 
 ## Publication note
 
-This ledger revision records the hosted W04.2 closure. It is reviewed with
-`git diff --check` and the relevant formatting check, then committed and
-pushed to `origin/main`. It closes W04.2 only; it does **not** approve
-production, because the artifact/package, deployment, provider, rollback, and
-operational evidence described above is still required.
+This ledger revision records the W04.2 closure and the qualified native
+artifact/consumer gate. It is reviewed with `git diff --check` and the
+relevant formatting check, then committed and pushed to `origin/main`. It
+does **not** approve production: persistence/rollback policy, provider scope,
+observability, runbook, ownership, hosted enforcement of the new consumer
+step, and release approval remain open.
