@@ -734,7 +734,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest mainline Linux Node/CLI/native-FUSE qualification is green at `35645459649`/`b3a0a92` with six hosted rollout-ledger regression cases and the NO-GO guard; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest mainline Linux Node/CLI/native-FUSE qualification is green at `35648296386`/`20fb445a` with six hosted rollout-ledger regression cases and the NO-GO guard; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1921,7 +1921,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
-  The latest mainline hosted run
+  The previous mainline hosted run
   [35645459649](https://github.com/andymac4182/mount-rs/actions/runs/35645459649)
   (job
   [106484724044](https://github.com/andymac4182/mount-rs/actions/runs/35645459649/job/106484724044))
@@ -1940,6 +1940,28 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `b3a0a92d617e66ad58460f345c428e197f8c9e2d`, run `35645459649`, attempt `1`
   and runner `GitHub Actions 1000021544`; the artifact SHA-256 is
   `0bab89cbff4d36b68351d84978ad56991e2ac16621084dd987f8717d4b07e63e`.
+  This is terminal hosted Linux qualification for the tested revision only;
+  production identity/ACL/TLS, backup/recovery, capacity, observability,
+  macOS and release-owner gates remain open.
+  The latest mainline hosted run
+  [35648296386](https://github.com/andymacclenaghan/mount-rs/actions/runs/35648296386)
+  (job
+  [106494088981](https://github.com/andymacclenaghan/mount-rs/actions/runs/35648296386/job/106494088981))
+  tested revision `20fb445a` on `ubuntu-24.04` and completed green in 11m16s.
+  Its retained artifact `foundationdb-production-qualification-35648296386-1`
+  reported `qualification-pass`, `FOUNDATIONDB_CLI_PASS
+  mode=foundationdb-rustfs-fuse`, five soak rounds,
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=7654
+  p95_us=36558 p99_us=36558 total_ms=146 throughput_ops_per_sec=102.61`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. The rollout-ledger guard emitted
+  `W07_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO w07_7=open nested_gates=7`
+  and `W07_ROLLOUT_LEDGER_TEST_PASS cases=6`. The schema-2 provenance summary
+  records source revision
+  `20fb445a02b16e3dcb62525fcbd84ff14d7c8dea`, run `35648296386`, attempt `1`
+  and runner `GitHub Actions 1000021765`; the artifact SHA-256 is
+  `8c93fc161217e7c032be17c6892791bb764a081ddad678ad601a0d6775a5962b`.
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
@@ -1990,9 +2012,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35645459649` recorded
-    `operations=15 p50_us=9350 p95_us=49303 p99_us=49303 total_ms=182
-    throughput_ops_per_sec=82.07` at revision `b3a0a92`. This remains bounded
+    latency and throughput; latest hosted run `35648296386` recorded
+    `operations=15 p50_us=7654 p95_us=36558 p99_us=36558 total_ms=146
+    throughput_ops_per_sec=102.61` at revision `20fb445a`. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -2005,8 +2027,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `b3a0a92` in run
-    `35645459649` on `ubuntu-24.04`, with the retained schema-2
+    Node, CLI/native Linux checkpoint is green for revision `20fb445a` in run
+    `35648296386` on `ubuntu-24.04`, with the retained schema-2
     `qualification-pass` artifact and provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
