@@ -197,6 +197,10 @@ async fn start_commit_drop_proxy(database_url: &str) -> (String, JoinHandle<IoRe
     proxy_url
         .set_port(Some(proxy_port))
         .expect("rewrite the proxy port");
+    proxy_url
+        .query_pairs_mut()
+        .append_pair("pool_min", "0")
+        .append_pair("pool_max", "1");
 
     let task = tokio::spawn(async move {
         let (client, _) = listener.accept().await?;
