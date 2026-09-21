@@ -711,7 +711,10 @@ if [ "$topology" = durable ]; then
   # a power-loss or host-fsync guarantee; the provider's durable flag remains
   # caller-owned.
   begin_phase "TiDB restart readiness"
-  docker restart "$tidb_container" >/dev/null
+  # TiDB v8.5.7 drains clients and closes its DDL/domain state during a
+  # graceful signal; Docker's default ten-second grace can SIGKILL it before
+  # that cleanup completes and strand restart state in PD/TiKV.
+  docker restart --time 30 "$tidb_container" >/dev/null
   wait_for_tidb
   begin_phase "TiKV restart readiness"
   docker restart "mount-rs-tidb-$run_id-tikv1" >/dev/null
