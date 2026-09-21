@@ -2722,7 +2722,7 @@ impl Nfs4Session {
         let Some(map) = self.options.nfs4.idmap.as_ref() else {
             return id.to_string();
         };
-        let Some(name) = map.name_of(id, group) else {
+        let Some(name) = map.resolve_name(id, group) else {
             return id.to_string();
         };
         if name.is_empty() {
@@ -2756,7 +2756,7 @@ impl Nfs4Session {
             }
             name = local;
         }
-        map.id_of(name, group).ok_or(NFS4ERR_BADOWNER)
+        map.resolve_id(name, group).ok_or(NFS4ERR_BADOWNER)
     }
 
     fn attrs_equal(&self, stats: &Stats, attrs: &Fattr4) -> bool {
@@ -4689,6 +4689,41 @@ mod tests {
             session.owner_id("missing@example.test", false),
             Err(super::NFS4ERR_BADOWNER)
         );
+    }
+
+    #[test]
+    fn owner_translation_callbacks_cover_user_group_and_panic_boundaries() {
+        let mut options = NfsSessionOptions::default();
+        options.nfs4.idmap = Some(
+            Nfs4IdMap::new(Some("example.test".to_owned()))
+                .with_name_of(|id, group| match (id, group) {
+                    (1000, false) => Some("alice".to_owned()),
+                    (1000, true) => Some("staff".to_owned()),
+                    _ => None,
+                })
+                .with_id_of(|name, group| match (name, group) {
+                    ("alice", false) => Some(1000),
+                    ("staff", true) => Some(1000),
+                    _ => None,
+                }),
+        );
+        let session = Nfs4Session::new(MemoryFs::empty(), options);
+
+        assert_eq!(session.owner_name(1000, false), "alice@example.test");
+        assert_eq!(session.owner_name(1000, true), "staff@example.test");
+        assert_eq!(session.owner_name(1001, false), "1001");
+        assert_eq!(session.owner_id("alice@example.test", false), Ok(1000));
+        assert_eq!(session.owner_id("staff@example.test", true), Ok(1000));
+        assert_eq!(
+            session.owner_id("missing@example.test", false),
+            Err(super::NFS4ERR_BADOWNER)
+        );
+
+        let panicking = Nfs4IdMap::new(None)
+            .with_name_of(|_, _| panic!("name callback panic"))
+            .with_id_of(|_, _| panic!("id callback panic"));
+        assert_eq!(panicking.resolve_name(1000, false), None);
+        assert_eq!(panicking.resolve_id("alice", false), None);
     }
 
     #[test]

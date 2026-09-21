@@ -35,8 +35,9 @@ pub use server::{
     NfsTransportErrorHook, NfsTransportErrorKind, create_nfs_server, create_nfs_server_with_hooks,
 };
 pub use session::{
-    Nfs3Session, Nfs4Clock, Nfs4IdMap, Nfs4StateOptions, NfsRequestContext, NfsSessionError,
-    NfsSessionErrorHook, NfsSessionHooks, NfsSessionOptions, NfsSessionStats,
+    Nfs3Session, Nfs4Clock, Nfs4IdCallback, Nfs4IdMap, Nfs4NameCallback, Nfs4StateOptions,
+    NfsRequestContext, NfsSessionError, NfsSessionErrorHook, NfsSessionHooks, NfsSessionOptions,
+    NfsSessionStats,
 };
 pub use v4::{NFS_V4, NFS4_PROGRAM, Nfs4Session};
 pub use xdr::{XdrError, XdrReader, XdrWriter};

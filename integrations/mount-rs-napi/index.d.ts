@@ -2100,10 +2100,13 @@ export interface Nfs4IdMap {
   users?: Record<string, number>
   /** Name-to-gid entries. Unmapped ids retain numeric wire form. */
   groups?: Record<string, number>
+  nameOf?: (id: number, group: boolean) => string | undefined
+  idOf?: (name: string, group: boolean) => number | undefined
 }
 
 export interface Nfs4StateKnobs {
   idmap?: Nfs4IdMap
+  now?: () => number
   leaseSeconds?: number
   seed?: number
   maxSessions?: number

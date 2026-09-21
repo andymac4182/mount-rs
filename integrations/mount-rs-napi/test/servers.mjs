@@ -15,6 +15,7 @@ import {
   createWebdavServer,
   WebdavSession,
 } from "../index.js";
+import * as nfs from "../nfs.cjs";
 
 let memoryFilesystem = () => Filesystem.memory();
 if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
@@ -250,6 +251,54 @@ function nfsV4NullCall(xid) {
   return call;
 }
 
+function nfsV4Compound(tag, operations) {
+  return nfs.encodeXdr((writer) => {
+    writer.string(tag);
+    writer.u32(1);
+    writer.u32(operations.length);
+    for (const [opcode, body] of operations) {
+      writer.u32(opcode);
+      writer.raw(body);
+    }
+  });
+}
+
+function nfsV4Operation(write) {
+  return nfs.encodeXdr(write);
+}
+
+function nfsV4Call(xid, tag, operations) {
+  return nfs.encodeCall({
+    xid,
+    program: 100_003,
+    version: 4,
+    procedure: 1,
+    cred: nfs.AUTH_NULL,
+    verf: nfs.AUTH_NULL,
+    args: nfsV4Compound(tag, operations),
+  });
+}
+
+function decodeNfsV4Compound(reply, label) {
+  const decoded = nfs.decodeReply(reply);
+  assert.equal(decoded.reply.acceptStat, nfs.RPC_SUCCESS, `${label} RPC status`);
+  const status = decoded.results.u32(`${label} compound status`);
+  const tag = decoded.results.string(undefined, `${label} tag`);
+  const count = decoded.results.u32(`${label} result count`);
+  return { reader: decoded.results, status, tag, count };
+}
+
+function readNfsV4Sequence(reader, label) {
+  assert.equal(reader.u32(`${label} operation`), 53);
+  assert.equal(reader.u32(`${label} status`), 0);
+  reader.fixedOpaque(16, `${label} session id`);
+  reader.u32(`${label} sequence`);
+  reader.u32(`${label} slot`);
+  reader.u32(`${label} highest slot`);
+  reader.u32(`${label} target highest slot`);
+  reader.u32(`${label} status flags`);
+}
+
 function nfsRecord(record) {
   const marker = Buffer.alloc(4);
   marker.writeUInt32BE((0x8000_0000 | record.length) >>> 0);
@@ -260,6 +309,9 @@ async function exerciseNfs() {
   const filesystem = memoryFilesystem();
   const reports = [];
   const sessionErrors = [];
+  const nameCalls = [];
+  const idCalls = [];
+  const clockCalls = [];
   const server = createNfsServer(filesystem, {
     host: "127.0.0.1",
     port: 0,
@@ -270,12 +322,26 @@ async function exerciseNfs() {
         domain: "example.test",
         users: { root: 0 },
         groups: { root: 0 },
+        nameOf(id, group) {
+          nameCalls.push({ id, group });
+          return `${group ? "group" : "user"}-${id}`;
+        },
+        idOf(name, group) {
+          idCalls.push({ name, group });
+          if (!group && name === "named-user") return 0;
+          if (group && name === "named-group") return 0;
+          return undefined;
+        },
+      },
+      now() {
+        clockCalls.push(Date.now());
+        return 1_000 + clockCalls.length;
       },
       seed: 0x10203040,
       leaseSeconds: 7,
       maxSessions: 1,
       maxForeSlots: 1,
-      maxOperations: 2,
+      maxOperations: 3,
       maxRequestSize: 4096,
       maxCachedResponseSize: 32,
       maxOpensPerFile: 1,
@@ -328,6 +394,151 @@ async function exerciseNfs() {
     assert.equal(server.session.stats.procedures["NFS4:NULL"], 1);
     assert.equal(server.session.v4.stats.requests, 2);
     assert.equal(await server.session.v4.sweepExpired(), 0);
+    assert.ok(clockCalls.length > 0, "NFSv4 uses the injected JavaScript clock");
+
+    // Exercise the callback-backed NFSv4 state path through the actual N-API
+    // server. The synchronous JS callbacks are invoked from the Rust async
+    // worker and their translated owner strings are returned on the wire.
+    const exchangeReply = await server.session.v4.handleCall(
+      nfsV4Call(46, "exchange", [[42, nfsV4Operation((writer) => {
+        writer.fixedOpaque(Buffer.from("nfs-vrfr"), 8);
+        writer.varOpaque(Buffer.from("nfs-napi-callback"));
+        writer.u32(0);
+        writer.u32(0);
+        writer.u32(0);
+      })]]),
+    );
+    const exchange = decodeNfsV4Compound(exchangeReply, "EXCHANGE_ID");
+    assert.equal(exchange.status, 0);
+    assert.equal(exchange.tag, "exchange");
+    assert.equal(exchange.count, 1);
+    assert.equal(exchange.reader.u32("EXCHANGE_ID operation"), 42);
+    assert.equal(exchange.reader.u32("EXCHANGE_ID status"), 0);
+    const clientId = exchange.reader.u64("EXCHANGE_ID clientid");
+    exchange.reader.u32("EXCHANGE_ID sequence");
+    exchange.reader.u32("EXCHANGE_ID flags");
+    exchange.reader.u32("EXCHANGE_ID state protection");
+    exchange.reader.u64("EXCHANGE_ID server owner minor");
+    exchange.reader.varOpaque(undefined, "EXCHANGE_ID server owner major");
+    exchange.reader.varOpaque(undefined, "EXCHANGE_ID server scope");
+    assert.equal(exchange.reader.u32("EXCHANGE_ID implementation count"), 0);
+    exchange.reader.end("EXCHANGE_ID reply");
+
+    const channelAttrs = (writer) => {
+      writer.u32(0);
+      writer.u32(1 << 20);
+      writer.u32(1 << 20);
+      writer.u32(1 << 20);
+      writer.u32(8);
+      writer.u32(1);
+      writer.u32(0);
+    };
+    const createSessionReply = await server.session.v4.handleCall(
+      nfsV4Call(47, "create", [[43, nfsV4Operation((writer) => {
+        writer.u64(clientId);
+        writer.u32(1);
+        writer.u32(0);
+        channelAttrs(writer);
+        channelAttrs(writer);
+        writer.u32(0);
+        writer.u32(1);
+        writer.u32(nfs.AUTH_NONE);
+      })]]),
+    );
+    const createSession = decodeNfsV4Compound(createSessionReply, "CREATE_SESSION");
+    assert.equal(createSession.status, 0);
+    assert.equal(createSession.tag, "create");
+    assert.equal(createSession.count, 1);
+    assert.equal(createSession.reader.u32("CREATE_SESSION operation"), 43);
+    assert.equal(createSession.reader.u32("CREATE_SESSION status"), 0);
+    const sessionId = createSession.reader.fixedOpaque(16, "CREATE_SESSION session id");
+    createSession.reader.u32("CREATE_SESSION sequence");
+    createSession.reader.u32("CREATE_SESSION flags");
+    for (let channel = 0; channel < 2; channel += 1) {
+      for (let field = 0; field < 6; field += 1) createSession.reader.u32("channel attribute");
+      assert.equal(createSession.reader.u32("channel RDMA count"), 0);
+    }
+    createSession.reader.end("CREATE_SESSION reply");
+
+    const sequence = (sequenceNumber) => nfsV4Operation((writer) => {
+      writer.fixedOpaque(sessionId, 16);
+      writer.u32(sequenceNumber);
+      writer.u32(0);
+      writer.u32(0);
+      writer.bool(false);
+    });
+    const putRoot = nfsV4Operation(() => {});
+    const requestedOwnerBitmap = nfsV4Operation((writer) => {
+      writer.u32(2);
+      writer.u32(0);
+      writer.u32((1 << 4) | (1 << 5));
+    });
+    const getattrReply = await server.session.v4.handleCall(
+      nfsV4Call(48, "getattr", [
+        [53, sequence(1)],
+        [24, putRoot],
+        [9, requestedOwnerBitmap],
+      ]),
+    );
+    const getattrResult = decodeNfsV4Compound(getattrReply, "GETATTR");
+    assert.equal(getattrResult.status, 0);
+    assert.equal(getattrResult.tag, "getattr");
+    assert.equal(getattrResult.count, 3);
+    readNfsV4Sequence(getattrResult.reader, "GETATTR SEQUENCE");
+    assert.equal(getattrResult.reader.u32("GETATTR PUTROOTFH operation"), 24);
+    assert.equal(getattrResult.reader.u32("GETATTR PUTROOTFH status"), 0);
+    assert.equal(getattrResult.reader.u32("GETATTR operation"), 9);
+    assert.equal(getattrResult.reader.u32("GETATTR status"), 0);
+    assert.equal(getattrResult.reader.u32("GETATTR bitmap words"), 2);
+    assert.equal(getattrResult.reader.u32("GETATTR owner bitmap"), 0);
+    assert.equal(getattrResult.reader.u32("GETATTR group bitmap"), (1 << 4) | (1 << 5));
+    const ownerAttrs = getattrResult.reader.varOpaque(undefined, "GETATTR attributes");
+    const decodedOwnerAttrs = nfs.decodeXdr(ownerAttrs, (reader) => [
+      reader.string(),
+      reader.string(),
+    ]);
+    const userCall = nameCalls.find(({ group }) => !group);
+    const groupCall = nameCalls.find(({ group }) => group);
+    assert.ok(userCall, "owner callback was invoked");
+    assert.ok(groupCall, "owner-group callback was invoked");
+    assert.deepEqual(decodedOwnerAttrs, [
+      `user-${userCall.id}@example.test`,
+      `group-${groupCall.id}@example.test`,
+    ]);
+    getattrResult.reader.end("GETATTR reply");
+
+    const setattrAttrs = nfs.encodeXdr((writer) => {
+      writer.string("named-user@example.test");
+      writer.string("named-group@example.test");
+    });
+    const setattr = nfsV4Operation((writer) => {
+      writer.u32(0);
+      writer.fixedOpaque(Buffer.alloc(12), 12);
+      writer.u32(2);
+      writer.u32(0);
+      writer.u32((1 << 4) | (1 << 5));
+      writer.varOpaque(setattrAttrs);
+    });
+    const setattrReply = await server.session.v4.handleCall(
+      nfsV4Call(49, "setattr", [[53, sequence(2)], [24, putRoot], [34, setattr]]),
+    );
+    const setattrResult = decodeNfsV4Compound(setattrReply, "SETATTR");
+    assert.equal(setattrResult.status, 0);
+    assert.equal(setattrResult.tag, "setattr");
+    assert.equal(setattrResult.count, 3);
+    readNfsV4Sequence(setattrResult.reader, "SETATTR SEQUENCE");
+    assert.equal(setattrResult.reader.u32("SETATTR PUTROOTFH operation"), 24);
+    assert.equal(setattrResult.reader.u32("SETATTR PUTROOTFH status"), 0);
+    assert.equal(setattrResult.reader.u32("SETATTR operation"), 34);
+    assert.equal(setattrResult.reader.u32("SETATTR status"), 0);
+    assert.equal(setattrResult.reader.u32("SETATTR applied bitmap words"), 2);
+    assert.equal(setattrResult.reader.u32("SETATTR applied owner"), 0);
+    assert.equal(setattrResult.reader.u32("SETATTR applied group"), (1 << 4) | (1 << 5));
+    setattrResult.reader.end("SETATTR reply");
+    assert.deepEqual(idCalls, [
+      { name: "named-user", group: false },
+      { name: "named-group", group: true },
+    ]);
     const malformedV4 = nfsV4NullCall(45);
     malformedV4.writeUInt32BE(1, 20);
     const malformedV4Reply = await server.session.v4.handleCall(malformedV4);
@@ -337,7 +548,7 @@ async function exerciseNfs() {
     assert.ok(sessionErrors[0].error instanceof Error);
     assert.match(sessionErrors[0].error.message, /COMPOUND|truncated|byte/i);
     assert.equal(sessionErrors[0].call.xid, 45);
-    const rootHandle = [{ id: 1n, fileid: 1n, path: "/" }];
+    const rootHandle = [{ id: 1n, fileid: 1n, key: "0:1", path: "/" }];
     assert.deepEqual(server.session.handles, rootHandle);
     assert.deepEqual(server.session.v4.handles, rootHandle);
 
