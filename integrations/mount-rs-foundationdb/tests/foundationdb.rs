@@ -1,5 +1,6 @@
 #![cfg(feature = "foundationdb")]
 
+use foundationdb::Database;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
 use mount_rs_core::storage::{
     BlockStore, DirectoryEntry, MetadataStore, Namespace, NodeData, NodeMetadata,
@@ -7,7 +8,9 @@ use mount_rs_core::storage::{
 use mount_rs_core::types::{S_IFDIR, S_IFLNK, Stats};
 use mount_rs_core::{ErrorCode, Result};
 use mount_rs_foundationdb::{
-    DEFAULT_METADATA_CHUNK_BYTES, FoundationDbStorage, FoundationDbStorageOptions, LeaseOracle,
+    DEFAULT_METADATA_CHUNK_BYTES, FoundationDbLeaseAuthority, FoundationDbLimits,
+    FoundationDbSharedLeaseOracle, FoundationDbStorage, FoundationDbStorageOptions,
+    LeaseAuthorityKind, LeaseOracle,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -132,6 +135,92 @@ impl LeaseOracle for DeterministicLeaseOracle {
     }
 }
 
+async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()> {
+    let db = Arc::new(Database::from_path(cluster_file).map_err(|error| {
+        mount_rs_core::FsError::backend(format!(
+            "open FoundationDB shared-authority test database: {error}"
+        ))
+    })?);
+    let authority_prefix = format!("{prefix}/shared-authority");
+    let volume_prefix = format!("{prefix}/shared-authority-volume");
+    let authority = FoundationDbLeaseAuthority::from_database(
+        Arc::clone(&db),
+        &authority_prefix,
+        FoundationDbLimits::default(),
+    )?;
+    let reader_a = FoundationDbSharedLeaseOracle::from_database(
+        Arc::clone(&db),
+        &authority_prefix,
+        FoundationDbLimits::default(),
+    )?;
+    let reader_b = FoundationDbSharedLeaseOracle::from_database(
+        Arc::clone(&db),
+        &authority_prefix,
+        FoundationDbLimits::default(),
+    )?;
+    assert_eq!(
+        reader_a.authority_kind(),
+        LeaseAuthorityKind::SharedProvider
+    );
+
+    let unavailable = reader_a
+        .now_ms()
+        .await
+        .expect_err("a reader must fail closed before authority recovery");
+    assert_eq!(unavailable.code, ErrorCode::Enotsup);
+
+    assert_eq!(authority.publish_now_ms(2_000_000).await?, 2_000_000);
+    assert_eq!(reader_a.now_ms().await?, 2_000_000);
+    assert_eq!(reader_b.now_ms().await?, 2_000_000);
+
+    // Both independent storage handles consume the same published time. A
+    // local clock skew on either host cannot move the shared oracle because the
+    // reader path never proposes or writes a time value.
+    let first = FoundationDbStorage::from_cluster_file(
+        cluster_file,
+        FoundationDbStorageOptions::new(&volume_prefix)
+            .with_production_lease_oracle(reader_a.clone()),
+    )?;
+    let second = FoundationDbStorage::from_cluster_file(
+        cluster_file,
+        FoundationDbStorageOptions::new(&volume_prefix)
+            .with_production_lease_oracle(reader_b.clone()),
+    )?;
+    let first_lease = first
+        .metadata()
+        .acquire_writer("shared-authority-first", Duration::from_secs(30))
+        .await?;
+    let busy = second
+        .metadata()
+        .acquire_writer("shared-authority-second", Duration::from_secs(30))
+        .await
+        .expect_err("the shared authority must protect the live writer lease");
+    assert_eq!(busy.code, ErrorCode::Eagain);
+
+    // A backward authority sample is clamped by the durable record. Advancing
+    // the authority then expires the old lease for both readers, and the old
+    // writer's renewal remains fenced after replacement.
+    assert_eq!(authority.publish_now_ms(1).await?, 2_000_000);
+    assert_eq!(reader_b.now_ms().await?, 2_000_000);
+    assert_eq!(authority.publish_now_ms(2_030_001).await?, 2_030_001);
+    assert_eq!(reader_a.now_ms().await?, 2_030_001);
+    let replacement = second
+        .metadata()
+        .acquire_writer("shared-authority-second", Duration::from_secs(5))
+        .await?;
+    assert!(replacement.fence > first_lease.fence);
+    let stale = first
+        .metadata()
+        .renew_writer(&first_lease, Duration::from_secs(5))
+        .await
+        .expect_err("the old shared-authority writer must be fenced");
+    assert_eq!(stale.code, ErrorCode::Estale);
+    second.metadata().release_writer(&replacement).await?;
+    drop(first);
+    drop(second);
+    Ok(())
+}
+
 async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -170,6 +259,8 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
         .expect_err("explicitly disabled lease authority must fail closed");
     assert_eq!(error.code, ErrorCode::Enotsup);
     drop(explicit_without_clock);
+
+    verify_shared_authority(cluster_file, &prefix).await?;
 
     // The persisted FoundationDB oracle is an explicit single-authority/test
     // choice. It is not a production cross-host clock authority, so the

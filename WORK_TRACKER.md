@@ -906,13 +906,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   contract passed. The container supplies `fdb_c`; no host install or mock.
 - [ ] W07.3 Resolve production lease/time semantics: default unsupported clock
   behavior and a development clock do not establish safe distributed fencing.
-  The current safety slice adds `with_production_lease_oracle` plus the
+  The safety slice adds `with_production_lease_oracle` plus the
   `LeaseAuthorityKind::SharedProvider` declaration gate: unverified,
-  development and single-authority clocks now fail closed when a caller opts
-  into the production path, with a focused regression test. This prevents an
-  unsafe default or persisted host clock from being presented as distributed
-  fencing, but the item remains open until a concrete protected shared
-  authority and multi-host clock-skew/recovery evidence are integrated.
+  development and single-authority clocks fail closed. The provider now also
+  exposes a FoundationDB-hosted write-side `FoundationDbLeaseAuthority` and a
+  read-only `FoundationDbSharedLeaseOracle`; the real-cluster integration test
+  exercises two independent readers, missing-authority fail-closed behavior,
+  backward-sample clamping, forward recovery and stale-writer fencing. Hosted
+  runtime evidence and deployment-level authority credential/clock-skew
+  controls remain pending, so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -921,8 +923,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   opt-in native features with an explicit persisted single-authority/test mode.
   The hosted FDB lane now builds the feature-enabled addon in the pinned
   libfdb_c client image and runs the live Node chunked factory against the real
-  cluster, composing RustFS blocks when that lane is active. Native-mount and
-  macOS/Linux acceptance remain open.
+  cluster, composing RustFS blocks when that lane is active. The same lane now
+  has an explicit Linux FUSE prerequisite and runs the config-driven CLI native
+  lifecycle/reopen test inside the client container when `/dev/fuse` is
+  available. Hosted result and macOS NFS acceptance remain open.
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
