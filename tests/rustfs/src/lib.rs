@@ -189,9 +189,9 @@ async fn real_rustfs_block_contract() {
             .collect::<Vec<_>>();
         let first_id = blocks.put(&payload).await.unwrap();
         let second_id = blocks.put(&payload).await.unwrap();
-        assert_ne!(
+        assert_eq!(
             first_id, second_id,
-            "immutable block publication reused an ID"
+            "content-addressed immutable publication should reuse an ID"
         );
         assert_eq!(blocks.get(&first_id).await.unwrap(), payload);
         blocks.flush().await.unwrap();
@@ -320,7 +320,7 @@ async fn real_rustfs_block_contract() {
         )
         .unwrap();
 
-        for id in concurrent_ids.into_iter().chain([first_id, second_id]) {
+        for id in concurrent_ids.into_iter().chain([first_id]) {
             blocks.delete(&id).await.unwrap();
         }
         object_store.delete(&conditional_path).await.unwrap();

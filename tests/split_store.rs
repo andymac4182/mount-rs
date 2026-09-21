@@ -206,9 +206,9 @@ async fn assert_live_r2_block_contract(config: &R2Config, blocks: &TrackedObject
         .collect::<Vec<_>>();
     let first_id = blocks.put(&payload).await.unwrap();
     let second_id = blocks.put(&payload).await.unwrap();
-    assert_ne!(
+    assert_eq!(
         first_id, second_id,
-        "live R2 immutable block publication reused an ID"
+        "live R2 content-addressed immutable publication should reuse an ID"
     );
     blocks.flush().await.unwrap();
     assert_eq!(blocks.get(&first_id).await.unwrap(), payload);
