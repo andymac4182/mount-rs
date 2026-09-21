@@ -1021,21 +1021,29 @@ fn mount_data(
         parts.push(format!("user_id={uid}"));
         parts.push(format!("group_id={gid}"));
     }
-    parts.push(format!("fsname={}", options.fsname));
+    // The helper consumes source metadata and generic mount flags from its
+    // option string. The privileged mount(2) path supplies the source and
+    // flags through its syscall arguments instead, so forwarding them as
+    // kernel data would make the FUSE driver reject the mount with EINVAL.
+    if privileged.is_none() {
+        parts.push(format!("fsname={}", options.fsname));
+    }
     if options.default_permissions {
         parts.push("default_permissions".to_owned());
     }
     if options.allow_other {
         parts.push("allow_other".to_owned());
     }
-    if options.read_only {
+    if privileged.is_none() && options.read_only {
         parts.push("ro".to_owned());
     }
     if let Some(max_read) = options.max_read {
         parts.push(format!("max_read={max_read}"));
     }
-    if let Some(subtype) = &options.subtype {
-        parts.push(format!("subtype={subtype}"));
+    if privileged.is_none() {
+        if let Some(subtype) = &options.subtype {
+            parts.push(format!("subtype={subtype}"));
+        }
     }
     parts.extend(options.mount_options.iter().cloned());
     std::ffi::CString::new(parts.join(",")).map_err(|_| {
@@ -1368,6 +1376,30 @@ mod tests {
         assert!(options.default_permissions);
         assert!(!options.allow_other);
         assert_eq!(options.device, Path::new("/dev/fuse"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_mount_data_excludes_helper_metadata_and_flags() {
+        let options = MountOptions {
+            fsname: "mount-rs-test".to_owned(),
+            subtype: Some("mount-rs".to_owned()),
+            read_only: true,
+            ..MountOptions::default()
+        };
+
+        let privileged = mount_data(&options, Some((3, 0o040755, 1000, 1000)))
+            .expect("privileged mount data should be valid");
+        assert_eq!(
+            privileged.to_str().expect("mount data is UTF-8"),
+            "fd=3,rootmode=40755,user_id=1000,group_id=1000,default_permissions"
+        );
+
+        let helper = mount_data(&options, None).expect("helper mount data should be valid");
+        assert_eq!(
+            helper.to_str().expect("mount data is UTF-8"),
+            "fsname=mount-rs-test,default_permissions,ro,subtype=mount-rs"
+        );
     }
 
     #[test]
