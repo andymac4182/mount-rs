@@ -14,7 +14,7 @@ restart/concurrency boundaries.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Public S3 exports and protocol behavior | In progress | Pinned-oracle codec/API differentials and generated declarations |
+| Public S3 exports and protocol behavior | In progress (Node scope explicit) | Pinned-oracle runtime scope audit, Rust codec/API differentials, and generated declarations |
 | Session, streaming, bucket-map and connection objects | In progress | Buffered/streamed request/response, options, assertions, buckets, connections, and peer-fault evidence |
 | Structural driver and local lifecycle | In progress | Oracle-backed source/bucket construction, mixed structural bucket maps, isolation, session replacement, close sweep, terminal-race handling, and local filesystem behavior |
 | Live AWS/R2 provider | External gate | Fresh authenticated service result; credentials remain externally injected |
@@ -22,8 +22,9 @@ restart/concurrency boundaries.
 
 ## Current queue
 
-- Close any remaining oracle-specific S3 session/server/member parity and keep
-  unsupported members explicitly scoped.
+- Keep the supported Node `./s3` server/session boundary pinned by the exact
+  oracle runtime scope audit; keep the 153 oracle-only codec/helper members
+  explicitly Rust-owned rather than implying JavaScript parity.
 - Qualify live AWS/R2 behavior with fresh credentials and record any service
   limitations separately from local structural-driver evidence.
 - Run fault, cancellation, concurrency, restart, and durability matrices.
@@ -41,6 +42,7 @@ restart/concurrency boundaries.
 | 2026-09-22 | Added failed-Complete retry regression | The focused `invalid_multipart_complete_releases_finalization_claim_for_retry` gateway test passed: a deliberately invalid ETag returns `InvalidPart`, removes the filesystem-visible `.finalizing` claim, and permits a subsequent correct Complete and GET; full provider/native/hosted and crash/power-loss boundaries remain separate | Crash/power-loss recovery, provider-backed durability, broader upload/complete ordering, live AWS/R2, complete oracle-specific codec/member parity, and native/hosted lifecycle evidence remain open; production decision stays NO-GO |
 | 2026-09-22 | Exercised the N-API multipart replacement-session boundary | Regenerated the release addon/declarations with `CI=true CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-s3-target pnpm build`; host-enabled `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/servers.mjs` passed the direct N-API replacement-session create/part/list/complete/GET flow alongside streamed traffic, cancellation, bucket isolation, connection cleanup, and one typed peer-fault callback; `node test/typecheck.mjs` and `node test/distribution.mjs` passed | This is same-process N-API evidence over a shared native Filesystem, not native mount, hosted CI, crash/power-loss durability, live AWS/R2, or complete oracle codec/member parity; production decision stays NO-GO |
 | 2026-09-22 | Exercised native-filesystem process-restart multipart recovery | `node test/s3-restart.mjs` passed: a child process intentionally exited without `S3Server.close()` after CreateMultipartUpload/UploadPart, and a fresh `createNodeFsDriver` plus S3 server listed, completed, and read the staged object; this is process-restart evidence over the local filesystem, not a power-loss or hosted-native result | Crash/power-loss recovery, provider-backed durability, broader upload/complete ordering, live AWS/R2, complete oracle-specific codec/member parity, and native/hosted lifecycle evidence remain open; production decision stays NO-GO |
+| 2026-09-22 | Pinned the Node `./s3` supported-scope boundary | `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/s3-barrel-scope.mjs` passed with 155 oracle runtime exports, 255 package exports, and the exact 153 oracle-only codec/helper names scoped out; supported N-API S3 server/session/streaming classes and factory identity remain present | This explicitly scopes the pure codec/helper barrel to Rust; live AWS/R2, crash/power-loss recovery, broader ordering/concurrency, and native/hosted lifecycle evidence remain open; production decision stays NO-GO |
 
 ## Explicit boundaries
 
@@ -50,6 +52,9 @@ restart/concurrency boundaries.
   not a passing service result.
 - Native Linux/Windows/macOS mount and hosted lanes remain separate from this
   mount-free transport evidence.
+- The Node `./s3` package entry intentionally supports the N-API
+  server/session facade; the oracle-only pure codec/helper barrel is Rust-owned
+  and is not counted as Node parity.
 
 ## Completion rule
 
