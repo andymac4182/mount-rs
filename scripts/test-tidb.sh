@@ -695,10 +695,6 @@ if [ "$topology" = durable ]; then
   # restart, and a TiKV store restart. This is still a test-cluster check, not
   # a power-loss or host-fsync guarantee; the provider's durable flag remains
   # caller-owned.
-  begin_phase "PD restart readiness"
-  docker restart "$pd1_container" >/dev/null
-  wait_for_pd "$pd1_container" "PD1 after restart"
-  wait_for_pd_quorum
   begin_phase "TiDB restart readiness"
   docker restart "$tidb_container" >/dev/null
   wait_for_tidb
@@ -706,6 +702,11 @@ if [ "$topology" = durable ]; then
   docker restart "mount-rs-tidb-$run_id-tikv1" >/dev/null
   wait_for_tikv "mount-rs-tidb-$run_id-tikv1" "TiKV1 after restart"
   wait_for_store_count
+  begin_phase "PD restart readiness"
+  docker restart "$pd1_container" >/dev/null
+  wait_for_pd "$pd1_container" "PD1 after restart"
+  wait_for_pd_quorum
+  wait_for_tidb
   set +e
   run_provider_test 1
   provider_status=$?
