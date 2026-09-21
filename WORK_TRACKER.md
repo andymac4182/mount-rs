@@ -2853,7 +2853,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `be721a20` was freshly reverified after the concurrent NFS/WebDAV/
+  Source `b7d77432` was freshly reverified after the concurrent NFS/9P/WebDAV/
   provider and Ozone updates with the full locked workspace test suite (exit 0)
   and strict workspace Clippy with `-D warnings` (exit 0). This is
   source-health evidence only and does not close W08-P01–P09.
