@@ -16,12 +16,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use mount_rs_host::HostFs;
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, FILE_SYNC, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3,
-    NFS3_OK, NFSPROC3_CREATE, NFSPROC3_LOOKUP, NFSPROC3_READ, NFSPROC3_WRITE,
+    NFS3_OK, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_LOOKUP, NFSPROC3_READ, NFSPROC3_WRITE,
 };
 use mount_rs_nfs::protocol::{
-    Create3args, DirOpArgs, Read3args, Sattr3, Write3args, read_create_res, read_lookup_res,
-    read_mount_res, read_read_res, read_write_res, write_create_args, write_dir_op,
-    write_read_args, write_write_args,
+    Create3args, DirOpArgs, Read3args, Read3res, Sattr3, Write3args, read_create_res,
+    read_lookup_res, read_mount_res, read_read_res, read_write_res, write_create_args,
+    write_dir_op, write_read_args, write_write_args,
 };
 use mount_rs_nfs::rpc::{RPC_SUCCESS, RecordAssembler, decode_reply, encode_call, frame_record};
 use mount_rs_nfs::xdr::encode_xdr;
@@ -239,7 +239,7 @@ async fn lookup_file(stream: &mut TcpStream, xid: u32, root: &[u8]) -> Vec<u8> {
     lookup.object.expect("successful LOOKUP file handle")
 }
 
-async fn read_file(stream: &mut TcpStream, xid: u32, file: &[u8]) -> Vec<u8> {
+async fn read_file_response(stream: &mut TcpStream, xid: u32, file: &[u8]) -> Read3res {
     let args = encode_xdr(|writer| {
         write_read_args(
             writer,
@@ -259,8 +259,17 @@ async fn read_file(stream: &mut TcpStream, xid: u32, file: &[u8]) -> Vec<u8> {
     assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
     let read = read_read_res(&mut body, 128).expect("decode READ response");
     body.end("READ response").expect("consume READ response");
+    read
+}
+
+async fn read_file(stream: &mut TcpStream, xid: u32, file: &[u8]) -> Vec<u8> {
+    let read = read_file_response(stream, xid, file).await;
     assert_eq!(read.status, NFS3_OK);
     read.data
+}
+
+async fn read_file_status(stream: &mut TcpStream, xid: u32, file: &[u8]) -> u32 {
+    read_file_response(stream, xid, file).await.status
 }
 
 async fn child_server() {
@@ -299,8 +308,13 @@ async fn nfs_v3_host_backend_survives_process_crash_and_restart() {
         .await
         .expect("connect replacement NFS server");
     let replacement_root = mount_root(&mut second, 11).await;
-    let replacement_file = lookup_file(&mut second, 12, &replacement_root).await;
-    assert_eq!(read_file(&mut second, 13, &replacement_file).await, payload);
+    assert_eq!(
+        read_file_status(&mut second, 12, &file_handle).await,
+        NFS3ERR_STALE,
+        "a file handle from the crashed server must not cross the replacement boundary"
+    );
+    let replacement_file = lookup_file(&mut second, 13, &replacement_root).await;
+    assert_eq!(read_file(&mut second, 14, &replacement_file).await, payload);
     second
         .shutdown()
         .await
