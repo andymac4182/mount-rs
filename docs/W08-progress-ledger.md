@@ -1,11 +1,11 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 07:27 AEST**
+Status snapshot: **2026-09-22 07:29 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
 implementation was qualified at hosted source `e0ab07d6`; the latest fetched
-public `origin/main` is `08f3dd03` (verified at **07:27 AEST**) after further
+public `origin/main` is `f1362442` (verified at **07:29 AEST**) after further
 concurrent mainline reconciliation. The W08.35 implementation and hosted-
 result ledger history remain in the same public ancestry; this pointer-only
 sync does not change any W08 production-gate decision.
@@ -470,6 +470,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 07:03–07:12 AEST | Committed W08.35 as `c4d1f8bd`, reconciled concurrent mainline changes and pushed merge tip `22f82dca` to `origin/main`. The automatic push run `35655178863` cancelled before jobs; manual credential-free run `35655299194`, job `106517465871`, resolved source `4efec58c`, completed successfully in 2m15s. Fetched public `origin/main` at `c45f3931` after concurrent threads advanced it. | ~0.1 engineer-day | ~2m15s hosted policy/artifact execution plus queue/cancellation and fetch/merge/push observation | W08.35 hosted implementation/static qualification passed. The production packet remains NO-GO with nine open gates and zero evidence records; no provider, candidate release, registry, canary, rollback or approval evidence is claimed. |
 | 2026-09-22 07:16–07:24 AEST | Added W08.36 placeholder rejection, ran the local 36-item/11-case policy suite, committed implementation as `0855e2ab`, reconciled concurrent mainline changes and pushed merge tip `e0ab07d6`. Hosted run `35656592580`, job `106521925802`, completed successfully in 2m45s at source `e0ab07d6`; fetched public `origin/main` at `57ade44a` after concurrent threads advanced it. | ~0.2 engineer-day | ~2m45s hosted policy/artifact execution plus queue and fetch/merge/push observation | W08.36 hosted implementation/static qualification passed. The production packet remains NO-GO with nine open gates and zero evidence records; no provider, candidate release, registry, canary, rollback or approval evidence is claimed. |
 | 2026-09-22 07:24–07:27 AEST | Reconciled the concurrent public changes, reran the 36-item rollout verifier, seven-case transition suite, NO-GO evidence validator and 11-case evidence suite, and pushed the W08.36 hosted-result ledger as public merge tip `08f3dd03`. | ~0.05 engineer-day | ~1–2 min fetch/merge/push reconciliation | The final public tip is clean and equal to `origin/main`; the W08 production packet remains NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 07:27–07:29 AEST | Pushed the pointer-only ledger synchronization as `f1362442` and verified `HEAD == origin/main` with a clean worktree. | ~0.03 engineer-day | ~1 min final push/fetch verification | No W08 implementation or production-gate state changed; the packet remains NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
