@@ -2396,10 +2396,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   statements fail closed. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
-  validator's secret-free six-case regression matrix covers valid, missing,
-  account-mismatch, endpoint, unsafe-prefix, and static-credential inputs;
-  it rejects a role ARN whose account does not match the protected
-  `MOUNT_RS_AWS_S3_ACCOUNT_ID` value. The
+  validator's secret-free seven-case regression matrix covers valid, missing,
+  account-mismatch, endpoint, unsafe-prefix, static-credential, and profile-
+  override inputs; it also enforces bucket length/edges, region edges, and
+  safe prefix characters. It rejects a role ARN whose account does not match
+  the protected `MOUNT_RS_AWS_S3_ACCOUNT_ID` value. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the

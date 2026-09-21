@@ -20,8 +20,17 @@ fail() {
 case "$AWS_S3_TEST_BUCKET" in
   ''|*[!a-z0-9.-]*) fail "invalid_bucket_shape" ;;
 esac
+[ "${#AWS_S3_TEST_BUCKET}" -ge 3 ] || fail "invalid_bucket_length"
+[ "${#AWS_S3_TEST_BUCKET}" -le 63 ] || fail "invalid_bucket_length"
+case "$AWS_S3_TEST_BUCKET" in
+  [!a-z0-9]*|*[!a-z0-9]) fail "invalid_bucket_edge" ;;
+  *..*) fail "invalid_bucket_shape" ;;
+esac
 case "$AWS_S3_TEST_REGION" in
   ''|*[!A-Za-z0-9.-]*) fail "invalid_region_shape" ;;
+esac
+case "$AWS_S3_TEST_REGION" in
+  [!A-Za-z0-9]*|*[!A-Za-z0-9]) fail "invalid_region_edge" ;;
 esac
 case "$AWS_S3_TEST_VERSIONING_STATUS" in
   None|Enabled|Suspended) ;;
@@ -32,7 +41,7 @@ case "$MOUNT_RS_AWS_S3_TEST_PREFIX" in
   *) fail "unsafe_test_prefix" ;;
 esac
 case "$MOUNT_RS_AWS_S3_TEST_PREFIX" in
-  *//*|*/../*|*/..|*/./*|*/.) fail "unsafe_test_prefix" ;;
+  *[!A-Za-z0-9._/-]*|*//*|*/../*|*/..|*/./*|*/.) fail "unsafe_test_prefix" ;;
 esac
 
 case "$AWS_S3_CI_ROLE_ARN" in
@@ -76,8 +85,12 @@ do
   [ -z "$endpoint_value" ] || fail "endpoint_override_detected"
 done
 
-if [ -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-}" ]; then
+if [ -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-${AWS_SECURITY_TOKEN:-}}" ]; then
   fail "preconfigured_credentials_detected"
+fi
+
+if [ -n "${AWS_PROFILE:-}${AWS_DEFAULT_PROFILE:-}${AWS_CONFIG_FILE:-}${AWS_SHARED_CREDENTIALS_FILE:-}" ]; then
+  fail "profile_override_detected"
 fi
 
 echo "AWS_S3_CI_CONFIG_PASS bucket=$AWS_S3_TEST_BUCKET region=$AWS_S3_TEST_REGION account=$AWS_S3_CI_EXPECTED_ACCOUNT_ID versioning=$AWS_S3_TEST_VERSIONING_STATUS role=redacted"
