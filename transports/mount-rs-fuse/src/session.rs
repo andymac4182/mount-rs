@@ -4,15 +4,16 @@ use crate::{
     Request,
     constants::{
         FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE,
-        FUSE_FORGET, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION, FUSE_LSEEK,
-        FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_RENAME2, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FUSE_FORGET, FUSE_GETLK, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION,
+        FUSE_LK_FLOCK, FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_RENAME2,
+        FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR_EXT, FUSE_STATFS,
     },
     error_reply,
     inodes::InodeTable,
     open_flags,
     protocol::{
-        FuseKstatfs, FuseReadlinkOut, FuseReplyBody, FuseRequestBody, ProtocolContext,
-        decode_request_body,
+        FuseFileLock, FuseKstatfs, FuseLkIn, FuseLkOut, FuseReadlinkOut, FuseReplyBody,
+        FuseRequestBody, ProtocolContext, decode_request_body,
     },
 };
 use mount_rs_core::{ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions, Result, Stats};
@@ -22,10 +23,48 @@ type DirectorySnapshot = Option<Vec<(String, u32)>>;
 const FUSE_IOCTL_IN_SIZE: usize = 32;
 // Keep path-component validation aligned with the `namelen` in STATFS.
 const NAME_MAX: usize = 255;
+const F_RDLCK: u32 = 0;
+const F_WRLCK: u32 = 1;
+const F_UNLCK: u32 = 2;
 // The driver contract currently supports plain rename only.  Match the
 // pinned mountx session: unsupported RENAME2 flag bits get ENOSYS so the
 // kernel can fall back to a plain rename where appropriate.
 const RENAME2_UNSUPPORTED_FLAGS: u32 = 0b111;
+
+#[derive(Debug, Clone, Copy)]
+struct HeldLock {
+    start: u128,
+    end: u128,
+    owner: u64,
+    pid: u32,
+    type_: u32,
+}
+
+fn lock_range(lock: FuseFileLock) -> Result<(u128, u128)> {
+    if !matches!(lock.type_, F_RDLCK | F_WRLCK | F_UNLCK) || lock.start > lock.end {
+        return Err(FsError::new(ErrorCode::Einval).with_message("invalid FUSE lock range"));
+    }
+    Ok((u128::from(lock.start), u128::from(lock.end) + 1))
+}
+
+fn ranges_overlap(left_start: u128, left_end: u128, right_start: u128, right_end: u128) -> bool {
+    left_start < right_end && right_start < left_end
+}
+
+fn lock_conflicts(held: HeldLock, request: FuseLkIn, start: u128, end: u128) -> bool {
+    held.owner != request.owner
+        && ranges_overlap(held.start, held.end, start, end)
+        && (held.type_ == F_WRLCK || request.lk.type_ == F_WRLCK)
+}
+
+fn wire_lock(lock: HeldLock) -> FuseFileLock {
+    FuseFileLock {
+        start: lock.start as u64,
+        end: (lock.end - 1) as u64,
+        type_: lock.type_,
+        pid: lock.pid,
+    }
+}
 
 async fn stat_of(driver: &dyn FsDriver, path: &str) -> Result<Stats> {
     match driver.lstat(path).await {
@@ -40,6 +79,7 @@ pub struct FuseSession {
     handles: HashMap<u64, Arc<dyn FileHandle>>,
     handle_nodes: HashMap<u64, u64>,
     inode_handles: HashMap<u64, Vec<u64>>,
+    locks: HashMap<u64, Vec<HeldLock>>,
     directories: HashMap<u64, (u64, DirectorySnapshot)>,
     next_handle: u64,
     pub max_request: usize,
@@ -128,6 +168,7 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         15 | 28 | 44 => Some(40),
         18 | 25 | 29 => Some(24),
         20 | 30 => Some(16),
+        FUSE_GETLK | FUSE_SETLK | FUSE_SETLKW => Some(48),
         FUSE_INTERRUPT => Some(8),
         FUSE_POLL => Some(24),
         FUSE_FALLOCATE => Some(32),
@@ -336,6 +377,130 @@ impl FuseSession {
         self.handle_nodes.insert(id, inode);
         self.inode_handles.entry(inode).or_default().push(id);
     }
+
+    fn lock_request(body: &[u8]) -> Result<FuseLkIn> {
+        Ok(FuseLkIn {
+            fh: u64_at(body, 0)?,
+            owner: u64_at(body, 8)?,
+            lk: FuseFileLock {
+                start: u64_at(body, 16)?,
+                end: u64_at(body, 24)?,
+                type_: u32_at(body, 32)?,
+                pid: u32_at(body, 36)?,
+            },
+            lk_flags: u32_at(body, 40)?,
+        })
+    }
+
+    fn lock_node(&self, fh: u64) -> Result<u64> {
+        self.handle_nodes
+            .get(&fh)
+            .copied()
+            .ok_or_else(|| FsError::new(ErrorCode::Ebadf))
+    }
+
+    fn validate_lock_request(request: FuseLkIn) -> Result<(u128, u128)> {
+        if request.lk_flags & !FUSE_LK_FLOCK != 0 {
+            return Err(FsError::new(ErrorCode::Einval).with_message("unsupported FUSE lock flags"));
+        }
+        lock_range(request.lk)
+    }
+
+    fn get_lock(&self, request: FuseLkIn) -> Result<FuseFileLock> {
+        let (start, end) = Self::validate_lock_request(request)?;
+        let node = self.lock_node(request.fh)?;
+        let conflict = self
+            .locks
+            .get(&node)
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|held| lock_conflicts(*held, request, start, end));
+        Ok(conflict.map_or(
+            FuseFileLock {
+                start: request.lk.start,
+                end: request.lk.end,
+                type_: F_UNLCK,
+                pid: 0,
+            },
+            wire_lock,
+        ))
+    }
+
+    fn set_lock(&mut self, request: FuseLkIn, blocking: bool) -> Result<()> {
+        let (start, end) = Self::validate_lock_request(request)?;
+        let node = self.lock_node(request.fh)?;
+        let existing = self.locks.get(&node).cloned().unwrap_or_default();
+        if request.lk.type_ != F_UNLCK
+            && existing
+                .iter()
+                .copied()
+                .any(|held| lock_conflicts(held, request, start, end))
+        {
+            return Err(FsError::new(ErrorCode::Eagain).with_message(if blocking {
+                "blocking FUSE lock cannot wait on a serialized session"
+            } else {
+                "FUSE lock conflicts with another owner"
+            }));
+        }
+
+        let mut updated = Vec::with_capacity(existing.len() + 1);
+        for held in existing {
+            if held.owner != request.owner || !ranges_overlap(held.start, held.end, start, end) {
+                updated.push(held);
+                continue;
+            }
+            if held.start < start {
+                updated.push(HeldLock { end: start, ..held });
+            }
+            if held.end > end {
+                updated.push(HeldLock { start: end, ..held });
+            }
+        }
+        if request.lk.type_ != F_UNLCK {
+            updated.push(HeldLock {
+                start,
+                end,
+                owner: request.owner,
+                pid: request.lk.pid,
+                type_: request.lk.type_,
+            });
+        }
+
+        updated.sort_by_key(|held| (held.start, held.end, held.owner, held.type_));
+        let mut coalesced: Vec<HeldLock> = Vec::with_capacity(updated.len());
+        for held in updated {
+            if let Some(previous) = coalesced.last_mut()
+                && previous.end >= held.start
+                && previous.owner == held.owner
+                && previous.pid == held.pid
+                && previous.type_ == held.type_
+            {
+                previous.end = previous.end.max(held.end);
+            } else {
+                coalesced.push(held);
+            }
+        }
+        if coalesced.is_empty() {
+            self.locks.remove(&node);
+        } else {
+            self.locks.insert(node, coalesced);
+        }
+        Ok(())
+    }
+
+    fn release_locks_for_node(&mut self, node: u64, owner: u64) {
+        let empty = if let Some(locks) = self.locks.get_mut(&node) {
+            locks.retain(|held| held.owner != owner);
+            locks.is_empty()
+        } else {
+            false
+        };
+        if empty {
+            self.locks.remove(&node);
+        }
+    }
+
     fn metadata_handle(
         &self,
         inode: u64,
@@ -395,6 +560,7 @@ impl FuseSession {
             handles: HashMap::new(),
             handle_nodes: HashMap::new(),
             inode_handles: HashMap::new(),
+            locks: HashMap::new(),
             directories: HashMap::new(),
             next_handle: 1,
             max_request: options.max_request,
@@ -816,6 +982,20 @@ impl FuseSession {
                 check_access(&stats, r.header.uid, r.header.gid, u32_at(r.body, 0)?)?;
                 Ok(vec![])
             }
+            FUSE_GETLK => {
+                let request = Self::lock_request(r.body)?;
+                let lock = self.get_lock(request)?;
+                encode_wire_reply(
+                    FUSE_GETLK,
+                    &FuseReplyBody::Lk(FuseLkOut { lk: lock }),
+                    self.protocol_context(),
+                )
+            }
+            FUSE_SETLK | FUSE_SETLKW => {
+                let request = Self::lock_request(r.body)?;
+                self.set_lock(request, r.header.opcode == FUSE_SETLKW)?;
+                Ok(vec![])
+            }
             FUSE_INTERRUPT => {
                 let target_unique = u64_at(r.body, 0)?;
                 // This request pump is deliberately serial and has no
@@ -1043,16 +1223,18 @@ impl FuseSession {
             }
             18 => {
                 let id = u64_at(r.body, 0)?;
+                let lock_owner = u64_at(r.body, 16)?;
                 let handle = self
                     .handles
                     .remove(&id)
                     .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
-                if let Some(node) = self.handle_nodes.remove(&id)
-                    && let Some(ids) = self.inode_handles.get_mut(&node)
-                {
-                    ids.retain(|entry| *entry != id);
-                    if ids.is_empty() {
-                        self.inode_handles.remove(&node);
+                if let Some(node) = self.handle_nodes.remove(&id) {
+                    self.release_locks_for_node(node, lock_owner);
+                    if let Some(ids) = self.inode_handles.get_mut(&node) {
+                        ids.retain(|entry| *entry != id);
+                        if ids.is_empty() {
+                            self.inode_handles.remove(&node);
+                        }
                     }
                 }
                 handle.close().await?;
@@ -1064,6 +1246,7 @@ impl FuseSession {
 
     pub async fn destroy(&mut self) {
         self.destroyed = true;
+        self.locks.clear();
         self.directories.clear();
         self.handle_nodes.clear();
         self.inode_handles.clear();
