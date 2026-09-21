@@ -297,6 +297,16 @@ failed; no hosted WebDAV PASS is claimable from this tip. Complete
 session/member parity, direct listener lifecycle, network/native/hosted
 concurrency, and the external provider/native/restart gates remain open.
 
+The 2026-09-22 FUSE native mount-object packet is published as
+`4fd3e25e030db5942e267a308a66ec12369feb36`, and the final local fetch verified
+`HEAD=origin/main` at that SHA. Exact-SHA hosted status is still incomplete:
+[CI run 35646646162](https://github.com/andymac4182/mount-rs/actions/runs/35646646162)
+is pending and [Fault injection run
+35646646113](https://github.com/andymac4182/mount-rs/actions/runs/35646646113)
+is in progress; the completed W04 policy result and unrelated R2 failure do not
+qualify Linux FUSE mount, callback, or lifecycle acceptance. W01 remains
+**NO-GO**.
+
 Next W01.1 action: close the next smallest remaining mount-free export or
 behavior gap, then rerun the pinned oracle and generated type/build checks
 before touching broader native acceptance. Production readiness remains **NO-GO**
