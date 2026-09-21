@@ -259,6 +259,7 @@ export interface MountP9Options {
 
 export interface P9Mount extends Mounted {
   readonly transport: "9p"
+  readonly source: string
   readonly trans: "unix" | "tcp"
   readonly server: P9Server
   readonly connection: P9Connection

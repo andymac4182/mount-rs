@@ -220,6 +220,18 @@ void p9Probe
 void p9OptionsString
 void p9PlatformName
 void p9Mounted
+const p9MountSource: string = p9Mounted.source
+const p9MountTrans: "unix" | "tcp" = p9Mounted.trans
+const p9MountServer: P9Server = p9Mounted.server
+const p9MountConnection: P9Connection = p9Mounted.connection
+const p9MountClosed: Promise<void> = p9Mounted.closed
+const p9MountWaitClosed: Promise<void> = p9Mounted.waitClosed()
+void p9MountSource
+void p9MountTrans
+void p9MountServer
+void p9MountConnection
+void p9MountClosed
+void p9MountWaitClosed
 declare const mounted: Mounted
 const mountedDisposal: Promise<void> = mounted[Symbol.asyncDispose]()
 void mountedDisposal
