@@ -1709,7 +1709,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   follow-up Standard scan reports zero reportable findings in the 20 directly
   reviewed W25 surfaces, with partial repository coverage (590 files, 20
   closed review rows). Hosted OIDC trust, the protected versioning-status
-  input, and the deployment evidence remain open. The
+  input, and the deployment evidence remain open. The latest hosted run
+  `35597712935` failed before acceptance because the `aws-s3-ci` environment
+  has no variables or secrets, leaving `aws-region` empty. The existing test
+  role trust policy allows only the selected SSO administrator role and does
+  not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
+  protected environment configuration are required before rerunning hosted
+  evidence. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
