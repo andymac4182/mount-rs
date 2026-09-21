@@ -35,6 +35,7 @@ use mount_rs_pglite::{
 };
 use mount_rs_r2::{R2BlockStore, R2Config, open_r2};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore, open_sqlite};
+use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 use napi::bindgen_prelude::{Buffer, Either};
 use napi::{Error, Status};
 use napi_derive::napi;
@@ -1133,6 +1134,7 @@ pub struct JsMountFailure {
 /// backend never falls back to an in-memory store.
 #[napi(object)]
 pub struct JsChunkedStoreOptions {
+    /// Supported values are memory, sqlite, pglite, tidb, and r2 (blocks only).
     pub kind: String,
     pub uri: Option<String>,
     pub key: Option<String>,
@@ -1667,7 +1669,7 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
 
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
-) -> Result<(Arc<dyn MetadataStore>, Option<PgliteMetadataStore>), Error> {
+) -> Result<(Arc<dyn MetadataStore>, Option<ChunkedProviderResource>), Error> {
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "metadata.uri")?;
@@ -1704,10 +1706,30 @@ async fn build_metadata_store(
             let store = PgliteMetadataStore::connect_with_options(&uri, storage)
                 .await
                 .map_err(to_js_error)?;
-            Ok((Arc::new(store.clone()), Some(store)))
+            Ok((
+                Arc::new(store.clone()),
+                Some(ChunkedProviderResource::PgliteMetadata(store)),
+            ))
+        }
+        "tidb" => {
+            let uri = required_string(&options.uri, "metadata.uri")?;
+            let key = required_string(&options.key, "metadata.key")?;
+            reject_set(&options.endpoint, "metadata.endpoint")?;
+            reject_set(&options.bucket, "metadata.bucket")?;
+            reject_set(&options.access_key_id, "metadata.accessKeyId")?;
+            reject_set(&options.secret_access_key, "metadata.secretAccessKey")?;
+            let storage =
+                TidbStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+            let store = TidbMetadataStore::connect_with_options(&uri, storage)
+                .await
+                .map_err(to_js_error)?;
+            Ok((
+                Arc::new(store.clone()),
+                Some(ChunkedProviderResource::TidbMetadata(store)),
+            ))
         }
         "r2" => Err(config_error(
-            "R2 is a block-only backend; metadata must use memory, sqlite, or pglite",
+            "R2 is a block-only backend; metadata must use memory, sqlite, pglite, or tidb",
         )),
         other => Err(config_error(format!("unknown metadata backend: {other}"))),
     }
@@ -1715,7 +1737,7 @@ async fn build_metadata_store(
 
 async fn build_block_store(
     options: &JsChunkedStoreOptions,
-) -> Result<(Arc<dyn BlockStore>, Option<PgliteBlockStore>), Error> {
+) -> Result<(Arc<dyn BlockStore>, Option<ChunkedProviderResource>), Error> {
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "blocks.uri")?;
@@ -1752,7 +1774,27 @@ async fn build_block_store(
             let store = PgliteBlockStore::connect_with_options(&uri, storage)
                 .await
                 .map_err(to_js_error)?;
-            Ok((Arc::new(store.clone()), Some(store)))
+            Ok((
+                Arc::new(store.clone()),
+                Some(ChunkedProviderResource::PgliteBlocks(store)),
+            ))
+        }
+        "tidb" => {
+            let uri = required_string(&options.uri, "blocks.uri")?;
+            let key = required_string(&options.key, "blocks.key")?;
+            reject_set(&options.endpoint, "blocks.endpoint")?;
+            reject_set(&options.bucket, "blocks.bucket")?;
+            reject_set(&options.access_key_id, "blocks.accessKeyId")?;
+            reject_set(&options.secret_access_key, "blocks.secretAccessKey")?;
+            let storage =
+                TidbStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+            let store = TidbBlockStore::connect_with_options(&uri, storage)
+                .await
+                .map_err(to_js_error)?;
+            Ok((
+                Arc::new(store.clone()),
+                Some(ChunkedProviderResource::TidbBlocks(store)),
+            ))
         }
         "r2" => {
             let prefix = required_string(&options.key, "blocks.key")?;
@@ -2757,40 +2799,54 @@ impl Filesystem {
     }
 }
 
+#[derive(Clone)]
+enum ChunkedProviderResource {
+    PgliteMetadata(PgliteMetadataStore),
+    PgliteBlocks(PgliteBlockStore),
+    TidbMetadata(TidbMetadataStore),
+    TidbBlocks(TidbBlockStore),
+}
+
+impl ChunkedProviderResource {
+    async fn close(&self) -> CoreResult<()> {
+        match self {
+            Self::PgliteMetadata(store) => store.close().await,
+            Self::PgliteBlocks(store) => store.close().await,
+            Self::TidbMetadata(store) => store.close().await,
+            Self::TidbBlocks(store) => store.close().await,
+        }
+    }
+}
+
+async fn close_chunked_resources(resources: Vec<ChunkedProviderResource>) -> CoreResult<()> {
+    let mut first_error = None;
+    for resource in resources {
+        if let Err(error) = resource.close().await
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
 /// Construct a filesystem over independently selected metadata and immutable
 /// block providers. The returned driver's `shutdown()` releases its writer
 /// lease; callers should invoke it when the driver is no longer in use.
 async fn shutdown_chunked_filesystem(
     filesystem: ChunkedFs<DynMetadataStore, DynBlockStore>,
-    metadata: Option<PgliteMetadataStore>,
-    blocks: Option<PgliteBlockStore>,
+    resources: Vec<ChunkedProviderResource>,
 ) -> CoreResult<()> {
     // Always attempt provider teardown even if lease release reports an
     // error. A stale lease must not keep the PostgreSQL-wire clients alive
     // until JavaScript garbage-collects the retained Filesystem object.
     let filesystem_result = filesystem.shutdown().await;
-    let metadata_result = match metadata {
-        Some(store) => store.close().await,
-        None => Ok(()),
-    };
-    let blocks_result = match blocks {
-        Some(store) => store.close().await,
-        None => Ok(()),
-    };
-
-    filesystem_result
-        .err()
-        .or_else(|| metadata_result.err())
-        .or_else(|| blocks_result.err())
-        .map_or(Ok(()), Err)
+    let resources_result = close_chunked_resources(resources).await;
+    filesystem_result.and(resources_result)
 }
 
 #[napi]
 pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Filesystem> {
-    let (metadata_store, metadata_close) = build_metadata_store(&options.metadata).await?;
-    let (block_store, blocks_close) = build_block_store(&options.blocks).await?;
-    let metadata = DynMetadataStore(metadata_store);
-    let blocks = DynBlockStore(block_store);
     let owner = chunked_owner(options.owner)?;
     let chunk_size = validate_chunk_size(options.chunk_size)?;
     let ttl = validate_ttl(options.ttl_ms)?;
@@ -2804,17 +2860,39 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         .with_identity(uid, gid, umask)
         .with_root_mode(root_mode);
 
-    let filesystem = ChunkedFs::open(metadata, blocks, chunk_options)
-        .await
-        .map_err(to_js_error)?;
+    let (metadata_store, metadata_resource) = build_metadata_store(&options.metadata).await?;
+    let (block_store, block_resource) = match build_block_store(&options.blocks).await {
+        Ok(opened) => opened,
+        Err(error) => {
+            if let Some(resource) = metadata_resource {
+                let _ = resource.close().await;
+            }
+            return Err(error);
+        }
+    };
+    let mut resources = Vec::with_capacity(2);
+    if let Some(resource) = metadata_resource {
+        resources.push(resource);
+    }
+    if let Some(resource) = block_resource {
+        resources.push(resource);
+    }
+    let metadata = DynMetadataStore(metadata_store);
+    let blocks = DynBlockStore(block_store);
+    let cleanup_resources = resources.clone();
+    let filesystem = match ChunkedFs::open(metadata, blocks, chunk_options).await {
+        Ok(filesystem) => filesystem,
+        Err(error) => {
+            let _ = close_chunked_resources(cleanup_resources).await;
+            return Err(to_js_error(error));
+        }
+    };
     let shutdown_filesystem = filesystem.clone();
-    let shutdown_metadata = metadata_close;
-    let shutdown_blocks = blocks_close;
+    let shutdown_resources = resources;
     let shutdown: Arc<ShutdownCallback> = Arc::new(move || {
         let filesystem = shutdown_filesystem.clone();
-        let metadata = shutdown_metadata.clone();
-        let blocks = shutdown_blocks.clone();
-        Box::pin(async move { shutdown_chunked_filesystem(filesystem, metadata, blocks).await })
+        let resources = shutdown_resources.clone();
+        Box::pin(async move { shutdown_chunked_filesystem(filesystem, resources).await })
     });
     Ok(Filesystem::from_driver(
         Arc::new(filesystem),

@@ -608,10 +608,14 @@ async fn windows_read_only_hard_link_delete_and_handle_lifetime_match_node() {
         driver.stat("/rust-readonly-links").await.unwrap(),
         driver.stat("/rust-readonly-links.first").await.unwrap(),
     ];
+    assert_eq!(before[0].mode & 0o777, 0o444);
+    assert_eq!(before[1].mode & 0o777, 0o444);
     driver.unlink("/rust-readonly-links.first").await.unwrap();
     let after_alias = handle.stat().await.unwrap();
+    assert_eq!(after_alias.mode & 0o777, 0o444);
     driver.unlink("/rust-readonly-links").await.unwrap();
     let after_final = handle.stat().await.unwrap();
+    assert_eq!(after_final.mode & 0o777, 0o444);
     handle.close().await.unwrap();
     let missing = driver.stat("/rust-readonly-links").await.unwrap_err().code;
     assert_eq!(missing, ErrorCode::Enoent);
@@ -723,6 +727,29 @@ async fn windows_open_handle_survives_rename_unlink_and_positional_io() {
         windows_oracle("handle-lifecycle", &root.path().join("node-handle")),
         "ab,2,ENOENT"
     );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_long_symlink_creation_uses_extended_path_fallback() {
+    let sandbox = TempDir::new();
+    let mut root = sandbox.path().to_path_buf();
+    while root.to_string_lossy().len() < 258 {
+        let remaining = 258 - root.to_string_lossy().len() - 1;
+        let component = "x".repeat(remaining.clamp(1, 40));
+        root.push(component);
+        fs::create_dir(&root).expect("create long root component");
+    }
+    assert!(root.to_string_lossy().len() >= 258);
+    let driver = HostFs::new(&root);
+    driver
+        .symlink("target", "/long-link")
+        .await
+        .expect("long symlink creation");
+    driver
+        .unlink("/long-link")
+        .await
+        .expect("long symlink cleanup");
 }
 
 #[cfg(windows)]

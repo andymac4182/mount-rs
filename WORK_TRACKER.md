@@ -66,6 +66,30 @@ matrices, the 1,194-test upstream suite, and all 40 PGlite-inclusive seeded
 trace lanes passed. R2 rows were explicit skips because this shell still lacks
 the required scoped credentials.
 
+The exact published tree at `747b160` was rerun on 2026-09-21 with the same
+gate and exited 0: PGlite lifecycle/reconnect/fencing/cancellation, SQLite VFS
+round-trip and fresh-provider reconnect, disk-server restart, split stores,
+N-API, chunked, userspace FUSE, Rust SDK 6/6, Node SDK 5/5, CLI 11/11, the
+upstream suite 1,200 passed/82 skipped, and all 40 seeded oracle lanes passed.
+R2 factory/runtime rows remained explicit credential-gated skips; this is not
+live R2 acceptance.
+
+The latest published tree `f07579e` was rerun with the oracle-enabled N-API
+package suite on 2026-09-21 and exited 0. Harness, factory, lifecycle, server,
+JS-driver, FUSE/NFS/9P codecs, Unstorage, chunked, differential, restart and
+distribution/artifact packets all passed; PGlite/R2 factories and native-mount
+opt-ins remained explicit skips. The authorized macOS native NFS N-API gate
+then passed real mounted write/read/unmount, and the Node CLI native gate passed
+with independent Rust and Node clients writing to the same mount, Rust reading
+Node bytes, clean unmount, and both payloads retained in the backing root.
+
+The same tree also passed `./scripts/cargo-shared test --locked --workspace
+--all-targets --all-features --offline` on macOS. Core, every registered
+integration/transport crate, the SDK/CLI/HTTP/N-API paths, SQLite/VFS,
+chunked, versioned and observability tests completed with exit 0; live R2,
+PGlite, TiDB, RustFS and privileged native tests remained explicit prerequisite
+skips rather than being counted as service acceptance.
+
 The follow-up PGlite CLI consumer check in `dcc3aa4` also exited 0: the Rust
 CLI now performs the same configured PGlite split-store write, shutdown,
 reopen and readback that the Node CLI already performed. The live CLI matrix
@@ -109,6 +133,15 @@ Windows oracle cases where runnable). These are focused local gates at
 `3042d09`; the current shell still lacks live R2 credentials and hosted
 Windows/macOS and privileged native-mount runs remain unqualified.
 
+The current W01 mount-free FUSE packet adds typed napi-rs `GETLK`, `SETLK` and
+`SETLKW` request codecs plus the typed `GETLK` reply codec. The generated root
+bindings, explicit CommonJS/ESM barrel exports and `./fuse` declarations are
+covered by a typecheck and a pinned-oracle differential covering the 48-byte
+request, 24-byte typed reply, truncation, trailing-byte and empty status-reply
+boundaries. The release N-API build, oracle-enabled package suite and focused
+locked `mount-rs-fuse` tests passed. This is mount-free wire evidence only;
+native FUSE lock/session semantics remain an explicit boundary.
+
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
 - `ccaf8f5` + `4cdeb58` correct the Windows SQLite WAL shared-memory access mask
@@ -131,6 +164,12 @@ Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 These packets reduce the W01 queue but do not close W01.1-W01.4: the complete
 parity ledger, all classified skips, cross-backend seeded evidence, live R2,
 hosted Windows/macOS and privileged native transport gates remain required.
+
+The FUSE session follow-up `1cf0350` corrects the support matrix: plain
+`RENAME2` is dispatched as a normal rename, while exchange/whiteout flag
+variants return `ENOSYS` without mutation. The README now states that boundary
+and the focused session test covers all three nonzero flag variants. The
+16-test session suite, strict Clippy, formatting and diff checks passed.
 
 Final integrated local gate after `192749e`: `cargo test --workspace
 --all-targets --all-features --locked --offline` exited 0, and the
@@ -213,6 +252,14 @@ The newest CI and fault-injection runs for `83466d7` are queued, not green
 evidence. These packets further reduce W01 but do not close W01 or establish a
 privileged native FUSE mount, FSKit activation, live R2, or hosted Windows run.
 
+The Windows HostFs follow-up was then published as `44cef6e` (from sidecar
+`d64d3bb`). It aligns long-path symlink fallback, Windows unlink disposition,
+and read-only hard-link metadata/lifetime behavior, with Windows-gated
+regressions. The focused macOS suite passed 10/10, the installed
+`x86_64-pc-windows-gnu` target compiled all HostFs targets, strict Clippy and
+format/diff checks passed. Hosted Windows runtime execution remains open, so
+this packet is target-compile evidence rather than Windows platform acceptance.
+
 Fresh macOS demo evidence on this checkout: `bash scripts/demo-end-to-end.sh`
 exited 0 after building the Rust CLI. The CLI mounted the local HostFs through
 native NFS; an independent Rust process wrote/read `rust-process.txt`, an
@@ -227,6 +274,24 @@ examples/node-cli/index.mjs --driver host --root <temporary backing>
 Node SDK mounting through native NFS, writing and reading its file, unmounting,
 and leaving the temporary backing directory clean. This is a separate Node CLI
 consumer check; it does not qualify Linux FUSE, FSKit or live providers.
+
+The latest W01 acceptance packets were published to `origin/main` at
+`25644c5`. `462d54b` closes the remaining Unstorage evidence harness gap:
+preparations now execute for both oracle and native adapters, refusals assert
+state preservation, hidden hardlink/mknod boundaries are split into separate
+rows, and the packet is part of the N-API chain. The direct and N-API gates
+passed 31 rows (5 PASS, 26 exact ENOSYS, zero ENOTSUP or skipped rows).
+`a3d980d` extends the opt-in Node SDK CLI native gate so the mounted path is
+exercised by an independent Rust client and an independent Node client, with
+Rust verifying the bytes written by Node. The authorized macOS NFS run passed
+mount, Rust read/write, Node read/write, cross-client readback, unmount and
+backing-root persistence. `25644c5` adds plain-flag FUSE `RENAME2` session
+support while keeping unsupported flags fail-closed; 16 focused FUSE tests,
+strict Clippy and formatting passed. FALLOCATE, LSEEK and COPY_FILE_RANGE
+remain explicit unsupported boundaries, and Linux hosted FUSE remains a
+separate acceptance gate.
+The follow-up `7183778` strengthens the same native gate by asserting that
+both Rust- and Node-written payloads remain in the backing root after unmount.
 
 The third W01 implementation rotation was validated locally and published
 sequentially to `origin/main` (verified remote ref
@@ -290,10 +355,15 @@ TiDB/RustFS hardening (rebased local tip `6327857`, published through
 `bbe8ebb`), W07 FoundationDB/RustFS restart-gate hardening (rebased local tip
 `629c2f6`, published through `ffd06bf`) and W30 observability (published at
 `6ce8228`). W26's nine-file Ozone packet remains byte-for-byte present in the
-current branch at its verified `a936eba` content. W08 and W07 service runs
-remain explicitly blocked by unavailable Docker/libfdb runtime prerequisites;
-W30 collector-backed export, overhead benchmarking and cross-platform
-qualification remain open.
+current branch at its verified `a936eba` content. The W26 follow-up now adds a
+dedicated hosted `ozone-compositions` CI job for the real SQLite/PGlite mixed
+metadata gate; its hosted result remains pending until that job runs. W08 and
+W07 service runs remain explicitly blocked by unavailable Docker/libfdb runtime
+prerequisites;
+W30 external collector reachability and Linux/Windows qualification remain
+open; the W30.5 local loopback collector, exporter-failure/shutdown tests,
+macOS qualification packet, and no-exporter facade benchmark are now verified
+on the current macOS arm64 host.
 
 ## How to read and maintain this tracker
 
@@ -321,6 +391,11 @@ non-overlapping packet. The current bounded allocation is:
 
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
+| `dbfa2ea` | N-API strict-Clippy type cleanup | Factors the structural-driver open future into a named alias; full scoped N-API Clippy now passes with `-D warnings` and no type-complexity exclusion. This is lint evidence, not native-mount or hosted-platform acceptance |
+| `66c79e0` | Rust FUSE session parity for simple namespace operations | 16 frame-level session tests cover SYMLINK/MKNOD/MKDIR/UNLINK/RMDIR/RENAME/LINK/ACCESS, error/state cleanup, MKNOD fallback and POSIX name limits; focused FUSE tests, strict Clippy and formatting passed. Native device/mount and advanced FALLOCATE/LSEEK semantics remain open |
+| `6972fbe` | Unstorage hardlink alias capability boundary | Direct and N-API packets now cover six exact `ENOSYS` hardlink rows, including alias write-through and unlink-lifetime cases, with zero `ENOTSUP` mismatches and zero skips; generic hardlink inode support remains open |
+| `96bbbd9` | Structural-driver native lifecycle assertion hardening | Explicit transport identity is asserted and the PASS marker is emitted only after unmount, live-mount cleanup and mountpoint teardown; macOS NFS structural mount/read/write/unmount passed. Linux FUSE hosted execution remains unverified |
+| `24c8a6b` | Public napi-rs FUSE request/reply codecs for SYMLINK/MKNOD/MKDIR/UNLINK/RMDIR/RENAME/RENAME2/LINK/ACCESS/FALLOCATE/LSEEK | Pinned mountx differential plus typed round-trip coverage passed; full oracle-enabled N-API test chain, typecheck and artifact aggregation passed. Native FUSE session/device/mount remains open |
 | Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Integrated |
 | Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Integrated; bounded TiDB + RustFS composition passed |
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Integrated checkpoint |
@@ -360,6 +435,10 @@ patch):
 | Ramanujan the 2nd | W01 napi-rs FUSE xattr codecs | `integrations/mount-rs-napi/**` | Integrated as `cf7a132`; published through `4f484ad`; SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR pinned-oracle differentials, generated artifacts/declarations, typecheck, build and full focused suite passed |
 | Zeno the 2nd | W01 Unstorage capability boundary parity | `tests/unstorage/**` | Integrated as `e0e8195`; published through `9b74c87`; 14 rows passed with 5 supported, 9 explicit ENOSYS, zero ENOTSUP mismatches and zero skips |
 | Kant the 2nd | W01 Unstorage hardlink capability boundary | `tests/unstorage/**` | Integrated as `99c7d32`; published through `2bce444`; 4 rows passed with 0 supported, 4 exact ENOSYS, zero ENOTSUP mismatches and zero skips |
+| Main | W01 Rust FUSE IOCTL session framing | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated as `f1872f8`; live source/test blobs verified; strict 32-byte header and declared-input-size framing, malformed/trailing `EINVAL`, valid-request `ENOSYS`, and no-mutation coverage passed in 12 focused tests and strict scoped Clippy |
+| Meitner the 2nd | W01 napi-rs FUSE IOCTL codecs | `integrations/mount-rs-napi/**` | Integrated as `32ddee3`; published sequentially through `8ea5f38`; build, typecheck, focused pinned-oracle raw-layout differential, and the full oracle-enabled N-API suite passed |
+| Pasteur the 2nd | W01 napi-rs FUSE BMAP codecs | `integrations/mount-rs-napi/**` | Integrated as `387940b`; published sequentially through `091ddcf`; Rust/N-API release build, typecheck, protocol-minor/truncation/trailing/wrong-shape oracle differentials, and the full oracle-enabled N-API suite passed |
+| Main | W01 napi-rs FUSE GETLK/SETLK/SETLKW codecs | `integrations/mount-rs-napi/**` | Current packet: generated bindings/declarations, explicit ESM/CommonJS exports, typecheck, pinned-oracle request/reply/error-boundary differential, release build, focused locked FUSE tests and full oracle-enabled N-API suite passed; native FUSE session/mount remains open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -423,11 +502,11 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
-| W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
+| W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite CI gate added, hosted result pending; TiDB/FoundationDB mixed stores pending | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
-| W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade and application boundary wiring landed; collector/benchmark/platform qualification pending | Main |
+| W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade, boundary wiring, local collector/failure tests, benchmark and macOS qualification packet landed; external collector/Linux/Windows evidence pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
 ## Decisions and external prerequisites
@@ -630,6 +709,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   creates one remote commit per file; no force-push or destructive
   synchronization was used.
 
+- [x] `f1872f8` adds the Rust FUSE IOCTL session packet: exact 32-byte header/input-size framing, `EINVAL` for truncated/declared-size/trailing payloads, explicit `ENOSYS` for valid requests, and no state mutation. The isolated 12-test FUSE gate and strict scoped Clippy passed. The elevated macOS N-API regression suite also passed, including native NFS server integration and the pinned-oracle/Unstorage/distribution gates; PGlite/R2 and native-mount opt-ins remain explicit skips.
+
+- [x] `32ddee3` adds the N-API FUSE IOCTL codec packet: 32-byte request and 16-byte reply layouts, declared input-size framing, protocol-context handling, signed results, malformed/trailing rejection, and pinned-oracle differential coverage. The full oracle-enabled N-API suite passed after publication; PGlite/R2 and native-mount opt-ins remain explicit skips.
+
+- [x] `387940b` adds the N-API FUSE BMAP codec packet: typed request/reply layouts, protocol-minor coverage, all truncation boundaries, trailing-byte rejection and wrong-shape errors against the pinned oracle. The post-publication full oracle-enabled N-API suite passed; PGlite/R2 and native-mount opt-ins remain explicit skips.
+
+- [x] Final combined N-API verification on 2026-09-21 passed after rebuilding the release native binding: elevated `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX pnpm test` reported both IOCTL and BMAP pinned-oracle differentials, plus the full harness/server/CLI/NFS/9P/Unstorage/chunked/distribution gates. The first rerun correctly exposed a stale local native artifact missing the new exports; PGlite/R2 and native-mount opt-ins remain explicit skips.
+
+- [x] Current-tree W01/PGlite verification on 2026-09-21 passed: `cargo test --workspace --all-targets --all-features --locked --offline` exited 0; `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX sh scripts/test-pglite.sh` exited 0 with real provider parity, reconnect, version history, SQLite VFS reconnect, N-API/chunked/FUSE rows, Rust SDK 6 pass/3 R2 skips, Node SDK 5 pass/1 R2 skip, CLI 11 pass/1 R2 skip, and 40/40 PGlite-inclusive 621-operation trace lanes. The upstream suite reported 1,200 passed/82 skipped; skipped behavior and hosted platform/native gates remain open.
+
 ## W02 — Independent metadata, blocks and chunking
 
 - [x] Land metadata/block contracts, fixed-size chunking, immutable blocks,
@@ -681,14 +770,27 @@ Evidence landed without closing the remaining W01 acceptance gates:
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  Run `35493696795`, job `106032856390`, still failed bounded close/reopen with
-  a server communication error. Copernicus owns the handshake-race investigation;
-  the newer local pass does not close this intermittent hosted failure.
-  Main's latest local regression run passed both Node cleanup suites and both
-  Rust bounded/shared-close tests after graceful half-close cleanup was added.
-  Listener restoration preserves duplicate regular and once registrations;
-  success and injected-detach-failure regressions cover that review finding.
-  Hosted macOS/Linux confirmation remains open.
+  Hosted run [35493696795](https://github.com/andymac4182/mount-rs/actions/runs/35493696795),
+  job [106032856390](https://github.com/andymac4182/mount-rs/actions/runs/35493696795/job/106032856390),
+  checked out `c6e6060` on `macos-26-arm64` and failed
+  `storage::tests::bounded_server_close_is_shared_cancellation_safe_and_reusable`
+  at the first `connect_with_key(connection_string, "close-reopened")` after
+  both providers had closed: `FsError { code: Eio, message: Some("error
+  communicating with the server") }`. This is pre-fix evidence; `571aa8a`
+  adds the graceful half-close detach path, tracked cleanup barrier and listener
+  restoration that target the race.
+
+  Tested current-tree revision `747b160` (the fetched `origin/main` before this
+  evidence commit) passes the deterministic Node slot-release and
+  injected-failure suites, the readiness and split-store Rust gates, the bounded
+  close/reopen regression 10/10 consecutive times, real-server versioned
+  snapshot/history reconnect, mount-free SQLite VFS reconnect, scoped Clippy,
+  formatting and `git diff --check`. Recent `ci.yml` runs were still queued when
+  inspected (including `35551786116` at `6f1ab93` and later `35552136578` at
+  `44cef6e`); no completed post-`571aa8a` hosted macOS/Linux rerun is available.
+  W04.2 remains open. Close it only after the post-fix macOS and Linux `node`
+  jobs complete and their `Verify PGlite integration and restart recovery` logs
+  pass; reproduce with `gh run view <run-id> --job <job-id> --log`.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
@@ -705,6 +807,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   remain in Keychain; this is local dirty-worktree evidence, not release acceptance.
 - [ ] W05.2 Verify immutable writes, ranges, retries, reconnect, cleanup and
   concurrent publication with independently selected metadata providers.
+  The 2026-09-21 isolated rerun at base revision `6f1ab93` passed the local
+  signed-HTTP R2 adapter contract (`10/10` unit tests and `1/1` HTTP test):
+  immutable create, ranged reads, stale conditional read/write rejection,
+  fresh-client reopen, eight concurrent publications, prefix isolation and
+  exact cleanup. The provider matrix reported `5` local Rust SDK passes,
+  `4` skips and `0` failures; its R2 and PGlite rows skipped because
+  `R2_ENDPOINT`, `R2_BUCKET`, `R2_ACCESS_KEY_ID`,
+  `R2_SECRET_ACCESS_KEY`, and `PGLITE_DATABASE_URL` were unset. This is
+  local S3-compatible evidence, not live Cloudflare R2 evidence; no dedicated
+  transient-failure retry injection was run, so W05.2 remains open.
 - [ ] W05.3 Run Node, CLI/native, parity and benchmark lanes on live R2.
   Main executed actual R2 differential traces with seeds 4182, 1, 42, 65535,
   and 4294967295: 621 operations each, all 3,105 matched the pinned TypeScript
@@ -717,6 +829,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   full benchmark matrix remain open. The full `scripts/test-all.sh` rerun at
   `73c33e0` also passed the live R2 lane end-to-end; this does not close the
   native/hosted portions of this task.
+  The 2026-09-21 isolated rerun reported `4` Node SDK passes, `2` skips and
+  `0` failures; `9` CLI passes, `2` skips and `0` failures; and the storage
+  benchmark unit gate passed. The Node R2 factory and PGlite rows skipped for
+  missing configuration. The live Cloudflare CLI and service-evidence scripts
+  stopped at credential preflight with `R2_ENDPOINT` unset; no remote request,
+  write or cleanup ran. The full N-API suite reached native server checks only
+  after elevated host access, then stopped on a stale local native binding
+  (`binding[nativeName] is not a function`) while R2 remained an explicit
+  credential skip. W05.3 live R2, native and hosted acceptance therefore
+  remains open.
 - [x] W05.4 Record service identity and revision without recording credentials.
   `integrations/mount-rs-r2` now exposes a redacted `R2ServiceIdentity` and
   `scripts/r2-service-evidence.sh` records only endpoint authority, bucket,
@@ -767,6 +889,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   contract passed. The container supplies `fdb_c`; no host install or mock.
 - [ ] W07.3 Resolve production lease/time semantics: default unsupported clock
   behavior and a development clock do not establish safe distributed fencing.
+  The current safety slice adds `with_production_lease_oracle` plus the
+  `LeaseAuthorityKind::SharedProvider` declaration gate: unverified,
+  development and single-authority clocks now fail closed when a caller opts
+  into the production path, with a focused regression test. This prevents an
+  unsafe default or persisted host clock from being presented as distributed
+  fencing, but the item remains open until a concrete protected shared
+  authority and multi-host clock-skew/recovery evidence are integrated.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -803,6 +932,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   capacity/restart markers; its real TiDB/RustFS lane remains blocked by the
   unavailable Docker daemon, so no service result is counted.
 - [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+- [x] W08.4a The bounded Node/CLI consumer slice is wired through the public
+  Rust SDK, N-API and Rust/Node CLI configuration: TiDB metadata can compose
+  with RustFS/S3-compatible `r2` chunks, with explicit `durable` assertions.
+  The provider matrix covers configuration, partial write, truncate, shutdown,
+  reopen and owned RustFS-prefix cleanup. Local evidence: `cargo fmt --all -- --check`,
+  focused Clippy, Rust SDK `2 passed`, CLI `40 library + 9 CLI
+  tests passed`, N-API chunked/CLI/shutdown tests passed, Node matrix
+  `pass=4 skip=3 fail=0`, and CLI matrix `pass=10 skip=3 fail=0`. The live
+  TiDB+RustFS rows are explicit skips because `MOUNT_RS_TIDB_URL` and the
+  loopback RustFS credential set are absent here. The consumer cleanup row
+  removes only owned RustFS objects and verifies provider shutdown; exact TiDB
+  metadata-row deletion remains the W08.5 service-harness boundary.
+- [ ] W08.4b Native-mount and live TiDB/RustFS consumer acceptance remain open.
+  The host has no Docker daemon/service run, and the full CLI all-target test's
+  two HTTP subprocess cases are blocked before readiness by the sandbox's
+  `Operation not permitted` mount denial; those are not counted as passes.
 - [x] W08.5 **TiDB metadata + RustFS S3 chunks:** the real single-node v8.5.7
   TiDB service and pinned loopback RustFS endpoint passed the mixed-provider
   seed, partial-write, truncate, reopen, CAS/fencing and exact cleanup path.
@@ -956,6 +1101,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   A minimal `MountRsHost` containing app now embeds the FSKit appex in
   `Contents/Extensions` and builds unsigned; Apple team/profile authorization
   and activation remain open.
+- [x] `fdd7c81` adds the strict macOS activation gate and publishes it through `ea9ac68`: Rust/Swift/Xcode/embedded-bundle checks pass, while the real activation probe correctly reports `FSKIT_ACTIVATION=FAIL` because the host has zero valid Apple signing identities, only ad-hoc signing, and no installed/enabled `mount-rs` FSClient entry. This proves the blocker and does not close W13.4.
 - [ ] W13.4 Activate and test real FSKit mounts, CLI integration, persistence and
   supported SQLite workloads. NFS/FUSE fallback does not satisfy this stream.
 
@@ -1222,11 +1368,18 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Local `myroot` SSO credentials are expired; secure local test authentication
   and least-privilege test access remain pending. MCP provisioning is not a
   Rust integration test result.
+- [x] AWS MCP OAuth was revalidated on 2026-09-21 for account `106427005394`: bucket location, all four public-access blocks, bucket-owner-enforced ownership, AES256 encryption, lifecycle and tags were read successfully; the root `mount-rs-tests/aws-s3/` inventory was empty before and after testing. A unique-prefix service-side probe passed create-only immutable publication, duplicate rejection, byte ranges, stale conditional read/CAS rejection, current ETag CAS, a 65,537-byte boundary read, four concurrent writers, scoped deletion, and post-delete empty-prefix verification. This is AWS API/SDK evidence only: the MCP caller was account root and the bucket has no bucket policy, so least-privilege authorization remains unverified.
 - [ ] W25.2 Provision private test bucket, narrowly scoped access, and test-data
   cleanup/retention policy. Keep credentials outside chat and source control.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
   tests with restart/reopen, ranges, conditional immutable writes and cleanup.
-  AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance.
+  AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance. The
+  checked-in Rust crate compiles with `cargo test --manifest-path
+  tests/aws/Cargo.toml --locked --lib --no-run`, but the actual two ignored
+  service tests remain blocked: the local `AWS_PROFILE=myroot` SSO session is
+  expired before the harness can claim a prefix, so no Rust `ChunkedFs`,
+  SQLite+S3, or fresh-process reopen acceptance is claimed.
+- [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The harness now emits the secret-free `AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` and exits 3 when local credentials cannot be exported, making the AWS MCP/OAuth-to-local-Cargo boundary explicit. The W25 worker verified the AWS-crate compile and ordinary ignored-test gate; the two actual AWS-service tests remain blocked until the local `myroot` SSO session is renewed. No live Rust acceptance is claimed yet.
 
 ## W26 — Apache Ozone S3 backend
 
@@ -1349,9 +1502,32 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 Implementation note (2026-09-21): the separate `mount-rs-observability` crate,
 feature-gated HTTP/SDK/Node/CLI integration, bounded redaction contract, W3C
-carrier helpers, OTLP/HTTP provider setup, and deterministic tests are in the
-current implementation. Collector-backed export, overhead benchmarking, and
-cross-platform qualification remain explicitly unverified.
+carrier helpers, signal-specific OTLP/HTTP paths, blocking-client exporter
+setup, and deterministic tests are in the current implementation. W30.5
+evidence on macOS arm64 (macOS 26.5.1, Darwin 25.5.0, Rust/Cargo 1.95.0)
+against the then-current `origin/main` base `af31ba7`:
+
+- `cargo fmt --all -- --check`: PASS.
+- `cargo check --workspace --locked --offline`: PASS.
+- `cargo test -p mount-rs-observability --all-features --locked --offline`:
+  5 unit tests, one loopback collector test, and one exporter-failure/shutdown
+  test PASS. The collector received non-empty `/v1/traces`, `/v1/metrics`,
+  and `/v1/logs` payloads and the test found no raw secret path bytes.
+- `cargo test -p mount-rs-sdk --features observability --locked --offline`:
+  3 PASS; `cargo test -p mount-rs-http --features observability-otlp
+  --test http_integration --locked --offline`: 7 PASS with loopback access;
+  `cargo test -p mount-rs-cli --features observability --locked --offline`:
+  39 unit + 9 CLI + 2 HTTP subprocess + 1 native artifact test PASS, with 3
+  documented native/remote tests ignored; N-API observability check PASS.
+- `cargo clippy -p mount-rs-observability --all-features --all-targets
+  --locked --offline -- -D warnings`: PASS. The optimized no-exporter facade
+  benchmark ran 20,000 operations and recorded baseline 2 ns/op, disabled
+  9 ns/op, enabled 59 ns/op on this host; these are comparative observations,
+  not a cross-platform SLO.
+
+The local collector and failure tests do not prove reachability of an external
+collector. Linux and Windows remain explicitly unverified, and the platform
+runbook is `docs/w30.5-platform-qualification.md`.
 
 ## W31 — Per-drive mounts from one backing datastore (future)
 

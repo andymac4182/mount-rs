@@ -174,13 +174,20 @@ trap 'exit 143' TERM
 # Parse only the three expected credential variables; never print the file.
 if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
   unset AWS_SESSION_TOKEN
+  credential_export_status=0
   if [ -n "${AWS_PROFILE:-}" ]; then
     aws configure export-credentials \
       --profile "${AWS_PROFILE}" \
-      --format env-no-export >"$credential_file"
+      --format env-no-export >"$credential_file" 2>/dev/null ||
+      credential_export_status=$?
   else
     aws configure export-credentials \
-      --format env-no-export >"$credential_file"
+      --format env-no-export >"$credential_file" 2>/dev/null ||
+      credential_export_status=$?
+  fi
+  if [ "$credential_export_status" -ne 0 ]; then
+    echo "AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable" >&2
+    exit 3
   fi
   while IFS='=' read -r name value; do
     case "$name" in
@@ -205,8 +212,11 @@ export AWS_S3_TEST_PREFIX="$prefix"
 export AWS_S3_RESTART_FIXTURE="$fixture_file"
 export AWS_S3_METADATA_FIXTURE="$metadata_file"
 
-AWS_EC2_METADATA_DISABLED=true aws sts get-caller-identity \
-  --region "$region" >/dev/null
+if ! AWS_EC2_METADATA_DISABLED=true aws sts get-caller-identity \
+  --region "$region" >/dev/null 2>/dev/null; then
+  echo "AWS_S3_TEST_BLOCKED reason=local_cli_identity_unavailable" >&2
+  exit 3
+fi
 
 if ! existing=$(AWS_EC2_METADATA_DISABLED=true aws s3api list-objects-v2 \
   --bucket "${AWS_S3_TEST_BUCKET}" \

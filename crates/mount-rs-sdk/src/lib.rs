@@ -20,6 +20,7 @@ use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteFs, SqliteMetadataStore, open_sqlite};
+use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 
 pub use mount_rs_auto::{
     AutoMount, AutoMountError, AutoMountOptions, AutoProbe, AutoTransport, Transport,
@@ -48,6 +49,11 @@ pub enum StoreConfig {
         path: PathBuf,
     },
     Pglite {
+        connection: String,
+        volume_key: String,
+        durable: bool,
+    },
+    Tidb {
         connection: String,
         volume_key: String,
         durable: bool,
@@ -439,6 +445,8 @@ impl BlockStore for ErasedBlockStore {
 enum ProviderResource {
     PgliteMetadata(PgliteMetadataStore),
     PgliteBlocks(PgliteBlockStore),
+    TidbMetadata(TidbMetadataStore),
+    TidbBlocks(TidbBlockStore),
 }
 
 impl ProviderResource {
@@ -446,6 +454,8 @@ impl ProviderResource {
         match self {
             Self::PgliteMetadata(store) => store.close().await,
             Self::PgliteBlocks(store) => store.close().await,
+            Self::TidbMetadata(store) => store.close().await,
+            Self::TidbBlocks(store) => store.close().await,
         }
     }
 }
@@ -520,6 +530,21 @@ async fn open_metadata(
                 vec![ProviderResource::PgliteMetadata(store)],
             ))
         }
+        StoreConfig::Tidb {
+            connection,
+            volume_key,
+            durable,
+        } => {
+            let store = TidbMetadataStore::connect_with_options(
+                connection,
+                TidbStorageOptions::new(volume_key.clone()).with_durable(*durable),
+            )
+            .await?;
+            Ok((
+                Arc::new(store.clone()),
+                vec![ProviderResource::TidbMetadata(store)],
+            ))
+        }
         StoreConfig::R2 { .. } => Err(backend_error(
             "metadata provider 'r2' is unsupported; R2 is block-only",
         )),
@@ -545,6 +570,21 @@ async fn open_blocks(
             Ok((
                 Arc::new(store.clone()),
                 vec![ProviderResource::PgliteBlocks(store)],
+            ))
+        }
+        StoreConfig::Tidb {
+            connection,
+            volume_key,
+            durable,
+        } => {
+            let store = TidbBlockStore::connect_with_options(
+                connection,
+                TidbStorageOptions::new(volume_key.clone()).with_durable(*durable),
+            )
+            .await?;
+            Ok((
+                Arc::new(store.clone()),
+                vec![ProviderResource::TidbBlocks(store)],
             ))
         }
         StoreConfig::R2 {

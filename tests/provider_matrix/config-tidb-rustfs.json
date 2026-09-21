@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "mountpoint": "./provider-matrix-mnt",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "tidb",
+        "connection": {
+          "env": "MOUNT_RS_TIDB_URL"
+        },
+        "volume_key": "provider-matrix-tidb-rustfs",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "http://127.0.0.1:9878",
+        "bucket": "mount-rs-rustfs",
+        "prefix": "mount-rs-provider-matrix/tidb-rustfs",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 7,
+      "owner": "provider-matrix-tidb-rustfs"
+    }
+  }
+}

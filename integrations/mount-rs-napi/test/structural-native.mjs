@@ -126,6 +126,9 @@ try {
       true,
       `${chosen} is not usable: ${availability?.reason ?? "the host probe returned no reason"}`,
     )
+    if (requestedTransport !== "auto") {
+      assert.equal(chosen, requestedTransport, "the selected transport must honor the explicit request")
+    }
 
     const mountpoint = await mkdtemp(join(tmpdir(), "mount-rs-napi-structural-native-"))
     let mounted
@@ -140,7 +143,7 @@ try {
         "structural native mount",
       )
       assert.equal(mounted.active, true)
-      assert.ok(["fuse", "9p", "nfs"].includes(mounted.transport))
+      assert.equal(mounted.transport, chosen)
 
       const seed = await withTimeout(readFile(join(mountpoint, "seed.txt"), "utf8"), 30_000, "mounted read")
       assert.equal(seed, "seed through structural driver")
@@ -152,9 +155,6 @@ try {
       assert.ok(
         (calls.stat ?? 0) + (calls.lstat ?? 0) > 0,
         "native I/O did not reach structural stat callback",
-      )
-      console.log(
-        `structural native mount: PASS (${mounted.transport}; read/write/unmount callback reachability)`,
       )
     } catch (error) {
       teardownFailure = error
@@ -192,6 +192,11 @@ try {
       }
     }
     if (teardownFailure) throw teardownFailure
+    assert.equal(mounted?.active, false, "native mount must be inactive after teardown")
+    assert.equal(mounted?.transport, chosen, "teardown must preserve the selected transport identity")
+    console.log(
+      `structural native mount: PASS (${mounted.transport}; read/write/unmount callback reachability)`,
+    )
     assert.equal(await backing.readFile("/written-through-native.txt").then((value) => Buffer.from(value).toString()), "write through structural native mount")
   }
 } finally {

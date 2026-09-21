@@ -113,11 +113,21 @@ This policy only addresses the virtual filesystem root; SQLite journal/WAL and
 transaction safety still require the native hosting acceptance tests below.
 
 Structured storage has independent metadata and blocks providers. Each
-provider is strict and supports memory, sqlite, and pglite; r2 is supported
-for blocks only because the current integration exposes no R2 metadata store.
-PGlite and R2 credentials are environment references such as
+provider is strict and supports memory, sqlite, pglite, and tidb; r2 is
+supported for blocks only because the current integration exposes no R2
+metadata store. PGlite and TiDB connection URLs plus R2 credentials are
+environment references such as
 {"env":"R2_SECRET_ACCESS_KEY"}, never plaintext values. See
-examples/config-pglite-r2.json for the block-only R2 shape.
+examples/config-pglite-r2.json for the block-only R2 shape and
+examples/config-tidb-rustfs.json for the TiDB metadata/RustFS block shape.
+
+TiDB metadata can be composed with RustFS or another S3-compatible endpoint
+through the `r2` block provider. The TiDB `connection` and `volume_key` are
+passed to the provider, and `durable` remains an explicit caller assertion;
+the URL alone does not prove replicated TiKV durability. The opt-in provider
+matrix uses this shape for configuration, shutdown/reopen, partial-write,
+truncate, and owned-prefix cleanup checks when live TiDB and RustFS
+credentials are available.
 
 Explicit command-line flags override only the config fields they name.
 Unspecified flags retain config values. Relative config paths are resolved

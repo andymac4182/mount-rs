@@ -10,6 +10,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createChunkedDriver, Filesystem } from "../../integrations/mount-rs-napi/index.js";
+import {
+  cleanupR2Prefix,
+  listR2Prefix,
+  rustfsConfigFromEnv,
+} from "./r2-cleanup.mjs";
 
 const PAYLOAD = Buffer.from([
   109, 111, 117, 110, 116, 45, 114, 115, 0, 112, 114, 111, 118, 105, 100, 101, 114, 255,
@@ -315,6 +320,54 @@ if (pgliteUrl) {
   console.log("SKIP node-sdk case=chunked-pglite/pglite gate=PGLITE_DATABASE_URL");
 }
 
+const tidbUrl = process.env.MOUNT_RS_TIDB_URL;
+const rustfs = rustfsConfigFromEnv();
+const tidbRustfsReady = Boolean(tidbUrl) && rustfs.missing.length === 0;
+if (tidbRustfsReady) {
+  const runId = safeRunId();
+  const prefix = `mount-rs-provider-matrix/${runId}/node-tidb-rustfs`;
+  const volumeKey = `mount-rs-provider-matrix/${runId}/node-tidb-rustfs-metadata`;
+  const protectedKeys = await listR2Prefix(rustfs.config, prefix);
+  const options = (owner) => ({
+    metadata: {
+      kind: "tidb",
+      uri: tidbUrl,
+      key: volumeKey,
+      durable: true,
+    },
+    blocks: {
+      kind: "r2",
+      endpoint: rustfs.config.endpoint,
+      bucket: rustfs.config.bucket,
+      key: prefix,
+      accessKeyId: rustfs.config.accessKeyId,
+      secretAccessKey: rustfs.config.secretAccessKey,
+      durable: true,
+    },
+    chunkSize: 7,
+    owner,
+  });
+  await runReopenCase(
+    "chunked-tidb-rustfs-partial-truncate-reopen",
+    () => createChunkedDriver(options("provider-matrix-node-tidb-first")),
+    () => createChunkedDriver(options("provider-matrix-node-tidb-reopened")),
+    () => cleanupR2Prefix(rustfs.config, prefix, protectedKeys),
+    exerciseSeeded,
+    seededExpected(),
+    "/provider-matrix/seeded",
+  );
+} else {
+  const gate = [
+    tidbUrl ? undefined : "MOUNT_RS_TIDB_URL",
+    ...rustfs.missing,
+  ].filter(Boolean);
+  console.log(
+    "SKIP node-sdk case=chunked-tidb-rustfs-partial-truncate-reopen gate=" +
+      gate.join("|") +
+      " reason=requires_actual_tidb_and_loopback_rustfs",
+  );
+}
+
 const missingR2 = R2_REQUIRED.filter((name) => !process.env[name]);
 if (missingR2.length === 0) {
   const stateKey = "mount-rs-provider-matrix/node-" + safeRunId() + ".json";
@@ -336,9 +389,11 @@ if (missingR2.length === 0) {
 
 console.log(
   "SUMMARY node-sdk pass=" +
-    (4 + (pgliteUrl ? 1 : 0) + (missingR2.length === 0 ? 1 : 0) - failures.length) +
+    (4 + (pgliteUrl ? 1 : 0) + (missingR2.length === 0 ? 1 : 0) +
+      (tidbRustfsReady ? 1 : 0) - failures.length) +
     " skip=" +
-    ((pgliteUrl ? 0 : 1) + (missingR2.length === 0 ? 0 : 1)) +
+    ((pgliteUrl ? 0 : 1) + (missingR2.length === 0 ? 0 : 1) +
+      (tidbRustfsReady ? 0 : 1)) +
     " fail=" +
     failures.length,
 );

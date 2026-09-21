@@ -10,6 +10,11 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  cleanupR2Prefix,
+  listR2Prefix,
+  rustfsConfigFromEnv,
+} from "./r2-cleanup.mjs";
 
 const matrixDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(matrixDirectory, "../..");
@@ -17,6 +22,7 @@ const configFiles = [
   ["memory-config", resolve(matrixDirectory, "config-memory.json")],
   ["sqlite-config", resolve(matrixDirectory, "config-sqlite.json")],
   ["pglite-r2-config", resolve(matrixDirectory, "config-pglite-r2.json")],
+  ["tidb-rustfs-config", resolve(matrixDirectory, "config-tidb-rustfs.json")],
 ];
 const failures = [];
 let passes = 0;
@@ -229,6 +235,86 @@ if (process.env.PGLITE_DATABASE_URL) {
 } else {
   skips += 1;
   console.log("SKIP cli case=node-cli-pglite-config-reopen gate=PGLITE_DATABASE_URL");
+}
+
+const tidbUrl = process.env.MOUNT_RS_TIDB_URL;
+const rustfs = rustfsConfigFromEnv();
+const tidbRustfsReady = Boolean(tidbUrl) && rustfs.missing.length === 0;
+if (tidbRustfsReady) {
+  const configDirectory = await mkdtemp(join(tmpdir(), "mount-rs-cli-tidb-rustfs-"));
+  const configPath = join(configDirectory, "tidb-rustfs.json");
+  const prefix = `mount-rs-provider-matrix/${providerRunId}/cli-tidb-rustfs`;
+  const volumeKey = `mount-rs-provider-matrix/${providerRunId}/cli-tidb-rustfs-metadata`;
+  const protectedKeys = await listR2Prefix(rustfs.config, prefix);
+  const config = {
+    version: 1,
+    driver: {
+      kind: "splitstore",
+      storage: {
+        metadata: {
+          kind: "tidb",
+          connection: { env: "MOUNT_RS_TIDB_URL" },
+          volume_key: volumeKey,
+          durable: true,
+        },
+        blocks: {
+          kind: "r2",
+          endpoint: rustfs.config.endpoint,
+          bucket: rustfs.config.bucket,
+          prefix,
+          access_key_id: { env: "R2_ACCESS_KEY_ID" },
+          secret_access_key: { env: "R2_SECRET_ACCESS_KEY" },
+          durable: true,
+        },
+        chunk_size_bytes: 7,
+        owner: `provider-matrix-cli-${providerRunId}-tidb-rustfs`,
+      },
+    },
+  };
+  try {
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+    await commandCase(
+      "node-cli-tidb-rustfs-config-reopen-partial-truncate",
+      process.execPath,
+      ["examples/node-cli/index.mjs", "--config", configPath, "--sdk-self-test", "--reopen"],
+    );
+    await commandCase(
+      "rust-cli-tidb-rustfs-config-reopen-partial-truncate",
+      "cargo",
+      [
+        "run",
+        "--quiet",
+        "--offline",
+        "--locked",
+        "-p",
+        "mount-rs-cli",
+        "--",
+        "sdk-self-test",
+        "--config",
+        configPath,
+        "--reopen",
+      ],
+    );
+  } finally {
+    try {
+      await cleanupR2Prefix(rustfs.config, prefix, protectedKeys);
+    } catch (error) {
+      failures.push("tidb-rustfs-prefix-cleanup");
+      console.log("FAIL cli case=tidb-rustfs-prefix-cleanup reason=" + error.message);
+    }
+    await rm(configDirectory, { recursive: true, force: true });
+  }
+} else {
+  skips += 1;
+  const gate = [
+    tidbUrl ? undefined : "MOUNT_RS_TIDB_URL",
+    ...rustfs.missing,
+  ].filter(Boolean);
+  console.log(
+    "SKIP cli case=tidb-rustfs-config-reopen-partial-truncate gate=" +
+      gate.join("|") +
+      " reason=requires_actual_tidb_and_loopback_rustfs",
+  );
 }
 
 for (const [label, path] of configFiles) {

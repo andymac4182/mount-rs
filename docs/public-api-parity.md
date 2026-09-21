@@ -40,7 +40,7 @@ described as a complete session or native-mount implementation.
 | Structural `FsDriver` accepted by mount/server APIs | `createDriver` adapts a JS object and the JS server facades accept structural drivers; the opt-in native mount lifecycle now accepts the plain structural object and passes macOS NFS read/write/unmount | **PARTIAL; UNVERIFIED** for hosted Linux/other platforms |
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
-| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining bodies, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
+| FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR`/`SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/`ACCESS`/`FALLOCATE`/`LSEEK`/`GETLK`/`SETLK`/`SETLKW` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; several oracle object members and callback options are absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
@@ -165,9 +165,20 @@ The Rust implementation has useful, tested FUSE pieces:
 
 The oracle FUSE barrel also exports constants, init, inodes, mount, notify,
 protocol, record, and session, including a broad request/reply body codec.
+- The N-API FUSE codec now adds raw-layout `IOCTL` request/reply support: the 32-byte request header, declared input payload, 16-byte reply, signed result and protocol-context fields are differentially tested against the pinned oracle, including malformed/trailing inputs. The post-publication full N-API suite passed; this remains focused codec evidence rather than full session/native-mount parity.
+- The N-API FUSE codec now also exposes typed `BMAP` request/reply bodies. Valid protocol-minor layouts, every truncation boundary, trailing bytes and wrong-shape cases are pinned-oracle differentials; the post-publication full N-API suite passed. Full FUSE session/native-mount parity remains open.
+- The N-API FUSE codec now also exposes typed `GETLK`, `SETLK` and `SETLKW` request bodies plus the typed `GETLK` reply. The pinned-oracle differential covers the 48-byte request, 24-byte reply, truncation, trailing-byte and empty status-reply boundaries; generated bindings, declarations, typecheck, release build and the full N-API suite passed. This remains mount-free wire evidence; native FUSE lock/session parity remains open.
+- The latest N-API FUSE codec packet exposes typed `SYMLINK`, `MKNOD`, `MKDIR`, `UNLINK`, `RMDIR`, `RENAME`, `RENAME2`, `LINK`, `ACCESS`, `FALLOCATE`, and `LSEEK` request/reply bodies with generated declarations and explicit CommonJS/ESM exports. Pinned mountx byte/decode differentials and the full artifact-aggregation suite passed; this remains mount-free codec evidence, and native session/device/mount parity remains open.
+- The Rust FUSE session packet now covers the already-supported simple namespace operations at the frame boundary, including successful mutation, error-state preservation, MKNOD fallback, ACCESS credential behavior and the 255-byte POSIX name limit. The focused 16-test session suite and strict Clippy passed; native device/mount acceptance and advanced operation semantics remain open.
+
 The N-API package still does not expose the complete request/reply body codec,
 init negotiation, session, or native mount objects. Therefore this packet
 proves focused body/inode components only, not full FUSE transport parity.
+
+The previously known `js_driver.rs` type-complexity lint was resolved in
+`dbfa2ea`; the current scoped N-API Clippy gate passes with `-D warnings`
+without that exclusion. This removes a lint blocker only and does not change
+the native-session, hosted-platform, or native-mount acceptance boundary.
 
 ### P1 — auto/mount option and lifecycle parity: PARTIAL; UNVERIFIED
 
@@ -284,8 +295,9 @@ from the smallest contract boundary to the larger environment boundary:
    explicit unsupported results on platforms that cannot provide the mount.
 2. **Capability-limited Unstorage behavior (P1):** focused oracle-backed
    capability, unsupported-operation, ownership-overlay and timestamp metadata
-   checks now pass. The remaining inventory now identifies hardlinks (2 rows still open after
-   four exact unsupported rows), symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
+   checks now pass. The remaining inventory now identifies hardlink support as a
+   six-row exact `ENOSYS` boundary in direct/N-API tests (generic inode-sharing
+   implementation remains open), symlinks/link timestamps (16 + 2 rows), `statfs` (2 rows), special-node
    creation (16 rows), and root-only permission cases (18 rows). Each remaining
    row needs an explicit unsupported assertion or adapter implementation; a
    passing MemoryFs or ChunkedFs case cannot close an Unstorage row.
@@ -296,7 +308,7 @@ from the smallest contract boundary to the larger environment boundary:
 4. **Remaining public transport/API surface (P1):** the FUSE directory,
    `READ`/`WRITE`, `GETATTR`/`SETATTR`, `OPEN`/`OPENDIR`, `LOOKUP`,
    `READLINK`, `STATFS`, `BATCH_FORGET`, `INTERRUPT`, `POLL`, `FALLOCATE`,
-   `RENAME2`, `LSEEK`, and `COPY_FILE_RANGE` body/session boundaries are now
+   `RENAME2`, `LSEEK`, `GETLK`/`SETLK`/`SETLKW`, and `COPY_FILE_RANGE` body/session boundaries are now
    public or strictly validated and oracle-differentially tested where an
    oracle body exists. Expose the remaining
    request/reply bodies, session and native-mount surfaces, then run
@@ -482,6 +494,12 @@ the closure items listed above.
   empty status framing and malformed/truncated/trailing inputs. The full
   N-API suite passed; the scoped Clippy run keeps the known pre-existing
   `js_driver.rs` type-complexity warning excluded.
+- **PASS** — `24c8a6b` N-API FUSE request/reply codecs: typed
+  `SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/
+  `ACCESS`/`FALLOCATE`/`LSEEK` layouts, generated declarations and explicit
+  public exports passed the pinned mountx byte/decode differentials and the
+  complete N-API artifact-aggregation gate. Native FUSE session/device/mount
+  acceptance remains open.
 - **PASS** — `b2040f6` pure Rust FUSE INIT hardening: six locked integration
   tests pass for version retry/downgrade, extension flags, max-pages/write
   clamping, compatibility layouts and truncation; strict scoped Clippy passed.
@@ -566,19 +584,60 @@ the closure items listed above.
   zero `ENOTSUP` mismatches and zero skips; every row retained errno `-38`,
   syscall `link`, and null path/destination fields. The packet was published
   through `2bce444`.
+- **PASS** — `66c79e0` Rust FUSE session parity packet: 16 frame-level tests
+  cover simple namespace operations, MKNOD fallback, ACCESS semantics, error
+  cleanup and POSIX name limits; focused FUSE tests, strict Clippy and formatting
+  passed. Native device/mount acceptance and FALLOCATE/LSEEK semantics remain
+  open.
+- **PASS** — `6972fbe` Unstorage hardlink alias packet: six exact `ENOSYS`
+  rows now cover inode-sharing, destination/source errors, alias write-through
+  and unlink lifetime in direct and N-API execution, with zero `ENOTSUP`
+  mismatches and zero skips. Generic hardlink inode support remains open.
+- **PASS** — `462d54b` Unstorage remaining-skip evidence packet: preparations
+  execute against both adapters, refusal rows verify state preservation, and
+  the direct/N-API chain covers 31 rows with 5 PASS, 26 exact `ENOSYS`, zero
+  `ENOTSUP` mismatches and zero skipped rows.
+- **PASS** — `25644c5` Rust FUSE `RENAME2` session packet: plain-flag rename
+  is supported, unsupported flags return `ENOSYS` without mutation, and the
+  focused 16-test suite plus strict Clippy passed. FALLOCATE, LSEEK and
+  COPY_FILE_RANGE remain intentionally unsupported; this is not native-kernel
+  mount evidence.
+- **PASS** — `a3d980d` Node SDK CLI cross-language native gate: the authorized
+  macOS NFS run mounted through the Node CLI, exercised independent Rust and
+  Node clients, verified Rust readback of Node-written bytes, unmounted and
+  retained backing data. Linux FUSE and live-provider acceptance remain open.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
 hosted/live boundaries stay open below.
 
+### W01 lock-codec packet evidence (2026-09-21)
+
+- **PASS** — the N-API FUSE barrel now exports typed `GETLK`, `SETLK` and
+  `SETLKW` request codecs plus the typed `GETLK` reply codec. Generated native
+  bindings, root declarations, the `./fuse` facade and explicit ESM/CommonJS
+  exports are covered by `node test/typecheck.mjs`.
+- **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX node
+  test/fuse-codec.mjs` matched the pinned oracle for request/reply bytes and
+  decoded values, all request/reply truncation boundaries, trailing bytes and
+  empty status replies for `SETLK`/`SETLKW`.
+- **PASS** — `MOUNTX_SOURCE=/tmp/mountx-source.uWiHfX pnpm test` completed the
+  full N-API suite, including server, codec, Unstorage, restart and artifact
+  aggregation checks. PGlite/R2 factory rows and opt-in native mounts remained
+  explicit skips.
+- **PASS** — `./scripts/cargo-shared fmt --all -- --check` and
+  `CARGO_TARGET_DIR=/Users/andrewmcclenaghan/Library/Caches/mount-rs/cargo-target
+  ./scripts/cargo-shared test -p mount-rs-fuse --locked --offline` passed.
+  This does not establish privileged native FUSE session or mount acceptance.
+
 ## Working-tree provenance and freeze boundary
 
 - Preserve all unrelated dirty, staged, and untracked work in the shared
   checkout.
-- This update changes only `docs/public-api-parity.md` and
-  `scripts/check-parity.mjs`; it makes no implementation, root manifest,
-  workflow, or tracker changes.
-- No commit or push is part of this work.
+- This packet changes the Rust-backed N-API FUSE codec facade, generated
+  declarations, focused tests and the associated tracker/parity evidence.
+- The packet is committed and pushed only after the local gates above pass;
+  native mount, hosted-platform and live-provider claims remain separate.
 - The oracle SHA and current source links above are the evidence boundary for
   this refresh. Broad completion must not be inferred from a green component
   test, an ignored native test, or a missing live-service prerequisite.

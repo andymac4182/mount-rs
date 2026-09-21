@@ -17,6 +17,7 @@ const execFileAsync = promisify(execFile);
 const exampleDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(exampleDirectory, "../..");
 const cliPath = resolve(exampleDirectory, "index.mjs");
+const rustClientSource = resolve(repositoryRoot, "examples/demo/rust-fs-io.rs");
 const optIn = "MOUNT_RS_NODE_CLI_NATIVE_INTEGRATION";
 const mountWaitMs = 60_000;
 const stopWaitMs = 20_000;
@@ -186,10 +187,13 @@ async function run() {
   const mountpoint = join(runDirectory, "mount");
   const backing = join(runDirectory, "backing");
   const configPath = join(runDirectory, "config.json");
+  const rustClient = join(runDirectory, "rust-fs-io");
   const filename = `node-cli-${process.pid}.txt`;
+  const rustFilename = `rust-client-${process.pid}.txt`;
   const seed = "seed written before the Node CLI mount\n";
   const first = "Node client wrote through the mounted Node SDK CLI path\n";
   const second = "Node client rewrote through the mounted Node SDK CLI path\n";
+  const rustPayload = "Rust client wrote through the mounted Node SDK CLI path\n";
   let cli;
   let mounted = false;
   let failure;
@@ -207,6 +211,11 @@ async function run() {
         driver: { kind: "host", root: "./backing" },
       }, null, 2)}\n`,
       { encoding: "utf8", mode: 0o600 },
+    );
+    await execFileAsync(
+      "rustc",
+      ["--edition=2024", rustClientSource, "-o", rustClient],
+      { cwd: repositoryRoot, timeout: 60_000 },
     );
 
     // The CLI waits for SIGINT with a top-level await. Load the exact CLI
@@ -248,6 +257,14 @@ async function run() {
     mounted = true;
     console.log(`PASS Node SDK CLI mounted through ${transport}`);
 
+    const rustClientResult = await execFileAsync(
+      rustClient,
+      ["write-read", resolvedMountpoint, rustFilename, rustPayload],
+      { cwd: repositoryRoot, timeout: clientWaitMs },
+    );
+    assert.match(rustClientResult.stdout, /rust-fs-io: write-read ok/);
+    console.log("PASS independent Rust client mounted read/write");
+
     const client = startCaptured(
       process.execPath,
       ["--input-type=module", "-", resolvedMountpoint, filename, seed, first, second],
@@ -258,6 +275,14 @@ async function run() {
     assert.match(client.output.stdout, /PASS independent Node client mounted read\/write/);
     console.log("PASS independent Node client mounted read/write");
 
+    const rustVerifyResult = await execFileAsync(
+      rustClient,
+      ["verify", resolvedMountpoint, filename, second],
+      { cwd: repositoryRoot, timeout: clientWaitMs },
+    );
+    assert.match(rustVerifyResult.stdout, /rust-fs-io: verify ok/);
+    console.log("PASS independent Rust client verified Node-written bytes");
+
     cli.child.kill("SIGINT");
     const cliExit = await withTimeout(cli.exit, stopWaitMs, "Node CLI unmount");
     assert.equal(cliExit.code, 0, `${cli.output.stdout}\n${cli.output.stderr}`);
@@ -267,7 +292,8 @@ async function run() {
     console.log("PASS Node SDK CLI unmounted cleanly");
 
     assert.equal(await readFile(join(backing, filename), "utf8"), second);
-    console.log("PASS backing root retained Node client bytes after unmount");
+    assert.equal(await readFile(join(backing, rustFilename), "utf8"), rustPayload);
+    console.log("PASS backing root retained Rust and Node client bytes after unmount");
   } catch (error) {
     failure = error;
   } finally {

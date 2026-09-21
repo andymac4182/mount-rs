@@ -2,6 +2,7 @@
 
 import type { Buffer } from "node:buffer"
 import type {
+  NativeFuseAccessIn,
   NativeFuseAttr,
   NativeFuseAttrOut,
   NativeFuseBmapIn,
@@ -11,9 +12,11 @@ import type {
   NativeFuseCreateOut,
   NativeFuseEmpty,
   NativeFuseEntryOut,
+  NativeFuseFallocateIn,
   NativeFuseFlushIn,
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
+  NativeFuseFileLock,
   NativeFuseGetattrIn,
   NativeFuseGetxattrIn,
   NativeFuseGetxattrOut,
@@ -21,7 +24,16 @@ import type {
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseInterruptIn,
+  NativeFuseIoctlIn,
+  NativeFuseIoctlOut,
   NativeFuseListxattrIn,
+  NativeFuseLkIn,
+  NativeFuseLkOut,
+  NativeFuseLinkIn,
+  NativeFuseLseekIn,
+  NativeFuseLseekOut,
+  NativeFuseMkdirIn,
+  NativeFuseMknodIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
   NativeFuseNotification,
@@ -37,15 +49,19 @@ import type {
   NativeFuseReadIn,
   NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
+  NativeFuseRename2In,
+  NativeFuseRenameIn,
   NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
+  NativeFuseSymlinkIn,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
   NativeFuseWriteOut,
 } from "../index.js"
 
 export type {
+  NativeFuseAccessIn,
   NativeFuseAttr,
   NativeFuseAttrOut,
   NativeFuseBmapIn,
@@ -55,9 +71,11 @@ export type {
   NativeFuseCreateOut,
   NativeFuseEmpty,
   NativeFuseEntryOut,
+  NativeFuseFallocateIn,
   NativeFuseFlushIn,
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
+  NativeFuseFileLock,
   NativeFuseGetattrIn,
   NativeFuseGetxattrIn,
   NativeFuseGetxattrOut,
@@ -65,7 +83,16 @@ export type {
   NativeFuseInitIn,
   NativeFuseInitOut,
   NativeFuseInterruptIn,
+  NativeFuseIoctlIn,
+  NativeFuseIoctlOut,
   NativeFuseListxattrIn,
+  NativeFuseLkIn,
+  NativeFuseLkOut,
+  NativeFuseLinkIn,
+  NativeFuseLseekIn,
+  NativeFuseLseekOut,
+  NativeFuseMkdirIn,
+  NativeFuseMknodIn,
   NativeFuseKstatfs,
   NativeFuseNameIn,
   NativeFuseNotification,
@@ -81,9 +108,12 @@ export type {
   NativeFuseReadIn,
   NativeFuseReadlinkOut,
   NativeFuseReleaseIn,
+  NativeFuseRename2In,
+  NativeFuseRenameIn,
   NativeFuseSetxattrIn,
   NativeFuseSetattrIn,
   NativeFuseSplitInitFlags,
+  NativeFuseSymlinkIn,
   NativeFuseTranscriptFrame,
   NativeFuseWriteIn,
   NativeFuseWriteOut,
@@ -158,6 +188,7 @@ export declare const FUSE_GETATTR_FH: number
 export declare const FUSE_READLINK: number
 export declare const FUSE_STATFS: number
 export declare const FUSE_INTERRUPT: number
+export declare const FUSE_IOCTL: number
 export declare const FUSE_BATCH_FORGET: number
 export declare const FUSE_POLL: number
 export declare const FUSE_BMAP: number
@@ -165,6 +196,13 @@ export declare const FUSE_SETXATTR: number
 export declare const FUSE_GETXATTR: number
 export declare const FUSE_LISTXATTR: number
 export declare const FUSE_REMOVEXATTR: number
+export declare const FUSE_GETLK: number
+export declare const FUSE_SETLK: number
+export declare const FUSE_SETLKW: number
+export declare const FUSE_LK_FLOCK: number
+export declare const F_RDLCK: number
+export declare const F_WRLCK: number
+export declare const F_UNLCK: number
 export declare const FUSE_SETXATTR_EXT: bigint
 export declare const FUSE_SETXATTR_ACL_KILL_SGID: number
 export declare const XATTR_CREATE: number
@@ -212,6 +250,32 @@ export declare function decodeLookupIn(body: Uint8Array, context?: NativeFusePro
 export declare function encodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeLookupOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
 export declare function encodeLookupOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeSymlinkIn(body: Uint8Array): NativeFuseSymlinkIn
+export declare function encodeSymlinkIn(value: NativeFuseSymlinkIn): Buffer
+export declare function decodeSymlinkOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeSymlinkOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeMknodIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseMknodIn
+export declare function encodeMknodIn(value: NativeFuseMknodIn, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeMknodOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeMknodOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeMkdirIn(body: Uint8Array): NativeFuseMkdirIn
+export declare function encodeMkdirIn(value: NativeFuseMkdirIn): Buffer
+export declare function decodeMkdirOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeMkdirOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeUnlinkIn(body: Uint8Array): NativeFuseNameIn
+export declare function encodeUnlinkIn(value: NativeFuseNameIn): Buffer
+export declare function decodeRmdirIn(body: Uint8Array): NativeFuseNameIn
+export declare function encodeRmdirIn(value: NativeFuseNameIn): Buffer
+export declare function decodeRenameIn(body: Uint8Array): NativeFuseRenameIn
+export declare function encodeRenameIn(value: NativeFuseRenameIn): Buffer
+export declare function decodeRename2In(body: Uint8Array): NativeFuseRename2In
+export declare function encodeRename2In(value: NativeFuseRename2In): Buffer
+export declare function decodeLinkIn(body: Uint8Array): NativeFuseLinkIn
+export declare function encodeLinkIn(value: NativeFuseLinkIn): Buffer
+export declare function decodeLinkOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseEntryOut
+export declare function encodeLinkOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeAccessIn(body: Uint8Array): NativeFuseAccessIn
+export declare function encodeAccessIn(value: NativeFuseAccessIn): Buffer
 export declare function decodeAttrOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseAttrOut
 export declare function encodeAttrOut(value: NativeFuseAttrOut, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetattrIn
@@ -242,6 +306,10 @@ export declare function decodeFlushIn(body: Uint8Array): NativeFuseFlushIn
 export declare function encodeFlushIn(value: NativeFuseFlushIn): Buffer
 export declare function decodeFsyncIn(body: Uint8Array): NativeFuseFsyncIn
 export declare function encodeFsyncIn(value: NativeFuseFsyncIn): Buffer
+export declare function decodeLkIn(body: Uint8Array): NativeFuseLkIn
+export declare function encodeLkIn(value: NativeFuseLkIn): Buffer
+export declare function decodeLkOut(body: Uint8Array): NativeFuseLkOut
+export declare function encodeLkOut(value: NativeFuseLkOut): Buffer
 export declare function decodeSetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseSetxattrIn
 export declare function encodeSetxattrIn(value: NativeFuseSetxattrIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetxattrIn
@@ -268,6 +336,10 @@ export declare function decodeStatfsOut(body: Uint8Array, context?: NativeFusePr
 export declare function encodeStatfsOut(value: NativeFuseKstatfs, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeInterruptIn(body: Uint8Array): NativeFuseInterruptIn
 export declare function encodeInterruptIn(value: NativeFuseInterruptIn): Buffer
+export declare function decodeIoctlIn(body: Uint8Array): NativeFuseIoctlIn
+export declare function encodeIoctlIn(value: NativeFuseIoctlIn): Buffer
+export declare function decodeIoctlOut(body: Uint8Array): NativeFuseIoctlOut
+export declare function encodeIoctlOut(value: NativeFuseIoctlOut): Buffer
 export declare function decodePollIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFusePollIn
 export declare function encodePollIn(value: NativeFusePollIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodePollOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFusePollOut
@@ -276,6 +348,12 @@ export declare function decodeBmapIn(body: Uint8Array, context?: NativeFuseProto
 export declare function encodeBmapIn(value: NativeFuseBmapIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeBmapOut(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseBmapOut
 export declare function encodeBmapOut(value: NativeFuseBmapOut, context?: NativeFuseProtocolContext): Buffer
+export declare function decodeFallocateIn(body: Uint8Array): NativeFuseFallocateIn
+export declare function encodeFallocateIn(value: NativeFuseFallocateIn): Buffer
+export declare function decodeLseekIn(body: Uint8Array): NativeFuseLseekIn
+export declare function encodeLseekIn(value: NativeFuseLseekIn): Buffer
+export declare function decodeLseekOut(body: Uint8Array): NativeFuseLseekOut
+export declare function encodeLseekOut(value: NativeFuseLseekOut): Buffer
 export declare function decodeGetxattrOut(body: Uint8Array): NativeFuseGetxattrOut
 export declare function encodeGetxattrOut(value: NativeFuseGetxattrOut): Buffer
 export declare function encodeXattrNames(names: Array<string>): Buffer

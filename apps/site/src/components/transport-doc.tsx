@@ -27,7 +27,7 @@ export const transportSpecs = {
     name: 'FUSE',
     eyebrow: 'Transport / kernel-facing Unix mount',
     maturity: 'Preview',
-    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; the latest recorded hosted Linux run passed the structural FUSE lifecycle at 37e9ba1 but predates newer codec packets, so current-tree requalification remains open while broader platform scope stays explicit.',
+    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; focused current-tree codec packets now cover additional FUSE operations and xattrs, while the latest recorded hosted Linux run passed the structural FUSE lifecycle at 37e9ba1 and current-tree requalification remains open.',
     summary: (
       <>
         FUSE is the kernel-facing route for a host that can provide the FUSE
@@ -82,12 +82,30 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>GETATTR</code>/<code>SETATTR</code>,
         <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>,
         <code>LOOKUP</code>, <code>READLINK</code>, <code>STATFS</code>,
-        <code>BATCH_FORGET</code>, <code>INTERRUPT</code>,
-        <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>, and
-        <code>FSYNC</code>/<code>FSYNCDIR</code> bodies, plus
-        <code>READDIR</code>/<code>READDIRPLUS</code> directory codecs.
-        Full request/reply, init negotiation, session, and native-mount surfaces
-        remain open; several typed operations still return <code>ENOSYS</code>.
+        <code>SYMLINK</code>, <code>MKNOD</code>, <code>MKDIR</code>,
+        <code>UNLINK</code>, <code>RMDIR</code>, <code>RENAME</code>,
+        <code>LINK</code>, <code>ACCESS</code>,
+        <code>BATCH_FORGET</code>, <code>INTERRUPT</code>, <code>POLL</code>,
+        <code>FALLOCATE</code>, <code>RENAME2</code>, <code>LSEEK</code>,
+        <code>GETLK</code>/<code>SETLK</code>/<code>SETLKW</code>, and
+        <code>COPY_FILE_RANGE</code>, <code>RELEASE</code>/<code>RELEASEDIR</code>,
+        <code>FLUSH</code>, and <code>FSYNC</code>/<code>FSYNCDIR</code> bodies,
+        plus <code>SETXATTR</code>/<code>GETXATTR</code>/<code>LISTXATTR</code>/
+        <code>REMOVEXATTR</code> request/reply codecs and
+        <code>READDIR</code>/<code>READDIRPLUS</code> directory codecs. These
+        are focused mount-free boundaries: malformed or trailing advanced
+        requests fail closed and valid unsupported operations still return
+        <code>ENOSYS</code>. Full request/reply, init negotiation, session, and
+        native-mount surfaces remain open. The current-tree Rust session packet
+        adds 16 frame-level cases for <code>SYMLINK</code>, <code>MKNOD</code>,
+        <code>MKDIR</code>, <code>UNLINK</code>, <code>RMDIR</code>,
+        <code>RENAME</code>, <code>LINK</code>, and <code>ACCESS</code>, including
+        error/state cleanup, regular-file <code>MKNOD</code> fallback, and the
+        POSIX 255-byte name limit. Advanced <code>FALLOCATE</code>/<code>LSEEK</code>
+        semantics and the native device/mount remain open. Plain-flag
+        <code>RENAME2</code> now participates in the Rust session path;
+        unsupported flag bits return <code>ENOSYS</code> without mutating the
+        namespace, while <code>COPY_FILE_RANGE</code> remains unsupported.
         FUSE evidence does not qualify NFS, 9P, or FSKit.
       </>
     ),
@@ -99,6 +117,31 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>OPEN</code>/<code>OPENDIR</code>, <code>CREATE</code>,
         <code>LOOKUP</code>, <code>READLINK</code>, and <code>STATFS</code>
         codecs alongside <code>BATCH_FORGET</code>/<code>INTERRUPT</code>,
+        <code>POLL</code>, <code>FALLOCATE</code>, <code>RENAME2</code>,
+        <code>LSEEK</code>, and <code>COPY_FILE_RANGE</code>. The advanced
+        operation packet validates framing and keeps unsupported valid requests
+        at <code>ENOSYS</code> without mutating the session. The N-API xattr
+        packet adds <code>SETXATTR</code>, <code>GETXATTR</code>,
+        <code>LISTXATTR</code>, and <code>REMOVEXATTR</code> codecs with
+        pinned-oracle coverage across protocol contexts, malformed,
+        truncated, trailing, and declared-size checks. The existing
+        raw-layout <code>IOCTL</code> request/reply and typed
+        <code>BMAP</code> request/reply bodies are now covered by pinned-oracle
+        differentials as well; these remain focused codecs rather than a full
+        native session. The latest packet also adds typed
+        <code>GETLK</code>/<code>SETLK</code>/<code>SETLKW</code> request codecs
+        and the typed <code>GETLK</code> reply. Its pinned-oracle differential
+        covers the 48-byte request, 24-byte reply, truncation, trailing-byte,
+        and empty status-reply boundaries; generated bindings, declarations,
+        typecheck, release build, and the full N-API suite passed. Native FUSE
+        lock/session semantics remain open. The latest packet also adds typed
+        <code>SYMLINK</code>, <code>MKNOD</code>, <code>MKDIR</code>,
+        <code>UNLINK</code>, <code>RMDIR</code>, <code>RENAME</code>,
+        <code>RENAME2</code>, <code>LINK</code>, <code>ACCESS</code>,
+        <code>FALLOCATE</code>, and <code>LSEEK</code> bodies with generated
+        declarations and explicit CommonJS/ESM exports. Pinned byte/decode
+        differentials and artifact aggregation passed; this remains mount-free
+        codec evidence. Other existing
         <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>,
         <code>FSYNC</code>/<code>FSYNCDIR</code>,
         <code>packDirents</code>/<code>unpackDirents</code>, and
@@ -106,13 +149,21 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         7.8/7.39/7.41 differential tests cover protocol bytes, legacy layouts,
         truncation, trailing data, UTF-8 names, 8-byte alignment, bounded
         packing, integer coercion, malformed input, embedded-NUL rejection, and
-        inode parity. Rust session tests cover focused <code>ACCESS</code>,
-        <code>BATCH_FORGET</code>, and fail-closed <code>INTERRUPT</code>
-        validation; six INIT tests cover negotiated <code>FUSE_INIT_EXT</code>
+        inode parity. Current-tree Rust session coverage adds 16 frame-level
+        cases for the simple namespace operations above, including rollback and
+        inode-path cleanup, error/state preservation, regular-file
+        <code>MKNOD</code> fallback, symlink access checks, and the
+        <code>NAME_MAX</code> boundary. Existing session tests cover focused
+        <code>ACCESS</code>, <code>BATCH_FORGET</code>, and fail-closed
+        <code>INTERRUPT</code> validation; six INIT tests cover negotiated
+        <code>FUSE_INIT_EXT</code>
         and <code>flags2</code> handling. Hosted CI run 35499717435 passed Linux
         native FUSE/NFS/9P/WebDAV at 37e9ba1; newer current-tree CI is queued,
-        so full request/reply, session, and native-mount surfaces stay
-        open.
+        so full request/reply, session, and native-mount surfaces stay open.
+        Plain-flag <code>RENAME2</code> is now supported at session dispatch;
+        unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
+        <code>FALLOCATE</code>, <code>LSEEK</code>, and
+        <code>COPY_FILE_RANGE</code> remain unsupported boundaries.
       </>
     ),
     sources: [
@@ -189,9 +240,10 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         Current-tree Rust NFS tests retain backend handles across NFSv3 unlink
         and NFSv4 rename. Focused coverage passed 30 unit, 8 integration, and
         266 oracle cases with 18 capability-gated skips. The opt-in macOS Node
-        CLI path also mounted HostFs through native NFS, verified read/write,
-        unmount, persistence, and clean backing-directory teardown. The
-        TypeScript control, Linux FUSE, and privileged cross-platform
+        CLI path also mounted HostFs through native NFS, exercised independent
+        Rust and Node clients, verified cross-client readback, unmount,
+        backing-root persistence, and clean teardown. The TypeScript control,
+        Linux FUSE, and privileged cross-platform
         qualification remain separate.
       </>
     ),
@@ -275,7 +327,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
     name: 'macOS FSKit',
     eyebrow: 'Transport / Apple extension boundary',
     maturity: 'Planned',
-    maturityNote: 'Unsigned SDK/worker checkpoint; signing, installation, activation, and real mounts remain pending.',
+    maturityNote: 'Unsigned SDK/worker checkpoint with a 12-test Rust bridge suite and arm64 build evidence; signing, installation, activation, and real mounts remain pending.',
     summary: (
       <>
         FSKit is the native macOS extension path for a future mounted volume.
@@ -302,10 +354,11 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
     ),
     surface: (
       <>
-        Swift translates FSKit operations to the bounded Rust worker frame;
-        Rust owns filesystem, provider, locking, and lifecycle behavior. The
-        bridge supports memory, rooted host, SQLite, and split SQLite backends
-        in its current test configuration.
+        Swift translates FSKit operations to a little-endian bounded Rust
+        worker frame with a 1 MiB body limit and 128 KiB data chunks; Rust owns
+        filesystem, provider, locking, and lifecycle behavior. The bridge
+        supports memory, rooted host, SQLite, and split SQLite backends in its
+        current test configuration.
       </>
     ),
     verifyLabel: 'Verify the unsigned seam without calling it a mount',
@@ -325,16 +378,26 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
     limitations: (
       <>
         No valid Apple signing identity, provisioning profile, launchd
-        registration, or FSKit activation test is currently recorded. Optional
-        xattrs, offloaded I/O, extent/preallocation, and special-node surfaces
-        also remain separate gaps. FUSE/NFS fallback does not close this stream.
+        registration, or FSKit activation test is currently recorded. The
+        local Rust toolchain can build arm64 targets and the extension for
+        x86_64, but cannot link the x86_64 XPC service because that Rust target
+        is not installed. Optional xattrs, offloaded I/O, extent/preallocation,
+        and special-node surfaces also remain separate gaps. FUSE/NFS fallback
+        does not close this stream.
       </>
     ),
     evidence: (
       <>
-        Rust bridge tests, Swift frame tests, XPC lifecycle tests, and unsigned
-        arm64/Xcode builds are current evidence. They are deliberately labeled
-        as transport/worker evidence rather than a mounted-volume result.
+        The Rust bridge suite has 12 passing tests covering bounded frames,
+        malformed input, provider errno propagation, handle shutdown, rooted
+        host round trips, and durable split-SQLite reopen. Swift frame tests,
+        in-process XPC lifecycle tests, and unsigned arm64/Xcode builds also
+        pass on the recorded macOS 26.5.1 arm64 SDK/Xcode 26.6 environment.
+        The activation script now has an explicit required mode that only
+        passes after signing, installation, user approval, and a real read/write
+        mount check; without those prerequisites it reports a diagnostic block.
+        All of this remains transport/worker evidence rather than a mounted-
+        volume result.
       </>
     ),
     sources: [
@@ -405,11 +468,24 @@ curl -H 'Authorization: Bearer demo-memory' \
       <>
         Local HTTP/CLI checks cover bearer isolation, streamed reads/writes,
         ranges, truncate, concurrent writes, restart/reopen, and cleanup. The
-        current tracker keeps broader multi-drive and hosted coverage open.
+        optional <code>mount-rs-observability</code> seam can attach a
+        caller-owned telemetry handle through
+        <code>HttpServerOptions::with_telemetry</code>; the OTLP variant accepts
+        only W3C trace propagation and emits bounded operation metadata without
+        paths, tokens, file contents, block IDs, or arbitrary headers. The
+        macOS arm64 W30.5 loopback collector test now receives non-empty
+        <code>/v1/traces</code>, <code>/v1/metrics</code>, and
+        <code>/v1/logs</code> payloads without raw path bytes, and the HTTP
+        observability integration gate recorded 7 passes. This verifies the
+        local exporter/collector boundary; external collector reachability and
+        broader multi-drive and hosted coverage remain open.
       </>
     ),
     sources: [
       { label: 'HTTP transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/README.md' },
+      { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
+      { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
+      { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/src/server.rs' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#quick-local-demo' },
     ],
   },

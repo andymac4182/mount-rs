@@ -107,8 +107,12 @@ if (process.env.MOUNTX_SOURCE) {
   // Keep the capability-limited, oracle-backed matrix in the root test tree
   // while making it part of the published N-API package gate.
   await import("../../../tests/unstorage/capability-parity.mjs")
+  // The remaining-skip packet executes every capability boundary and keeps
+  // exact ENOSYS/ENOTSUP results separate from upstream capability skips.
+  await import("../../../tests/unstorage/remaining-skip-parity.mjs")
 } else {
   console.log("mount-rs N-API unstorage capability parity: SKIP (MOUNTX_SOURCE unset)")
+  console.log("mount-rs N-API unstorage remaining-skip parity: SKIP (MOUNTX_SOURCE unset)")
 }
 
 console.log("mount-rs N-API unstorage bridge: PASS")

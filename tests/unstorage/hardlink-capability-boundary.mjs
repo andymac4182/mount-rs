@@ -213,13 +213,30 @@ const hardlinkRows = [
     expectedError: "ENOENT",
     scenario: async (fs) => fs.link("/missing", "/alias"),
   },
+  {
+    label: "hardlink alias write-through boundary",
+    scenario: async (fs) => {
+      await fs.writeFile("/source", new Uint8Array([1]));
+      await fs.link("/source", "/alias");
+      await fs.writeFile("/alias", new Uint8Array([2]));
+    },
+  },
+  {
+    label: "hardlink alias unlink-lifetime boundary",
+    scenario: async (fs) => {
+      await fs.writeFile("/source", new Uint8Array([1]));
+      await fs.link("/source", "/alias");
+      await fs.unlink("/source");
+      await fs.stat("/alias");
+    },
+  },
 ];
 
 const oracleCapabilities = resolveCapabilities(
   createOracleDriver(createStorage({ driver: new RawStore().asOracleDriver() })),
 );
 assert.equal(oracleCapabilities.hardlinks, false, "pinned oracle hardlinks capability changed");
-assert.equal(hardlinkRows.length, 4, "hardlink inventory changed without updating this test");
+assert.equal(hardlinkRows.length, 6, "hardlink inventory changed without updating this test");
 for (const row of hardlinkRows) await runRow(row);
 
 assert.equal(counts.PASS, 0, "hardlink packet unexpectedly used supported rows");

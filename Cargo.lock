@@ -1277,6 +1277,7 @@ dependencies = [
  "mount-rs-r2",
  "mount-rs-s3",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
  "mount-rs-webdav",
  "napi",
  "napi-build",
@@ -1378,6 +1379,7 @@ dependencies = [
  "mount-rs-pglite",
  "mount-rs-r2",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
  "tokio",
 ]
 
@@ -2128,7 +2130,9 @@ checksum = "16a1cfa75cc186dd73d5818e510e042e40927bccc9c236b061cea97e1eb08029"
 dependencies = [
  "base64 0.23.1",
  "bytes",
+ "futures-channel",
  "futures-core",
+ "futures-util",
  "http",
  "http-body",
  "http-body-util",

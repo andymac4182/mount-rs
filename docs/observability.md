@@ -52,6 +52,13 @@ guard.shutdown()?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+`OtlpConfig::endpoint` is the collector base URL. The built-in setup sends
+traces, metrics, and logs to its `/v1/traces`, `/v1/metrics`, and `/v1/logs`
+signal paths respectively. It uses the blocking OTLP HTTP client behind the
+SDK's worker processors, so exporter threads do not require an ambient Tokio
+runtime; applications that need a different runtime or client can own their
+providers and call `set_global` instead.
+
 Exporter failures are isolated from filesystem operations. `OtlpGuard::shutdown`
 and `force_flush` return aggregated provider errors so the owning application
 can report them without turning an in-flight read or write into an exporter
@@ -100,7 +107,11 @@ leaves exporter setup to the embedding application.
 
 The crate tests cover disabled behavior, bounded path summaries, driver
 round-trips, byte counters, configuration bounds, and W3C carrier round-trips
-when the relevant feature is enabled. These are deterministic unit/integration
-checks; they do not prove that an external collector is reachable. A demo or
-release claim of end-to-end export still requires a live collector-backed run
-with the exact binary revision and OTLP endpoint recorded.
+when the relevant feature is enabled. The `otlp_collector` integration test
+also runs a loopback collector and verifies that all three signal paths receive
+non-empty payloads without a raw path value. The `otlp_failure` test verifies
+that setup, flush, and shutdown failures remain in the guard API. These tests
+prove the local exporter/collector boundary, not reachability of an external
+collector. A demo or release claim of external end-to-end export still
+requires a live collector-backed run with the exact binary revision and OTLP
+endpoint recorded.

@@ -10,6 +10,32 @@ import {
   encodeLookupIn as namedEncodeLookupIn,
   decodeLookupOut as namedDecodeLookupOut,
   encodeLookupOut as namedEncodeLookupOut,
+  decodeSymlinkIn as namedDecodeSymlinkIn,
+  encodeSymlinkIn as namedEncodeSymlinkIn,
+  decodeSymlinkOut as namedDecodeSymlinkOut,
+  encodeSymlinkOut as namedEncodeSymlinkOut,
+  decodeMknodIn as namedDecodeMknodIn,
+  encodeMknodIn as namedEncodeMknodIn,
+  decodeMknodOut as namedDecodeMknodOut,
+  encodeMknodOut as namedEncodeMknodOut,
+  decodeMkdirIn as namedDecodeMkdirIn,
+  encodeMkdirIn as namedEncodeMkdirIn,
+  decodeMkdirOut as namedDecodeMkdirOut,
+  encodeMkdirOut as namedEncodeMkdirOut,
+  decodeUnlinkIn as namedDecodeUnlinkIn,
+  encodeUnlinkIn as namedEncodeUnlinkIn,
+  decodeRmdirIn as namedDecodeRmdirIn,
+  encodeRmdirIn as namedEncodeRmdirIn,
+  decodeRenameIn as namedDecodeRenameIn,
+  encodeRenameIn as namedEncodeRenameIn,
+  decodeRename2In as namedDecodeRename2In,
+  encodeRename2In as namedEncodeRename2In,
+  decodeLinkIn as namedDecodeLinkIn,
+  encodeLinkIn as namedEncodeLinkIn,
+  decodeLinkOut as namedDecodeLinkOut,
+  encodeLinkOut as namedEncodeLinkOut,
+  decodeAccessIn as namedDecodeAccessIn,
+  encodeAccessIn as namedEncodeAccessIn,
   decodeCreateIn as namedDecodeCreateIn,
   encodeCreateIn as namedEncodeCreateIn,
   decodeCreateOut as namedDecodeCreateOut,
@@ -26,6 +52,10 @@ import {
   encodeFlushIn as namedEncodeFlushIn,
   decodeFsyncIn as namedDecodeFsyncIn,
   encodeFsyncIn as namedEncodeFsyncIn,
+  decodeLkIn as namedDecodeLkIn,
+  encodeLkIn as namedEncodeLkIn,
+  decodeLkOut as namedDecodeLkOut,
+  encodeLkOut as namedEncodeLkOut,
   decodeReadIn as namedDecodeReadIn,
   encodeReadIn as namedEncodeReadIn,
   decodeReadOut as namedDecodeReadOut,
@@ -48,6 +78,10 @@ import {
   encodeStatfsOut as namedEncodeStatfsOut,
   decodeInterruptIn as namedDecodeInterruptIn,
   encodeInterruptIn as namedEncodeInterruptIn,
+  decodeIoctlIn as namedDecodeIoctlIn,
+  encodeIoctlIn as namedEncodeIoctlIn,
+  decodeIoctlOut as namedDecodeIoctlOut,
+  encodeIoctlOut as namedEncodeIoctlOut,
   decodePollIn as namedDecodePollIn,
   encodePollIn as namedEncodePollIn,
   decodePollOut as namedDecodePollOut,
@@ -56,6 +90,12 @@ import {
   encodeBmapIn as namedEncodeBmapIn,
   decodeBmapOut as namedDecodeBmapOut,
   encodeBmapOut as namedEncodeBmapOut,
+  decodeFallocateIn as namedDecodeFallocateIn,
+  encodeFallocateIn as namedEncodeFallocateIn,
+  decodeLseekIn as namedDecodeLseekIn,
+  encodeLseekIn as namedEncodeLseekIn,
+  decodeLseekOut as namedDecodeLseekOut,
+  encodeLseekOut as namedEncodeLseekOut,
   decodeSetxattrIn as namedDecodeSetxattrIn,
   encodeSetxattrIn as namedEncodeSetxattrIn,
   decodeGetxattrIn as namedDecodeGetxattrIn,
@@ -75,6 +115,32 @@ for (const [name, value] of [
   ["encodeLookupIn", namedEncodeLookupIn],
   ["decodeLookupOut", namedDecodeLookupOut],
   ["encodeLookupOut", namedEncodeLookupOut],
+  ["decodeSymlinkIn", namedDecodeSymlinkIn],
+  ["encodeSymlinkIn", namedEncodeSymlinkIn],
+  ["decodeSymlinkOut", namedDecodeSymlinkOut],
+  ["encodeSymlinkOut", namedEncodeSymlinkOut],
+  ["decodeMknodIn", namedDecodeMknodIn],
+  ["encodeMknodIn", namedEncodeMknodIn],
+  ["decodeMknodOut", namedDecodeMknodOut],
+  ["encodeMknodOut", namedEncodeMknodOut],
+  ["decodeMkdirIn", namedDecodeMkdirIn],
+  ["encodeMkdirIn", namedEncodeMkdirIn],
+  ["decodeMkdirOut", namedDecodeMkdirOut],
+  ["encodeMkdirOut", namedEncodeMkdirOut],
+  ["decodeUnlinkIn", namedDecodeUnlinkIn],
+  ["encodeUnlinkIn", namedEncodeUnlinkIn],
+  ["decodeRmdirIn", namedDecodeRmdirIn],
+  ["encodeRmdirIn", namedEncodeRmdirIn],
+  ["decodeRenameIn", namedDecodeRenameIn],
+  ["encodeRenameIn", namedEncodeRenameIn],
+  ["decodeRename2In", namedDecodeRename2In],
+  ["encodeRename2In", namedEncodeRename2In],
+  ["decodeLinkIn", namedDecodeLinkIn],
+  ["encodeLinkIn", namedEncodeLinkIn],
+  ["decodeLinkOut", namedDecodeLinkOut],
+  ["encodeLinkOut", namedEncodeLinkOut],
+  ["decodeAccessIn", namedDecodeAccessIn],
+  ["encodeAccessIn", namedEncodeAccessIn],
   ["decodeCreateIn", namedDecodeCreateIn],
   ["encodeCreateIn", namedEncodeCreateIn],
   ["decodeCreateOut", namedDecodeCreateOut],
@@ -91,6 +157,10 @@ for (const [name, value] of [
   ["encodeFlushIn", namedEncodeFlushIn],
   ["decodeFsyncIn", namedDecodeFsyncIn],
   ["encodeFsyncIn", namedEncodeFsyncIn],
+  ["decodeLkIn", namedDecodeLkIn],
+  ["encodeLkIn", namedEncodeLkIn],
+  ["decodeLkOut", namedDecodeLkOut],
+  ["encodeLkOut", namedEncodeLkOut],
   ["decodeReadIn", namedDecodeReadIn],
   ["encodeReadIn", namedEncodeReadIn],
   ["decodeReadOut", namedDecodeReadOut],
@@ -113,6 +183,10 @@ for (const [name, value] of [
   ["encodeStatfsOut", namedEncodeStatfsOut],
   ["decodeInterruptIn", namedDecodeInterruptIn],
   ["encodeInterruptIn", namedEncodeInterruptIn],
+  ["decodeIoctlIn", namedDecodeIoctlIn],
+  ["encodeIoctlIn", namedEncodeIoctlIn],
+  ["decodeIoctlOut", namedDecodeIoctlOut],
+  ["encodeIoctlOut", namedEncodeIoctlOut],
   ["decodePollIn", namedDecodePollIn],
   ["encodePollIn", namedEncodePollIn],
   ["decodePollOut", namedDecodePollOut],
@@ -121,6 +195,12 @@ for (const [name, value] of [
   ["encodeBmapIn", namedEncodeBmapIn],
   ["decodeBmapOut", namedDecodeBmapOut],
   ["encodeBmapOut", namedEncodeBmapOut],
+  ["decodeFallocateIn", namedDecodeFallocateIn],
+  ["encodeFallocateIn", namedEncodeFallocateIn],
+  ["decodeLseekIn", namedDecodeLseekIn],
+  ["encodeLseekIn", namedEncodeLseekIn],
+  ["decodeLseekOut", namedDecodeLseekOut],
+  ["encodeLseekOut", namedEncodeLseekOut],
   ["decodeSetxattrIn", namedDecodeSetxattrIn],
   ["encodeSetxattrIn", namedEncodeSetxattrIn],
   ["decodeGetxattrIn", namedDecodeGetxattrIn],
@@ -405,6 +485,80 @@ for (const ctx of [lookupContext, { minor: 39, setxattrExt: false }, { minor: 8,
   assert.deepEqual(fuse.decodeLookupOut(reply, ctx), plusEntry);
 }
 
+const symlinkInput = { name: "alias", target: "../café/target" };
+const symlinkBody = fuse.encodeSymlinkIn(symlinkInput);
+assert.deepEqual(fuse.decodeSymlinkIn(symlinkBody), symlinkInput);
+assert.deepEqual(fuse.decodeSymlinkOut(fuse.encodeSymlinkOut(plusEntry, lookupContext), lookupContext), plusEntry);
+
+const mknodInput = { mode: 0o100640, rdev: 0x01020304, umask: 0o22, name: "device" };
+for (const ctx of [lookupContext, { minor: 8, setxattrExt: false }]) {
+  const body = fuse.encodeMknodIn(mknodInput, ctx);
+  assert.deepEqual(fuse.decodeMknodIn(body, ctx), {
+    ...mknodInput,
+    umask: ctx.minor >= 12 ? mknodInput.umask : 0,
+  });
+  assert.deepEqual(fuse.decodeMknodOut(fuse.encodeMknodOut(plusEntry, ctx), ctx), plusEntry);
+}
+
+const mkdirInput = { mode: 0o40750, umask: 0o27, name: "new-dir" };
+const mkdirBody = fuse.encodeMkdirIn(mkdirInput);
+assert.deepEqual(fuse.decodeMkdirIn(mkdirBody), mkdirInput);
+assert.deepEqual(fuse.decodeMkdirOut(fuse.encodeMkdirOut(plusEntry, lookupContext), lookupContext), plusEntry);
+
+const nameOperations = [
+  ["unlink", fuse.decodeUnlinkIn, fuse.encodeUnlinkIn],
+  ["rmdir", fuse.decodeRmdirIn, fuse.encodeRmdirIn],
+];
+for (const [name, decode, encode] of nameOperations) {
+  const value = { name: `${name}-entry` };
+  assert.deepEqual(decode(encode(value)), value, `${name} request round trip`);
+}
+
+const renameInput = { newdir: 0x0102030405060708n, oldName: "old name", newName: "new name" };
+assert.deepEqual(fuse.decodeRenameIn(fuse.encodeRenameIn(renameInput)), renameInput);
+const rename2Input = { ...renameInput, flags: 0x3 };
+assert.deepEqual(fuse.decodeRename2In(fuse.encodeRename2In(rename2Input)), rename2Input);
+
+const linkInput = { oldnodeid: 0x1112131415161718n, name: "hard-link" };
+assert.deepEqual(fuse.decodeLinkIn(fuse.encodeLinkIn(linkInput)), linkInput);
+assert.deepEqual(fuse.decodeLinkOut(fuse.encodeLinkOut(plusEntry, lookupContext), lookupContext), plusEntry);
+
+const accessInput = { mask: 0x7 };
+assert.deepEqual(fuse.decodeAccessIn(fuse.encodeAccessIn(accessInput)), accessInput);
+
+const fallocateInput = {
+  fh: 0x0102030405060708n,
+  offset: 0x1112131415161718n,
+  length: 0x2122232425262728n,
+  mode: 0x3,
+};
+assert.deepEqual(fuse.decodeFallocateIn(fuse.encodeFallocateIn(fallocateInput)), fallocateInput);
+const lseekInput = { fh: 0x3132333435363738n, offset: 0x4142434445464748n, whence: fuse.SEEK_DATA };
+assert.deepEqual(fuse.decodeLseekIn(fuse.encodeLseekIn(lseekInput)), lseekInput);
+const lseekReply = { offset: 0x5152535455565758n };
+assert.deepEqual(fuse.decodeLseekOut(fuse.encodeLseekOut(lseekReply)), lseekReply);
+const lkInput = {
+  fh: 0x0102030405060708n,
+  owner: 0x1112131415161718n,
+  lk: {
+    start: 0x2122232425262728n,
+    end: 0x3132333435363738n,
+    type: fuse.F_WRLCK,
+    pid: 4242,
+  },
+  lkFlags: fuse.FUSE_LK_FLOCK,
+};
+assert.deepEqual(fuse.decodeLkIn(fuse.encodeLkIn(lkInput)), lkInput);
+const lkReply = {
+  lk: {
+    start: 0x4142434445464748n,
+    end: 0x5152535455565758n,
+    type: fuse.F_UNLCK,
+    pid: 777,
+  },
+};
+assert.deepEqual(fuse.decodeLkOut(fuse.encodeLkOut(lkReply)), lkReply);
+
 const emptyRequest = {};
 const readlinkValue = { target: "../café/target" };
 const statfsValue = {
@@ -478,6 +632,74 @@ for (const ctx of pollContexts) {
     `POLL reply round trip for minor ${ctx.minor}`,
   );
 }
+
+const ioctlInput = {
+  fh: 0x0102030405060708n,
+  flags: 0x3,
+  cmd: 0x80185879,
+  arg: 0x1112131415161718n,
+  inSize: 0x21222324,
+  outSize: 0x31323334,
+};
+const ioctlReplyValue = {
+  result: -25,
+  flags: 0x5,
+  inIovs: 0x41424344,
+  outIovs: 0x51525354,
+};
+const ioctlContexts = [
+  { minor: 41, setxattrExt: false },
+  { minor: 39, setxattrExt: false },
+  { minor: 8, setxattrExt: false },
+  { minor: 3, setxattrExt: false },
+];
+const encodeIoctlInOracle = (value) => {
+  const body = Buffer.alloc(32);
+  body.writeBigUInt64LE(value.fh, 0);
+  body.writeUInt32LE(value.flags, 8);
+  body.writeUInt32LE(value.cmd, 12);
+  body.writeBigUInt64LE(value.arg, 16);
+  body.writeUInt32LE(value.inSize, 24);
+  body.writeUInt32LE(value.outSize, 28);
+  return body;
+};
+const encodeIoctlOutOracle = (value) => {
+  const body = Buffer.alloc(16);
+  body.writeInt32LE(value.result, 0);
+  body.writeUInt32LE(value.flags, 4);
+  body.writeUInt32LE(value.inIovs, 8);
+  body.writeUInt32LE(value.outIovs, 12);
+  return body;
+};
+const ioctlBody = fuse.encodeIoctlIn(ioctlInput);
+const ioctlReplyBody = fuse.encodeIoctlOut(ioctlReplyValue);
+assert.equal(fuse.FUSE_IOCTL, 39);
+assert.equal(ioctlBody.length, 32);
+assert.equal(ioctlReplyBody.length, 16);
+assert.deepEqual(fuse.decodeIoctlIn(ioctlBody), ioctlInput);
+assert.deepEqual(fuse.decodeIoctlOut(ioctlReplyBody), ioctlReplyValue);
+assert.deepEqual([...ioctlBody], [...encodeIoctlInOracle(ioctlInput)]);
+assert.deepEqual([...ioctlReplyBody], [...encodeIoctlOutOracle(ioctlReplyValue)]);
+for (let length = 0; length < ioctlBody.length; length++) {
+  const result = classifyProtocolError(() => fuse.decodeIoctlIn(ioctlBody.subarray(0, length)));
+  assert.equal(result.name, "ProtocolError");
+  assert.equal(result.code, "ERR_FUSE_PROTOCOL");
+}
+for (let length = 0; length < ioctlReplyBody.length; length++) {
+  const result = classifyProtocolError(() => fuse.decodeIoctlOut(ioctlReplyBody.subarray(0, length)));
+  assert.equal(result.name, "ProtocolError");
+  assert.equal(result.code, "ERR_FUSE_PROTOCOL");
+}
+assert.equal(
+  classifyProtocolError(() => fuse.decodeIoctlIn(Buffer.concat([ioctlBody, Buffer.from([0])]))).offset,
+  32,
+);
+assert.equal(
+  classifyProtocolError(() => fuse.decodeIoctlOut(Buffer.concat([ioctlReplyBody, Buffer.from([0])]))).offset,
+  16,
+);
+const ioctlErrorReply = fuse.encodeErrorReply(99n, "EIO");
+assert.deepEqual(fuse.decodeOutHeader(ioctlErrorReply), { len: 16, error: -5, unique: 99n });
 
 const bmapInput = {
   block: 0x0102030405060708n,
@@ -574,6 +796,159 @@ assert.equal(fuse.encodeReply(99n).length, fuse.FUSE_OUT_HEADER_SIZE);
 const source = process.env.MOUNTX_SOURCE;
 if (source) {
   const oracle = await import(pathToFileURL(`${source}/src/fuse/protocol.ts`).href);
+  const oracleIoctlIsTyped =
+    typeof oracle.encodeRequestBody === "function" &&
+    !Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(fuse.FUSE_IOCTL);
+
+  const typedRequestCases = [
+    ["SYMLINK", fuse.FUSE_SYMLINK, symlinkInput, undefined, fuse.encodeSymlinkIn, fuse.decodeSymlinkIn],
+    ["MKNOD", fuse.FUSE_MKNOD, mknodInput, lookupContext, fuse.encodeMknodIn, fuse.decodeMknodIn],
+    ["MKDIR", fuse.FUSE_MKDIR, mkdirInput, undefined, fuse.encodeMkdirIn, fuse.decodeMkdirIn],
+    ["UNLINK", fuse.FUSE_UNLINK, { name: "unlink-entry" }, undefined, fuse.encodeUnlinkIn, fuse.decodeUnlinkIn],
+    ["RMDIR", fuse.FUSE_RMDIR, { name: "rmdir-entry" }, undefined, fuse.encodeRmdirIn, fuse.decodeRmdirIn],
+    ["RENAME", fuse.FUSE_RENAME, renameInput, undefined, fuse.encodeRenameIn, fuse.decodeRenameIn],
+    ["RENAME2", fuse.FUSE_RENAME2, rename2Input, undefined, fuse.encodeRename2In, fuse.decodeRename2In],
+    ["LINK", fuse.FUSE_LINK, linkInput, undefined, fuse.encodeLinkIn, fuse.decodeLinkIn],
+    ["ACCESS", fuse.FUSE_ACCESS, accessInput, undefined, fuse.encodeAccessIn, fuse.decodeAccessIn],
+    ["FALLOCATE", fuse.FUSE_FALLOCATE, fallocateInput, undefined, fuse.encodeFallocateIn, fuse.decodeFallocateIn],
+    ["LSEEK", fuse.FUSE_LSEEK, lseekInput, undefined, fuse.encodeLseekIn, fuse.decodeLseekIn],
+    ["GETLK", fuse.FUSE_GETLK, lkInput, undefined, fuse.encodeLkIn, fuse.decodeLkIn],
+    ["SETLK", fuse.FUSE_SETLK, lkInput, undefined, fuse.encodeLkIn, fuse.decodeLkIn],
+    ["SETLKW", fuse.FUSE_SETLKW, lkInput, undefined, fuse.encodeLkIn, fuse.decodeLkIn],
+  ];
+  for (const [name, opcode, value, ctx, encode, decode] of typedRequestCases) {
+    const actual = ctx === undefined ? encode(value) : encode(value, ctx);
+    const expected = oracle.encodeRequestBody(opcode, value, ctx);
+    assert.deepEqual([...actual], [...expected], `${name} request bytes match oracle`);
+    const decoded = ctx === undefined ? decode(actual) : decode(actual, ctx);
+    assert.deepEqual(decoded, oracle.decodeRequestBody(opcode, expected, ctx), `${name} request decode matches oracle`);
+  }
+
+  for (const [name, opcode, value, ctx, encode, decode] of [
+    ["SYMLINK", fuse.FUSE_SYMLINK, plusEntry, lookupContext, fuse.encodeSymlinkOut, fuse.decodeSymlinkOut],
+    ["MKNOD", fuse.FUSE_MKNOD, plusEntry, lookupContext, fuse.encodeMknodOut, fuse.decodeMknodOut],
+    ["MKDIR", fuse.FUSE_MKDIR, plusEntry, lookupContext, fuse.encodeMkdirOut, fuse.decodeMkdirOut],
+    ["LINK", fuse.FUSE_LINK, plusEntry, lookupContext, fuse.encodeLinkOut, fuse.decodeLinkOut],
+    ["LSEEK", fuse.FUSE_LSEEK, lseekReply, undefined, fuse.encodeLseekOut, fuse.decodeLseekOut],
+    ["GETLK", fuse.FUSE_GETLK, lkReply, undefined, fuse.encodeLkOut, fuse.decodeLkOut],
+  ]) {
+    const actual = ctx === undefined ? encode(value) : encode(value, ctx);
+    const expected = oracle.encodeReplyBody(opcode, value, ctx);
+    assert.deepEqual([...actual], [...expected], `${name} reply bytes match oracle`);
+    const decoded = ctx === undefined ? decode(actual) : decode(actual, ctx);
+    assert.deepEqual(decoded, oracle.decodeReplyBody(opcode, expected, ctx), `${name} reply decode matches oracle`);
+  }
+
+  for (const ctx of ioctlContexts) {
+    const expectedRequest = encodeIoctlInOracle(ioctlInput);
+    const expectedReply = encodeIoctlOutOracle(ioctlReplyValue);
+    assert.deepEqual(
+      [...ioctlBody],
+      [...expectedRequest],
+      `IOCTL request bytes match the pinned FUSE oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      [...ioctlReplyBody],
+      [...expectedReply],
+      `IOCTL reply bytes match the pinned FUSE oracle for minor ${ctx.minor}`,
+    );
+    const ioctlRequest = Buffer.concat([
+      fuse.encodeInHeader({
+        len: fuse.FUSE_IN_HEADER_SIZE + ioctlBody.length,
+        opcode: fuse.FUSE_IOCTL,
+        unique: 99n,
+        nodeid: fuse.FUSE_ROOT_ID,
+        uid: 501,
+        gid: 20,
+        pid: 7,
+        totalExtlen: 0,
+      }),
+      ioctlBody,
+    ]);
+    const oracleRequest = oracle.encodeRequest({
+      opcode: fuse.FUSE_IOCTL,
+      unique: 99n,
+      nodeid: fuse.FUSE_ROOT_ID,
+      uid: 501,
+      gid: 20,
+      pid: 7,
+      payload: ioctlBody,
+    }, ctx);
+    assert.deepEqual(
+      [...ioctlRequest],
+      [...oracleRequest],
+      `IOCTL request framing matches oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      [...oracle.decodeRequest(oracleRequest, ctx).payload],
+      [...ioctlBody],
+      `IOCTL request payload matches oracle for minor ${ctx.minor}`,
+    );
+    const ioctlReply = fuse.encodeReply(99n, ioctlReplyBody);
+    const oracleReplyFrame = oracle.encodeReply(99n, ioctlReplyBody);
+    assert.deepEqual(
+      [...ioctlReply],
+      [...oracleReplyFrame],
+      `IOCTL reply framing matches oracle for minor ${ctx.minor}`,
+    );
+    assert.deepEqual(
+      [...oracle.decodeReply(oracleReplyFrame, fuse.FUSE_IOCTL, ctx).payload],
+      [...ioctlReplyBody],
+      `IOCTL reply payload matches oracle for minor ${ctx.minor}`,
+    );
+    if (oracleIoctlIsTyped) {
+      const oracleTypedRequest = oracle.encodeRequestBody(fuse.FUSE_IOCTL, ioctlInput, ctx);
+      const oracleTypedReply = oracle.encodeReplyBody(fuse.FUSE_IOCTL, ioctlReplyValue, ctx);
+      assert.deepEqual(
+        [...ioctlBody],
+        [...oracleTypedRequest],
+        `IOCTL request bytes match oracle for minor ${ctx.minor}`,
+      );
+      assert.deepEqual(
+        [...ioctlReplyBody],
+        [...oracleTypedReply],
+        `IOCTL reply bytes match oracle for minor ${ctx.minor}`,
+      );
+      assert.deepEqual(
+        fuse.decodeIoctlIn(ioctlBody),
+        oracle.decodeRequestBody(fuse.FUSE_IOCTL, oracleTypedRequest, ctx),
+        `IOCTL request decode matches oracle for minor ${ctx.minor}`,
+      );
+      assert.deepEqual(
+        fuse.decodeIoctlOut(ioctlReplyBody),
+        oracle.decodeReplyBody(fuse.FUSE_IOCTL, oracleTypedReply, ctx),
+        `IOCTL reply decode matches oracle for minor ${ctx.minor}`,
+      );
+      for (let length = 0; length < ioctlBody.length; length++) {
+        const body = ioctlBody.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => fuse.decodeIoctlIn(body)),
+          classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_IOCTL, body, ctx)),
+          `IOCTL request truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      for (let length = 0; length < ioctlReplyBody.length; length++) {
+        const body = ioctlReplyBody.subarray(0, length);
+        assert.deepEqual(
+          classifyProtocolError(() => fuse.decodeIoctlOut(body)),
+          classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_IOCTL, body, ctx)),
+          `IOCTL reply truncation classification at ${length} bytes for minor ${ctx.minor}`,
+        );
+      }
+      const requestTrailing = Buffer.concat([ioctlBody, Buffer.from([0])]);
+      const replyTrailing = Buffer.concat([ioctlReplyBody, Buffer.from([0])]);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeIoctlIn(requestTrailing)),
+        classifyProtocolError(() => oracle.decodeRequestBody(fuse.FUSE_IOCTL, requestTrailing, ctx)),
+        `IOCTL request trailing-byte classification for minor ${ctx.minor}`,
+      );
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeIoctlOut(replyTrailing)),
+        classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_IOCTL, replyTrailing, ctx)),
+        `IOCTL reply trailing-byte classification for minor ${ctx.minor}`,
+      );
+    }
+  }
   for (const ctx of [readContext, { minor: 8, setxattrExt: false }]) {
     const oracleRead = oracle.encodeRequestBody(fuse.FUSE_READ, readInput, ctx);
     const actualRead = fuse.encodeReadIn(readInput, ctx);
@@ -1068,6 +1443,70 @@ if (source) {
     );
   }
 
+  const lkContext = { minor: 41, setxattrExt: false };
+  for (const [name, opcode] of [
+    ["GETLK", fuse.FUSE_GETLK],
+    ["SETLK", fuse.FUSE_SETLK],
+    ["SETLKW", fuse.FUSE_SETLKW],
+  ]) {
+    const oracleRequest = oracle.encodeRequestBody(opcode, lkInput, lkContext);
+    const actualRequest = fuse.encodeLkIn(lkInput);
+    assert.deepEqual([...actualRequest], [...oracleRequest], `${name} request bytes match oracle`);
+    assert.deepEqual(
+      fuse.decodeLkIn(actualRequest),
+      oracle.decodeRequestBody(opcode, oracleRequest, lkContext),
+      `${name} request decode matches oracle`,
+    );
+    for (let length = 0; length < actualRequest.length; length++) {
+      const body = actualRequest.subarray(0, length);
+      assert.deepEqual(
+        classifyProtocolError(() => fuse.decodeLkIn(body)),
+        classifyProtocolError(() => oracle.decodeRequestBody(opcode, body, lkContext)),
+        `${name} request truncation classification at ${length} bytes`,
+      );
+    }
+    const requestTrailing = Buffer.concat([actualRequest, Buffer.from([0])]);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeLkIn(requestTrailing)),
+      classifyProtocolError(() => oracle.decodeRequestBody(opcode, requestTrailing, lkContext)),
+      `${name} request trailing-byte classification`,
+    );
+
+    if (opcode !== fuse.FUSE_GETLK) {
+      const actualReply = fuse.encodeReply(99n);
+      const oracleReply = oracle.encodeReplyFor(99n, opcode, {}, lkContext);
+      assert.deepEqual([...actualReply], [...oracleReply], `${name} empty reply framing matches oracle`);
+      assert.deepEqual(
+        oracle.decodeReplyBody(opcode, actualReply.subarray(fuse.FUSE_OUT_HEADER_SIZE), lkContext),
+        {},
+        `${name} oracle accepts empty reply body`,
+      );
+    }
+  }
+
+  const oracleLkReply = oracle.encodeReplyBody(fuse.FUSE_GETLK, lkReply, lkContext);
+  const actualLkReply = fuse.encodeLkOut(lkReply);
+  assert.deepEqual([...actualLkReply], [...oracleLkReply], "GETLK reply bytes match oracle");
+  assert.deepEqual(
+    fuse.decodeLkOut(actualLkReply),
+    oracle.decodeReplyBody(fuse.FUSE_GETLK, oracleLkReply, lkContext),
+    "GETLK reply decode matches oracle",
+  );
+  for (let length = 0; length < actualLkReply.length; length++) {
+    const body = actualLkReply.subarray(0, length);
+    assert.deepEqual(
+      classifyProtocolError(() => fuse.decodeLkOut(body)),
+      classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_GETLK, body, lkContext)),
+      `GETLK reply truncation classification at ${length} bytes`,
+    );
+  }
+  const lkReplyTrailing = Buffer.concat([actualLkReply, Buffer.from([0])]);
+  assert.deepEqual(
+    classifyProtocolError(() => fuse.decodeLkOut(lkReplyTrailing)),
+    classifyProtocolError(() => oracle.decodeReplyBody(fuse.FUSE_GETLK, lkReplyTrailing, lkContext)),
+    "GETLK reply trailing-byte classification",
+  );
+
   const xattrRequestCases = [
     ["SETXATTR", fuse.FUSE_SETXATTR, setxattrInput, fuse.decodeSetxattrIn, fuse.encodeSetxattrIn, (value) => ({ ...value, value: [...value.value] })],
     ["GETXATTR", fuse.FUSE_GETXATTR, getxattrInput, fuse.decodeGetxattrIn, fuse.encodeGetxattrIn, (value) => value],
@@ -1365,6 +1804,11 @@ if (source) {
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE POLL request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE BMAP request/typed-reply differential: PASS (pinned oracle)");
+  console.log(
+    `mount-rs N-API FUSE IOCTL request/reply differential: PASS (pinned oracle${oracleIoctlIsTyped ? " typed" : " raw-layout"})`,
+  );
+  console.log("mount-rs N-API FUSE BMAP request/typed-reply differential: PASS (pinned oracle)");
+  console.log("mount-rs N-API FUSE GETLK/SETLK/SETLKW request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
 } else {
@@ -1383,6 +1827,9 @@ if (source) {
   console.log("mount-rs N-API FUSE INTERRUPT request/empty-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE POLL request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE BMAP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE IOCTL request/reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE BMAP request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
+  console.log("mount-rs N-API FUSE GETLK/SETLK/SETLKW request/typed-reply differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: SKIP (MOUNTX_SOURCE unset)");
 }

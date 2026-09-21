@@ -28,6 +28,30 @@ jobs:
       - name: Verify real Apache Ozone block contract and restart recovery
         run: sh scripts/test-ozone.sh
 
+  ozone-compositions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tests/ozone -> target
+      - name: Install the real PGlite composition service
+        run: pnpm --dir tests/pglite install --frozen-lockfile
+      - name: Verify Ozone with SQLite and PGlite metadata
+        env:
+          MOUNT_RS_OZONE_COMPOSITIONS: '1'
+        run: sh scripts/test-ozone-compositions.sh
+
   rustfs:
     runs-on: ubuntu-latest
     timeout-minutes: 25

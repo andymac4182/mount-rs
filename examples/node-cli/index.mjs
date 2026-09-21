@@ -245,9 +245,23 @@ function configStore(value, role, baseDirectory, resolveValue) {
       durable: configBoolean(store.durable, `driver.storage.${role}.durable`, false),
     };
   }
+  if (kind === "tidb") {
+    return {
+      kind: "tidb",
+      uri: configCredential(
+        store.connection,
+        `driver.storage.${role}.connection`,
+        resolveValue,
+      ),
+      key: store.volume_key === undefined
+        ? "mount-rs"
+        : configString(store.volume_key, `driver.storage.${role}.volume_key`),
+      durable: configBoolean(store.durable, `driver.storage.${role}.durable`, false),
+    };
+  }
   if (kind === "r2") {
     if (role !== "blocks") {
-      throw new CliConfigError("R2 is a block-only provider; metadata must use memory, sqlite, or pglite");
+      throw new CliConfigError("R2 is a block-only provider; metadata must use memory, sqlite, pglite, or tidb");
     }
     return {
       kind: "r2",
@@ -416,11 +430,30 @@ async function runSdkSelfTest(createFilesystem, driver, reopen) {
   const filename = `.mount-rs-node-sdk-direct-${process.pid}-${Date.now()}.txt`;
   const path = `/${filename}`;
   const expected = `mount-rs Node SDK direct driver wrote this file (${driver})\n`;
+  const patch = Buffer.from("partial");
+  const patchOffset = 3;
+  const finalLength = expected.length - 2;
+  const expectedAfterPatch = Buffer.from(expected);
+  patch.copy(expectedAfterPatch, patchOffset);
+  const expectedFinal = expectedAfterPatch.subarray(0, finalLength);
   let filesystem = await createFilesystem();
   try {
     await filesystem.writeFile(path, expected);
-    const actual = Buffer.from(await filesystem.readFile(path)).toString("utf8");
-    if (actual !== expected) throw new Error("Node SDK direct-driver readback mismatch");
+    const handle = await filesystem.open(path, "r+");
+    try {
+      const result = await handle.write(patch, 0, patch.length, patchOffset);
+      if (result.bytesWritten !== patch.length) {
+        throw new Error("Node SDK direct-driver partial write length mismatch");
+      }
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await filesystem.truncate(path, finalLength);
+    const actual = Buffer.from(await filesystem.readFile(path));
+    if (!actual.equals(expectedFinal)) {
+      throw new Error("Node SDK direct-driver partial/truncate readback mismatch");
+    }
     if (!reopen) {
       await filesystem.unlink(path).catch(() => {});
     }
@@ -430,8 +463,10 @@ async function runSdkSelfTest(createFilesystem, driver, reopen) {
   if (reopen) {
     filesystem = await createFilesystem();
     try {
-      const actual = Buffer.from(await filesystem.readFile(path)).toString("utf8");
-      if (actual !== expected) throw new Error("Node SDK reopen readback mismatch");
+      const actual = Buffer.from(await filesystem.readFile(path));
+      if (!actual.equals(expectedFinal)) {
+        throw new Error("Node SDK reopen partial/truncate readback mismatch");
+      }
       await filesystem.unlink(path);
       console.log(`sdk self-test passed: Node SDK wrote, shut down, reopened, and read ${filename}`);
     } finally {

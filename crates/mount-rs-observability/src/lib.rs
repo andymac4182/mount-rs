@@ -1199,19 +1199,19 @@ mod otlp {
 
         let span_exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
-            .with_endpoint(config.endpoint.clone())
+            .with_endpoint(signal_endpoint(&config.endpoint, "traces"))
             .with_timeout(config.export_timeout)
             .build()
             .map_err(|error| OtlpError::Exporter(format!("traces: {error}")))?;
         let metric_exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
-            .with_endpoint(config.endpoint.clone())
+            .with_endpoint(signal_endpoint(&config.endpoint, "metrics"))
             .with_timeout(config.export_timeout)
             .build()
             .map_err(|error| OtlpError::Exporter(format!("metrics: {error}")))?;
         let log_exporter = opentelemetry_otlp::LogExporter::builder()
             .with_http()
-            .with_endpoint(config.endpoint)
+            .with_endpoint(signal_endpoint(&config.endpoint, "logs"))
             .with_timeout(config.export_timeout)
             .build()
             .map_err(|error| OtlpError::Exporter(format!("logs: {error}")))?;
@@ -1287,6 +1287,10 @@ mod otlp {
     /// Extract a W3C trace context from an arbitrary carrier.
     pub fn extract_context<E: Extractor>(extractor: &E) -> Context {
         global::get_text_map_propagator(|propagator| propagator.extract(extractor))
+    }
+
+    fn signal_endpoint(base: &str, signal: &str) -> String {
+        format!("{}/v1/{signal}", base.trim_end_matches('/'))
     }
 }
 

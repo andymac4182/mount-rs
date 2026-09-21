@@ -66,7 +66,20 @@ import {
   type WebdavServer,
   type WebdavServerOptions,
 } from "@mount-rs/core/webdav"
-import { InodeTable, type Inode } from "@mount-rs/core/fuse"
+import {
+  decodeLkIn,
+  decodeLkOut,
+  encodeLkIn,
+  encodeLkOut,
+  FUSE_LK_FLOCK,
+  F_UNLCK,
+  F_WRLCK,
+  InodeTable,
+  type Inode,
+  type NativeFuseFileLock,
+  type NativeFuseLkIn,
+  type NativeFuseLkOut,
+} from "@mount-rs/core/fuse"
 
 // node:fs/promises and minimal structural drivers satisfy the public boundary.
 import * as nodeFs from "node:fs/promises"
@@ -375,6 +388,30 @@ function checkFuseInodeSubpath(): void {
   void forgotten
 }
 
+function checkFuseLockCodecSubpath(): void {
+  const lock: NativeFuseFileLock = {
+    start: 1n,
+    end: 2n,
+    type: F_WRLCK,
+    pid: 3,
+  }
+  const input: NativeFuseLkIn = {
+    fh: 4n,
+    owner: 5n,
+    lk: lock,
+    lkFlags: FUSE_LK_FLOCK,
+  }
+  const reply: NativeFuseLkOut = {
+    lk: { ...lock, type: F_UNLCK },
+  }
+  const requestBytes: Uint8Array = encodeLkIn(input)
+  const decodedInput: NativeFuseLkIn = decodeLkIn(requestBytes)
+  const replyBytes: Uint8Array = encodeLkOut(reply)
+  const decodedReply: NativeFuseLkOut = decodeLkOut(replyBytes)
+
+  void [decodedInput, decodedReply]
+}
+
 void checkFilesystemAndHandles
 // Public harness types and functions are available from the package root.
 import { createLoopback, resolveCapabilities, type Loopback, type ResolvedCapabilities } from "@mount-rs/core"
@@ -400,3 +437,4 @@ void checkMemorySubpath
 void checkUtilities
 void checkServerAndKvSubpaths
 void checkFuseInodeSubpath
+void checkFuseLockCodecSubpath
