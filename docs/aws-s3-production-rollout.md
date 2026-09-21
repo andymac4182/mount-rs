@@ -143,6 +143,22 @@ protected environment variable `MOUNT_RS_AWS_S3_ACCOUNT_ID` to the approved
 12-digit account and require it to match the account component of
 `MOUNT_RS_AWS_S3_CI_ROLE_ARN`; the preflight rejects a cross-account role ARN.
 
+Run the read-only identity audit before changing the environment or role:
+
+```sh
+AWS_S3_CI_ROLE_ARN=<approved-ci-role-arn> \
+./scripts/audit-aws-s3-ci-oidc.sh
+```
+
+The audit verifies the repository's immutable owner/repository subject shape,
+the protected environment and main-branch policy, the required variable and
+secret names, the AWS OIDC provider and `sts.amazonaws.com` audience, and an
+exact `AssumeRoleWithWebIdentity` trust statement. It never reads secret
+values or mutates GitHub or AWS. The current account audit is expected to fail
+until the approved OIDC provider, role trust, protected environment, and CI
+inputs are configured; that failure is a rollout blocker, not a hosted test
+result.
+
 ## Rollout sequence
 
 1. Review the resource and identity change, including region, bucket, prefix,

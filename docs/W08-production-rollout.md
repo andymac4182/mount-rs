@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator wired into the CLI preview workflow, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -38,7 +38,7 @@ planning result.
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
 | P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
-| P09 — release provenance, canary and go/no-go | Open — 10%; identity/provenance policy slice passed | `scripts/verify-w08-release-manifest.mjs` and its pending/accepted/invalid fixtures validate W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states. Hosted run `35606873984`, source `fecec0e`, `w08-release-policy` job `106356402785` passed the positive, strict-acceptance and expected-negative paths. Exit still requires a real immutable artifact manifest/checksum, signature and SBOM verification, target-platform package checks, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
+| P09 — release provenance, canary and go/no-go | Open — 10%; verifier and artifact-wiring slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `.github/workflows/cli-release.yml` now generates/verifies the manifest before upload and after download. Hosted run `35609172786`, source `66544b5`, `w08-release-policy` job `106363893748` passed the generator and all policy paths. Exit still requires an approved tag-triggered publication, signing/SBOM, target-platform package checks, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
 
 No P01–P09 item is terminally accepted. P01/P02/P07 implementation progress is
 also covered locally by
@@ -57,6 +57,12 @@ gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or
 approve a release. Its accepted fixture is synthetic and must not be promoted
 to production evidence.
+
+W08.12 wires the same policy to the actual macOS CLI preview artifact path:
+the release workflow computes the tarball digest/size, publishes the manifest
+beside `SHA256SUMS`, and verifies both again after download. A tag-triggered
+release has not been run in this session, so this is implementation and hosted
+policy evidence rather than published-release evidence.
 
 ## Deployment contract
 
@@ -158,6 +164,8 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 | Hosted CI run `35601990956`, source `f09fbe9`, `http-observability` job `106340034907` | Terminal hosted health-header, telemetry/OTLP and strict-Clippy evidence; `2f7919a` is in the tested source ancestry | Deployed collector/exporter, provider/object-store/TLS health, dashboard/pager, SLO/error-budget approval and production alert execution |
 | `node scripts/verify-w08-release-manifest.mjs tests/tidb/release-manifest-policy.json` plus the accepted and invalid fixtures | Credential-free release identity/provenance policy validation; strict acceptance requires verified signature/SBOM and passed canary states | Real artifact generation/checksum attachment, signature/SBOM creation and verification, target-package acceptance, canary, rollback, approval and release registry evidence |
 | Hosted CI run `35606873984`, source `fecec0e`, `w08-release-policy` job `106356402785` | Terminal hosted policy success for pending, strict-accepted and expected-negative fixture paths | Real release artifact/provenance, signing/SBOM, target-platform packages, canary, rollback, approval and production deployment |
+| `CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-release-target ./scripts/cargo-shared build --locked --release -p mount-rs-cli` plus tarball/`SHA256SUMS`/manifest verification | Local `mount-rs 0.1.0` release artifact and checksum/manifest/content path passed; tarball SHA-256 `da0782596d7402ce64869f2037075d95b273f59f389b9493e26a0ba1e39822c7`, size `6910193` | No published tag, registry, signing/SBOM, target-platform matrix, canary, rollback or approval evidence |
+| Hosted CI run `35609172786`, source `66544b5`, `w08-release-policy` job `106363893748` | Terminal hosted generator plus pending/strict-accepted/expected-negative policy evidence | Tag-triggered macOS release publication, asset inspection, signing/SBOM, target-platform acceptance, canary, rollback, approval and production deployment |
 
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate
@@ -181,10 +189,11 @@ jobs failed; it is not an aggregate-green release result either.
    collector/paging and measured recovery evidence.
 4. Close P06 and P08 with production-shaped workload, soak, fault injection,
    runbook and on-call exercises. Record resource headroom and rollback timing.
-5. Run the release-policy verifier against the actual immutable artifact and
-   workflow provenance, then close P09 with signatures/SBOM, a held-back
-   canary, live SLO observation, rollback verification and release-owner
-   approval. The synthetic accepted fixture is not sufficient.
+5. Run the approved tag-triggered CLI release workflow and retain its actual
+   tarball, `SHA256SUMS` and manifest; then close P09 with signatures/SBOM, a
+   held-back canary, live SLO observation, rollback verification and
+   release-owner approval. The synthetic accepted fixture and local tarball are
+   not sufficient.
 6. Promote in stages only after the evidence packet passes the final audit. On
    rollback, stop new writers, preserve metadata and block snapshots, restore
    the last known-good artifact/topology, verify reads/fences/ownership, and
