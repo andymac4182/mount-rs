@@ -5,9 +5,9 @@ use mount_rs_core::{
 use mount_rs_fuse::{
     RequestHeader,
     constants::{
-        FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_INTERRUPT,
-        FUSE_IOCTL, FUSE_LINK, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_POLL,
-        FUSE_READLINK, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_STATFS, FUSE_SYMLINK,
+        FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET,
+        FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD,
+        FUSE_POLL, FUSE_READLINK, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_STATFS, FUSE_SYMLINK,
         FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
@@ -537,6 +537,35 @@ async fn batch_forget_is_validated_before_no_reply_inode_release() {
     );
     assert!(session.inodes.get(one).is_none());
     assert!(session.inodes.get(two).is_none());
+}
+
+#[tokio::test]
+async fn malformed_forget_is_ignored_without_releasing_inode() {
+    let fs = Arc::new(MemoryFs::empty());
+    let file = fs.open("/one", "w", 0o644).await.unwrap();
+    file.close().await.unwrap();
+    let mut session = FuseSession::new(fs);
+    let inode = number(&request(&mut session, FUSE_LOOKUP, 1, b"one\0").await, 0);
+
+    assert!(
+        session
+            .handle(&frame(FUSE_FORGET, inode, &[0; 3]))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(session.inodes.get(inode).unwrap().nlookup, 1);
+
+    let mut valid = Vec::new();
+    valid.extend(1u64.to_le_bytes());
+    assert!(
+        session
+            .handle(&frame(FUSE_FORGET, inode, &valid))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(session.inodes.get(inode).is_none());
 }
 
 #[tokio::test]

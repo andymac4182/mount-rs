@@ -10,6 +10,7 @@ members = [
     "integrations/mount-rs-sqlite",
     "integrations/mount-rs-r2",
     "integrations/mount-rs-pglite",
+    "integrations/mount-rs-foundationdb",
     "integrations/mount-rs-tidb",
     "integrations/mount-rs-versioned",
     "integrations/mount-rs-sqlite-vfs",

@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Verifying; local S3/R2 HTTP and configuration gates pass, but live provider acceptance is still credential-gated | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition passed; target-gated root member landed; production authority, consumer/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -881,9 +881,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 
 ## W07 — FoundationDB
 
-- [x] W07.1 Review the separate FoundationDB integration crate and commit its
-  provider/test harness. It remains a standalone package until target-gated root
-  registration is safe for Windows all-features CI.
+- [x] W07.1 Review and register the FoundationDB integration crate and its
+  provider/test harness as a target-gated root workspace member. The feature-off
+  package remains portable for client-free workspace and Windows all-features
+  checks; native FDB compilation remains opt-in on supported targets.
 - [x] W07.2 Finish isolated real FoundationDB client/server harness. Main ran
   the real pinned 7.4.7 Linux ARM64 server/client in Docker; the provider
   contract passed. The container supplies `fdb_c`; no host install or mock.
@@ -904,12 +905,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
-  FoundationDB service-restart evidence. FDB service restart, root integration,
-  and hosted composition coverage remain open; no emulated acceptance.
+  FoundationDB service-restart evidence. FDB service restart and hosted
+  composition coverage remain open; no emulated acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
-  restart, root-registration or hosted-composition boundaries above. The
+  restart or hosted-composition boundaries above. The
   published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
   fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
   handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
@@ -1380,6 +1381,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   expired before the harness can claim a prefix, so no Rust `ChunkedFs`,
   SQLite+S3, or fresh-process reopen acceptance is claimed.
 - [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The harness now emits the secret-free `AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` and exits 3 when local credentials cannot be exported, making the AWS MCP/OAuth-to-local-Cargo boundary explicit. The W25 worker verified the AWS-crate compile and ordinary ignored-test gate; the two actual AWS-service tests remain blocked until the local `myroot` SSO session is renewed. No live Rust acceptance is claimed yet.
+- [x] The harness now accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that caller-provided role with a one-hour session, and uses the resulting temporary credentials for all S3 requests and cleanup. It does not create IAM resources or access keys; W25.2 still requires explicit role provisioning and W25.3 still requires a live local Rust run.
 
 ## W26 — Apache Ozone S3 backend
 
@@ -1390,16 +1392,29 @@ listing a source does not mean it has been reviewed or its code can be reused.
   results and mixed metadata-provider/Node/CLI coverage remain open. The
   all-in-one non-secure test deployment is loopback-only, not production auth
   or replicated-durability acceptance.
-- [ ] W26.1 Pin an Apache Ozone release and container digests; provide isolated
-  local/CI orchestration, readiness, authentication and bounded cleanup on
-  macOS/Linux. Record service topology, replication and durability settings.
-- [ ] W26.2 Run the immutable block contract through its actual S3 gateway:
-  conditional publication, concurrent writers, full/range reads, missing objects,
-  binary multi-chunk content, restart/reopen and injected failures. Verify
-  conditional semantics explicitly; never emulate away unsupported guarantees.
-- [ ] W26.3 Test Ozone blocks with independent SQLite, PGlite, TiDB and
-  FoundationDB metadata through ChunkedFs, including partial writes/truncation,
-  revision CAS and stale-writer fencing.
+- [x] W26.1 Pin Apache Ozone 2.2.1 and architecture-specific container digests;
+  the isolated macOS/Linux harness owns loopback readiness, SigV4 bucket
+  bootstrap, bounded Docker/test actions, restart/failure windows and
+  ownership-checked cleanup. Its single all-in-one service has anonymous
+  volumes and no replication, Kerberos/TLS or power-loss durability claim.
+- [x] W26.2 Run the immutable block contract through its actual S3 gateway:
+  the 2026-09-21 arm64 run passed create-only publication and duplicate
+  rejection, ETag stale-read/stale-write rejection and successful CAS,
+  concurrent writers, full/range reads, missing objects, binary payloads,
+  bounded stopped-gateway failure, service restart/reopen and cleanup via
+  `./scripts/test-ozone.sh`. The hosted Linux result remains a separate,
+  revision-specific evidence boundary.
+- W26.3 partial evidence: SQLite and disk-backed PGlite compositions passed
+  on 2026-09-21
+  through the real Ozone gateway with seven-byte ChunkedFs chunks, partial
+  writes, shrink/extend truncation, ranges, revision CAS, stale-writer
+  fencing, fresh reopen and scoped block/metadata cleanup. Real TiDB and
+  FoundationDB compositions remain explicit manual gates and are not implied
+  by this result.
+- [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
+  TiDB and FoundationDB metadata, including partial writes/truncation,
+  revision CAS and stale-writer fencing. SQLite and PGlite are covered above;
+  the distributed-provider runs remain explicit manual gates.
 - [ ] W26.4 Cover Node factories and CLI configuration; add required CI gates
   and document verified versions, limitations and platform evidence. Ozone is
   requested support, not yet a verified supported backend.

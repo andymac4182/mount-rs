@@ -45,6 +45,12 @@ narrow role/user policy needs, at minimum, `sts:GetCallerIdentity`,
 object ARN prefix. The bucket and prefix must be owned by the test account;
 the harness does not create or discover resources.
 
+For a short-lived least-privilege role, set `AWS_S3_TEST_ROLE_ARN` alongside
+`AWS_PROFILE` (or explicit base credentials). The harness obtains temporary
+role credentials with `sts:AssumeRole` before the preflight and uses those
+credentials for the Rust tests and cleanup. It never creates or modifies the
+role, policy, bucket, or access keys.
+
 For the recorded bucket, the identity policy can be scoped to the harness's
 dedicated test namespace (replace the bucket ARN if the test bucket changes;
 for stricter per-run isolation, replace `mount-rs-tests/aws-s3/*` with the
@@ -106,6 +112,7 @@ The explicit opt-in is required:
 
 ```sh
 AWS_PROFILE=myroot \
+AWS_S3_TEST_ROLE_ARN=arn:aws:iam::106427005394:role/mount-rs-aws-s3-integration-test \
 AWS_S3_TEST_BUCKET=mount-rs-integration-106427005394-ap-southeast-2 \
 AWS_S3_TEST_REGION=ap-southeast-2 \
 MOUNT_RS_RUN_AWS_S3=1 \

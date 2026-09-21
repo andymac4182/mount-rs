@@ -84,6 +84,7 @@ if [ -n "$configured_endpoint" ] || [ -n "$configured_services" ]; then
 fi
 
 credential_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-credentials.XXXXXX")
+role_credential_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-role-credentials.XXXXXX")
 fixture_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-restart.XXXXXX")
 metadata_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-metadata.XXXXXX")
 owner_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-owner.XXXXXX")
@@ -143,6 +144,7 @@ cleanup() {
 
   rm -f \
     "$credential_file" \
+    "$role_credential_file" \
     "$fixture_file" \
     "$metadata_file" \
     "$owner_file" \
@@ -203,6 +205,34 @@ if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
   done <"$credential_file"
 fi
 rm -f "$credential_file"
+
+# Optionally replace the profile/environment identity with short-lived
+# credentials from a dedicated least-privilege role. The role ARN is supplied
+# by the caller; this harness never creates or modifies IAM resources. The
+# caller's base credentials are used only for AssumeRole, and the resulting
+# role credentials are the ones used for every S3 request and cleanup.
+if [ -n "${AWS_S3_TEST_ROLE_ARN:-}" ]; then
+  if ! AWS_EC2_METADATA_DISABLED=true aws sts assume-role \
+    --role-arn "$AWS_S3_TEST_ROLE_ARN" \
+    --role-session-name mount-rs-w25-test \
+    --duration-seconds 3600 \
+    --region "$region" \
+    --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
+    --output text >"$role_credential_file" 2>/dev/null; then
+    echo "AWS_S3_TEST_BLOCKED reason=role_assumption_failed" >&2
+    exit 3
+  fi
+  if ! read -r AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN \
+    <"$role_credential_file" || \
+    [ -z "${AWS_ACCESS_KEY_ID:-}" ] || \
+    [ -z "${AWS_SECRET_ACCESS_KEY:-}" ] || \
+    [ -z "${AWS_SESSION_TOKEN:-}" ]; then
+    echo "AWS_S3_TEST_BLOCKED reason=role_credentials_invalid" >&2
+    exit 3
+  fi
+  export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  unset AWS_PROFILE
+fi
 
 : "${AWS_ACCESS_KEY_ID:?AWS credentials must provide AWS_ACCESS_KEY_ID or an active AWS profile}"
 : "${AWS_SECRET_ACCESS_KEY:?AWS credentials must provide AWS_SECRET_ACCESS_KEY or an active AWS profile}"

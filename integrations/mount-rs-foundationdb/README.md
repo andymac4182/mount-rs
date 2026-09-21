@@ -1,8 +1,8 @@
 # mount-rs FoundationDB integration
 
 This crate stores the mount-rs namespace and immutable blocks in a
-FoundationDB keyspace. It is deliberately not part of the core workspace until
-the workspace owner registers it.
+FoundationDB keyspace. It is registered in the core workspace, while its native
+client remains behind the opt-in `foundationdb` feature.
 
 The native backend is behind the opt-in `foundationdb` Cargo feature. A normal
 workspace build therefore does not try to link a FoundationDB client:
@@ -12,8 +12,12 @@ cargo check -p mount-rs-foundationdb --features foundationdb
 cargo test -p mount-rs-foundationdb --features foundationdb
 ```
 
-The feature-off package is only a portable workspace shell; it does not claim
-to provide a storage backend. The commands above are the implementation gate.
+The feature-off package is a portable workspace shell; it does not claim to
+provide a storage backend. The commands above are the implementation gate and
+must run on a supported native-client target with the matching FDB runtime.
+On unsupported targets, enabling all Cargo features intentionally leaves this
+package empty so client-free Windows and cross-platform workspace checks stay
+portable; no FoundationDB backend is advertised there.
 
 ## Supported native-client platforms
 

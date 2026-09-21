@@ -302,35 +302,40 @@ impl FuseSession {
             destroyed: false,
         }
     }
-    /// Returns no frame for FORGET and BATCH_FORGET. Malformed no-reply frames
-    /// return a protocol error before changing inode state.
+    /// Returns no frame for FORGET and BATCH_FORGET. Malformed FORGET bodies
+    /// are ignored to match the pinned no-reply oracle; malformed
+    /// BATCH_FORGET bodies remain rejected before changing inode state.
     pub async fn handle(
         &mut self,
         bytes: &[u8],
     ) -> std::result::Result<Option<Vec<u8>>, crate::ProtocolError> {
         let request = Request::decode(bytes, self.max_request)?;
-        if matches!(request.header.opcode, FUSE_FORGET | FUSE_BATCH_FORGET) {
-            // These opcodes are explicitly no-reply operations. A malformed
-            // frame cannot be answered without violating that contract, so
-            // reject it before applying a partial or guessed forget list.
-            validate_body(request.header.opcode, request.body).map_err(|error| {
+        if request.header.opcode == FUSE_FORGET {
+            // FORGET has no reply, and the pinned mountx session ignores a
+            // malformed body rather than surfacing an unanswerable error.
+            if let Ok(FuseRequestBody::Forget(value)) =
+                decode_request_body(FUSE_FORGET, request.body, None)
+            {
+                self.inodes.forget(request.header.nodeid, value.nlookup);
+            }
+            return Ok(None);
+        }
+        if request.header.opcode == FUSE_BATCH_FORGET {
+            // BATCH_FORGET is also no-reply, but its count and fixed-width
+            // records must be validated before applying any inode changes.
+            validate_body(FUSE_BATCH_FORGET, request.body).map_err(|error| {
                 crate::ProtocolError::new(format!(
-                    "{} body validation failed: {}",
-                    crate::constants::opcode_name(request.header.opcode),
+                    "BATCH_FORGET body validation failed: {}",
                     error.code.as_str()
                 ))
             })?;
-            let decoded = decode_request_body(request.header.opcode, request.body, None)?;
-            match decoded {
-                FuseRequestBody::Forget(value) => {
-                    self.inodes.forget(request.header.nodeid, value.nlookup);
+            let decoded = decode_request_body(FUSE_BATCH_FORGET, request.body, None)?;
+            if let FuseRequestBody::BatchForget(value) = decoded {
+                for forget in value.forgets {
+                    self.inodes.forget(forget.nodeid, forget.nlookup);
                 }
-                FuseRequestBody::BatchForget(value) => {
-                    for forget in value.forgets {
-                        self.inodes.forget(forget.nodeid, forget.nlookup);
-                    }
-                }
-                _ => unreachable!("no-reply forget opcode decoded to another body"),
+            } else {
+                unreachable!("batch-forget opcode decoded to another body");
             }
             return Ok(None);
         }
