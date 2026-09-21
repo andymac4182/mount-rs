@@ -908,11 +908,12 @@ hosted/native acceptance. At exact scope-packet SHA
 successful `native-webdav (macos-latest)` job `106469172312` and
 `native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
 native WebDAV I/O for that packet only, not the overall CI run or production
-acceptance. The focused N-API SQLite provider/reopen probe now also preserves
-exact file bytes across orderly provider/server recreation and observes zero
-replacement-session locks, classifying bytes as durable and locks as
-process-local for that provider; it does not qualify crash/power-loss or live
-remote-provider durability. A read-only status check for the published tip
+acceptance. The focused N-API NodeFs and SQLite provider/reopen probes now also
+preserve exact file bytes across orderly provider/server recreation and observe
+zero replacement-session locks, classifying bytes as durable and locks as
+process-local for those local providers; the SQLite process-crash probe adds
+abrupt-death recovery, but none of these local results qualify power-loss or
+live remote-provider durability. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -1398,6 +1399,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   server/provider shutdown and a replacement-session zero-lock check. This
   classifies local SQLite byte persistence and process-local WebDAV locks only;
   crash/power-loss and live-provider durability remain open.
+- [x] The focused N-API NodeFs WebDAV provider/reopen probe is now part of the
+  package test sequence: `node test/typecheck.mjs && node
+  test/webdav-node-fs.mjs` passed exact PUT-byte readback after orderly
+  server/provider shutdown and a replacement-session zero-lock check. This
+  classifies local NodeFs byte persistence and process-local WebDAV locks only;
+  power-loss ordering and live-provider durability remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
