@@ -30,11 +30,11 @@ use mount_rs_fuse::{
 };
 use mount_rs_nfs::{
     FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
-    Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
-    NfsConnection as TransportNfsConnection, NfsRequestContext as TransportNfsRequestContext,
-    NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
-    NfsServerOptions as TransportNfsServerOptions, NfsTransportError as TransportNfsError,
-    NfsTransportErrorHook as TransportNfsErrorHook,
+    Nfs3Session as TransportNfsSession, Nfs4IdMap as TransportNfs4IdMap,
+    Nfs4Session as TransportNfs4Session, NfsConnection as TransportNfsConnection,
+    NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
+    NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
+    NfsTransportError as TransportNfsError, NfsTransportErrorHook as TransportNfsErrorHook,
 };
 use mount_rs_s3::{
     Credentials as TransportS3Credentials, HeaderEntry as TransportS3HeaderEntry,
@@ -375,8 +375,44 @@ fn verifier(value: Option<Buffer>) -> Result<Option<[u8; 8]>, Error> {
     Ok(Some(array))
 }
 
+fn nfs4_idmap(options: Nfs4IdMap) -> Result<TransportNfs4IdMap, Error> {
+    let mut output = TransportNfs4IdMap::new(options.domain);
+    let mut user_ids = HashMap::<u32, String>::new();
+    for (name, value) in options.users.unwrap_or_default() {
+        let id = u32_number(&format!("nfs4.idmap.users.{name}"), Some(value), 0)?;
+        if let Some(previous) = user_ids.insert(id, name.clone()) {
+            return Err(config_error(format!(
+                "nfs4.idmap.users maps {previous:?} and {name:?} to uid {id}"
+            )));
+        }
+        output = output.with_user(name, id);
+    }
+    let mut group_ids = HashMap::<u32, String>::new();
+    for (name, value) in options.groups.unwrap_or_default() {
+        let id = u32_number(&format!("nfs4.idmap.groups.{name}"), Some(value), 0)?;
+        if let Some(previous) = group_ids.insert(id, name.clone()) {
+            return Err(config_error(format!(
+                "nfs4.idmap.groups maps {previous:?} and {name:?} to gid {id}"
+            )));
+        }
+        output = output.with_group(name, id);
+    }
+    Ok(output)
+}
+
+#[napi(object)]
+pub struct Nfs4IdMap {
+    /// Domain used to qualify mapped owner names on the wire.
+    pub domain: Option<String>,
+    /// Name-to-uid entries. Unmapped ids retain numeric wire form.
+    pub users: Option<HashMap<String, f64>>,
+    /// Name-to-gid entries. Unmapped ids retain numeric wire form.
+    pub groups: Option<HashMap<String, f64>>,
+}
+
 #[napi(object)]
 pub struct Nfs4StateKnobs {
+    pub idmap: Option<Nfs4IdMap>,
     pub lease_seconds: Option<f64>,
     pub max_sessions: Option<f64>,
     pub max_fore_slots: Option<f64>,
@@ -464,6 +500,9 @@ fn nfs_options(
     )?;
     output.session.claim_ownership = options.claim_ownership.unwrap_or(true);
     if let Some(nfs4) = options.nfs4 {
+        if let Some(idmap) = nfs4.idmap {
+            output.session.nfs4.idmap = Some(nfs4_idmap(idmap)?);
+        }
         output.session.nfs4.lease_seconds = u32_number(
             "nfs4.leaseSeconds",
             nfs4.lease_seconds,

@@ -2024,7 +2024,17 @@ export interface NativeP9Txattrwalk {
   name: string
 }
 
+export interface Nfs4IdMap {
+  /** Domain used to qualify mapped owner names on the wire. */
+  domain?: string
+  /** Name-to-uid entries. Unmapped ids retain numeric wire form. */
+  users?: Record<string, number>
+  /** Name-to-gid entries. Unmapped ids retain numeric wire form. */
+  groups?: Record<string, number>
+}
+
 export interface Nfs4StateKnobs {
+  idmap?: Nfs4IdMap
   leaseSeconds?: number
   maxSessions?: number
   maxForeSlots?: number

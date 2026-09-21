@@ -49,6 +49,7 @@ import {
 import {
   createNfsServer,
   type NfsConnection,
+  type Nfs4IdMap,
   type Nfs4StateKnobs,
   type NfsServer,
   type NfsServerOptions,
@@ -324,7 +325,13 @@ function checkUtilities(): void {
 
 function checkServerAndKvSubpaths(): void {
   const filesystem = Filesystem.memory()
+  const nfs4IdMap: Nfs4IdMap = {
+    domain: "example.test",
+    users: { root: 0 },
+    groups: { root: 0 },
+  }
   const nfs4Options: Nfs4StateKnobs = {
+    idmap: nfs4IdMap,
     leaseSeconds: 90,
     maxSessions: 4,
     maxForeSlots: 64,

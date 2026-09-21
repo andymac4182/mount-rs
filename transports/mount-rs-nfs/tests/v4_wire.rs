@@ -14,8 +14,8 @@ use mount_rs_nfs::v4::{
     NFS4ERR_TOOSMALL, UNSTABLE4,
 };
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
-    decode_reply, encode_call, frame_record,
+    NFS_V4, NFS4_PROGRAM, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler, XdrReader,
+    XdrWriter, decode_reply, encode_call, frame_record,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -308,6 +308,11 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                 .block_on(async {
                     let mut options = NfsServerOptions::default();
                     options.session.nfs4.max_locks_per_file = 1;
+                    options.session.nfs4.idmap = Some(
+                        Nfs4IdMap::new(Some("example.test".to_owned()))
+                            .with_user("root", 0)
+                            .with_group("root", 0),
+                    );
                     let server = NfsServer::new(MemoryFs::empty(), options);
                     let address = server.listen().await.expect("listen rootless NFS server");
                     let mut stream = TcpStream::connect(address)
@@ -358,8 +363,8 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                                 op(OP_PUTROOTFH, |_| {}),
                                 op(OP_GETATTR, |writer| {
                                     writer.u32(2);
-                                    writer.u32(1 << 1);
-                                    writer.u32((1 << 9) | (1 << 23));
+                                    writer.u32((1 << 1) | (1 << 10));
+                                    writer.u32((1 << 4) | (1 << 5) | (1 << 9) | (1 << 23));
                                 }),
                             ],
                         ),
@@ -379,12 +384,23 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                         response
                             .array(16, "getattr mask", |reader| reader.u32("mask word"))
                             .unwrap(),
-                        vec![2, 1 << 9]
+                        vec![(1 << 1) | (1 << 10), (1 << 4) | (1 << 5) | (1 << 9)]
+                    );
+                    let values = response.var_opaque(128, "getattr values").unwrap();
+                    let mut values = XdrReader::new(&values);
+                    assert_eq!(values.u32("fh expire type").unwrap(), 2);
+                    assert_eq!(values.u32("lease value").unwrap(), 90);
+                    assert_eq!(
+                        values.string(128, "owner value").unwrap(),
+                        "root@example.test"
                     );
                     assert_eq!(
-                        response.var_opaque(128, "getattr values").unwrap().len(),
-                        12
+                        values.string(128, "owner group value").unwrap(),
+                        "root@example.test"
                     );
+                    let _ = values.u32("rawdev major").unwrap();
+                    let _ = values.u32("rawdev minor").unwrap();
+                    values.end("getattr values").unwrap();
                     response.end("getattr response").unwrap();
 
                     client.sequence += 1;

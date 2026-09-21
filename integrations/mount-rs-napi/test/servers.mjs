@@ -261,6 +261,11 @@ async function exerciseNfs() {
     maxRecord: 256,
     maxHandles: 2,
     nfs4: {
+      idmap: {
+        domain: "example.test",
+        users: { root: 0 },
+        groups: { root: 0 },
+      },
       leaseSeconds: 7,
       maxSessions: 1,
       maxForeSlots: 1,

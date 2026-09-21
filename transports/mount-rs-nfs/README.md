@@ -40,7 +40,7 @@ released; with no value, the table remains uncapped for compatibility.
 
 NFSv4.1 channel and state ceilings are available through
 `NfsSessionOptions.nfs4` and the nested N-API `nfs4`/`Nfs4StateKnobs` option:
-`leaseSeconds`, `maxSessions`, `maxForeSlots`, `maxOperations`,
+`idmap`, `leaseSeconds`, `maxSessions`, `maxForeSlots`, `maxOperations`,
 `maxRequestSize`, `maxCachedResponseSize`, `maxOpensPerFile`,
 `maxLocksPerFile`, and `requireReclaimComplete`. The channel-size and count
 values are clamped during `CREATE_SESSION`; operation, session, open-state,
@@ -49,6 +49,11 @@ and lock-range limits are enforced by the v4 state machine. When enabled,
 until the client sends `RECLAIM_COMPLETE`. The defaults match the pinned
 oracle's 90-second lease, 64 fore slots/operations, 1 MiB request ceiling,
 64 KiB replay cache, 256 opens per file, and 1024 lock ranges per file.
+`idmap` is a deterministic static map: Rust callers use `Nfs4IdMap`'s
+`with_user`/`with_group` builders, while N-API callers provide `domain`,
+`users`, and `groups` name-to-id records. Mapped names are qualified with the
+configured domain, unmapped ids retain numeric form, and incoming names from a
+different domain return `NFS4ERR_BADOWNER`.
 
 ## Native macOS/Linux mount lifecycle
 
@@ -116,7 +121,8 @@ NFSv4.1 is not full upstream parity yet. Byte-range LOCK/LOCKT/LOCKU now have
 real process-local state, conflict/denial replies, range release, and
 stateid lifecycle handling, but they are advisory to this in-process service:
 there is no blocking wait, backend/kernel lock integration, or persistent
-lease/lock recovery. Delegations and callbacks, ACL/id-mapping policy,
+lease/lock recovery. Delegations and callbacks, ACL policy, dynamic
+id-mapping callbacks,
 pNFS/layout/offload operations, persistent lease/reply state across process
 restart, and the other RFC operations outside the common filesystem/session
 path remain gaps. It does not claim Linux-kernel native mount interoperability
@@ -134,7 +140,8 @@ the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. Backend crash recovery and durability behavior remains outside
 the supported local scope until a separate qualification lane is accepted.
 
-The pinned upstream API still exposes `onError`, NFSv4 ID-map callbacks, and
-deterministic `now`/`seed` state controls. Those controls are not silently
-mapped to the Rust defaults: they remain explicit parity work until their
+The pinned upstream API still exposes `onError`, dynamic NFSv4 ID-map
+callbacks, and deterministic `now`/`seed` state controls. Static ID maps are
+supported as described above; callback maps and the other controls are not
+silently mapped to Rust defaults and remain explicit parity work until their
 behavior has dedicated wire tests and supported N-API plumbing.

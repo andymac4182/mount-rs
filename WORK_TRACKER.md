@@ -1159,6 +1159,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The NFSv4 reclaim policy now gates both `OPEN` and `LOCK` state
   establishment with `NFS4ERR_GRACE` until `RECLAIM_COMPLETE`; the affected
   rootless v4.1 round-trip and same-owner/cross-client share tests pass.
+- [x] The NFSv4 owner translation boundary now supports deterministic static
+  Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
+  `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
+  release addon/typecheck, live N-API server integration, and strict affected
+  Clippy pass. Callback-based maps, deterministic clock/seed controls, and
+  session `onError` remain explicit parity gaps.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
