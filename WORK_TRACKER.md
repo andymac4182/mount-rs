@@ -1337,7 +1337,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   completed successfully. Direct logs and job metadata confirm the exact
   `Verify PGlite integration and restart recovery` step passed on all three
   platforms, as did fragmented HTTP early rejection; the prior Intel EPIPE
-  failure did not recur. W04.2 is closed on this evidence. Production rollout
+  failure did not recur. Current-tip qualification run
+  [35635114595](https://github.com/andymac4182/mount-rs/actions/runs/35635114595)
+  at published revision `d2db74dd` independently reconfirmed the Linux,
+  ARM, macOS-latest, and macOS-15-intel exact PGlite/restart steps, with both
+  macOS logs retaining the PGlite/chunked-PGlite trace, backup/restore/rollback,
+  and zero-provider-failure markers. W04.2 is closed on this evidence.
+  Production rollout
   remains separately tracked in
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
   NO-GO until artifact/package, persistence/rollback, provider, and
