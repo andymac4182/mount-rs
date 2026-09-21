@@ -795,6 +795,14 @@ where
                     if reply.is_closed() {
                         continue;
                     }
+                    let mut mutation = mutation;
+                    // Concurrent creates can all snapshot the same next inode
+                    // before this batch publishes. Rebase only those creates
+                    // that were prepared from this batch's revision; stale
+                    // requests still take the serialized conflict path.
+                    if mutation.new_inode && mutation.expected_revision == revision {
+                        mutation.inode = namespace.next_inode;
+                    }
                     let mut candidate = namespace.clone();
                     let result = apply_whole_file_mutation(&mut candidate, revision, &mutation);
                     match result {
@@ -2366,6 +2374,9 @@ fn apply_whole_file_mutation(
         return Ok(WholeFileMutationResult::Committed);
     }
 
+    if current_revision != mutation.expected_revision {
+        return Ok(WholeFileMutationResult::Conflict);
+    }
     let Some(target) = namespace.nodes.get_mut(&mutation.inode) else {
         return Ok(WholeFileMutationResult::Conflict);
     };
@@ -3441,6 +3452,53 @@ mod tests {
         for index in 0..PARTICIPANTS {
             let inode = resolve(&namespace, &format!("/file-{index}"), true, "test").unwrap();
             assert_eq!(namespace.nodes[&inode].stats.size, 4);
+        }
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_whole_file_creates_rebase_inodes_in_one_publication() {
+        const PARTICIPANTS: usize = 4;
+        let metadata = CountingMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            publishes: Arc::new(AtomicUsize::new(0)),
+        };
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks,
+            options("mutation-batch-create"),
+        ))
+        .unwrap();
+        let before = metadata.publishes.load(Ordering::SeqCst);
+        let futures = (0..PARTICIPANTS)
+            .map(|index| {
+                let filesystem = filesystem.clone();
+                Box::pin(async move {
+                    filesystem
+                        .write_file(&format!("/created-{index}"), b"created")
+                        .await
+                })
+            })
+            .collect();
+        for result in block_on_all(futures) {
+            result.unwrap();
+        }
+        assert_eq!(
+            metadata.publishes.load(Ordering::SeqCst),
+            before + 1,
+            "concurrent whole-file creates must share one fenced publication"
+        );
+        let loaded = block_on(metadata.load()).unwrap();
+        let namespace = loaded.namespace.unwrap();
+        let mut inodes = BTreeSet::new();
+        for index in 0..PARTICIPANTS {
+            let inode = resolve(&namespace, &format!("/created-{index}"), true, "test").unwrap();
+            assert!(
+                inodes.insert(inode),
+                "batched creates must receive unique inodes"
+            );
+            assert_eq!(namespace.nodes[&inode].stats.size, 7);
         }
         block_on(filesystem.shutdown()).unwrap();
     }
