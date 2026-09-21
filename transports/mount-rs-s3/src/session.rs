@@ -979,23 +979,43 @@ impl S3Session {
                 "This copy request is illegal because you are trying to copy an object to itself without changing the metadata.",
             )));
         }
-        let bytes = read_bytes_range(
-            source_driver,
-            &source.path,
-            None,
-            source_stats.size,
-            self.options.read_chunk_bytes,
-        )
-        .await?;
+        require_atomic_rename(&destination_driver)?;
         ensure_parent(&destination_driver, &destination.path).await?;
-        write_bytes(&destination_driver, &destination.path, &bytes, false).await?;
         let mtime = if replace_metadata {
             parse_meta_mtime(header_value(&head.headers, "x-amz-meta-mtime").as_deref())
                 .unwrap_or_else(now_ms)
         } else {
             source_stats.mtime_ms
         };
-        apply_mtime(&destination_driver, &destination.path, mtime).await?;
+        let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
+        let copy_result: S3Result<()> = async {
+            let destination_handle = destination_driver
+                .open(&staging_path, "w", 0o666)
+                .await
+                .map_err(S3Failure::Fs)?;
+            let mut destination_position = 0_u64;
+            let copy_result = copy_file_between_drivers(
+                &source_driver,
+                &source.path,
+                &destination_handle,
+                source_stats.size,
+                self.options.read_chunk_bytes,
+                &mut destination_position,
+            )
+            .await;
+            let close_result = destination_handle.close().await.map_err(S3Failure::Fs);
+            copy_result.and(close_result)?;
+            apply_mtime(&destination_driver, &staging_path, mtime).await?;
+            destination_driver
+                .rename(&staging_path, &destination.path)
+                .await
+                .map_err(S3Failure::Fs)
+        }
+        .await;
+        if let Err(error) = copy_result {
+            let _ = destination_driver.unlink(&staging_path).await;
+            return Err(error);
+        }
         let destination_stats = destination_driver
             .stat(&destination.path)
             .await
@@ -1316,7 +1336,7 @@ impl S3Session {
             let mut position = 0_u64;
             let copy_result: S3Result<()> = async {
                 for (path, size) in &parts {
-                    copy_file_into(
+                    copy_file_between_drivers(
                         &driver,
                         path,
                         &destination,
@@ -1696,15 +1716,15 @@ async fn write_stream_chunk(
     Ok(())
 }
 
-async fn copy_file_into(
-    driver: &Arc<dyn FsDriver>,
+async fn copy_file_between_drivers(
+    source_driver: &Arc<dyn FsDriver>,
     source_path: &str,
     destination: &Arc<dyn mount_rs_core::FileHandle>,
     size: u64,
     chunk_bytes: usize,
     destination_position: &mut u64,
 ) -> S3Result<()> {
-    let source = driver
+    let source = source_driver
         .open(source_path, "r", 0)
         .await
         .map_err(S3Failure::Fs)?;
@@ -1718,6 +1738,9 @@ async fn copy_file_into(
                 .await
                 .map_err(S3Failure::Fs)?;
             if count == 0 {
+                return Err(S3Failure::s3("InternalError"));
+            }
+            if count > requested {
                 return Err(S3Failure::s3("InternalError"));
             }
             write_stream_chunk(destination, destination_position, &buffer[..count]).await?;
