@@ -284,6 +284,17 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             secret_access_key: resolve_storage_env(secret_access_key)?,
             durable: *durable,
         }),
+        StorageProvider::AwsS3 {
+            bucket,
+            region,
+            prefix,
+            durable,
+        } => Ok(StoreConfig::AwsS3 {
+            bucket: bucket.clone(),
+            region: region.clone(),
+            prefix: prefix.clone(),
+            durable: *durable,
+        }),
     }
 }
 

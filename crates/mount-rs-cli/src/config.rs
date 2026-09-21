@@ -83,6 +83,12 @@ pub enum StorageProvider {
         secret_access_key: EnvReference,
         durable: bool,
     },
+    AwsS3 {
+        bucket: String,
+        region: String,
+        prefix: String,
+        durable: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -637,6 +643,29 @@ fn parse_provider(
                     "secret_access_key",
                     &format!("{path}.secret_access_key"),
                 )?,
+                durable: object
+                    .get("durable")
+                    .map(|value| required_value_bool(value, &format!("{path}.durable")))
+                    .transpose()?
+                    .unwrap_or(true),
+            }
+        }
+        "aws-s3" => {
+            if !block_role {
+                return Err(ConfigError::at(
+                    path,
+                    "provider 'aws-s3' is block-only; metadata AWS S3 is unsupported by mount-rs",
+                ));
+            }
+            reject_unknown(
+                object,
+                &["kind", "bucket", "region", "prefix", "durable"],
+                path,
+            )?;
+            StorageProvider::AwsS3 {
+                bucket: required_nonempty_string(object, "bucket", path)?,
+                region: required_nonempty_string(object, "region", path)?,
+                prefix: required_nonempty_string(object, "prefix", path)?,
                 durable: object
                     .get("durable")
                     .map(|value| required_value_bool(value, &format!("{path}.durable")))
@@ -1396,6 +1425,85 @@ mod tests {
         assert_eq!(connection.name, "PGLITE_URL");
         assert_eq!(access_key_id.name, "R2_ACCESS_KEY_ID");
         assert_eq!(secret_access_key.name, "R2_SECRET_ACCESS_KEY");
+    }
+
+    #[test]
+    fn aws_s3_provider_uses_region_and_rejects_s3_compatible_fields() {
+        let spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {"kind": "memory"},
+                        "blocks": {
+                            "kind": "aws-s3",
+                            "bucket": "mount-rs-integration",
+                            "region": "ap-southeast-2",
+                            "prefix": "mount-rs-tests/aws-s3"
+                        }
+                    }
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let Some(SplitStorageConfig {
+            blocks:
+                StorageProvider::AwsS3 {
+                    bucket,
+                    region,
+                    prefix,
+                    durable,
+                },
+            ..
+        }) = spec.storage
+        else {
+            panic!("expected AWS S3 block provider");
+        };
+        assert_eq!(bucket, "mount-rs-integration");
+        assert_eq!(region, "ap-southeast-2");
+        assert_eq!(prefix, "mount-rs-tests/aws-s3");
+        assert!(durable);
+
+        let error = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {"kind": "memory"},
+                        "blocks": {
+                            "kind": "aws-s3",
+                            "bucket": "mount-rs-integration",
+                            "region": "ap-southeast-2",
+                            "prefix": "mount-rs-tests/aws-s3",
+                            "endpoint": "https://example.invalid"
+                        }
+                    }
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("endpoint"));
+        assert!(error.message().contains("unknown field"));
+
+        let error = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {"kind": "aws-s3"},
+                        "blocks": {"kind": "memory"}
+                    }
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("block-only"));
     }
 
     #[test]

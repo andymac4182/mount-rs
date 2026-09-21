@@ -31,7 +31,7 @@ use mount_rs_foundationdb::{
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
-use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_r2::{AwsS3Config, R2BlockStore, R2Config};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteFs, SqliteMetadataStore, open_sqlite};
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
 
@@ -83,6 +83,14 @@ pub enum StoreConfig {
         prefix: String,
         access_key_id: String,
         secret_access_key: String,
+        durable: bool,
+    },
+    /// AWS S3 block storage using the standard AWS workload credential chain.
+    /// The provider is block-only; metadata remains an independent store.
+    AwsS3 {
+        bucket: String,
+        region: String,
+        prefix: String,
         durable: bool,
     },
 }
@@ -642,8 +650,8 @@ async fn open_metadata(
                 ))
             }
         }
-        StoreConfig::R2 { .. } => Err(backend_error(
-            "metadata provider 'r2' is unsupported; R2 is block-only",
+        StoreConfig::R2 { .. } | StoreConfig::AwsS3 { .. } => Err(backend_error(
+            "metadata providers 'r2' and 'aws-s3' are unsupported; object-store providers are block-only",
         )),
     }
 }
@@ -738,6 +746,19 @@ async fn open_blocks(
                 access_key_id: access_key_id.clone(),
                 secret_access_key: secret_access_key.clone(),
                 state_key: prefix.clone(),
+            };
+            let store = R2BlockStore::new(config.build_store()?, prefix.clone(), *durable)?;
+            Ok((Arc::new(store), Vec::new()))
+        }
+        StoreConfig::AwsS3 {
+            bucket,
+            region,
+            prefix,
+            durable,
+        } => {
+            let config = AwsS3Config {
+                bucket: bucket.clone(),
+                region: region.clone(),
             };
             let store = R2BlockStore::new(config.build_store()?, prefix.clone(), *durable)?;
             Ok((Arc::new(store), Vec::new()))
