@@ -1870,6 +1870,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   confirms the current source and workflow head before rollout review; the
   explicitly ignored native/service rows and all production deployment gates
   remain separate and are not claimed by this local result.
+- [x] The current security-remediation head `3fca802` passed the full locked
+  offline workspace test gate and strict workspace Clippy with `-D warnings`.
+  The same source passed the authenticated `myroot` AWS S3 CLI/self-test,
+  composed filesystem, fresh-process reopen, independent PGlite metadata,
+  writer-fencing, restored-PGlite reopen, and exact cleanup gates under
+  `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
+  This remains qualification-account and isolated-metadata evidence, not
+  production deployment acceptance.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -1908,6 +1916,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   fencing, and restore/reopen gates under
   `mount-rs-tests/aws-s3/20260921T141112Z-81269-ab3a599172244316234d1f3b23181dba`.
   This is local metadata backup/restore and restart evidence only.
+  A fresh current-source rerun at `3fca802` passed the same gates and exact
+  cleanup under
+  `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
   This does not close W25.6: production metadata ownership, multi-writer
   fencing, backup/restore, schema migration, failure recovery, and DR evidence
   remain open.
@@ -1944,8 +1955,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `428ce6d`; it therefore cannot be used as current-head release
-  evidence, regardless of its eventual result. The existing test
+  current head `3fca802`; it therefore cannot be used as current-head release
+  evidence, regardless of its result. The completed scan found one medium
+  `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
+  and partial 606-file inventory; the issue is remediated on current pushed
+  head `3fca802` by a redacting SDK `Debug` implementation and regression test,
+  but the scan itself predates that fix and remains stale for current-head
+  security acceptance. The existing test
   role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
