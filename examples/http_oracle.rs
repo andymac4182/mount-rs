@@ -31,7 +31,19 @@ impl FixedMtimeDriver {
         Self { inner }
     }
 
-    fn fix_stats(&self, mut stats: Stats) -> Stats {
+    fn fix_stats(&self, path: &str, mut stats: Stats) -> Stats {
+        // The S3 gateway uses the upload-directory mtime to reap abandoned
+        // multipart uploads. Keep that one private directory timestamp live
+        // in the parity fixture; public objects and staged part files still
+        // use the deterministic timestamp used by the comparison.
+        let relative = path.strip_prefix('/').unwrap_or(path);
+        let private_multipart_directory = relative
+            .strip_prefix(mount_rs_s3::MULTIPART_PREFIX)
+            .and_then(|suffix| suffix.strip_prefix('/'))
+            .is_some_and(|upload_id| !upload_id.is_empty() && !upload_id.contains('/'));
+        if private_multipart_directory {
+            return stats;
+        }
         stats.atime_ms = FIXED_MTIME_MS;
         stats.mtime_ms = FIXED_MTIME_MS;
         stats.ctime_ms = FIXED_MTIME_MS;
@@ -47,11 +59,11 @@ impl FsDriver for FixedMtimeDriver {
     }
 
     async fn stat(&self, path: &str) -> mount_rs_core::Result<Stats> {
-        Ok(self.fix_stats(self.inner.stat(path).await?))
+        Ok(self.fix_stats(path, self.inner.stat(path).await?))
     }
 
     async fn lstat(&self, path: &str) -> mount_rs_core::Result<Stats> {
-        Ok(self.fix_stats(self.inner.lstat(path).await?))
+        Ok(self.fix_stats(path, self.inner.lstat(path).await?))
     }
 
     async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<DirEntry>> {
