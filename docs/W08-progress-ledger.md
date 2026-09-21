@@ -2,7 +2,8 @@
 
 Status snapshot: **2026-09-21 21:54 AEST**
 Repository: `andymac4182/mount-rs`  
-Current published tip before this evidence chunk: `origin/main` at `c5532e3`
+Publication snapshot: `origin/main` at `077b6c2` before the final ledger-sync
+commit `ffdcf1f` (the W08 evidence chunk itself was committed as `67e0938`)
 Authoritative W08 hosted evidence: CI run `35585066458`, source `9c098e5`
 (W08-relevant jobs all terminal success)
 
@@ -144,11 +145,14 @@ for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
 | CI `35590919645`, source `b68c1f2`, `tidb-tls-compile` job `106304951579` | PASS — P07 implementation guard | The production-rollout-contract tip passed the TLS-enabled provider/SDK/CLI/N-API compile and credential-free positive/negative URL-policy checks. This remains implementation/guard evidence, not a live provider or production pass. |
 | CI `35592902494`, source `4326c54`, `tidb-tls-compile` job `106311076905` | PASS — W08.6/P01/P02/P07 implementation policy | Terminal success for TLS-enabled provider/SDK/CLI/N-API compilation, positive/negative TLS URL policy, and positive/negative production-config policy without credentials or network. This does not prove a live provider, IAM, certificate trust, topology, capacity or production deployment. |
 | CI `35595664981`, source `c5532e3`, `tidb-rustfs` job `106319766691` | PASS — W08.8 bounded hosted qualification | Terminal success for the real Linux TiDB/RustFS composition. Seed and reopen each ran 64 operations at concurrency 8 with 65,536-byte payloads and `errors=0`; seed p50/p95/p99/throughput were 668.59/918.49/918.62 ms and 11.47 ops/s, while reopen values were 648.69/815.50/816.83 ms and 12.15 ops/s. Durable TiDB and RustFS restart markers also passed. This does not close production workload, capacity, headroom, failover, multi-hour soak, cost or SLO gates. |
+| CI `35595664981` aggregate | Failure — not an aggregate W08 result | W08-relevant `tidb` `106319766731`, `tidb-rustfs` `106319766691`, `tidb-tls-compile` `106319766544` and `native-fuse` `106319766612` jobs were terminal successes. The aggregate was red because unrelated FoundationDB, Windows Rust, Ozone and Node matrix jobs failed; those failures remain visible to their workstreams and are not converted into W08 provider failures. |
 
-The W08 rows above use exact terminal job IDs and markers. The aggregate
-workflow conclusion is retained as `Cancelled` because later `main` pushes
-superseded it; this does not erase the terminal W08 job results, and it is not
-reported as an aggregate CI green result.
+The W08 rows above use exact terminal job IDs and markers. The historical
+functional run `35585066458` was later superseded and cancelled at aggregate
+level, while the current-main run `35595664981` completed with an aggregate
+`failure` caused by unrelated matrix jobs. Neither aggregate state is reported
+as an aggregate-green release result; the terminal W08 job conclusions remain
+the evidence counted here.
 
 ## Remaining action plan
 
@@ -225,7 +229,8 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 21:17–21:21 AEST | Re-ran the W08 production policy’s missing/unsafe TLS cases and checked the local provider prerequisites without printing credentials. | ~3 min | ~0 min | Missing `MOUNT_RS_TIDB_TLS_URL`, `require_ssl=false`, `verify_identity=false` and `built_in_roots=false` all failed closed. Provider URLs/credentials are absent; Docker CLI is present but its daemon check is unusable, so no new local provider evidence can be claimed. |
 | 2026-09-21 21:22–21:31 AEST | Corrected tracker evidence to the latest hosted policy job and added `docs/W08-operations-runbook.md` with deployment admission, incident response, backup/restore, rollback, observability handoff and D01–D09 timed drills; committed `ea01338`, reconciled concurrent changes and published `0e624d3`. | ~6 min | ~2 min remote fetch/merge/push wait | W08.7 implementation documentation is complete; all operational/provider drills remain explicitly unexecuted until named staging/production owners and systems are available. |
 | 2026-09-21 21:32–21:39 AEST | Added W08.8 bounded TiDB/RustFS soak coverage with configurable workload parameters and p50/p95/p99/throughput markers; enabled 64-operation hosted composition coverage; ran syntax, explicit-skip and missing-gate rejection checks. | ~7 min | ~0 min | The soak implementation is ready for hosted qualification; local provider and production-capacity evidence remain unavailable. P06 stays open pending terminal markers and approved workload/resource targets. |
-| 2026-09-21 21:44–21:54 AEST | Followed current-main CI run `35595664981`, extracted terminal `tidb-rustfs` job `106319766691` markers, and reconciled the hosted result against source `c5532e3`. | ~4 min | ~8 min hosted wait | Both seed and reopen bounded soak phases passed with zero errors and recorded latency/throughput metrics. W08.8 bounded hosted qualification is complete; P06 remains open for production-shaped workload, resource/headroom, failover, multi-hour and SLO/cost evidence. |
+| 2026-09-21 21:44–21:58 AEST | Followed current-main CI run `35595664981`, extracted terminal `tidb-rustfs` job `106319766691` markers, committed the evidence update as `67e0938`, reconciled concurrent main changes and published the result at `077b6c2`; the final ledger-pointer sync was then published as `ffdcf1f`. | ~5 min | ~12 min hosted/remote wait | Both seed and reopen bounded soak phases passed with zero errors and recorded latency/throughput metrics. W08.8 bounded hosted qualification is complete; P06 remains open for production-shaped workload, resource/headroom, failover, multi-hour and SLO/cost evidence. |
+| 2026-09-21 21:59–22:03 AEST | Checked the completed aggregate run and enumerated its unrelated failed jobs, then updated the ledger to preserve the W08 job-level PASS versus aggregate FAILURE boundary. | ~3 min | ~1 min hosted evidence lookup | W08 provider/TLS/native job results remain terminal successes; the aggregate is not release-green because other workstreams failed. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
