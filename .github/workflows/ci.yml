@@ -112,12 +112,21 @@ jobs:
         env:
           CARGOFLAGS: --locked
         run: pnpm --dir integrations/mount-rs-napi build
+      - name: Install and verify the Linux FUSE prerequisite for the FDB CLI gate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          test -c /dev/fuse
+          test -r /dev/fuse
+          test -w /dev/fuse
+          command -v fusermount3
       - name: Verify FoundationDB metadata, RustFS chunks, and service restart
         env:
           RUSTFS_COMBO_NAME: foundationdb-metadata-rustfs-chunks
           RUSTFS_COMBO_TIMEOUT_SECONDS: '900'
           RUSTFS_COMBO_COMMAND: ./scripts/test-foundationdb.sh
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
+          MOUNT_RS_FOUNDATIONDB_NATIVE_CLI: '1'
         run: ./scripts/test-rustfs.sh
 
   tidb:

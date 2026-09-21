@@ -234,6 +234,14 @@ client image that supplies `libfdb_c`, then runs the Node 24 test container on
 the FoundationDB network. The temporary artifact is written only beneath the
 script-owned run directory and is removed with the other test state.
 
+Set `MOUNT_RS_FOUNDATIONDB_NATIVE_CLI=1` as well to run the ignored
+config-driven Linux CLI lifecycle test in that client container. The caller
+must provide the actual `/dev/fuse`; the script adds only `SYS_ADMIN` and the
+FUSE device to the disposable container, installs `fuse3` there, and runs the
+feature-enabled CLI through a real FUSE mount with RustFS blocks. This option
+requires the composed RustFS lane and is intentionally not inferred from a
+client-only provider run.
+
 The normal script invocation owns its cluster file. If an existing cluster is
 supplied with `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE`, the script refuses it unless
 `MOUNT_RS_FOUNDATIONDB_ALLOW_EXTERNAL_CLUSTER=1` is also set. That explicit

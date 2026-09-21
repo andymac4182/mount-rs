@@ -13,6 +13,10 @@ run_napi=0
 if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
   run_napi=1
 fi
+run_native_cli=0
+if [ "${MOUNT_RS_FOUNDATIONDB_NATIVE_CLI:-0}" = "1" ]; then
+  run_native_cli=1
+fi
 run_id="$(date +%s)-$$"
 network="mount-rs-foundationdb-net-$run_id"
 server="mount-rs-foundationdb-server-$run_id"
@@ -200,6 +204,16 @@ else
   fi
 fi
 
+if [ "$run_native_cli" -eq 1 ] && [ -z "$rustfs_endpoint" ]; then
+  echo "MOUNT_RS_FOUNDATIONDB_NATIVE_CLI requires the composed RustFS lane" >&2
+  exit 2
+fi
+native_mount_args=""
+if [ "$run_native_cli" -eq 1 ]; then
+  native_mount_args="--device /dev/fuse --cap-add SYS_ADMIN"
+  test_command="${test_command} && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle -- --ignored --nocapture"
+fi
+
 napi_build_prefix=""
 if [ "$run_napi" -eq 1 ]; then
   # Build the feature-enabled N-API artifact in the same pinned client image
@@ -224,6 +238,7 @@ fi
 # positional argument to the container shell for the same reason.
 if [ -n "$rustfs_endpoint" ]; then
   docker run --rm \
+    $native_mount_args \
     --platform "$docker_platform" \
     --network "$network" \
     --add-host host.docker.internal:host-gateway \
@@ -241,11 +256,16 @@ if [ -n "$rustfs_endpoint" ]; then
     --env R2_SECRET_ACCESS_KEY \
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env MOUNT_RS_FOUNDATIONDB_NATIVE_CLI \
     --env MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP=1 \
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
      apt-get update -qq
-     apt-get install -y -qq --no-install-recommends clang libclang-dev curl >/dev/null
+     packages="clang libclang-dev curl"
+     if [ "${MOUNT_RS_FOUNDATIONDB_NATIVE_CLI:-0}" = "1" ]; then
+       packages="$packages fuse3"
+     fi
+     apt-get install -y -qq --no-install-recommends $packages >/dev/null
      endpoint_status=$(curl --silent --show-error --connect-timeout 2 --max-time 5 \
        -o /dev/null -w "%{http_code}" "$R2_ENDPOINT" || true)
      if [ "$endpoint_status" = "000" ]; then
@@ -257,6 +277,7 @@ if [ -n "$rustfs_endpoint" ]; then
     mount-rs-foundationdb-client "$test_command"
 else
   docker run --rm \
+    $native_mount_args \
     --platform "$docker_platform" \
     --network "$network" \
     --add-host host.docker.internal:host-gateway \
@@ -269,10 +290,15 @@ else
     --env RUSTFLAGS=-Lnative=/fdb \
     --env CARGO_TARGET_DIR=/tmp/mount-rs-foundationdb-target \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
+    --env MOUNT_RS_FOUNDATIONDB_NATIVE_CLI \
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
      apt-get update -qq
-     apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
+     packages="clang libclang-dev"
+     if [ "${MOUNT_RS_FOUNDATIONDB_NATIVE_CLI:-0}" = "1" ]; then
+       packages="$packages fuse3"
+     fi
+     apt-get install -y -qq --no-install-recommends $packages >/dev/null
      exec sh -c "$1"' \
     mount-rs-foundationdb-client "$test_command"
 fi
