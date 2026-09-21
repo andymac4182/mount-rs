@@ -457,11 +457,15 @@ if [ "$soak_rounds" -gt 0 ]; then
   while [ "$round" -le "$MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS" ]; do
     round_prefix="${RUSTFS_COMBO_PREFIX}/soak-${round}"
     round_authority_prefix="${round_prefix}/lease-authority"
-    env -u MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP \
+    if ! env -u MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP \
       RUSTFS_COMBO_PREFIX="$round_prefix" \
       MOUNT_RS_FOUNDATIONDB_TEST_PREFIX="$round_prefix" \
       MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX="$round_authority_prefix" \
       cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture
+    then
+      echo "FOUNDATIONDB_SOAK_FAIL round=$round" >&2
+      exit 1
+    fi
     round=$((round + 1))
   done
   echo "FOUNDATIONDB_SOAK_PASS rounds=$MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS"'
