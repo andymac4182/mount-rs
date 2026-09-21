@@ -96,9 +96,14 @@ try {
     const firstClose = stalledServer.close()
     assert.strictEqual(firstClose, stalledServer.close(), "failed close is cached while in flight")
     await assert.rejects(firstClose, /WebDAV close failed.*timed out/i)
-    assert.equal(stalledServer.connections, 1)
+    await waitUntil(
+      () => stalledServer.connections === 0,
+      "WebDAV N-API forced stalled connection cancellation",
+    )
 
-    const socketClosed = new Promise((resolve) => stalledSocket.once("close", resolve))
+    const socketClosed = stalledSocket.destroyed
+      ? Promise.resolve()
+      : new Promise((resolve) => stalledSocket.once("close", resolve))
     stalledSocket.destroy()
     await socketClosed
     stalledSocket = undefined

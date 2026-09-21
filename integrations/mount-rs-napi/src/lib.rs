@@ -11,6 +11,7 @@ pub mod utilities;
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -1153,12 +1154,35 @@ pub struct JsNodeFsOptions {
 }
 
 #[napi(object)]
+pub struct JsP9MountOptions {
+    /// Select the kernel's 9P transport. The default is the private Unix
+    /// socket path created by the Rust mount helper.
+    pub transport: Option<String>,
+    pub host: Option<String>,
+    pub port: Option<f64>,
+    pub path: Option<String>,
+    pub mount_msize: Option<f64>,
+    pub access: Option<String>,
+    pub cache: Option<String>,
+    pub uname: Option<String>,
+    pub aname: Option<String>,
+    pub read_only: Option<bool>,
+    pub use_driver_ino: Option<bool>,
+    pub mount_options: Option<Vec<String>>,
+    pub unmount_timeout_ms: Option<f64>,
+}
+
+#[napi(object)]
 pub struct JsAutoMountOptions {
     pub transport: Option<String>,
     pub read_only: Option<bool>,
     pub unmount_timeout_ms: Option<f64>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
+    /// 9P-only mount(8) options. The direct `./9p` mount helper maps its
+    /// public option bag here while the automatic facade keeps its shared
+    /// fields above.
+    pub p9: Option<JsP9MountOptions>,
     /// Apply hard mounts and same-host locking when the selected transport is
     /// NFS. This does not enable WAL or distributed SQLite locking.
     pub nfs_sqlite_single_host: Option<bool>,
@@ -1179,6 +1203,17 @@ pub struct JsAutoProbe {
     #[napi(js_name = "9p")]
     pub nine_p: JsTransportProbe,
     pub nfs: JsTransportProbe,
+    pub reason: Option<String>,
+}
+
+#[napi(object)]
+pub struct JsP9ClientProbe {
+    pub usable: bool,
+    pub platform: Option<String>,
+    pub kernel: bool,
+    pub transport: bool,
+    pub modules: bool,
+    pub root: bool,
     pub reason: Option<String>,
 }
 
@@ -2148,6 +2183,69 @@ fn validate_unmount_timeout(value: Option<f64>) -> Result<Option<Duration>, Erro
     Ok(Some(Duration::from_millis(value as u64)))
 }
 
+fn parse_p9_mount_transport(value: Option<String>) -> Result<mount_rs_9p::P9MountTransport, Error> {
+    match value.as_deref().unwrap_or("unix") {
+        "unix" => Ok(mount_rs_9p::P9MountTransport::Unix),
+        "tcp" => Ok(mount_rs_9p::P9MountTransport::Tcp),
+        other => Err(config_error(format!(
+            "unknown 9P mount transport {other}; expected unix or tcp"
+        ))),
+    }
+}
+
+fn p9_mount_msize(value: Option<f64>) -> Option<u32> {
+    let value = value?;
+    if value.is_nan() {
+        return None;
+    }
+    Some(value.trunc().clamp(
+        mount_rs_9p::P9_MIN_MSIZE as f64,
+        mount_rs_9p::mount::P9_MAX_MOUNT_MSIZE as f64,
+    ) as u32)
+}
+
+fn p9_mount_options(
+    options: Option<JsP9MountOptions>,
+    read_only: Option<bool>,
+    unmount_timeout: Option<Duration>,
+) -> Result<Option<mount_rs_9p::P9MountOptions>, Error> {
+    let Some(options) = options else {
+        return Ok(None);
+    };
+    let defaults = mount_rs_9p::P9MountOptions::default();
+    let nested_timeout = validate_unmount_timeout(options.unmount_timeout_ms)?;
+    let port = match options.port {
+        Some(value) => Some(
+            u16::try_from(validate_u32("9p.port", value)?)
+                .map_err(|_| config_error("9p.port must be between 0 and 65535"))?,
+        ),
+        None => None,
+    };
+    let mount_msize = p9_mount_msize(options.mount_msize);
+    Ok(Some(mount_rs_9p::P9MountOptions {
+        server: None,
+        server_hooks: mount_rs_9p::P9ServerHooks::default(),
+        transport: parse_p9_mount_transport(options.transport)?,
+        host: options.host.unwrap_or(defaults.host),
+        port,
+        socket_path: options.path.map(PathBuf::from),
+        mount_msize,
+        access: options.access.unwrap_or(defaults.access),
+        cache: options.cache.unwrap_or(defaults.cache),
+        uname: options.uname.unwrap_or(defaults.uname),
+        aname: options.aname.unwrap_or(defaults.aname),
+        read_only: options
+            .read_only
+            .or(read_only)
+            .unwrap_or(defaults.read_only),
+        use_driver_ino: options.use_driver_ino.unwrap_or(defaults.use_driver_ino),
+        mount_options: options.mount_options.unwrap_or(defaults.mount_options),
+        unmount_timeout: nested_timeout
+            .or(unmount_timeout)
+            .or(defaults.unmount_timeout),
+    }))
+}
+
 fn auto_options(
     options: Option<JsAutoMountOptions>,
 ) -> Result<(AutoMountOptions, Option<Arc<TransportErrorCallback>>), Error> {
@@ -2156,10 +2254,12 @@ fn auto_options(
         read_only: None,
         unmount_timeout_ms: None,
         on_transport_error: None,
+        p9: None,
         nfs_sqlite_single_host: None,
     });
     let transport = parse_auto_transport(options.transport)?;
     let unmount_timeout = validate_unmount_timeout(options.unmount_timeout_ms)?;
+    let p9 = p9_mount_options(options.p9, options.read_only, unmount_timeout)?;
     let callback = options
         .on_transport_error
         .map(TransportErrorCallback::new)
@@ -2170,7 +2270,7 @@ fn auto_options(
             read_only: options.read_only,
             unmount_timeout,
             fuse: None,
-            p9: None,
+            p9,
             nfs: options.nfs_sqlite_single_host.unwrap_or(false).then(|| {
                 let mut nfs = mount_rs_nfs::NfsMountOptions::sqlite_single_host();
                 nfs.read_only = options.read_only.unwrap_or(false);
@@ -2246,6 +2346,44 @@ impl Mounted {
     #[napi(getter)]
     pub fn active(&self) -> bool {
         self.inner.active()
+    }
+
+    /// The kernel transport used by a 9P mount. Other transport families
+    /// return `undefined` because they do not have a 9P `trans=` spelling.
+    #[napi(getter)]
+    pub fn trans(&self) -> Option<String> {
+        self.inner.p9_transport().map(|transport| match transport {
+            mount_rs_9p::P9MountTransport::Unix => "unix".to_owned(),
+            mount_rs_9p::P9MountTransport::Tcp => "tcp".to_owned(),
+        })
+    }
+
+    /// The shared server behind a native 9P mount, when this is a 9P mount.
+    #[napi(getter)]
+    pub fn server(&self) -> Option<crate::servers::P9Server> {
+        self.inner
+            .p9_server()
+            .map(crate::servers::P9Server::from_transport)
+    }
+
+    /// The kernel connection adopted by a native 9P mount, when this is a 9P
+    /// mount. The returned wrapper views the same transport connection.
+    #[napi(getter)]
+    pub fn connection(&self) -> Option<crate::servers::P9Connection> {
+        let server = self.inner.p9_server()?;
+        let connection = self.inner.p9_connection()?;
+        Some(crate::servers::P9Connection::from_transport(
+            connection,
+            server.options(),
+        ))
+    }
+
+    /// Wait for a native 9P connection-driven teardown. This is a no-op for
+    /// other transports so the neutral `Mounted` lifecycle remains usable.
+    #[napi]
+    pub async fn wait_closed(&self) -> napi::Result<()> {
+        self.inner.wait_closed().await;
+        Ok(())
     }
 
     #[napi]
@@ -3250,6 +3388,32 @@ pub async fn probe_transports() -> JsAutoProbe {
     auto_probe(mount_rs_auto::probe_transports())
 }
 
+/// Probe the Linux v9fs client without attempting to load a module or mount a
+/// filesystem. This is the direct `./9p` helper; the automatic probe exposes
+/// the same result in its `9p` transport summary.
+#[napi(js_name = "p9ClientProbe")]
+pub fn p9_client_probe() -> JsP9ClientProbe {
+    let probe = mount_rs_9p::p9_client_probe();
+    JsP9ClientProbe {
+        usable: probe.usable,
+        platform: probe.platform.map(|platform| match platform {
+            mount_rs_9p::P9Platform::Linux => "linux".to_owned(),
+        }),
+        kernel: probe.kernel,
+        transport: probe.transport,
+        modules: probe.modules,
+        root: probe.root,
+        reason: probe.reason,
+    }
+}
+
+#[napi(js_name = "p9Platform")]
+pub fn p9_platform() -> Option<String> {
+    mount_rs_9p::p9_platform().map(|platform| match platform {
+        mount_rs_9p::P9Platform::Linux => "linux".to_owned(),
+    })
+}
+
 /// Mount a filesystem through the named transport or the automatic facade.
 /// The Rust transport remains authoritative for platform prerequisites; this
 /// function never silently falls back after a named transport fails.
@@ -3558,6 +3722,17 @@ mod tests {
     }
 
     #[test]
+    fn p9_mount_msize_matches_the_public_clamp_boundary() {
+        assert_eq!(p9_mount_msize(None), None);
+        assert_eq!(p9_mount_msize(Some(f64::NAN)), None);
+        assert_eq!(p9_mount_msize(Some(1.5)), Some(mount_rs_9p::P9_MIN_MSIZE));
+        assert_eq!(
+            p9_mount_msize(Some(f64::INFINITY)),
+            Some(mount_rs_9p::mount::P9_MAX_MOUNT_MSIZE)
+        );
+    }
+
+    #[test]
     fn auto_facade_exposes_opt_in_nfs_sqlite_profile() {
         assert!(auto_options(None).unwrap().0.nfs.is_none());
         let (options, callback) = auto_options(Some(JsAutoMountOptions {
@@ -3565,6 +3740,7 @@ mod tests {
             read_only: Some(true),
             unmount_timeout_ms: Some(1234.0),
             on_transport_error: None,
+            p9: None,
             nfs_sqlite_single_host: Some(true),
         }))
         .unwrap();

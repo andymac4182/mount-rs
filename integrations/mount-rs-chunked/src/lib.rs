@@ -119,6 +119,12 @@ struct RuntimeState {
     revision: u64,
     next_fd: u64,
     open_refs: HashMap<InodeId, u64>,
+    /// Read atime changes are visible immediately to this coordinator and are
+    /// folded into the next fenced namespace publication. Keeping them out of
+    /// the read acknowledgement path avoids a remote metadata commit for
+    /// every small read while syncfs/fsync and graceful shutdown retain the
+    /// durability boundary.
+    pending_atime: HashMap<InodeId, i64>,
     /// Unlinked inodes remain available to existing handles but are never
     /// published. They are reclaimed on the last close or process restart.
     orphans: HashMap<InodeId, NodeMetadata>,
@@ -228,6 +234,7 @@ where
                     revision: loaded.revision,
                     next_fd: 3,
                     open_refs: HashMap::new(),
+                    pending_atime: HashMap::new(),
                     orphans: HashMap::new(),
                     failure: None,
                     closed: false,
@@ -263,6 +270,7 @@ where
         // from starting while this writer is queued.
         let _lifecycle = self.inner.lifecycle.write().await;
         let _gate = self.inner.gate.lock().await;
+        self.flush_pending_atime().await?;
         // Provider I/O can outlive the lease TTL (for example, a bounded
         // remote R2 write). Refresh our own lease before releasing it so a
         // graceful shutdown is not reported as ESTALE merely because the
@@ -354,7 +362,13 @@ where
         if state.closed {
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
-        Ok((state.namespace.clone(), state.revision))
+        let mut namespace = state.namespace.clone();
+        for (inode, atime_ms) in &state.pending_atime {
+            if let Some(node) = namespace.nodes.get_mut(inode) {
+                node.stats.atime_ms = node.stats.atime_ms.max(*atime_ms);
+            }
+        }
+        Ok((namespace, state.revision))
     }
 
     fn node_snapshot(
@@ -537,7 +551,23 @@ where
         let mut state = self.lock_state()?;
         state.namespace = namespace;
         state.revision = revision;
+        state.pending_atime.clear();
         Ok(revision)
+    }
+
+    /// Publish coalesced read-atime changes while the caller owns the
+    /// operation gate. Ordinary mutation paths call `snapshot`, so pending
+    /// values are included in any later namespace publication too.
+    async fn flush_pending_atime(&self) -> Result<()> {
+        let has_pending = !self.lock_state()?.pending_atime.is_empty();
+        if !has_pending {
+            return Ok(());
+        }
+        self.ensure_operation_lease().await?;
+        let (namespace, revision) = self.snapshot()?;
+        self.publish_namespace(revision, namespace, false)
+            .await
+            .map(|_| ())
     }
 
     async fn mutate<F, R>(&self, operation: F) -> Result<R>
@@ -600,6 +630,9 @@ where
         }
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
+        if count == 0 {
+            return Ok(0);
+        }
         if orphan {
             let mut state = self.lock_state()?;
             if let Some(node) = state.orphans.get_mut(&inode) {
@@ -607,16 +640,19 @@ where
             }
             return Ok(count);
         }
-        let (mut namespace, revision) = self.snapshot()?;
+        let (namespace, _) = self.snapshot()?;
         if namespace
             .nodes
             .get(&inode)
             .is_some_and(|node| write_base_unchanged(node, &original))
         {
-            if let Some(node) = namespace.nodes.get_mut(&inode) {
-                node.stats.atime_ms = now_ms();
-            }
-            self.publish_namespace(revision, namespace, false).await?;
+            let atime_ms = now_ms();
+            let mut state = self.lock_state()?;
+            state
+                .pending_atime
+                .entry(inode)
+                .and_modify(|pending| *pending = (*pending).max(atime_ms))
+                .or_insert(atime_ms);
         } else if let Some(node) = self.lock_state()?.orphans.get_mut(&inode)
             && write_base_unchanged(node, &original)
         {
@@ -1080,13 +1116,17 @@ where
         if state.closed {
             return Err(FsError::new(ErrorCode::Ebadf).with_message("filesystem is closed"));
         }
-        state
+        let mut stats = state
             .namespace
             .nodes
             .get(&inode)
             .or_else(|| state.orphans.get(&inode))
             .map(|node| node.stats.clone())
-            .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))
+            .ok_or_else(|| error_with_path(ErrorCode::Estale, syscall, path))?;
+        if let Some(atime_ms) = state.pending_atime.get(&inode) {
+            stats.atime_ms = stats.atime_ms.max(*atime_ms);
+        }
+        Ok(stats)
     }
 
     /// Remove a detached inode from the next published namespace. Existing
@@ -1124,6 +1164,7 @@ where
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
         self.snapshot()?;
+        self.flush_pending_atime().await?;
         self.inner
             .blocks
             .flush()
@@ -2985,6 +3026,50 @@ mod tests {
         assert_eq!(&buffer, b"atomic bytes");
         block_on(file.close()).unwrap();
         block_on(reopened.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn reads_coalesce_atime_and_eof_does_not_publish() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks,
+            options("lazy-atime"),
+        ))
+        .unwrap();
+        let driver: &dyn FsDriver = &filesystem;
+        block_on(driver.write_file("/read", b"read bytes")).unwrap();
+        let before = block_on(metadata.load()).unwrap();
+
+        let file = block_on(filesystem.open("/read", "r", 0)).unwrap();
+        let before_stat = block_on(file.stat()).unwrap();
+        let mut buffer = [0_u8; 16];
+        assert_eq!(block_on(file.read(&mut buffer, Some(0))).unwrap(), 10);
+        let visible = block_on(file.stat()).unwrap();
+        assert!(visible.atime_ms >= before_stat.atime_ms);
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before.revision);
+
+        let mut eof = [0_u8; 1];
+        assert_eq!(block_on(file.read(&mut eof, Some(10))).unwrap(), 0);
+        assert_eq!(block_on(metadata.load()).unwrap().revision, before.revision);
+
+        block_on(file.sync()).unwrap();
+        let synced = block_on(metadata.load()).unwrap();
+        assert_eq!(synced.revision, before.revision + 1);
+        let persisted_atime = synced
+            .namespace
+            .as_ref()
+            .unwrap()
+            .nodes
+            .values()
+            .find(|node| matches!(node.data, NodeData::File(_)))
+            .unwrap()
+            .stats
+            .atime_ms;
+        assert_eq!(persisted_atime, visible.atime_ms);
+        block_on(file.close()).unwrap();
+        block_on(filesystem.shutdown()).unwrap();
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! through an explicit limit, buffers only bounded XML bodies, and hands the
 //! normalized request to the same session used by unit tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -151,6 +151,59 @@ struct ServerState {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+struct ConnectionRegistry {
+    active: AtomicUsize,
+    next_id: AtomicUsize,
+    tasks: Mutex<HashMap<usize, tokio::task::AbortHandle>>,
+}
+
+impl Default for ConnectionRegistry {
+    fn default() -> Self {
+        Self {
+            active: AtomicUsize::new(0),
+            next_id: AtomicUsize::new(0),
+            tasks: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl ConnectionRegistry {
+    fn active(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+
+    fn next_id(&self) -> usize {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Register the task while holding the task map lock. A connection guard
+    /// is moved into the future before it is spawned, so aborting a task before
+    /// its first poll still decrements the active count on future drop.
+    fn spawn<F>(&self, id: usize, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let task = tokio::spawn(future);
+        tasks.insert(id, task.abort_handle());
+    }
+
+    fn abort_all(&self) {
+        let tasks = self
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let handles = tasks.values().cloned().collect::<Vec<_>>();
+        drop(tasks);
+        for task in handles {
+            task.abort();
+        }
+    }
+}
+
 /// A running or runnable WebDAV HTTP server.
 pub struct WebdavServer {
     pub session: Arc<WebdavSession>,
@@ -164,7 +217,7 @@ pub struct WebdavServer {
     drained: Arc<Notify>,
     lifecycle: tokio::sync::Mutex<()>,
     state: Mutex<ServerState>,
-    connections: Arc<AtomicUsize>,
+    connections: Arc<ConnectionRegistry>,
     hooks: WebdavServerHooks,
 }
 
@@ -201,7 +254,7 @@ impl WebdavServer {
             drained: Arc::new(Notify::new()),
             lifecycle: tokio::sync::Mutex::new(()),
             state: Mutex::new(ServerState { task: None }),
-            connections: Arc::new(AtomicUsize::new(0)),
+            connections: Arc::new(ConnectionRegistry::default()),
             hooks,
         }
     }
@@ -224,7 +277,7 @@ impl WebdavServer {
     }
 
     pub fn connections(&self) -> usize {
-        self.connections.load(Ordering::Acquire)
+        self.connections.active()
     }
 
     pub async fn listen(&self) -> Result<(), WebdavServerError> {
@@ -235,18 +288,15 @@ impl WebdavServer {
             .map(|state| state.task.is_some())
             .unwrap_or(false);
         let closing = self.closing.load(Ordering::Acquire) != 0;
-        if running && closing {
-            return Err(WebdavServerError::Io(std::io::Error::other(
-                "WebDAV server is closing",
-            )));
+        if closing {
+            return Err(WebdavServerError::Io(std::io::Error::other(if running {
+                "WebDAV server is closing"
+            } else {
+                "WebDAV server is still draining connections"
+            })));
         }
         if running {
             return Ok(());
-        }
-        if closing && self.connections.load(Ordering::Acquire) != 0 {
-            return Err(WebdavServerError::Io(std::io::Error::other(
-                "WebDAV server is still draining connections",
-            )));
         }
         let address = socket_address(&self.host, self.requested_port)
             .await
@@ -287,15 +337,21 @@ impl WebdavServer {
                             }
                         };
                         let session = Arc::clone(&session);
-                        let counter = Arc::clone(&counter_for_task);
+                        let connections = Arc::clone(&counter_for_task);
                         let drained = Arc::clone(&drained_for_task);
                         let shutdown = Arc::clone(&shutdown);
                         let closing = Arc::clone(&closing_for_task);
                         let hooks = hooks_for_task.clone();
                         let peer = peer.to_string();
-                        counter.fetch_add(1, Ordering::AcqRel);
-                        tokio::spawn(async move {
-                            let _guard = ConnectionGuard { counter, drained };
+                        let connection_id = connections.next_id();
+                        connections.active.fetch_add(1, Ordering::AcqRel);
+                        let guard = ConnectionGuard {
+                            connections: Arc::clone(&connections),
+                            id: connection_id,
+                            drained,
+                        };
+                        connections.spawn(connection_id, async move {
+                            let _guard = guard;
                             let service = service_fn(move |request| {
                                 handle_request(request, Arc::clone(&session), max_request_bytes)
                             });
@@ -363,11 +419,11 @@ impl WebdavServer {
                 task = None;
                 join_result.map_err(WebdavServerError::Join)?;
             }
-            while connections.load(Ordering::Acquire) != 0 {
+            while connections.active() != 0 {
                 let notified = drained.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if connections.load(Ordering::Acquire) == 0 {
+                if connections.active() == 0 {
                     break;
                 }
                 notified.await;
@@ -376,8 +432,14 @@ impl WebdavServer {
         })
         .await;
         match result {
-            Ok(result) => result,
+            Ok(result) => {
+                if result.is_ok() {
+                    self.closing.store(0, Ordering::Release);
+                }
+                result
+            }
             Err(_) => {
+                connections.abort_all();
                 if let Some(task) = task.take()
                     && !task.is_finished()
                     && let Ok(mut state) = self.state.lock()
@@ -397,17 +459,25 @@ impl Drop for WebdavServer {
     fn drop(&mut self) {
         self.closing.store(1, Ordering::Release);
         self.shutdown.notify_waiters();
+        self.connections.abort_all();
     }
 }
 
 struct ConnectionGuard {
-    counter: Arc<AtomicUsize>,
+    connections: Arc<ConnectionRegistry>,
+    id: usize,
     drained: Arc<Notify>,
 }
 
 impl Drop for ConnectionGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        self.connections.active.fetch_sub(1, Ordering::AcqRel);
+        let mut tasks = self
+            .connections
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tasks.remove(&self.id);
         self.drained.notify_waiters();
     }
 }

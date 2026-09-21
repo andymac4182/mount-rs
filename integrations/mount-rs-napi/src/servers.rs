@@ -2902,6 +2902,18 @@ pub struct P9Connection {
     options: P9SessionOptions,
 }
 
+impl P9Connection {
+    pub(crate) fn from_transport(
+        inner: mount_rs_9p::P9Connection,
+        options: &TransportP9ServerOptions,
+    ) -> Self {
+        Self {
+            inner,
+            options: p9_session_options(options),
+        }
+    }
+}
+
 #[napi]
 impl P9Connection {
     #[napi(getter)]
@@ -2961,6 +2973,31 @@ pub struct P9Server {
     transport_error: Option<Arc<TransportErrorCallback>>,
     session_error: Option<Arc<P9SessionErrorCallback>>,
     assertion: Option<Arc<P9AssertionCallback>>,
+}
+
+impl P9Server {
+    /// Wrap the transport server retained by a native 9P mount. The wrapper
+    /// intentionally does not duplicate callbacks or the serving task: both
+    /// remain owned by the mount-created server, while lifecycle methods and
+    /// live client/session views operate on the same Arc-backed transport.
+    pub(crate) fn from_transport(server: Arc<TransportP9Server>) -> Self {
+        let options = server.options().clone();
+        Self {
+            driver: server.driver(),
+            host: options.host.clone(),
+            requested_port: options.port,
+            options,
+            state: Mutex::new(P9State {
+                server: Some(server),
+                serve_task: None,
+            }),
+            binding: AtomicBool::new(false),
+            closed: AtomicBool::new(false),
+            transport_error: None,
+            session_error: None,
+            assertion: None,
+        }
+    }
 }
 
 #[napi]
