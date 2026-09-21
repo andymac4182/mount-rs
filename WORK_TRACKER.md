@@ -1308,6 +1308,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   complete/GET, streamed traffic, cancellation, bucket isolation, connection
   cleanup, and a typed peer-fault callback all pass in the host-enabled server
   integration; this remains non-native and non-provider evidence.
+- [x] The S3 N-API process-restart packet now runs a child process that leaves
+  staged multipart state without calling `S3Server.close()`; a fresh native
+  filesystem driver/session lists, completes, and reads the object through
+  `node test/s3-restart.mjs`. This is restart evidence, not power-loss,
+  provider, hosted-native, or crash-consistency acceptance.
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
