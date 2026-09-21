@@ -1580,15 +1580,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     record the actual runner, cluster/image, revision and result. Failed,
     skipped, cancelled or unavailable evidence remains open.
 
-  A fresh local source gate on 2026-09-22 tested revision `717a0ab` and
+  The current-main source gate on 2026-09-22 tested revision `29365e9` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
   Clippy with `-D warnings`, and the locked
-  `./scripts/cargo-shared test --workspace --all-targets --locked` suite with
-  loopback networking enabled for the TCP integration test. The suite's
-  provider, native-mount and external-service rows remained explicitly
-  ignored where their required harnesses were not present. This is current
-  source qualification only; it does not close the hosted platform matrix or
-  any production deployment gate.
+  `./scripts/cargo-shared test --workspace --all-targets --locked` suite.
+  The suite's provider, native-mount and external-service rows remained
+  explicitly ignored where their required harnesses were not present. This is
+  current source qualification only; it does not close the hosted platform
+  matrix or any production deployment gate. The earlier source checkpoint at
+  `717a0ab` remains historical evidence in the rollout ledger.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
