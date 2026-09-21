@@ -1194,10 +1194,11 @@ reproducible in a production-like environment.
   `X-Content-Type-Options: nosniff`, with local regression assertions passing
   on reconciled source `2159976`.
   Hosted CI run `35599817215`, source `b26819e`, job `106333141914` also
-  reached terminal success for the pre-hardening all-features gate. The
-  header-hardening hosted requalification is still open because successive
-  current-main candidates were cancelled before the job ran. This is
-  process/configuration and local/hosted exporter-path evidence only:
+  reached terminal success for the pre-hardening all-features gate. Terminal
+  hosted CI run `35601990956`, source `f09fbe9`, job `106340034907` also
+  passed the hardening-bearing all-features gate, with `2f7919a` in its
+  ancestry. This is process/configuration and local/hosted exporter-path
+  evidence only:
   provider-aware readiness, collector, SLO, paging, redaction and end-to-end
   alert evidence remain open. *(Implementation + hosted/provider; collector
   and on-call route are not configured.)*
