@@ -1248,14 +1248,14 @@ async fn multipart_completion_keeps_destination_inode_before_finalization_marker
     let driver = MemoryFs::empty();
     let session = S3Session::new(driver.clone());
     let initiated = session
-        .handle(request("POST", "/mountx/etag.bin?uploads", [], &[]))
+        .handle(request("POST", "/mountx/nested/etag.bin?uploads", [], &[]))
         .await;
     assert_eq!(initiated.status, 200);
     let upload_id = xml_field(&initiated.body, "UploadId");
     let part = session
         .handle(request(
             "PUT",
-            &format!("/mountx/etag.bin?uploadId={upload_id}&partNumber=1"),
+            &format!("/mountx/nested/etag.bin?uploadId={upload_id}&partNumber=1"),
             b"stable multipart bytes",
             &[],
         ))
@@ -1284,7 +1284,7 @@ async fn multipart_completion_keeps_destination_inode_before_finalization_marker
     let completed = session
         .handle(request(
             "POST",
-            &format!("/mountx/etag.bin?uploadId={upload_id}"),
+            &format!("/mountx/nested/etag.bin?uploadId={upload_id}"),
             complete_body.as_bytes(),
             &[],
         ))
@@ -1292,10 +1292,13 @@ async fn multipart_completion_keeps_destination_inode_before_finalization_marker
     assert_eq!(completed.status, 200);
 
     let object = driver
-        .stat("/etag.bin")
+        .stat("/nested/etag.bin")
         .await
         .expect("completed object stats");
-    assert_eq!(object.ino, probe_stats.ino + 1);
+    // The parent directory is allocated before the reserved completion file;
+    // the marker then consumes the following inode without shifting the
+    // published object's identity.
+    assert_eq!(object.ino, probe_stats.ino + 2);
 }
 
 #[tokio::test]
