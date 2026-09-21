@@ -840,7 +840,13 @@ direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
 accepted while DTD/custom entities remain refused. W01 and production status
-remain **NO-GO**. A read-only status check for the published tip
+remain **NO-GO**. The pinned
+`CARGO=./scripts/cargo-shared MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node --experimental-strip-types scripts/check-http-parity.mjs`
+also passes all 40 paired TypeScript/Rust S3+WebDAV loopback cases, including
+16 authenticated WebDAV cases for streaming PUT, XML property updates,
+GET/HEAD/range/conditional behavior, PROPFIND, COPY/MOVE, refusal,
+missing-resource, and DELETE. This is local pinned-oracle HTTP evidence, not
+hosted/native acceptance. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
