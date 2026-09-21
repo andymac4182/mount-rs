@@ -1165,7 +1165,9 @@ pub struct JsChunkedOptions {
     pub chunk_size: f64,
     pub owner: Option<String>,
     pub ttl_ms: Option<f64>,
+    /// Defaults to the current process uid, matching the memory driver.
     pub uid: Option<f64>,
+    /// Defaults to the current process gid, matching the memory driver.
     pub gid: Option<f64>,
     pub umask: Option<f64>,
     pub root_mode: Option<f64>,
@@ -2992,8 +2994,9 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
     let owner = chunked_owner(options.owner)?;
     let chunk_size = validate_chunk_size(options.chunk_size)?;
     let ttl = validate_ttl(options.ttl_ms)?;
-    let uid = optional_u32("uid", options.uid, 0)?;
-    let gid = optional_u32("gid", options.gid, 0)?;
+    let (process_uid, process_gid) = memory_factory::native_process_identity();
+    let uid = optional_u32("uid", options.uid, process_uid)?;
+    let gid = optional_u32("gid", options.gid, process_gid)?;
     let umask = optional_u32("umask", options.umask, 0)?;
     let root_mode = optional_u32("rootMode", options.root_mode, 0o755)?;
     let chunk_options = ChunkedOptions::fixed(owner, chunk_size)

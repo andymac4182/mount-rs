@@ -14,7 +14,7 @@ pub struct JsMemoryOptions {
     pub root_mode: Option<f64>,
 }
 
-fn process_id(env: &Env, property: &str) -> napi::Result<u32> {
+pub(crate) fn process_id(env: &Env, property: &str) -> napi::Result<u32> {
     let global = env.get_global()?;
     let process: Object = global.get_named_property("process")?;
     if !process.has_named_property(property)? {
@@ -23,6 +23,24 @@ fn process_id(env: &Env, property: &str) -> napi::Result<u32> {
 
     let getter: Function<(), u32> = process.get_named_property(property)?;
     getter.apply(process, ())
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn getgid() -> std::os::raw::c_uint;
+    fn getuid() -> std::os::raw::c_uint;
+}
+
+pub(crate) fn native_process_identity() -> (u32, u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: POSIX getuid/getgid have no pointer arguments or retained state.
+        unsafe { (getuid(), getgid()) }
+    }
+    #[cfg(not(unix))]
+    {
+        (0, 0)
+    }
 }
 
 /// Construct the N-API memory driver with the same identity and mode defaults

@@ -48,6 +48,15 @@ async function exercise(options, expected) {
 
 const directory = await mkdtemp(join(tmpdir(), "mount-rs-napi-chunked-"))
 try {
+  const defaults = await openDriver()
+  try {
+    const root = await defaults.stat("/")
+    assert.equal(root.uid, process.getuid?.() ?? 0, "default chunked uid")
+    assert.equal(root.gid, process.getgid?.() ?? 0, "default chunked gid")
+  } finally {
+    await defaults.shutdown()
+  }
+
   await exercise(
     {
       metadata: { kind: "memory" },
