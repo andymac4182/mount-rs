@@ -162,7 +162,7 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Source base `4c8dbfcb68a643a4294a79b72431c44629dcb767` was freshly reverified
+Source base `97986b663f3cd13a8996d6b495a0806fcafb4f69` was freshly reverified
 locally after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider,
 Ozone, FUSE, chunked, bounded-teardown and restart-fencing updates: the full
 locked workspace test suite exited 0 and strict workspace Clippy with
