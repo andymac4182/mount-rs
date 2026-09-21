@@ -44,6 +44,9 @@ pub use constants::{
     FUSE_WRITE, FUSE_WRITE_CACHE, FUSE_WRITE_KILL_SUIDGID, FUSE_WRITE_LOCKOWNER,
     FUSE_WRITEBACK_CACHE, OPCODE_NAMES,
 };
+pub use mount::{
+    FuseMountHooks, FuseTransportError, FuseTransportErrorHook, FuseTransportErrorKind,
+};
 pub use notify::{
     FUSE_NAME_MAX, FUSE_NOTIFY_INVAL_ENTRY, FUSE_NOTIFY_INVAL_INODE, FUSE_NOTIFY_UNIQUE,
     FuseNotification, FuseNotifyInvalEntryOut, FuseNotifyInvalInodeOut, NotifyError, decode_notify,

@@ -185,6 +185,13 @@ coverage. Its locked N-API check/Clippy, debug addon build, focused session/
 codec/typecheck tests, FUSE tests, formatting and diff checks pass; the full
 `MOUNTX_SOURCE` package suite, native Linux callback events, FSKit, cancellation,
 concurrency, crash/restart and durability remain open.
+The native transport follow-up adds owned `FuseTransportError` kinds,
+`FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
+callback-panic isolation, and a mount-free Unix-stream protocol-failure
+harness. The locked FUSE target, formatting and diff checks pass on macOS; the
+Linux-only hook harness and hosted `/dev/fuse` callback delivery remain
+external evidence, as do FSKit, cancellation, concurrency, crash/restart and
+durability.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
