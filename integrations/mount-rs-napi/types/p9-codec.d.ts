@@ -7,6 +7,7 @@ import type {
   Mounted,
   P9Connection,
   P9FidTable,
+  P9LockTable,
   P9Server,
 } from "../index.js"
 
@@ -229,6 +230,13 @@ export interface MountP9Options {
   host?: string
   port?: number
   path?: string
+  /** Scalar policy for a server created by this mount. */
+  allowRemote?: boolean
+  socketMode?: number
+  allowSharedDirectory?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+  msize?: number
   mountMsize?: number
   access?: string
   cache?: string
@@ -236,6 +244,9 @@ export interface MountP9Options {
   aname?: string
   readOnly?: boolean
   useDriverIno?: boolean
+  claimOwnership?: boolean
+  debug?: boolean
+  locks?: P9LockTable
   mountOptions?: readonly string[]
   unmountTimeout?: number
   onTransportError?: (error: unknown, peer: string | undefined) => void

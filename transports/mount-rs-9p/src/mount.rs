@@ -21,9 +21,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::constants::{P9_IOHDRSZ, P9_MIN_MSIZE};
-#[cfg(target_os = "linux")]
-use crate::server::P9ServerOptions;
-use crate::server::{P9Server, P9ServerHooks};
+use crate::server::{P9Server, P9ServerHooks, P9ServerOptions};
 
 pub const P9_DEFAULT_MOUNT_MSIZE: u32 = 128 * 1024 + P9_IOHDRSZ;
 pub const P9_MAX_MOUNT_MSIZE: u32 = 1024 * 1024;
@@ -109,6 +107,9 @@ pub struct P9MountOptions {
     /// Reuse a previously bound server. Its accept loop is started if it is
     /// not already running, and it is closed when this mount tears down.
     pub server: Option<Arc<P9Server>>,
+    /// Policy for a server created by this mount. A supplied shared server
+    /// keeps its own policy instead.
+    pub server_options: P9ServerOptions,
     /// Hooks used only when this mount creates its own in-process server. A
     /// supplied shared server keeps the hooks it was created with.
     pub server_hooks: P9ServerHooks,
@@ -133,6 +134,7 @@ impl Default for P9MountOptions {
     fn default() -> Self {
         Self {
             server: None,
+            server_options: P9ServerOptions::default(),
             server_hooks: P9ServerHooks::default(),
             transport: P9MountTransport::Unix,
             host: "127.0.0.1".to_owned(),
@@ -148,6 +150,34 @@ impl Default for P9MountOptions {
             mount_options: Vec::new(),
             unmount_timeout: Some(Duration::from_secs(10)),
         }
+    }
+}
+
+impl P9MountOptions {
+    /// Build the listener policy for a mount-created server while preserving
+    /// the public server controls that are independent of mount(8)'s option
+    /// string. Transport identity is supplied by the mount helper itself so
+    /// a caller-provided socket path cannot accidentally leave a TCP listener
+    /// with a Unix path (or vice versa).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn server_options_for_mount(
+        &self,
+        transport: P9MountTransport,
+        socket: Option<&Path>,
+    ) -> P9ServerOptions {
+        let mut options = self.server_options.clone();
+        options.host = self.host.clone();
+        options.port = self.port.unwrap_or(0);
+        options.path = match transport {
+            P9MountTransport::Unix => socket.map(Path::to_path_buf),
+            P9MountTransport::Tcp => None,
+        };
+        if options.msize.is_none() {
+            options.msize = Some(mount_msize(self.mount_msize));
+        }
+        options.read_only = self.read_only;
+        options.use_driver_ino = self.use_driver_ino;
+        options
     }
 }
 
@@ -447,12 +477,8 @@ where
                     cleanup_socket_directory(directory.as_deref());
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
                 }
-                let server_options = P9ServerOptions {
-                    msize: Some(mount_msize(options.mount_msize)),
-                    read_only: options.read_only,
-                    use_driver_ino: options.use_driver_ino,
-                    ..P9ServerOptions::default()
-                };
+                let server_options =
+                    options.server_options_for_mount(P9MountTransport::Unix, Some(&socket));
                 let server = match P9Server::bind_unix_with_hooks(
                     driver,
                     &socket,
@@ -482,14 +508,7 @@ where
                 if let Some(reason) = tcp_source_refusal(&host) {
                     return Err(io::Error::new(io::ErrorKind::InvalidInput, reason));
                 }
-                let server_options = P9ServerOptions {
-                    host: host.clone(),
-                    port: options.port.unwrap_or(0),
-                    msize: Some(mount_msize(options.mount_msize)),
-                    read_only: options.read_only,
-                    use_driver_ino: options.use_driver_ino,
-                    ..P9ServerOptions::default()
-                };
+                let server_options = options.server_options_for_mount(P9MountTransport::Tcp, None);
                 let server =
                     P9Server::bind_with_hooks(driver, server_options, options.server_hooks.clone())
                         .await?;
@@ -964,6 +983,48 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn mount_server_options_preserve_policy_and_overlay_transport_identity() {
+        let socket = PathBuf::from("/tmp/mount-rs-policy/9p.sock");
+        let mut options = P9MountOptions {
+            host: "10.0.0.7".to_owned(),
+            port: Some(4567),
+            read_only: true,
+            use_driver_ino: false,
+            ..P9MountOptions::default()
+        };
+        options.server_options.allow_remote = true;
+        options.server_options.socket_mode = 0o640;
+        options.server_options.allow_shared_directory = true;
+        options.server_options.max_frame = 2 * 1024 * 1024;
+        options.server_options.max_in_flight = 7;
+        options.server_options.msize = Some(64 * 1024);
+        options.server_options.claim_ownership = false;
+        options.server_options.debug = false;
+        options.server_options.locks = Some(crate::locks::P9LockTable::new(Default::default()));
+
+        let tcp = options.server_options_for_mount(P9MountTransport::Tcp, None);
+        assert_eq!(tcp.host, "10.0.0.7");
+        assert_eq!(tcp.port, 4567);
+        assert_eq!(tcp.path, None);
+        assert!(tcp.allow_remote);
+        assert_eq!(tcp.socket_mode, 0o640);
+        assert!(tcp.allow_shared_directory);
+        assert_eq!(tcp.max_frame, 2 * 1024 * 1024);
+        assert_eq!(tcp.max_in_flight, 7);
+        assert_eq!(tcp.msize, Some(64 * 1024));
+        assert!(!tcp.use_driver_ino);
+        assert!(tcp.read_only);
+        assert!(!tcp.claim_ownership);
+        assert!(!tcp.debug);
+        assert!(tcp.locks.is_some());
+
+        let unix = options.server_options_for_mount(P9MountTransport::Unix, Some(&socket));
+        assert_eq!(unix.path, Some(socket));
+        assert_eq!(unix.port, 4567);
+        assert_eq!(unix.host, "10.0.0.7");
     }
 
     #[test]

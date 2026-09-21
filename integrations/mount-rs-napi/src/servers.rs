@@ -2056,6 +2056,10 @@ impl P9LockTable {
             inner: self.inner.client(),
         }
     }
+
+    pub(crate) fn transport(&self) -> TransportP9LockTable {
+        self.inner.clone()
+    }
 }
 
 #[napi]

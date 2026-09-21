@@ -1375,6 +1375,16 @@ export interface JsP9MountOptions {
   host?: string
   port?: number
   path?: string
+  /**
+   * Scalar policy for a server created by this mount. A supplied server
+   * keeps its already-configured policy instead.
+   */
+  allowRemote?: boolean
+  socketMode?: number
+  allowSharedDirectory?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+  msize?: number
   mountMsize?: number
   access?: string
   cache?: string
@@ -1382,6 +1392,9 @@ export interface JsP9MountOptions {
   aname?: string
   readOnly?: boolean
   useDriverIno?: boolean
+  claimOwnership?: boolean
+  debug?: boolean
+  locks?: P9LockTable
   mountOptions?: Array<string>
   unmountTimeoutMs?: number
   /**
