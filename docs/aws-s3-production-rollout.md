@@ -330,6 +330,14 @@ fail-closed blocker set and made no GitHub or AWS changes; hosted OIDC evidence
 remains blocked until the deployment owner configures and approves those
 controls.
 
+The current shared-mainline read-only OIDC audit at pushed source
+`a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22 returned
+`AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rule,
+protected-branch policy, non-self-approvable reviewer, four protected
+environment inputs/secret, GitHub OIDC provider, and immutable-subject role
+trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
+until the deployment owner configures and approves those controls.
+
 ## Rollout sequence
 
 1. Review the resource and identity change, including region, bucket, prefix,
@@ -417,6 +425,12 @@ account/region, public-access, ownership, AES256 encryption, `None` versioning,
 seven-day lifecycle, and one-day incomplete-multipart abort controls without
 mutating AWS. It remains qualification-account evidence only; the production
 bucket, policy, roles, and approved change set remain open.
+The current shared-mainline read-only qualification-bucket audit at pushed
+source `a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22 passed the
+same account/region, public-access, ownership, AES256 encryption, `None`
+versioning, seven-day lifecycle, and one-day incomplete-multipart abort checks.
+It made no AWS changes; this remains qualification-account evidence only and
+the production bucket, policy, roles, and approved change set remain open.
 The latest full integrated qualification is the current shared-source
 `2101e555` run recorded above. This is qualification-account evidence only;
 production

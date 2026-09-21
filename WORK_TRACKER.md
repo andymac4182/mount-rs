@@ -3174,6 +3174,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   controls. It made no AWS changes and remains qualification-account evidence
   only; the production bucket, policy, roles, and approved change set remain
   open.
+- [x] The current shared-mainline read-only qualification-bucket audit at
+  pushed source `a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22
+  passed account/region binding, all four public-access blocks,
+  BucketOwnerEnforced ownership, AES256 encryption, `None` versioning,
+  seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
+  abort checks. It made no AWS changes; this remains qualification-account
+  evidence only and the production bucket, policy, roles, and approved change
+  set remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -3324,6 +3332,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   remain open. This closes the source-review evidence item only; hosted
   release, production identity, load/soak/fault/restore, canary, rollback, and
   post-deploy smoke gates remain open.
+- [x] The current shared-mainline read-only OIDC audit at pushed source
+  `a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22 returned
+  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rule,
+  protected-branch policy, non-self-approvable reviewer, four protected
+  environment inputs/secret, GitHub OIDC provider, and immutable-subject role
+  trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
+  until the deployment owner configures and approves those controls.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
