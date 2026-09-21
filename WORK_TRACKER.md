@@ -1729,6 +1729,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   passing run includes the 14-test S3 gateway suite, 13 AWS-provider unit
   tests, both signed HTTP interop tests, and the public SDK/CLI tests; the
   workspace's explicitly ignored native/service rows remain separate gates.
+- [x] Final current-head qualification rerun on 2026-09-21 at local
+  `b720696` passed `cargo fmt --all -- --check`, the full locked offline
+  workspace test gate, and strict workspace Clippy with `-D warnings`. This
+  confirms the current source and workflow head before rollout review; the
+  explicitly ignored native/service rows and all production deployment gates
+  remain separate and are not claimed by this local result.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
