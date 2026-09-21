@@ -200,6 +200,10 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         before advertising <code>max_frame</code>; the remaining mount-member
         decisions are recorded explicitly in the transport README. This is
         validation and scope evidence, not hosted <code>/dev/fuse</code> proof.
+        Hosted native-FUSE runs <code>35657075892</code> and
+        <code>35659287961</code> still timed out both unmount cases at the
+        15-second bound, including the corrected descriptor-drain path, so no
+        hosted native-FUSE acceptance is claimed.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
         The no-reply <code>FORGET</code> path follows the pinned session
@@ -225,7 +229,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     name: 'NFS',
     eyebrow: 'Transport / network filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Native macOS NFSv3 and Linux checkpoints plus shared v3/v4 session and connection views exist; rootless reconnect, bounded pipelining, and v4 channel/state knobs pass, while the current workstream remains NO-GO pending native NFSv4.1, hosted lifecycle, and crash/durability qualification.',
+    maturityNote: 'Native macOS NFSv3 plus job-scoped hosted macOS/Linux NFSv3 and Linux NFSv4.1 checkpoints are evidenced; shared v3/v4 session and connection views, rootless reconnect, bounded pipelining, and v4 channel/state knobs pass, while the current workstream remains NO-GO pending full stateful/member, hosted lifecycle, and crash/durability qualification.',
     summary: (
       <>
         NFS is the current native macOS path and a Linux option when the host
@@ -320,7 +324,21 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         <code>Nfs3Session</code>. Hosted runs
         <code>35656252661</code>, <code>35657100915</code>, and
         <code>35657445618</code> were cancelled before native-NFS jobs ran,
-        so no current hosted acceptance is claimed.
+        so they are not acceptance evidence. The later hosted run
+        <code>35658285441</code> completed both named native-NFS jobs:
+        macOS passed native NFSv3, CLI persistence/cleanup, and
+        SQLite-over-NFS, while Ubuntu passed privileged native NFSv3/NFSv4.1
+        and SQLite-over-NFS. The surrounding workflow was not wholly green,
+        so this remains job-scoped platform evidence rather than release
+        acceptance. A focused process-restart target writes a
+        <code>FILE_SYNC</code> file, force-terminates the server, and recovers
+        the bytes through a replacement <code>HostFs</code> server; the
+        pre-crash handle returns <code>NFS3ERR_STALE</code>. This is
+        host-backed NFSv3 process-restart evidence, not power-loss or NFSv4
+        lease/replay recovery. A bounded rootless NFSv4.1 target also runs two
+        independent sessions with concurrent distinct-file OPEN/WRITE/READ
+        and passes 7/7; hosted run <code>35663954461</code> was cancelled
+        before jobs were created, so it supplies no hosted concurrency result.
         The pinned oracle passes 266 NFSv3/MOUNT and NFSv4.1 TCP cases with 18
         capability/root skips; bounded <code>maxHandles</code> LRU and NFSv4
         open-state pinning are covered. Native Linux NFSv4.1, the full
@@ -333,6 +351,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'W01 NFS progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_NFS_PROGRESS.md' },
       { label: 'Public API parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'SQLite-over-NFS boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
+      { label: 'Hosted native NFS platform jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35658285441' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
   },
@@ -614,7 +633,7 @@ curl -H 'Authorization: Bearer demo-memory' \
     name: 'WebDAV',
     eyebrow: 'Transport / HTTP filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
+    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, 32-request network and same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
     summary: (
       <>
         WebDAV makes the filesystem contract available through standard HTTP
@@ -682,8 +701,9 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         stays open. N-API network/hosted concurrency,
         crash/power-loss restart, and provider durability remain open.
         The latest host-enabled N-API network packet also passes one
-        <code>MKCOL</code>, 16 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
-        pairs, chunked stream I/O, Basic authentication, and a live unsupported
+        <code>MKCOL</code>, 32 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
+        pairs with 33 PUT/33 GET method counters, chunked stream I/O, Basic
+        authentication, and a live unsupported
         <code>PATCH</code> that returns <code>405</code> and calls
         <code>onError</code> once. A child-process <code>SIGKILL</code> and
         SQLite reopen recovered file bytes with zero replacement-session locks;
@@ -699,8 +719,10 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         typed transport callback with the accepted loopback peer. A malformed
         HTTP request produces one typed callback and clean socket/server
         teardown. Same-driver recreation preserves file bytes while resetting
-        session locks, and eight parallel direct-session PUTs followed by GETs
-        all return matching bodies. The N-API listener remains blocked in this
+        session locks, and 32 parallel direct-session PUTs followed by GETs
+        all return matching bodies. A rooted NodeFs replacement-provider test
+        also reopens exact bytes with zero replacement-session locks. The
+        N-API listener remains blocked in this
         sandbox by its loopback bind prerequisite. The current postlude also
         normalizes method counters to the oracle's <code>Map&lt;string,
         number&gt;</code> shape and exposes a request-level

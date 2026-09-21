@@ -796,6 +796,18 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35652638242-1</code>
         with SHA-256
         <code>366cb78d19bc5182a438a8459ebfe54efc510232e9dab667a815aba5eacfbee7</code>.
+        The newer mainline run <code>35657842924</code> at revision
+        <code>87a500b1</code> also passed the explicit lease-publication marker
+        policy, five isolated soak rounds, live Node/N-API, native Linux
+        CLI/FUSE mount and reopen, service restart, and schema-2 provenance
+        validation. Its base marker recorded <code>p50_us=9426</code>,
+        <code>p95_us=29053</code>, <code>p99_us=29053</code>, and
+        <code>throughput_ops_per_sec=95.22</code>; soak p95/p99 ranged from
+        27,345µs to 29,175µs and throughput from 85.77 to 94.49 ops/s.
+        The retained artifact is
+        <code>foundationdb-production-qualification-35657842924-1</code>
+        with SHA-256
+        <code>dc37b10f82ecd1c4c4513f4cf3ecc9a95e2ef37ccdadf0f4d69e56d30620846b</code>.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -807,7 +819,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35652638242' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35657842924' },
     ],
   },
   'aws-s3': {
