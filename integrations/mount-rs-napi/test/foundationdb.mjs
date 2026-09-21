@@ -52,14 +52,15 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
   if (sharedProvider) {
     store.metadata.authorityPrefix = authorityPrefix
   }
+  const missingAuthorityPrefixMetadata = {
+    ...store.metadata,
+    leaseAuthority: "shared-provider",
+  }
+  delete missingAuthorityPrefixMetadata.authorityPrefix
   await assert.rejects(
     () =>
       createChunkedDriver({
-        metadata: {
-          ...store.metadata,
-          leaseAuthority: "shared-provider",
-          authorityPrefix: undefined,
-        },
+        metadata: missingAuthorityPrefixMetadata,
         blocks: { kind: "memory" },
         chunkSize: 4096,
       }),
