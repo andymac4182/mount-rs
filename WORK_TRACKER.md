@@ -1535,6 +1535,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   finalization-marker path, and Ubuntu Rust/native-FUSE/provider gates also
   failed. This is recorded as a mixed-scope blocker; production remains
   NO-GO.
+  Isolated current-main qualification `35654281185` independently reproduced
+  the four-platform ETag mismatch before the recovery step, the Ubuntu Rust
+  forced-unmount deadline failure, native-FUSE timeout, and sub-100 IOPS
+  provider gates; it confirms the production NO-GO boundary on a terminal
+  non-cancellable run.
 
 ## W05 — Cloudflare R2
 
