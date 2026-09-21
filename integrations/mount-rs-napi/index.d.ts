@@ -492,6 +492,7 @@ export declare class S3Server {
 }
 
 export declare class WebdavServer {
+  get session(): WebdavSession
   get host(): string
   get port(): number
   get url(): string
@@ -499,6 +500,24 @@ export declare class WebdavServer {
   listen(): Promise<WebdavServer>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
+}
+
+/** Read-only N-API view of the in-process WebDAV session shared by a server. */
+export declare class WebdavSession {
+  /**
+   * Read-only N-API wrapper for the session-owned filesystem driver. The
+   * server retains the authoritative driver lifetime.
+   */
+  get driver(): Filesystem
+  /**
+   * Handle one in-process, buffered WebDAV request without an HTTP socket.
+   * The response body is materialized for the N-API boundary.
+   */
+  handleRequest(head: WebdavRequestHead, body?: Buffer | undefined | null): Promise<WebdavResponse>
+  get stats(): WebdavSessionStats
+  get assertions(): Array<string>
+  get options(): WebdavSessionOptionsView
+  get lockCount(): number
 }
 
 export declare function basename(path: string): string
@@ -2006,6 +2025,35 @@ export interface WebdavCredentials {
   password: string
 }
 
+export interface WebdavHeader {
+  name: string
+  value: string
+}
+
+export interface WebdavLockOptions {
+  defaultTimeoutSeconds?: number
+  maxTimeoutSeconds?: number
+  maxLocks?: number
+}
+
+export interface WebdavLockOptionsView {
+  defaultTimeoutSeconds: number
+  maxTimeoutSeconds: number
+  maxLocks: number
+}
+
+export interface WebdavRequestHead {
+  method: string
+  target: string
+  headers: Array<WebdavHeader>
+}
+
+export interface WebdavResponse {
+  status: number
+  headers: Array<WebdavHeader>
+  body?: Buffer | null
+}
+
 export interface WebdavServerOptions {
   host?: string
   port?: number
@@ -2014,8 +2062,28 @@ export interface WebdavServerOptions {
   readChunkBytes?: number
   maxXmlBytes?: number
   maxBodyBytes?: number
+  locks?: WebdavLockOptions
   drainTimeout?: number
   debug?: boolean
+  onTransportError?: (error: unknown, peer: string | undefined) => void
+}
+
+export interface WebdavSessionOptionsView {
+  credentials?: WebdavCredentials
+  realm: string
+  readChunkBytes: number
+  maxXmlBytes: number
+  maxBodyBytes?: number
+  locks: WebdavLockOptionsView
+  debug: boolean
+}
+
+export interface WebdavSessionStats {
+  requests: number
+  replies: number
+  errors: number
+  methods: Record<string, number>
+  assertions: number
 }
 
 import type { FsError, FsErrorOptions } from "./types/root.js"

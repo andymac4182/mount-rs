@@ -790,11 +790,16 @@ fn mount_privileged(
     let target = path_to_cstring(mountpoint)?;
     let fstype = std::ffi::CString::new("fuse").expect("literal has no NUL");
     let data = mount_data(options, Some((fd, root_mode, uid, gid)))?;
-    let flags = if options.read_only {
-        libc::MS_RDONLY
-    } else {
-        0
-    };
+    // Keep the privileged path aligned with fusermount3's safety defaults.
+    // Without these flags, a direct mount(2) call can be rejected by the FUSE
+    // kernel driver even though the equivalent rootless helper mount works.
+    let flags = libc::MS_NOSUID
+        | libc::MS_NODEV
+        | if options.read_only {
+            libc::MS_RDONLY
+        } else {
+            0
+        };
     let result = unsafe {
         libc::mount(
             source.as_ptr(),

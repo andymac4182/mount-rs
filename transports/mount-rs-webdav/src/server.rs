@@ -49,6 +49,32 @@ impl fmt::Display for WebdavBindError {
 
 impl std::error::Error for WebdavBindError {}
 
+/// The transport phase that terminated a WebDAV listener or connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WebdavTransportErrorKind {
+    Accept,
+    Connection,
+}
+
+/// A transport failure reported to an embedding server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebdavTransportError {
+    pub kind: WebdavTransportErrorKind,
+    pub peer: Option<String>,
+    pub message: String,
+}
+
+/// Synchronous callback used by the transport task to report one terminal
+/// listener or connection failure.
+pub type WebdavTransportErrorHook = Arc<dyn Fn(WebdavTransportError) + Send + Sync + 'static>;
+
+/// Optional hooks for a [`WebdavServer`]. Kept separate from
+/// [`WebdavServerOptions`] so existing option literals remain compatible.
+#[derive(Clone, Default)]
+pub struct WebdavServerHooks {
+    pub on_transport_error: Option<WebdavTransportErrorHook>,
+}
+
 #[derive(Debug)]
 pub enum WebdavServerError {
     Bind(std::io::Error),
@@ -138,6 +164,7 @@ pub struct WebdavServer {
     drained: Arc<Notify>,
     state: Mutex<ServerState>,
     connections: Arc<AtomicUsize>,
+    hooks: WebdavServerHooks,
 }
 
 impl fmt::Debug for WebdavServer {
@@ -151,7 +178,11 @@ impl fmt::Debug for WebdavServer {
 }
 
 impl WebdavServer {
-    fn new(driver: Arc<dyn FsDriver>, options: WebdavServerOptions) -> Self {
+    fn new(
+        driver: Arc<dyn FsDriver>,
+        options: WebdavServerOptions,
+        hooks: WebdavServerHooks,
+    ) -> Self {
         Self {
             session: Arc::new(WebdavSession::new(driver, options.session)),
             host: options.host,
@@ -164,6 +195,7 @@ impl WebdavServer {
             drained: Arc::new(Notify::new()),
             state: Mutex::new(ServerState { task: None }),
             connections: Arc::new(AtomicUsize::new(0)),
+            hooks,
         }
     }
 
@@ -212,17 +244,30 @@ impl WebdavServer {
         let counter_for_task = Arc::clone(&self.connections);
         let drained_for_task = Arc::clone(&self.drained);
         let closing_for_task = Arc::clone(&self.closing);
+        let hooks_for_task = self.hooks.clone();
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
                     _ = shutdown.notified() => break,
                     accepted = listener.accept() => {
-                        let Ok((stream, _peer)) = accepted else { break };
+                        let (stream, peer) = match accepted {
+                            Ok(accepted) => accepted,
+                            Err(error) => {
+                                report(&hooks_for_task, WebdavTransportError {
+                                    kind: WebdavTransportErrorKind::Accept,
+                                    peer: None,
+                                    message: error.to_string(),
+                                });
+                                break;
+                            }
+                        };
                         let session = Arc::clone(&session);
                         let counter = Arc::clone(&counter_for_task);
                         let drained = Arc::clone(&drained_for_task);
                         let shutdown = Arc::clone(&shutdown);
                         let closing = Arc::clone(&closing_for_task);
+                        let hooks = hooks_for_task.clone();
+                        let peer = peer.to_string();
                         counter.fetch_add(1, Ordering::AcqRel);
                         tokio::spawn(async move {
                             let _guard = ConnectionGuard { counter, drained };
@@ -243,11 +288,21 @@ impl WebdavServer {
                             tokio::select! {
                                 _ = shutdown_notified => {
                                     connection.as_mut().graceful_shutdown();
-                                    let _ = connection.await;
+                                    if let Err(error) = connection.await {
+                                        report(&hooks, WebdavTransportError {
+                                            kind: WebdavTransportErrorKind::Connection,
+                                            peer: Some(peer),
+                                            message: error.to_string(),
+                                        });
+                                    }
                                 }
                                 result = &mut connection => {
                                     if let Err(error) = result {
-                                        let _ = error;
+                                        report(&hooks, WebdavTransportError {
+                                            kind: WebdavTransportErrorKind::Connection,
+                                            peer: Some(peer),
+                                            message: error.to_string(),
+                                        });
                                     }
                                 }
                             }
@@ -591,8 +646,22 @@ pub fn create_webdav_server(
     driver: Arc<dyn FsDriver>,
     options: WebdavServerOptions,
 ) -> Result<WebdavServer, WebdavBindError> {
+    create_webdav_server_with_hooks(driver, options, WebdavServerHooks::default())
+}
+
+pub fn create_webdav_server_with_hooks(
+    driver: Arc<dyn FsDriver>,
+    options: WebdavServerOptions,
+    hooks: WebdavServerHooks,
+) -> Result<WebdavServer, WebdavBindError> {
     if let Some(error) = bind_refusal(&options.host, options.session.credentials.is_some()) {
         return Err(error);
     }
-    Ok(WebdavServer::new(driver, options))
+    Ok(WebdavServer::new(driver, options, hooks))
+}
+
+fn report(hooks: &WebdavServerHooks, error: WebdavTransportError) {
+    if let Some(hook) = &hooks.on_transport_error {
+        hook(error);
+    }
 }

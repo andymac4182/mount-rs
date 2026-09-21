@@ -20,6 +20,14 @@ the supported Node Duplex seam. Production remains NO-GO pending a fresh
 revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
 native fault/race/crash evidence, and the remaining W01 gates.
 
+Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
+shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
+connection teardown and awaited server close. The focused Rust/N-API checks
+pass, and the opt-in macOS native NFSv3 loopback mount gate passed 1/1 in
+0.09s. Production remains NO-GO pending the privileged Linux v4.1 lane, the
+full v3/v4 stateful and connection-object surface, hosted/native lifecycle
+evidence, and crash/concurrency/durability qualification.
+
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
 credentials held outside the repository. The run passed the complete Rust and
@@ -601,6 +609,18 @@ transport tracker together.
   consecutive pinned-oracle runs. Cross-process/crash, exact append ordering,
   cancellation/close races, durability/restart and transport/native concurrency
   remain open by classification.
+
+WebDAV-owned W01 tracking is maintained in
+[`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md). The current
+bounded slice adds the low-level `./webdav` barrel and generated declarations,
+the N-API `WebdavSession`/server session view, buffered request handling,
+serializable session and lock policy, driver access, Basic-auth challenge and
+acceptance, and Rust transport-hook plumbing. The Rust WebDAV target passed
+13/13 tests and the isolated locked N-API check plus release generation passed;
+the oracle differential is explicitly skipped without `MOUNTX_SOURCE`, the
+sandbox blocks the live N-API loopback bind with `Operation not permitted`, and
+streaming, peer-fault, restart/durability, provider, hosted, and native gates
+remain open. W01 and production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -2171,6 +2191,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   workstream changes already on that commit; the later unrelated `de6514c`
   N-API test-only change landed after the gate and requires a post-rebase
   verification before it can be included in current-head release evidence.
+- [x] The latest W25 repository-gate audit at `ae33e4c` passed
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings` on 2026-09-22. This includes
+  the AWS S3 provider, SDK/CLI, gateway, CI-safety changes, and the integrated
+  workstream code present at that commit; later unrelated NFS/W01 commits are
+  outside this evidence boundary.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
