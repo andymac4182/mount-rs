@@ -54,6 +54,22 @@ jobs:
           node scripts/verify-w08-release-manifest.mjs \
             "$release_dir/release-manifest.json" \
             "$release_dir/$artifact"
+          cargo metadata --locked --format-version 1 > "$release_dir/cargo-metadata.json"
+          node scripts/write-w08-release-sbom.mjs \
+            --metadata "$release_dir/cargo-metadata.json" \
+            --output "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --package mount-rs-cli \
+            --version 0.1.0 \
+            --artifact "$release_dir/$artifact"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --package mount-rs-cli \
+            --version 0.1.0 \
+            --artifact "$release_dir/$artifact"
           (cd "$release_dir" && sha256sum -c SHA256SUMS)
           test "$(tar -tzf "$release_dir/$artifact")" = "mount-rs"
           test "$("$release_dir/mount-rs" --version)" = "mount-rs 0.1.0"
