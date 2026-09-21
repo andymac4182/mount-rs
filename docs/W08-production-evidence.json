@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "repository": "andymac4182/mount-rs",
+  "sourceRevision": null,
+  "decision": "NO-GO",
+  "gates": [
+    {
+      "id": "P01",
+      "status": "open",
+      "remainingActions": [
+        "Approve the managed or self-hosted TiDB/PD/TiKV and object-storage topology, regions, HA, network/TLS policy, resource limits, versions, tenancy, IaC and owners.",
+        "Run a production-like staging smoke and restart result with terminal evidence."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P02",
+      "status": "open",
+      "remainingActions": [
+        "Inject short-lived secret-manager credentials and prove least privilege, rotation, revocation, audit and redaction without data loss.",
+        "Record the approved break-glass procedure and named IAM owner."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P03",
+      "status": "open",
+      "remainingActions": [
+        "Define RPO/RTO, retention, encryption and versioning.",
+        "Complete isolated restore, corruption, partial-object and region-loss recovery drills with metadata/block consistency evidence."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P04",
+      "status": "open",
+      "remainingActions": [
+        "Rehearse the supported TiDB/RustFS/client version matrix, schema/config migration and rolling upgrade.",
+        "Record interrupted-upgrade recovery, retained-data rollback and compatibility sign-off."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P05",
+      "status": "open",
+      "remainingActions": [
+        "Configure provider-aware health, metrics/logs/traces, collector, dashboards, paging, retention and redaction.",
+        "Exercise an alert end to end and record SLO/error-budget results."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P06",
+      "status": "open",
+      "remainingActions": [
+        "Run representative baseline, peak, saturation, failover and multi-hour soak workloads.",
+        "Record p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P07",
+      "status": "open",
+      "remainingActions": [
+        "Complete TLS and certificate rotation, network segmentation, authz/tenant-isolation, dependency/image/SBOM and threat-model review.",
+        "Run a credentialed TLS handshake and obtain security sign-off."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P08",
+      "status": "open",
+      "remainingActions": [
+        "Execute the D01–D09 client, provider, lease, partition, partial-write, restart and restore drills.",
+        "Record diagnosis, integrity, rollback, on-call tabletop and acknowledgement outcomes."
+      ],
+      "evidence": []
+    },
+    {
+      "id": "P09",
+      "status": "open",
+      "remainingActions": [
+        "Run the approved immutable candidate-tag release and retain target-platform registry, manifest, SBOM and attestation evidence.",
+        "Complete staged canary, live SLO observation, rollback verification and explicit release-owner approval."
+      ],
+      "evidence": []
+    }
+  ]
+}

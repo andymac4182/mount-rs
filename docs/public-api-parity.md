@@ -42,7 +42,7 @@ described as a complete session or native-mount implementation.
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR`/`SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/`ACCESS`/`FALLOCATE`/`LSEEK`/`GETLK`/`SETLK`/`SETLKW` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
 | NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway and N-API object expose bounded drain, live connection and peer-aware transport-hook state, plus shared buffered/streaming session methods, safe effective options, bucket wrappers, and debug-gated assertions; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, while several oracle members remain absent | **PARTIAL** |
-| S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
+| S3 Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; the supported Node `./s3` boundary is the N-API server/session facade, while the oracle's pure codec/helper barrel is explicitly Rust-owned | **PARTIAL; SCOPED** |
 | WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings, read-only active lock records, and direct LOCK/UNLOCK, cancellation, and body-error coverage; the oracle-only `now`, `onAssertion`, and live lock-table controls are explicitly outside the supported N-API scope; broader member parity remains open | **PARTIAL** |
 | CLI | Rust CLI constructs drivers through `mount-rs-sdk` and exposes a real `sdk-self-test`/durable-reopen path; Node CLI uses the N-API SDK for direct and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
@@ -251,9 +251,10 @@ Current focused behavior:
   `driver`, debug-gated assertion readback/statistics, and request-error and
   assertion callbacks with Node error/header shapes across attached and native
   sessions. `P9Server.clients` is now a live property-shaped array combining
-  native and attached connections. Lock-table injection through session/server
-  option bags and the 9P mount helpers remain unresolved rather than being
-  treated as intentionally out of scope.
+  native and attached connections. `P9ServerOptions.locks` accepts a
+  `P9LockTable`, and the injected table is shared by native and attached
+  sessions and exposed through their live option handles. The 9P mount helpers
+  remain unresolved rather than being treated as intentionally out of scope.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
@@ -317,9 +318,21 @@ timeout, accepted-connection cleanup, loopback-only credentialed binding,
 assertion cleanliness, and one peer-aware reset-on-close transport event
 across the 18 gateway cases. The generated package build and N-API integration
 verify connection/transport-error member parity and direct Node peer-fault
-injection; live AWS/R2, complete oracle-specific member/codec parity, and
-native/hosted lifecycle evidence remain open. The standalone TypeScript fixture
-check passes against the checked-in declarations.
+injection; live AWS/R2 and native/hosted lifecycle evidence remain open. The
+oracle-only pure codec/helper members are explicitly outside the supported Node
+scope, and the standalone TypeScript fixture check passes against the
+checked-in declarations.
+
+The supported-scope decision is pinned by
+[`test/s3-barrel-scope.mjs`](../integrations/mount-rs-napi/test/s3-barrel-scope.mjs):
+with `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921`, the package
+`./s3` export is compared to the oracle's runtime export set and the exact 153
+oracle-only codec/helper names are asserted as Rust-owned and out of the Node
+subpath. The supported N-API `S3Server`, `S3Session`, streaming body classes,
+and `createS3Server` identity are asserted against the root package. This is
+an explicit Node-scope boundary, not a claim that the oracle's pure codec
+barrel is available from JavaScript; the Rust `mount-rs-s3` public API and its
+codec tests remain the low-level implementation boundary.
 
 ### P2 — WebDAV public barrel, session, and streaming: PARTIAL
 
@@ -362,10 +375,17 @@ Rust clock boundary is covered by
 These are accepted supported-scope decisions for N-API; broader session/server
 differential, listener, provider/native, restart, and hosted gates remain open.
 The Rust listener lifecycle itself is locally qualified by concurrent
-`listen()` serialization and an immediate `listen()`/`close()` shutdown-wakeup
-regression. The N-API WebDAV wrapper also serializes its closed-state check
-with the transport lifecycle; a rebuilt 40-iteration real-loopback race test
-passes. N-API network/hosted concurrency and hosted lifecycle remain open.
+`listen()` serialization, an immediate `listen()`/`close()` shutdown-wakeup
+regression, and a bounded-drain regression: a stalled partial request keeps a
+timed-out server in a draining state, repeated `close()` calls continue to
+report the timeout, and `listen()` is rejected until the peer exits. The
+focused host-enabled WebDAV target passes 18/18 with strict warning-denied
+Clippy and formatting. The N-API WebDAV wrapper also serializes its
+closed-state check with the transport lifecycle; a rebuilt 40-iteration
+real-loopback race test passes. The opt-in
+`MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
+host-enabled WebDAV network/fault/restart matrix; N-API close-timeout,
+network/hosted concurrency and hosted lifecycle remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full

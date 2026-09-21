@@ -371,6 +371,7 @@ function checkServerAndKvSubpaths(): void {
     allowRemote: false,
     socketMode: 0o600,
     readOnly: true,
+    locks: new P9LockTable({ maxLocksPerFile: 2 }),
   }
   const p9AttachOptions: P9AttachOptions = {
     peer: "attached-types",
@@ -468,6 +469,7 @@ function checkServerAndKvSubpaths(): void {
   const p9Address: string | null = p9Server.address()
   const p9Connections: Array<P9Connection> = p9Server.clients
   const p9Configured: P9ServerOptions = p9Server.options
+  const p9ConfiguredLocks: P9LockTable | undefined = p9Configured.locks
   const p9Path: string | null = p9Server.path
   const p9Listen: Promise<P9Server> = p9Server.listen()
   const p9Close: Promise<void> = p9Server.close()
@@ -501,6 +503,7 @@ function checkServerAndKvSubpaths(): void {
   const p9Connection: P9Connection = p9Connections[0]
   const p9Session: P9Session = p9Connection.session
   const p9SessionOptions: P9SessionOptions = p9Session.options
+  const p9SessionOptionLocks: P9LockTable | undefined = p9SessionOptions.locks
   const p9SessionStats: P9SessionStats = p9Session.stats
   const p9Locks: P9LockClient = p9Session.locks
   const p9LockTable: P9LockTable = p9Locks.table

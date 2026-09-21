@@ -2100,10 +2100,13 @@ export interface Nfs4IdMap {
   users?: Record<string, number>
   /** Name-to-gid entries. Unmapped ids retain numeric wire form. */
   groups?: Record<string, number>
+  nameOf?: (id: number, group: boolean) => string | undefined
+  idOf?: (name: string, group: boolean) => number | undefined
 }
 
 export interface Nfs4StateKnobs {
   idmap?: Nfs4IdMap
+  now?: () => number
   leaseSeconds?: number
   seed?: number
   maxSessions?: number
@@ -2364,14 +2367,16 @@ export interface P9ServerOptions {
   readOnly?: boolean
   claimOwnership?: boolean
   debug?: boolean
+  locks?: P9LockTable
   onTransportError?: (error: unknown, peer: string | undefined) => void
   onError?: (error: unknown, header: NativeP9Header | undefined) => void
   onAssertion?: (message: string) => void
 }
 
 /**
- * Read-only scalar session policy exposed to Node callers. The transport's
- * driver and shared lock table remain owned by the server.
+ * Read-only session policy exposed to Node callers. The transport's driver
+ * remains owned by the server; the shared lock table can be injected through
+ * the server options and is exposed here as a live inspection handle.
  */
 export interface P9SessionOptions {
   msize?: number
@@ -2379,6 +2384,7 @@ export interface P9SessionOptions {
   readOnly: boolean
   claimOwnership: boolean
   debug: boolean
+  locks?: P9LockTable
 }
 
 export interface P9SessionStats {

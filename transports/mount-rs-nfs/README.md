@@ -53,12 +53,16 @@ Lease expiry is enforced at NFSv4 request boundaries: an expired client loses
 its sessions, locks, open states, and pinned backend handles before the next
 COMPOUND is dispatched. Rust callers can also invoke
 `Nfs4Session::sweep_expired`; `Nfs4Clock` provides deterministic monotonic
-time injection for Rust tests, while N-API uses the default system clock.
-`idmap` is a deterministic static map: Rust callers use `Nfs4IdMap`'s
-`with_user`/`with_group` builders, while N-API callers provide `domain`,
-`users`, and `groups` name-to-id records. Mapped names are qualified with the
-configured domain, unmapped ids retain numeric form, and incoming names from a
-different domain return `NFS4ERR_BADOWNER`.
+time injection for Rust tests. N-API callers can additionally provide the
+synchronous `nfs4.now` JavaScript callback; its millisecond results are
+anchored to a monotonic Rust `Instant`, and invalid/throwing/Promise results
+retain the last observed instant. `idmap` supports a deterministic static map:
+Rust callers use `Nfs4IdMap`'s `with_user`/`with_group` builders, while N-API
+callers provide `domain`, `users`, and `groups` name-to-id records. Mapped
+names are qualified with the configured domain, unmapped ids retain numeric
+form, and incoming names from a different domain return `NFS4ERR_BADOWNER`.
+Both Rust and N-API callers may also provide synchronous `nameOf`/`idOf`
+callbacks; they take precedence over the static entries for that request.
 
 ## Native macOS/Linux mount lifecycle
 
@@ -126,8 +130,7 @@ NFSv4.1 is not full upstream parity yet. Byte-range LOCK/LOCKT/LOCKU now have
 real process-local state, conflict/denial replies, range release, and
 stateid lifecycle handling, but they are advisory to this in-process service:
 there is no blocking wait, backend/kernel lock integration, or persistent
-lease/lock recovery. Delegations and callbacks, ACL policy, dynamic
-id-mapping callbacks,
+lease/lock recovery. Delegations and callback-channel operations, ACL policy,
 pNFS/layout/offload operations, persistent lease/reply state across process
 restart, and the other RFC operations outside the common filesystem/session
 path remain gaps. It does not claim Linux-kernel native mount interoperability
@@ -145,12 +148,19 @@ the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. Backend crash recovery and durability behavior remains outside
 the supported local scope until a separate qualification lane is accepted.
 
-The pinned upstream API still exposes dynamic NFSv4 ID-map callbacks and a
-JavaScript `now` callback. Static ID maps, Rust `Nfs4Clock`, lease enforcement,
-the `nfs4.seed` identity control, and request-level `onError` reporting are
-supported as described above. Rust callers can install `NfsSessionHooks`; the
-N-API `NfsServerOptions.onError` callback receives an `Error` plus the decoded
+The N-API boundary now also supports the upstream synchronous NFSv4
+`idmap.nameOf`, `idmap.idOf`, and `now` callbacks. Callback results must be
+immediate strings, uint32-compatible numbers, or millisecond numbers;
+Promises and other invalid results are treated as unavailable (numeric owner
+fallback, `NFS4ERR_BADOWNER`, or the last clock instant). The callback
+references are retained by the server and released on close. Rust callback
+panics are isolated. Dedicated Rust callback tests and the live N-API server
+exercise `EXCHANGE_ID`/`CREATE_SESSION`, owner `GETATTR`, owner `SETATTR`, and
+clock calls; release build, generated typecheck, and the pinned NFS codec
+differential remain separate evidence gates.
+
+Rust callers can install `NfsSessionHooks`; the N-API
+`NfsServerOptions.onError` callback receives an `Error` plus the decoded
 `NfsRpcCall` for XDR/dispatch failures, or `undefined` for ordinary NFS status
-failures. Callback panics are isolated. Dynamic callback maps and N-API clock
-injection remain explicit parity work until they have dedicated wire tests and
-supported N-API plumbing.
+failures. Callback-channel operations, native Linux NFSv4.1, hosted lifecycle,
+and crash/durability qualification remain explicit production gates.

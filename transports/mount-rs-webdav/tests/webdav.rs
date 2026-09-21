@@ -8,7 +8,7 @@ use mount_rs_webdav::protocol::{
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavRequestHead, WebdavServer,
-    WebdavServerHooks, WebdavServerOptions, WebdavSession, WebdavSessionHooks,
+    WebdavServerError, WebdavServerHooks, WebdavServerOptions, WebdavSession, WebdavSessionHooks,
     WebdavSessionOptions, WebdavTransportErrorKind, create_webdav_server,
     create_webdav_server_with_hooks, status_for_error, status_line, status_text,
 };
@@ -139,6 +139,72 @@ async fn concurrent_listen_calls_share_one_lifecycle() {
     }
     assert_eq!(server.port(), port);
     server.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn close_timeout_keeps_the_server_in_a_draining_state() {
+    let server = create_webdav_server(
+        Arc::new(MemoryFs::empty()),
+        WebdavServerOptions {
+            drain_timeout: Duration::from_millis(25),
+            ..WebdavServerOptions::default()
+        },
+    )
+    .expect("loopback bind");
+    server.listen().await.expect("listen");
+
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("connect");
+    stream
+        .write_all(
+            b"PUT /stalled HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\nx",
+        )
+        .await
+        .expect("write partial request");
+    timeout(Duration::from_secs(1), async {
+        while server.connections() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server accepted the stalled request");
+    timeout(Duration::from_secs(1), async {
+        while server.session.stats().requests == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("server began dispatching the stalled request");
+
+    let first_close = server.close().await.expect_err("close should time out");
+    assert!(matches!(
+        first_close,
+        WebdavServerError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
+    ));
+    assert_eq!(server.connections(), 1);
+
+    let listen_while_draining = server
+        .listen()
+        .await
+        .expect_err("relisten must not race the timed-out drain");
+    assert!(listen_while_draining.to_string().contains("draining"));
+
+    let second_close = server
+        .close()
+        .await
+        .expect_err("a second close must not report false success");
+    assert!(matches!(
+        second_close,
+        WebdavServerError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
+    ));
+
+    drop(stream);
+    timeout(Duration::from_secs(1), server.close())
+        .await
+        .expect("close after the stalled peer exited")
+        .expect("close after the stalled peer exited");
+    assert_eq!(server.connections(), 0);
 }
 
 #[tokio::test]
