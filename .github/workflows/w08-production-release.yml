@@ -29,7 +29,9 @@ jobs:
           node-version: '24'
 
       - name: Require W08 production GO ledger
-        run: node scripts/verify-w08-rollout-ledger.mjs --require-go
+        run: |
+          node scripts/verify-w08-rollout-ledger.mjs --require-go
+          node scripts/verify-w08-production-evidence.mjs --require-go
 
   build:
     name: Build ${{ matrix.label }} production candidate

@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, a machine-readable nine-gate production-evidence packet/validator, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, evidence-shape, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -109,6 +109,15 @@ rollback or release-owner evidence.
 The post-publication push run `35648755697` (source `86a87ed0`) and the
 credential-free manual dispatch `35648898876` (resolved source `987c593b`) both
 cancelled before creating jobs, so neither is hosted admission evidence.
+
+W08.34 adds `docs/W08-production-evidence.json` and a validator that cross-checks
+its decision with this rollout document. The current packet deliberately has
+all nine gates open, explicit remaining actions and no evidence records. A GO
+admission requires every gate to be closed and every evidence record to name a
+full source revision, provider versions, topology, environment, terminal
+test/run, owner, cleanup outcome, rollback outcome and evidence reference.
+This is completeness/safety validation only; it cannot authenticate the
+underlying provider or owner claims.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

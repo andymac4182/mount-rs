@@ -2439,6 +2439,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   manual dispatch `35648898876` both cancelled before creating jobs, so hosted
   W08.33 admission qualification remains unexecuted. *(Implementation/static
   qualification; production evidence and approval remain external.)*
+- [x] W08.34 **Machine-readable production evidence admission:** added
+  `docs/W08-production-evidence.json` as an explicit NO-GO packet with all nine
+  P01–P09 rows, remaining actions and empty evidence arrays; added
+  `scripts/verify-w08-production-evidence.mjs` and its ten-case
+  `scripts/test-w08-production-evidence.mjs` control. The validator cross-checks
+  the authoritative rollout decision, requires all nine gates to be closed and
+  populated with full revision/provider-version/topology/environment/run,
+  terminal-status/owner/cleanup/rollback/reference fields before GO, and is
+  wired into both the normal policy workflow and the production-candidate
+  admission job. This validates evidence completeness only; it cannot
+  authenticate provider results or create production approval. *(Implementation
+  /static qualification; production evidence and approval remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
