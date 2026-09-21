@@ -228,11 +228,14 @@ Current focused behavior:
   `Duplex`; the supported Node stream-injection boundary is `attach`.
   The public `peer` type retains the native listener's `null` absence while
   allowing the attached-stream contract's `undefined` absence.
-- The supported N-API P9 session boundary is intentionally smaller than the
-  oracle's internal/debug surface: direct calls, destroy, stats, lifecycle,
-  clients, connection identity, and attached streams are exposed; mutable
-  driver/options/fid/lock maps, `userFor`, assertions, debug hooks, and other
-  upstream implementation helpers are not exposed or claimed for parity.
+- The N-API P9 session now exposes the scalar session policy through
+  `session.options` and the attach identity through `userFor(fid)`; the server
+  exposes its effective scalar policy through `server.options`. These members
+  are covered by generated typecheck and a live attach-only runtime check.
+  The upstream `driver`, `fids`, `locks`, assertion/debug callbacks and full
+  lock/fid object graphs remain unresolved rather than being treated as
+  intentionally out of scope. The server's property-shaped `clients` contract
+  and the 9P mount/barrel helpers are also still open.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
