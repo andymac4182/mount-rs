@@ -66,6 +66,20 @@ jobs:
             echo 'W26 Ozone production config policy accepted a weak TiDB TLS fixture' >&2
             exit 1
           fi
+      - name: Verify W04 PGlite production config policy without credentials or network
+        run: |
+          node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy.json
+          if node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy.invalid.json; then
+            echo 'W04 PGlite production config policy accepted a non-durable fixture' >&2
+            exit 1
+          fi
+          if node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy-inline-secret.invalid.json; then
+            echo 'W04 PGlite production config policy accepted an inline-secret fixture' >&2
+            exit 1
+          fi
       - name: Verify real Apache Ozone block contract and restart recovery
         run: sh scripts/test-ozone.sh
 

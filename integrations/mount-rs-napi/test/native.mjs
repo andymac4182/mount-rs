@@ -49,6 +49,21 @@ try {
     (error) => error.code === "ERR_OUT_OF_RANGE",
   )
 
+  // Callback conversion must happen before the async mount task is spawned,
+  // while a preflight failure must still release the owned TSFN. The child
+  // path is not a directory, so this never reaches a host mount operation.
+  const callbackDriver = createNodeFsDriver(root)
+  await assert.rejects(
+    () => mount(callbackDriver, join(mountpoint, "not-a-directory"), {
+      transport: "fuse",
+      onTransportError(error, peer) {
+        void error
+        void peer
+      },
+    }),
+  )
+  await callbackDriver.shutdown()
+
   if (!mountOptIn) {
     console.log(
       "mount-rs N-API native mount: SKIP (set MOUNT_RS_NAPI_NATIVE_MOUNT=1 to require a host mount)",

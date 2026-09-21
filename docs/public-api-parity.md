@@ -187,13 +187,16 @@ The current root facade exposes `mount`, `liveMounts`, `unmountAll`, and
 The native `Mounted` object exposes transport, mountpoint, source, active, and
 `unmount`; see [`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L135-L141).
 
-The public auto options are currently only `transport`, `readOnly`,
-`unmountTimeout`, and `nfsSqliteSingleHost`.
+The public auto options are currently `transport`, `readOnly`,
+`unmountTimeout`, `onTransportError`, and `nfsSqliteSingleHost`.
 [`JsAutoMountOptions`](../integrations/mount-rs-napi/index.d.ts#L478-L487) does
-not cover the oracle's signals, `useDriverIno`, `onError`,
-`onTransportError`, or transport-specific `fuse`/`9p`/`nfs` option bags. The
-Rust auto layer has typed transport selection and timeout handling, but this
-does not close the upstream option or lifecycle surface.
+not cover the oracle's signals, `useDriverIno`, `onError`, or
+transport-specific `fuse`/`9p`/`nfs` option bags. The callback is retained by
+the `Mounted` lifecycle and is wired to the selected native FUSE, 9P, or NFS
+transport hook; a hosted native fault event is still required before this
+boundary can be treated as runtime-qualified. The Rust auto layer has typed
+transport selection and timeout handling, but this does not close the
+upstream option or lifecycle surface.
 
 No native mount, unmount, signal, or live-filesystem result should be inferred
 from component tests. The CLI and integration test prerequisites remain an
@@ -289,9 +292,9 @@ root server/class identity while exposing the low-level constants/status,
 path/header/XML/lock helpers and generated declarations. The N-API session now
 accepts async-iterable or Web ReadableStream request bodies and returns a
 pull-based response iterator; the session also exposes read-only active lock
-records with expiry cleanup. The direct probe covers LOCK/UNLOCK cleanup,
-chunked PUT, multi-chunk GET, early iterator return, and deliberate
-request-body failure mapping. The
+records with expiry cleanup. The direct probe covers the class 1/2/3 method
+matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
+return, and deliberate request-body failure mapping. The
 pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
 provider/native, restart, and complete member-parity gates remain open.
 

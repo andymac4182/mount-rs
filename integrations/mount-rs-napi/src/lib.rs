@@ -53,9 +53,13 @@ use mount_rs_pglite::{
 use mount_rs_r2::{R2BlockStore, R2Config, open_r2};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore, open_sqlite};
 use mount_rs_tidb::{TidbBlockStore, TidbMetadataStore, TidbStorageOptions};
-use napi::bindgen_prelude::{Buffer, Either, PromiseRaw};
-use napi::{Env, Error, Status};
+use napi::bindgen_prelude::{Buffer, Either, Env, PromiseRaw};
+use napi::{Error, Status};
 use napi_derive::napi;
+
+use crate::servers::{
+    JsTransportErrorCallback, TransportErrorCallback, fuse_hooks, nfs_hooks, p9_hooks,
+};
 
 const ERROR_MARKER: &str = "__mount_rs_error_v1__";
 const RANGE_ERROR_MARKER: &str = "__mount_rs_range_error_v1__";
@@ -1153,11 +1157,11 @@ pub struct JsAutoMountOptions {
     pub transport: Option<String>,
     pub read_only: Option<bool>,
     pub unmount_timeout_ms: Option<f64>,
+    #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
+    pub on_transport_error: Option<JsTransportErrorCallback>,
     /// Apply hard mounts and same-host locking when the selected transport is
     /// NFS. This does not enable WAL or distributed SQLite locking.
     pub nfs_sqlite_single_host: Option<bool>,
-    #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
-    pub on_transport_error: Option<servers::JsTransportErrorCallback>,
 }
 
 #[napi(object)]
@@ -2146,20 +2150,25 @@ fn validate_unmount_timeout(value: Option<f64>) -> Result<Option<Duration>, Erro
 
 fn auto_options(
     options: Option<JsAutoMountOptions>,
-) -> Result<(AutoMountOptions, Option<servers::JsTransportErrorCallback>), Error> {
+) -> Result<(AutoMountOptions, Option<Arc<TransportErrorCallback>>), Error> {
     let options = options.unwrap_or(JsAutoMountOptions {
         transport: None,
         read_only: None,
         unmount_timeout_ms: None,
-        nfs_sqlite_single_host: None,
         on_transport_error: None,
+        nfs_sqlite_single_host: None,
     });
-    let on_transport_error = options.on_transport_error;
+    let transport = parse_auto_transport(options.transport)?;
+    let unmount_timeout = validate_unmount_timeout(options.unmount_timeout_ms)?;
+    let callback = options
+        .on_transport_error
+        .map(TransportErrorCallback::new)
+        .transpose()?;
     Ok((
         AutoMountOptions {
-            transport: parse_auto_transport(options.transport)?,
+            transport,
             read_only: options.read_only,
-            unmount_timeout: validate_unmount_timeout(options.unmount_timeout_ms)?,
+            unmount_timeout,
             fuse: None,
             p9: None,
             nfs: options.nfs_sqlite_single_host.unwrap_or(false).then(|| {
@@ -2171,7 +2180,7 @@ fn auto_options(
                 nfs
             }),
         },
-        on_transport_error,
+        callback,
     ))
 }
 
@@ -2206,6 +2215,15 @@ fn mount_failure(error: AutoMountError) -> JsMountFailure {
 #[napi]
 pub struct Mounted {
     inner: Arc<AutoMount>,
+    transport_error: Option<Arc<TransportErrorCallback>>,
+}
+
+impl Drop for Mounted {
+    fn drop(&mut self) {
+        if let Some(callback) = &self.transport_error {
+            callback.release();
+        }
+    }
 }
 
 #[napi]
@@ -2235,7 +2253,11 @@ impl Mounted {
         self.inner
             .unmount()
             .await
-            .map_err(|error| auto_mount_error(error, "unmount", None))
+            .map_err(|error| auto_mount_error(error, "unmount", None))?;
+        if let Some(callback) = &self.transport_error {
+            callback.release();
+        }
+        Ok(())
     }
 }
 
@@ -3273,26 +3295,34 @@ pub fn mount(
     mountpoint: String,
     options: Option<JsAutoMountOptions>,
 ) -> napi::Result<PromiseRaw<'static, Mounted>> {
-    let (options, on_transport_error) = auto_options(options)?;
+    let (options, transport_error) = auto_options(options)?;
     let mountpoint_for_error = mountpoint.clone();
     let mount_driver = driver.driver()?;
-    let hooks = AutoMountHooks {
-        fuse: mount_rs_fuse::mount::FuseMountHooks {
-            on_transport_error: servers::fuse_hook(on_transport_error)?,
-        },
-    };
     let promise = env.spawn_future(async move {
-        let mounted =
-            mount_rs_auto::mount_with_hooks(MountDriver(mount_driver), mountpoint, options, hooks)
-                .await
-                .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))?;
+        let mounted = mount_rs_auto::mount_with_hooks(
+            MountDriver(mount_driver),
+            mountpoint,
+            options,
+            AutoMountHooks {
+                fuse: fuse_hooks(transport_error.as_ref()),
+                p9: transport_error
+                    .as_ref()
+                    .map(|_| p9_hooks(transport_error.as_ref())),
+                nfs: transport_error
+                    .as_ref()
+                    .map(|_| nfs_hooks(transport_error.as_ref())),
+            },
+        )
+        .await
+        .map_err(|error| auto_mount_error(error, "mount", Some(&mountpoint_for_error)))?;
         Ok(Mounted {
             inner: Arc::new(mounted),
+            transport_error,
         })
     })?;
-    // `PromiseRaw` only carries the Env lifetime at the type level. The N-API
-    // promise and all values captured by the future are owned or thread-safe
-    // after the JavaScript callback has been converted to a TSFN above.
+    // `PromiseRaw` only carries the Env lifetime at the type level. Node owns
+    // the promise and all future captures are owned/thread-safe after the
+    // callback has been converted to its TSFN above.
     Ok(unsafe {
         std::mem::transmute::<PromiseRaw<'_, Mounted>, PromiseRaw<'static, Mounted>>(promise)
     })
@@ -3306,6 +3336,7 @@ pub async fn live_mounts() -> Vec<Mounted> {
         .into_iter()
         .map(|mount| Mounted {
             inner: Arc::new(mount),
+            transport_error: None,
         })
         .collect()
 }
@@ -3568,8 +3599,8 @@ mod tests {
             transport: Some("nfs".into()),
             read_only: Some(true),
             unmount_timeout_ms: Some(1234.0),
-            nfs_sqlite_single_host: Some(true),
             on_transport_error: None,
+            nfs_sqlite_single_host: Some(true),
         }))
         .unwrap();
         assert!(callback.is_none());

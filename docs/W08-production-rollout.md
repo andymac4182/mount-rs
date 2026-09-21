@@ -38,7 +38,7 @@ planning result.
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
 | P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
-| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact, unsigned-SBOM, all-asset-integrity, target-matrix and attestation-wiring implementation slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. Both release workflows create `SHA256SUMS` after the manifest and unsigned SBOM, cover all three assets and verify every entry; the preview workflow then re-downloads and verifies them. The tag release now invokes pinned GitHub `actions/attest@v4.2.2` for provenance and CycloneDX SBOM, verifies repository/signer-workflow/source-commit/tag identity with `gh attestation verify`, and finalizes the manifest's signature/SBOM controls; the target matrix exposes an explicit `workflow_dispatch` `attest=true` path. Dedicated `.github/workflows/w08-release-policy.yml` proves the Ubuntu artifact path. `.github/workflows/w08-release-targets.yml` builds/tests Linux x86_64 and macOS arm64, uploads each four-file asset set and verifies each downloaded set. Hosted run `35617415427`, source `b0ca8a9`, reached terminal success for both target builds and both download-verification jobs. The new attestation paths have not run on an approved tag or manual dispatch. Exit still requires an approved tag-triggered publication, terminal cryptographic attestations for the accepted target assets, target-platform package/SBOM checks in the release registry, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
+| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact, unsigned-SBOM, all-asset-integrity, target-matrix and manual attestation slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. Both release workflows create `SHA256SUMS` after the manifest and unsigned SBOM, cover all three assets and verify every entry; the preview workflow then re-downloads and verifies them. The tag release invokes pinned GitHub `actions/attest@v4.2.2` for provenance and CycloneDX SBOM, verifies repository/signer-workflow/source-commit/tag identity with `gh attestation verify`, and finalizes the manifest's signature/SBOM controls; the target matrix exposes an explicit `workflow_dispatch` `attest=true` path. Dedicated `.github/workflows/w08-release-policy.yml` proves the Ubuntu artifact path. `.github/workflows/w08-release-targets.yml` builds/tests Linux x86_64 and macOS arm64, uploads each four-file asset set and verifies each downloaded set. Hosted run `35624385556`, source `2ab3cf1`, reached terminal success for both target builds, both download-verification jobs and both target attestation jobs; the latter verified provenance and CycloneDX SBOM attestations for both target assets. The approved tag-triggered release has not run. Exit still requires that publication, target-platform package/SBOM checks in the release registry, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
 
 No P01–P09 item is terminally accepted. P01/P02/P07 implementation progress is
 also covered locally by
@@ -103,8 +103,9 @@ identity. Hosted run `35617415427`, source `b0ca8a9`, passed build jobs
 not tag publication, cryptographic signing/attestation, canary, rollback or
 approval.
 
-W08.17 wires the production-facing attestation path without claiming that it
-has executed. The tag-triggered CLI release job grants OIDC and attestation
+W08.17 wires the production-facing attestation path; the tag-triggered CLI
+release execution remains open and the manual target path is qualified below.
+The tag-triggered CLI release job grants OIDC and attestation
 permissions only at that release job, runs pinned `actions/attest@v4.2.2` for
 the exact tarball and CycloneDX SBOM, verifies both predicates with
 `gh attestation verify` against the repository, signer workflow, source commit,
@@ -112,9 +113,9 @@ tag ref and hosted-runner policy, then records `signature=verified` and
 `sbom=verified` in the finalized manifest before rebuilding `SHA256SUMS`. The
 target matrix has an explicit manual `attest=true` path that performs the same
 per-target qualification. Local YAML/embedded-Bash validation and the local
-GitHub CLI flag-surface check passed. No approved tag or successful manual
-attestation dispatch has run, so no Sigstore bundle, attestation ID/URL or
-production release signature is claimed.
+GitHub CLI flag-surface check passed. No approved tag has run, so the
+production release signature and registry acceptance remain unclaimed; the
+successful manual target qualification is recorded below.
 
 The first live target qualification (`35620932700`, source `11a7b22`) passed
 both target builds and both downloaded-asset checks. Its two attestation jobs
@@ -128,17 +129,28 @@ target builds, both downloaded-asset checks and both attestation-generation
 steps for provenance and CycloneDX SBOMs. Its final verification steps failed
 only because the workflow supplied the mutually exclusive `--signer-repo` and
 `--signer-workflow` options to `gh attestation verify`. W08.20 removes the
-redundant repository option from both workflows. No terminal verifier PASS,
-attestation acceptance, tag publication, canary, rollback or approval is
-claimed until the corrected manual dispatch completes.
+redundant repository option from both workflows; that run is not counted as a
+verification PASS.
+
+The corrected manual qualification (`35624385556`, source `2ab3cf1`) passed
+both target builds, both downloaded-asset checks, both provenance attestations,
+both CycloneDX SBOM attestations and both final `gh attestation verify` steps.
+The Linux tarball was SHA-256
+`5f7f3c6345013144d8889b107cde41c9e5b69d688e21a975ba6fbb33ce2507d6` and the
+macOS arm64 tarball was SHA-256
+`add8e365c0ab1c0390267531144b77b6c7cf7f338d03ce0a549a5783c834fc8e`.
+Repository attestation records `48984689`, `48984696`, `48984678` and
+`48984687` were created, with Rekor entries `2906371944`, `2906371970`,
+`2906371892` and `2906371927`. This qualifies the hosted target-attestation
+path; it is not a published tag release, canary, rollback or approval.
 
 The first explicit target-matrix dispatch (`35620392878`, source `0a4de6f`)
 was accepted but cancelled before job creation because concurrent `main` pushes
 occupied the old shared pending concurrency group. W08.18 now keys the target
 workflow by event type and ref so a manual attestation qualification does not
 compete with push-triggered runs. The cancelled run is recorded as a no-job
-boundary, not a PASS or a provider failure; the corrected workflow still needs
-a terminal manual attestation result.
+boundary, not a PASS or a provider failure; it is superseded by the terminal
+manual qualification `35624385556` documented above.
 
 ## Deployment contract
 
@@ -246,6 +258,7 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 | Hosted CI run `35614345209`, source `9c9d0e4`, `w08-release-policy` job `106381893114` | Terminal success from the dedicated non-cancelling workflow: real Ubuntu CLI artifact, `SHA256SUMS`, artifact-derived manifest, 288-component CycloneDX SBOM, tar-content check, direct/extracted `--version` checks and policy fixtures; SBOM marker carried tarball SHA-256 `c3d1a3200c06830f95527dd62310455e66b4632080aee7ead3a118e4783f4543` | Tag-triggered macOS release publication, published asset inspection, cryptographic signing/attestation, target-platform package/SBOM acceptance, canary, rollback, approval and production deployment |
 | Hosted CI run `35615714935`, source `5116ded`, `w08-release-policy` job `106386240669` | Terminal success from the dedicated non-cancelling workflow: real Ubuntu CLI artifact, artifact-derived manifest, 288-component CycloneDX SBOM, and three-entry `SHA256SUMS` verification (`tarball: OK`, `release-manifest.json: OK`, `release-sbom.json: OK`) | Tag-triggered macOS release publication, downloaded asset inspection, cryptographic signing/attestation, target-platform package/SBOM acceptance, canary, rollback, approval and production deployment |
 | Hosted CI run `35617415427`, source `b0ca8a9`, target jobs `106391572292`, `106391572540`, `106393402528`, `106393402680` | Terminal success for Linux x86_64 and macOS arm64 build/test/package plus downloaded-asset verification. Linux artifact SHA-256 `875a06fb975d8a294141f5b70841c481768655ac3c5c56a721604216ee12ff2c`; macOS arm64 artifact SHA-256 `50f466bbe22b2fa09ecd8f1246fb278bd2b190fed52f940de21bb8d414baa9bd`; all target jobs passed manifest, 288-component SBOM, three-entry checksums, tar content and target identity | Tag-triggered release publication, registry asset inspection, cryptographic signing/attestation, target-platform release/SBOM approval, canary, rollback, approval and production deployment |
+| Hosted CI run `35624385556`, source `2ab3cf1`, target jobs `106415027916`, `106415027629`, `106416531412`, `106416531464`, `106416627127`, `106416627177` | Terminal success for Linux x86_64 and macOS arm64 build/test/package, downloaded-asset verification, provenance attestation, CycloneDX SBOM attestation and final `gh attestation verify`. Linux tarball SHA-256 `5f7f3c6345013144d8889b107cde41c9e5b69d688e21a975ba6fbb33ce2507d6` (8,277,051 bytes); macOS arm64 SHA-256 `add8e365c0ab1c0390267531144b77b6c7cf7f338d03ce0a549a5783c834fc8e` (6,910,097 bytes); repository attestation records `48984689`, `48984696`, `48984678`, `48984687`; Rekor entries `2906371944`, `2906371970`, `2906371892`, `2906371927` | Approved tag-triggered release publication, release-registry asset/SBOM acceptance, staged canary, rollback, approval and production deployment |
 
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate

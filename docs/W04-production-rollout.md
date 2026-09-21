@@ -37,6 +37,26 @@ pass. If the launch is PGlite-only, explicitly record the excluded provider
 rows and their non-goals; if an external provider is advertised, execute that
 provider's real identity, durability, cleanup, restart, and recovery gates.
 
+### Credential-free PGlite launch-config policy
+
+The repository has a static, network-free policy check for the advertised
+PGlite-only CLI shape:
+
+```sh
+node scripts/verify-w04-pglite-production-config.mjs \
+  /path/to/approved-w04-pglite-config.json
+```
+
+The policy requires an absolute normalized mountpoint, a `splitstore` driver
+whose metadata and blocks are both PGlite, durable metadata and blocks,
+distinct scoped volume keys, an external `MOUNT_RS_PGLITE_URL` reference,
+bounded chunking, and an owner field. It rejects inline secret values and
+unknown fields. The checked fixture under
+`tests/pglite/production-config-policy.json` is a shape test, not an approved
+deployment configuration. Its negative fixtures prove fail-closed behavior.
+The policy does not connect to PGlite, inspect the server's persistent data
+directory, prove backup consistency, or replace the deployment-owner review.
+
 ## Evidence record
 
 Create one redacted record for each staging rehearsal, canary, deployment,
@@ -175,4 +195,3 @@ evidence for the following rows on the same advertised release scope:
 | Operator/on-call | Not assigned | Pending | — | — |
 | Release owner | Not assigned | Pending | — | — |
 | Approver | Not assigned | Pending | — | — |
-

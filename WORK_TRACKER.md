@@ -24,9 +24,11 @@ kernel-connection teardown. Session destruction also wakes and drains in-flight
 `Tflush` waiters. Local lifecycle 6/6, transport-error 8/8, the focused native
 target, strict 9P Clippy and formatting pass. Hosted run `35616832528` / job
 `106389895603` passed the prior Linux kernel-client mount/read/write/unmount
-packet; the current packet's CI run `35624869535` at `e5f4dda` was canceled
-before jobs materialized, so a fresh hosted run is still required for this
-packet and the concurrent-I/O harness.
+packet; the later current run `35625437327` / native-9p job `106418844564`
+passed 3/4 ignored tests but exposed a live-mount cleanup failure in the
+server-close test. The local follow-up separates kernel unmount coordination
+from resource teardown, and a fresh hosted run is required to verify it and
+the concurrent-I/O harness.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
@@ -224,6 +226,13 @@ harness. The locked FUSE target, formatting and diff checks pass on macOS; the
 Linux-only hook harness and hosted `/dev/fuse` callback delivery remain
 external evidence, as do FSKit, cancellation, concurrency, crash/restart and
 durability.
+The automatic-mount follow-up now threads one owned N-API `onTransportError`
+callback through the FUSE, 9P, and NFS native mount paths, converts the
+JavaScript callback synchronously to a TSFN before spawning the async mount,
+and releases it on `Mounted` teardown. The scoped auto/NFS/N-API Rust tests,
+debug addon build, native-facade skip lane, generated typecheck, formatting
+and diff checks pass; hosted native fault-event delivery and the remaining
+native lifecycle gates remain open.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -566,7 +575,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; hosted Linux Node/CLI/native-FUSE qualification is green at `35620006731`/`aa3dae3`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35623491280`/`336d9a3`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1014,7 +1023,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
-  loopback integration verified direct class 1/2/3 methods plus chunked PUT,
+  host-enabled integration verified direct OPTIONS/MKCOL/PUT/HEAD/GET,
+  PROPFIND/PROPPATCH, COPY/MOVE, LOCK/UNLOCK, DELETE, and PATCH refusal, plus
+  chunked PUT,
   multi-chunk GET, early iterator return, and deliberate request-stream
   failure; WebDAV integration 13/13, isolated N-API compile, release build,
   generated typecheck, server integration, and scoped warning-denied Clippy
@@ -1440,6 +1451,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification checkpoint for that revision; production identity/ACL/TLS,
   backup/recovery, capacity, observability, macOS and release-owner gates
   remain open.
+  A later non-cancelling hosted run
+  [35623491280](https://github.com/andymac4182/mount-rs/actions/runs/35623491280)
+  (job
+  [106415143857](https://github.com/andymac4182/mount-rs/actions/runs/35623491280/job/106415143857))
+  tested current-main revision `336d9a3` on `ubuntu-24.04` and completed green
+  in 12m26s. Its retained artifact
+  `foundationdb-production-qualification-35623491280-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
+  throughput_ops_per_sec=64.28`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a newer bounded
+  current-main qualification checkpoint, not production-duration, capacity,
+  identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1480,9 +1506,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; hosted run `35606741719` recorded the marker at
-    revision `4aadbb1`. This is bounded qualification evidence and does not
-    convert the one-round result into production capacity evidence.
+    latency and throughput; latest hosted run `35623491280` recorded
+    `operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
+    throughput_ops_per_sec=64.28` at revision `336d9a3`. This is bounded
+    qualification evidence and does not convert the five-round result into
+    production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -1492,9 +1520,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
-  - [ ] **Hosted and platform evidence:** the hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `aa3dae3` in run
-    `35620006731` on `ubuntu-24.04`, with the retained
+  - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
+    Node, CLI/native Linux checkpoint is green for revision `336d9a3` in run
+    `35623491280` on `ubuntu-24.04`, with the retained
     `qualification-pass` artifact. Complete the advertised macOS/Linux
     build/native matrix and any remaining clean-install/package evidence;
     record the actual runner, cluster/image, revision and result. Failed,
@@ -1698,7 +1726,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   step because GitHub rejected the shortened ref; no OIDC token or Sigstore
   bundle was created. The correction is implementation-complete but requires a
   fresh `attest=true` hosted run; target attestation, tag publication, canary,
-  rollback and approval remain W08-P09 gates. *(Release implementation fix;
+  rollback and approval remain W08-P09 gates. The corrected run `35624385556`
+  later passed both target attestation jobs. *(Release implementation fix;
   GitHub action resolution and hosted attestation are external gates.)*
 - [x] W08.20 **Hosted attestation verifier identity-flag correction:** the
   target qualification `35622899242` at source `2f43721` passed both target
@@ -1708,9 +1737,24 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   options. Both release workflows now use the precise `--signer-workflow`
   identity without the redundant repository option. The correction is ready
   for a fresh `attest=true` run; terminal verifier acceptance, tag publication,
-  canary, rollback and approval remain W08-P09 gates. *(Release implementation
-  fix; hosted verifier behavior, OIDC/attestation availability and release
-  approval are external gates.)*
+  canary, rollback and approval remain W08-P09 gates. The corrected run
+  `35624385556` passed both target verifier jobs. *(Release implementation fix;
+  hosted verifier behavior, OIDC/attestation availability and release approval
+  are external gates.)*
+- [x] W08.21 **Terminal hosted target attestation qualification:** manual run
+  `35624385556` at source `2ab3cf1` passed Linux x86_64 and macOS arm64 build,
+  package and downloaded-asset verification, then generated and verified both
+  provenance and CycloneDX SBOM attestations for each target. Linux tarball
+  SHA-256 is `5f7f3c6345013144d8889b107cde41c9e5b69d688e21a975ba6fbb33ce2507d6`
+  (8,277,051 bytes); macOS arm64 is
+  `add8e365c0ab1c0390267531144b77b6c7cf7f338d03ce0a549a5783c834fc8e`
+  (6,910,097 bytes). Repository attestation records `48984689`, `48984696`,
+  `48984678` and `48984687` and Rekor entries `2906371944`, `2906371970`,
+  `2906371892` and `2906371927` are retained in the ledger. This closes the
+  hosted target-attestation qualification only; approved tag publication,
+  release-registry acceptance, canary, rollback and owner approval remain
+  W08-P09 gates. *(Hosted/provider qualification; release approval and
+  production deployment are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1813,9 +1857,9 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.20's pinned attestation wiring,
-  dispatch isolation, full-pin correction and verifier identity fix, but they do not create executed cryptographic
-  signing/attestation evidence or run a real tag release, and do not close the
+  target/download matrix and W08.17–W08.21's pinned attestation wiring,
+  dispatch isolation, full-pin correction, verifier identity fix and terminal
+  target qualification, but they do not run a real tag release or close the
   canary, rollback or approval gates.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
@@ -2381,6 +2425,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   commits do not change the provider source covered by that gate. Explicitly
   ignored native/service rows remain separate prerequisites and are not promoted
   to production evidence.
+- [x] Current W25 repository-gate boundary `daf2a51` passed on 2026-09-22:
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings`. The test and Clippy runs used
+  an explicitly isolated Cargo target so concurrent worktrees could not supply
+  stale package metadata; the isolated run included the AWS provider's 15 unit
+  tests, S3 gateway tests, SDK/CLI tests, and the current W01/W26 workspace
+  changes. Explicitly ignored native/service rows remain separate prerequisites
+  and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2398,6 +2450,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   qualification bucket. The current pushed audit at `0010246` repeated the
   same read-only checks and additionally enforced the reviewed versioning
   status (`None`) before reporting pass; no production resource was changed.
+  A fresh current-source audit at pushed head `74b5150` repeated those
+  account/region, public-access, ownership, encryption, lifecycle, multipart,
+  and expected-versioning checks without mutating the qualification bucket.
   The
   reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
   contract now expresses retained state, versioning, encryption choice,
@@ -2524,9 +2579,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   statements fail closed. Its credential-free three-case environment fixture
   test is wired into the hosted preflight. The
   fresh read-only audit on 2026-09-22 returned
-  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
-  secret, missing GitHub OIDC provider, and missing immutable-subject role
-  trust; it made no changes. The
+  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
+  non-self-approvable reviewer, protected-environment inputs and secret,
+  missing GitHub OIDC provider, and missing immutable-subject role trust; it
+  made no changes. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free seven-case regression matrix covers valid, missing,
