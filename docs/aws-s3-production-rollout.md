@@ -45,17 +45,23 @@ artifact is `aws-s3-qualification-35629600687-1` (7,649 bytes). This artifact
 is available for a completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
+The newer observed hosted run [`35635498647`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35635498647)
+at `24408f8` also stopped before AWS authentication at
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its protected bucket, region,
+account, versioning, and role inputs were blank. This is a current safety
+refusal rather than an implementation failure or AWS acceptance result.
+
 The latest tested integrated repository boundary
-`eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed formatting, the full locked
-offline workspace/all-target test gate, and strict workspace Clippy with
-`-D warnings` on an explicitly isolated Cargo target after the S3 observability
-code was pushed to `origin/main`, with the required local loopback permission.
-The gate includes the streamed request/response byte accounting tests in the
-17-case S3 gateway suite. The isolated target was used because concurrent
-worktrees share the normal Cargo target and can expose cross-worktree artifact
-races; this gate therefore binds to the checked-out source rather than another
-thread's compiled metadata. Ignored native/service rows remain explicit
-prerequisites and are not treated as production acceptance.
+`984e070b1568e50c7e30962a7064049a7c95f846` passed formatting, the full locked
+offline workspace/all-target test gate with the required local loopback
+permission, and strict workspace Clippy with `-D warnings` on the explicitly
+isolated Cargo target `/private/tmp/mount-rs-w25-current-shared-gate`. The gate
+included the 18-case S3 gateway suite and the current W01/S3 source. The
+isolated target was used because concurrent worktrees share the normal Cargo
+target and can expose cross-worktree artifact races; this gate therefore binds
+to the checked-out source rather than another thread's compiled metadata.
+Ignored native/service rows remain explicit prerequisites and are not treated
+as production acceptance.
 
 ## Deployment contract
 
@@ -348,8 +354,16 @@ alongside the existing public-access, ownership, encryption, lifecycle, and
 multipart-abort checks. A current-source audit at pushed source
 `313fb2f2a6bd6e68305a86bc55036d77c563ca8c` repeated those controls on
 2026-09-22 without mutating AWS or rerunning the full service qualification.
-The latest full integrated qualification is the separate `860492d` run
-recorded above. This is qualification-account evidence only; production
+A current shared-source audit at pushed source
+`6e19c4d2388aac02c0a3278a3f524febdc4b07ec` on 2026-09-22 repeated the
+qualification bucket's account/region binding, all four public-access blocks,
+BucketOwnerEnforced ownership, AES256 encryption, `None` versioning, seven-day
+`mount-rs-tests/` lifecycle, and one-day incomplete-multipart abort checks. It
+made no AWS changes and remains qualification-account evidence only; the
+production bucket, policy, roles, and approved change set remain open.
+The latest full integrated qualification is the current shared-source
+`2101e555` run recorded above. This is qualification-account evidence only;
+production
 resource, metadata, identity, hosted release, and deployment operations gates
 remain open.
 

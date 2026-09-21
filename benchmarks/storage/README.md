@@ -125,10 +125,16 @@ JSON for SQLite/PGlite, TiDB and FoundationDB. The aggregate
 file, the exact provider sets, a clean and matching `git rev-parse HEAD` in
 each benchmark artifact, the positive and negative production-policy markers,
 provider acceptance markers, Ozone integration/recovery markers, and cleanup
-markers. Missing artifacts, a cross-revision packet, or a missing marker fails
-the aggregate job. Logs are retained as evidence only; this gate does not
-claim customer Ozone capacity, 99.99% availability, 5-minute RPO/RTO, backup
-or DR ownership, deployment, or release readiness.
+markers. It also requires the complete surface that is currently wired into
+the Ozone jobs: gateway health/readiness/restart, SQLite/PGlite composition and
+bounded listing, Rust CLI, Node provider matrix and Node CLI, remote HTTP CLI,
+TiDB Rust plus N-API seed/reopen, and FoundationDB Rust/restart plus N-API
+seed/reopen. Missing artifacts, a cross-revision packet, or a missing marker
+fails the aggregate job. The synthetic packet test deliberately removes a
+required Node CLI marker and verifies that the aggregate fails closed. Logs
+are retained as evidence only; this gate does not claim customer Ozone
+capacity, 99.99% availability, 5-minute RPO/RTO, backup or DR ownership,
+deployment, or release readiness.
 
 ## Provider matrix and evidence boundaries
 

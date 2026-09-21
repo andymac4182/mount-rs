@@ -45,6 +45,87 @@ pub const EXCLUSIVE_CREATE_WINDOW: Duration = Duration::from_secs(120);
 const S_ISGID: u32 = 0o2000;
 const S_IXGRP: u32 = 0o0010;
 
+/// A deterministic NFSv4 owner-name translation table.
+///
+/// RFC 8881 carries owners as strings rather than numeric uids/gids.  The
+/// default wire representation remains the numeric form; this table lets an
+/// embedding server opt into stable local names without making the transport
+/// depend on a platform user database or an asynchronous callback.
+#[derive(Debug, Clone, Default)]
+pub struct Nfs4IdMap {
+    domain: Option<String>,
+    users: HashMap<String, u32>,
+    groups: HashMap<String, u32>,
+    users_by_id: HashMap<u32, String>,
+    groups_by_id: HashMap<u32, String>,
+}
+
+impl Nfs4IdMap {
+    /// Create an empty map. `domain` qualifies names returned by the reverse
+    /// lookup unless the configured name already contains `@`.
+    pub fn new(domain: Option<String>) -> Self {
+        Self {
+            domain,
+            ..Self::default()
+        }
+    }
+
+    /// Add one user name to uid mapping.
+    pub fn with_user(mut self, name: impl Into<String>, id: u32) -> Self {
+        let name = name.into();
+        if let Some(previous_id) = self.users.insert(name.clone(), id)
+            && previous_id != id
+        {
+            self.users_by_id.remove(&previous_id);
+        }
+        if let Some(previous_name) = self.users_by_id.insert(id, name.clone())
+            && previous_name != name
+        {
+            self.users.remove(&previous_name);
+        }
+        self
+    }
+
+    /// Add one group name to gid mapping.
+    pub fn with_group(mut self, name: impl Into<String>, id: u32) -> Self {
+        let name = name.into();
+        if let Some(previous_id) = self.groups.insert(name.clone(), id)
+            && previous_id != id
+        {
+            self.groups_by_id.remove(&previous_id);
+        }
+        if let Some(previous_name) = self.groups_by_id.insert(id, name.clone())
+            && previous_name != name
+        {
+            self.groups.remove(&previous_name);
+        }
+        self
+    }
+
+    /// The configured DNS domain, if any.
+    pub fn domain(&self) -> Option<&str> {
+        self.domain.as_deref()
+    }
+
+    /// Resolve a uid/gid to its local name, if the map has one.
+    pub fn name_of(&self, id: u32, group: bool) -> Option<&str> {
+        if group {
+            self.groups_by_id.get(&id).map(String::as_str)
+        } else {
+            self.users_by_id.get(&id).map(String::as_str)
+        }
+    }
+
+    /// Resolve a local owner name to a uid/gid, if the map has one.
+    pub fn id_of(&self, name: &str, group: bool) -> Option<u32> {
+        if group {
+            self.groups.get(name).copied()
+        } else {
+            self.users.get(name).copied()
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Nfs4StateOptions {
     /// Lease length reported by FATTR4_LEASE_TIME.
@@ -65,6 +146,8 @@ pub struct Nfs4StateOptions {
     pub max_locks_per_file: usize,
     /// Require RECLAIM_COMPLETE before granting a new byte-range lock.
     pub require_reclaim_complete: bool,
+    /// Optional static uid/gid to NFSv4 owner-name translation.
+    pub idmap: Option<Nfs4IdMap>,
 }
 
 impl Default for Nfs4StateOptions {
@@ -79,6 +162,7 @@ impl Default for Nfs4StateOptions {
             max_opens_per_file: DEFAULT_NFS4_MAX_OPENS_PER_FILE,
             max_locks_per_file: DEFAULT_NFS4_MAX_LOCKS_PER_FILE,
             require_reclaim_complete: true,
+            idmap: None,
         }
     }
 }

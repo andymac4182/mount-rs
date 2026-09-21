@@ -68,7 +68,8 @@ session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
 options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
 an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
-and refused-`CREATE_SESSION` replay followed by a next-sequence retry. Upstream ID-map, deterministic clock/seed,
+refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
+`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Upstream ID-map, deterministic clock/seed,
 and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -299,6 +300,13 @@ reply and bounded close while a read is blocked. Host all-target tests, host and
 Linux-target strict Clippy, formatting, and diff checks pass; hosted kernel
 unmount/close-race and crash/restart execution remain external, so W01 remains
 NO-GO.
+The ignored Linux FUSE harness now adds the corresponding kernel close-race
+case: a backend read is held pending until the request is observed, then the
+test calls bounded unmount and requires the blocked filesystem read to finish
+with an error before removing the mountpoint. The harness compiles on the host
+and passes Linux-target strict Clippy, but only the hosted `/dev/fuse` job can
+qualify the runtime interruption and unmount behavior; crash/restart and the
+remaining lifecycle gates stay external, so W01 remains NO-GO.
 The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
 non-Linux mount regression returns `UnsupportedPlatform` without touching its
 requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
@@ -685,7 +693,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35632935680`/`0bb628b` after the `35632139449` N-API build blocker was corrected; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35634895382`/`0e0454da`; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1155,6 +1163,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The NFSv4 `CREATE_SESSION` sequence slot now caches refusal replies for
   retransmission and advances to the next sequence for a retry; the focused
   wire test proves the refusal replay and successful next-sequence creation.
+- [x] The NFSv4 reclaim policy now gates both `OPEN` and `LOCK` state
+  establishment with `NFS4ERR_GRACE` until `RECLAIM_COMPLETE`; the affected
+  rootless v4.1 round-trip and same-owner/cross-client share tests pass.
+- [x] The NFSv4 owner translation boundary now supports deterministic static
+  Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
+  `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
+  release addon/typecheck, live N-API server integration, and strict affected
+  Clippy pass. Callback-based maps, deterministic clock/seed controls, and
+  session `onError` remain explicit parity gaps.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1685,6 +1702,26 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
+  The latest non-cancelling hosted run
+  [35634895382](https://github.com/andymacclenaghan/mount-rs/actions/runs/35634895382)
+  (job
+  [106449795704](https://github.com/andymacclenaghan/mount-rs/actions/runs/35634895382/job/106449795704))
+  tested current-main revision `0e0454da` on `ubuntu-24.04` and completed
+  green in 10m10s. Its retained artifact
+  `foundationdb-production-qualification-35634895382-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=9462 p95_us=398345 p99_us=398345 total_ms=803
+  throughput_ops_per_sec=18.68`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. The schema-2 provenance
+  summary records source revision
+  `0e0454da7973c08a56c8634435909da037d21fe7`, run `35634895382`, attempt `1`
+  and runner `GitHub Actions 1000020805`; the artifact SHA-256 is
+  `c542e9538bc29708fa187ecf78281075060f981a3b06b4d30e686c79a6a33bf7`.
+  The p95/p99 outlier is retained as qualification telemetry, not production
+  capacity evidence; production identity/ACL/TLS, backup/recovery, capacity,
+  observability, macOS and release-owner gates remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1725,11 +1762,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35632935680` recorded
-    `operations=15 p50_us=9577 p95_us=41547 p99_us=41547 total_ms=168
-    throughput_ops_per_sec=89.02` at revision `0bb628b`. This is bounded
-    qualification evidence and does not convert the five-round result into
-    production capacity evidence.
+    latency and throughput; latest hosted run `35634895382` recorded
+    `operations=15 p50_us=9462 p95_us=398345 p99_us=398345 total_ms=803
+    throughput_ops_per_sec=18.68` at revision `0e0454da`. The p95/p99 outlier
+    is retained as qualification telemetry; this remains bounded qualification
+    evidence and does not convert the five-round result into production
+    capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -1740,8 +1778,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `0bb628b` in run
-    `35632935680` on `ubuntu-24.04`, with the retained schema-2
+    Node, CLI/native Linux checkpoint is green for revision `0e0454da` in run
+    `35634895382` on `ubuntu-24.04`, with the retained schema-2
     `qualification-pass` artifact and provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
@@ -2821,6 +2859,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   streamed request/response byte accounting tests in the 17-case S3 gateway
   suite. Explicitly ignored native/service rows remain separate prerequisites
   and are not promoted to production evidence.
+- [x] The current shared source
+  `984e070b1568e50c7e30962a7064049a7c95f846` passed on 2026-09-22:
+  `cargo fmt --all -- --check`, the full locked offline workspace/all-target
+  test gate with the required local loopback permission, and strict workspace
+  Clippy with `-D warnings` on the isolated Cargo target
+  `/private/tmp/mount-rs-w25-current-shared-gate`. The gate included the 18-case
+  S3 gateway suite and the current W01/S3 source. Ignored native/service rows
+  remain explicit prerequisites and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2894,6 +2940,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   incomplete-multipart abort checks. It made no AWS changes and remains
   qualification-account evidence only; the production bucket, policy, roles,
   and approved change set remain open.
+- [x] A current shared-source read-only resource audit at pushed source
+  `6e19c4d2388aac02c0a3278a3f524febdc4b07ec` on 2026-09-22 passed the
+  qualification bucket's account/region binding, all four public-access
+  blocks, BucketOwnerEnforced ownership, AES256 encryption, `None` versioning,
+  seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
+  abort checks. It made no AWS changes and remains qualification-account
+  evidence only; the production bucket, policy, roles, and approved change
+  set remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -2960,6 +3014,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   identity, and acceptance were skipped. Its non-expired artifact is
   `aws-s3-qualification-35629600687-1` (7,649 bytes). This is a successful
   safety refusal and provenance-contract result, not hosted AWS acceptance.
+  The newer observed hosted run `35635498647` at `24408f8` also stopped before
+  AWS authentication at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its protected
+  bucket, region, account, versioning, and role inputs were blank. This is a
+  current safety refusal rather than an implementation failure or AWS
+  acceptance result.
   The provenance-hash expansion now binds the
   policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
   PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs
@@ -3204,12 +3263,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
   CLI, TiDB Rust composition plus N-API seed/reopen, and FoundationDB Rust
   composition/restart plus N-API seed/reopen markers. The synthetic packet
   test proves a missing Node CLI marker fails closed. Local benchmark/evidence
-  tests, Node/shell syntax, YAML parsing and diff checks passed. Commit
+  tests, Node/shell syntax, YAML parsing, diff checks and the full locked
+  workspace test command `./scripts/cargo-shared test --workspace --all-targets
+  --locked` exited 0; environment-gated native/provider rows remain explicit
+  skips. Commit
   `20a06b8` was reconciled with concurrent mainline changes and published at
   `0e0454d`; focused security diff scan
   `e4ce1aab-c6cd-44e4-b20d-3130ca357412` found zero reportable findings.
-  Terminal hosted provider/aggregate results, native/mount qualification,
-  customer secure-runtime evidence and measured SLO/RPO/RTO remain open.
+  Manual qualification run `35635486040` is active on
+  `cfe7e29e001dc01f2fa430a54bc8981b44db0b05` with Ozone, composition and TiDB
+  jobs running and FoundationDB queued; no queued/in-progress result is
+  promoted. Terminal hosted provider/aggregate results, native/mount
+  qualification, customer secure-runtime evidence and measured SLO/RPO/RTO
+  remain open.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
