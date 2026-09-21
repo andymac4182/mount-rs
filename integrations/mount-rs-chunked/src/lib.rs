@@ -795,6 +795,184 @@ where
         Ok((buffer.len(), end))
     }
 
+    async fn write_file_atomic(&self, path: &str, data: &[u8]) -> Result<()> {
+        let normalized = normalize_path(path);
+        let _lifecycle = self.inner.lifecycle.read().await;
+        let (layout, original, inode, expected_revision, new_inode) = {
+            let _gate = self.inner.gate.lock().await;
+            self.ensure_operation_lease().await?;
+            let (namespace, revision) = self.snapshot()?;
+            let entry = walk(&namespace, &normalized, true, "open", 0)?;
+            if let Some(inode) = entry.node {
+                let node = namespace
+                    .nodes
+                    .get(&inode)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                let layout = match &node.data {
+                    NodeData::File(layout) => layout.clone(),
+                    NodeData::Directory { .. } => {
+                        return Err(error_with_path(ErrorCode::Eisdir, "open", &entry.path));
+                    }
+                    NodeData::Special => {
+                        return Err(error_with_path(ErrorCode::Enxio, "open", &entry.path));
+                    }
+                    NodeData::Symlink { .. } => {
+                        return Err(error_with_path(ErrorCode::Eio, "open", &entry.path));
+                    }
+                };
+                (layout, Some(node.clone()), inode, revision, false)
+            } else {
+                let parent = namespace
+                    .nodes
+                    .get(&entry.parent)
+                    .ok_or_else(|| error_with_path(ErrorCode::Estale, "open", &entry.path))?;
+                if !matches!(parent.data, NodeData::Directory { .. }) {
+                    return Err(error_with_path(ErrorCode::Enotdir, "open", &entry.path));
+                }
+                let inode = namespace.next_inode;
+                let original = new_file_node(
+                    inode,
+                    S_IFREG | (0o666 & !namespace.umask & 0o7777),
+                    namespace.default_uid,
+                    namespace.default_gid,
+                    namespace.default_chunker.clone(),
+                );
+                let layout = match &original.data {
+                    NodeData::File(layout) => layout.clone(),
+                    _ => unreachable!("new_file_node must create a regular file"),
+                };
+                (layout, None, inode, revision, true)
+            }
+        };
+
+        let empty_layout = FileLayout {
+            chunker: layout.chunker.clone(),
+            extents: Vec::new(),
+        };
+        let new_layout = if data.is_empty() {
+            empty_layout
+        } else {
+            rewrite_layout(
+                &self.inner.blocks,
+                &empty_layout,
+                0,
+                0,
+                data,
+                u64::try_from(data.len())
+                    .map_err(|_| error_with_path(ErrorCode::Efbig, "write", &normalized))?,
+                &normalized,
+            )
+            .await?
+        };
+        if !data.is_empty() {
+            self.inner
+                .blocks
+                .flush()
+                .await
+                .map_err(|error| with_context(error, "block-flush", Some(&normalized)))?;
+        }
+
+        let committed = {
+            let _gate = self.inner.gate.lock().await;
+            self.ensure_operation_lease().await?;
+            let (mut namespace, revision) = self.snapshot()?;
+            if new_inode {
+                let entry = walk(&namespace, &normalized, true, "open", 0)?;
+                if revision != expected_revision
+                    || entry.node.is_some()
+                    || namespace.next_inode != inode
+                {
+                    false
+                } else {
+                    namespace.next_inode =
+                        namespace.next_inode.checked_add(1).ok_or_else(|| {
+                            error_with_path(ErrorCode::Eoverflow, "open", &normalized)
+                        })?;
+                    let node = new_file_node(
+                        inode,
+                        S_IFREG | (0o666 & !namespace.umask & 0o7777),
+                        namespace.default_uid,
+                        namespace.default_gid,
+                        namespace.default_chunker.clone(),
+                    );
+                    namespace.nodes.insert(inode, node);
+                    add_entry(
+                        &mut namespace,
+                        entry.parent,
+                        entry.name,
+                        inode,
+                        "open",
+                        &entry.path,
+                    )?;
+                    let target = namespace
+                        .nodes
+                        .get_mut(&inode)
+                        .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", &normalized))?;
+                    target.data = NodeData::File(new_layout);
+                    set_file_size(&mut target.stats, data.len() as u64);
+                    touch_modified(&mut target.stats);
+                    self.publish_namespace(revision, namespace, true).await?;
+                    true
+                }
+            } else {
+                let target = namespace.nodes.get_mut(&inode).filter(|target| {
+                    original
+                        .as_ref()
+                        .is_some_and(|original| write_base_unchanged(target, original))
+                });
+                if let Some(target) = target {
+                    target.data = NodeData::File(new_layout);
+                    set_file_size(&mut target.stats, data.len() as u64);
+                    touch_modified(&mut target.stats);
+                    self.publish_namespace(revision, namespace, true).await?;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if committed {
+            return Ok(());
+        }
+
+        // A concurrent namespace change won the optimistic race. Preserve the
+        // public writeFile semantics by falling back to the existing
+        // open/write/close path; the immutable blocks from the abandoned
+        // attempt remain protected by reconciliation grace.
+        let handle = self
+            .open_flags(
+                &normalized,
+                OpenFlags {
+                    read: false,
+                    write: true,
+                    create: true,
+                    truncate: true,
+                    append: false,
+                    exclusive: false,
+                },
+                0o666,
+            )
+            .await?;
+        let operation = async {
+            let mut written = 0_usize;
+            while written < data.len() {
+                let count = handle.write(&data[written..], Some(written as u64)).await?;
+                if count == 0 || count > data.len() - written {
+                    return Err(error_with_path(ErrorCode::Eio, "write", &normalized));
+                }
+                written += count;
+            }
+            Ok(())
+        }
+        .await;
+        let close = handle.close().await;
+        match (operation, close) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
     async fn truncate_inode(&self, inode: InodeId, path: &str, length: u64) -> Result<()> {
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
@@ -1307,6 +1485,10 @@ where
         }
         self.publish_namespace(revision, namespace, false).await?;
         Ok(result)
+    }
+
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.write_file_atomic(path, data).await
     }
 
     async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
@@ -2765,6 +2947,44 @@ mod tests {
         }
         assert!(!filesystem.capabilities().durable_writes);
         block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn whole_file_write_publishes_creation_and_bytes_atomically() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("atomic-write"),
+        ))
+        .unwrap();
+        let before = block_on(metadata.load()).unwrap().revision;
+
+        let driver: &dyn FsDriver = &filesystem;
+        block_on(driver.write_file("/atomic", b"atomic bytes")).unwrap();
+
+        let committed = block_on(metadata.load()).unwrap();
+        assert_eq!(committed.revision, before + 1);
+        let file = block_on(filesystem.open("/atomic", "r", 0)).unwrap();
+        let mut buffer = [0_u8; 12];
+        assert_eq!(block_on(file.read(&mut buffer, Some(0))).unwrap(), 12);
+        assert_eq!(&buffer, b"atomic bytes");
+        block_on(file.close()).unwrap();
+        block_on(filesystem.shutdown()).unwrap();
+
+        let reopened = block_on(ChunkedFs::open(
+            metadata,
+            blocks,
+            options("atomic-write-reopen"),
+        ))
+        .unwrap();
+        let file = block_on(reopened.open("/atomic", "r", 0)).unwrap();
+        let mut buffer = [0_u8; 12];
+        assert_eq!(block_on(file.read(&mut buffer, Some(0))).unwrap(), 12);
+        assert_eq!(&buffer, b"atomic bytes");
+        block_on(file.close()).unwrap();
+        block_on(reopened.shutdown()).unwrap();
     }
 
     #[test]
