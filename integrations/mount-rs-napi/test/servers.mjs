@@ -1077,29 +1077,15 @@ async function exerciseS3() {
     assert.deepEqual(server.session.assertions, []);
     assert.deepEqual(reports, []);
 
-    markPhase("S3 peer-fault fixture write");
-    await photos.writeFile("/peer-fault-s3.txt", Buffer.alloc(4 * 1024 * 1024, 0x1b));
-    const faultReplyCount = streamedStats.replies;
-    markPhase("S3 peer-fault connection");
+    markPhase("S3 peer-fault partial request");
     faultSocket = (await connectLoopback(server.port)).socket;
     await writeSocket(
       faultSocket,
-      Buffer.from(
-        `GET /photos/peer-fault-s3.txt HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
-      ),
+      Buffer.from(`GET /photos/peer-fault-s3.txt HTTP/1.1\r\nHost: `),
       "S3 JavaScript peer-fault request",
     );
-    markPhase("S3 peer-fault response readiness");
-    await within(
-      (async () => {
-        while ((await server.session.stats()).replies <= faultReplyCount) {
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-      })(),
-      "S3 JavaScript peer-fault response readiness",
-    );
     markPhase("S3 peer-fault reset");
-    faultSocket.destroy(new Error("deliberate S3 peer reset"));
+    faultSocket.resetAndDestroy();
     markPhase("S3 peer-fault callback");
     const faultReport = await waitForTransportError(reports, "S3 JavaScript peer fault");
     assert.ok(faultReport.error instanceof Error);
