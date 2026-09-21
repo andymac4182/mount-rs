@@ -459,7 +459,7 @@ export declare class NfsXdrWriter {
 export declare class P9Connection {
   get session(): P9Session
   get id(): number
-  get peer(): string | null | undefined
+  get peer(): string | null
   get isClosed(): boolean
   close(): Promise<void>
   waitClosed(): Promise<void>
