@@ -2062,8 +2062,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   bounded overflow/success while legacy/absent callbacks fail closed with
   `ENOTSUP`. The SQLite/R2 and PGlite/R2 Ozone composition tests now also
   assert provider-backed bounded success and `EOVERFLOW`; locked compilation,
-  test discovery and strict Clippy pass. `MOUNTX_SOURCE` parity and live
-  hosted provider results remain environment-gated checks.
+  test discovery and strict Clippy pass. The KV adapter forwards the exact
+  caller limit and its 13-test regression records provider limits `[2, 3]`.
+  `MOUNTX_SOURCE` parity and live hosted provider results remain
+  environment-gated checks.
 
 ### W26 production-rollout readiness (post-demo; currently NO-GO)
 
