@@ -1653,9 +1653,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   smoke. The workflow action references are now pinned to verified full SHAs,
   but hosted OIDC trust, the protected versioning-status input, and the
   deployment evidence remain open. The adjacent S3 gateway now refuses
-  non-loopback binds without a TLS boundary; remaining resource-bound and
-  repository-coverage findings from the sealed review remain open. Do not place
-  AWS secrets in the repository or CI logs.
+  non-loopback binds without a TLS boundary and now stages streaming PUT and
+  multipart publication behind bounded atomic rename. Remaining list/copy/
+  staging-retention and repository-coverage findings from the sealed review
+  remain open. Do not place AWS secrets in the repository or CI logs.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
@@ -1757,7 +1758,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
 | P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
 | P2 — all-feasible-provider Ozone CI matrix | Ozone CI matrix wired; terminal evidence pending | 30% | SQLite/PGlite and durable TiDB lanes are retained; `ozone-foundationdb` now provides the dedicated durable FoundationDB lane, which still needs a terminal retained result |
-| P3 — authentication, TLS, secrets and redaction | Static endpoint gate improved; secure integration open | 30% | Static R2/Ozone config parsing rejects malformed or credential-bearing endpoints before client construction; secure endpoint/auth, least privilege, rotation and full negative-path evidence remain open |
+| P3 — authentication, TLS, secrets and redaction | Plaintext remote endpoint gate improved; secure integration open | 40% | Static and runtime R2/Ozone validation rejects malformed, credential-bearing and remote plaintext-HTTP endpoints before client construction; secure endpoint/auth, least privilege, rotation and full negative-path evidence remain open |
 | P4 — durability/storage failure contract | Partial qualification | 10% | CI client recovery/error evidence plus customer Ozone replication/storage requirements |
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
 | P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |

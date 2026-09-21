@@ -27,11 +27,11 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use crate::protocol::{
     self, ByteRange, ListObjectsXml, ListPartsXml, ListedObject, ListedPart, MAX_PART_SIZE,
     MAX_XML_BYTES, MIN_PART_SIZE, MULTIPART_PREFIX, ObjectTarget, Operation, S3Failure, S3Response,
-    S3Result, compare_utf8, conditional_match, content_encoding_chunked, decode_continuation_token,
-    delete_result_xml, encode_continuation_token, error_response, header_md5,
-    initiate_multipart_xml, is_staging_key, list_buckets_xml, list_objects_xml, list_parts_xml,
-    parse_complete_document, parse_delete_document, parse_meta_mtime, parse_object_key,
-    parse_request_target, s3_error, unquote_etag, xml_response,
+    S3Result, STREAMING_STAGING_PREFIX, compare_utf8, conditional_match, content_encoding_chunked,
+    decode_continuation_token, delete_result_xml, encode_continuation_token, error_response,
+    header_md5, initiate_multipart_xml, is_staging_key, list_buckets_xml, list_objects_xml,
+    list_parts_xml, parse_complete_document, parse_delete_document, parse_meta_mtime,
+    parse_object_key, parse_request_target, s3_error, unquote_etag, xml_response,
 };
 use crate::sigv4::{self, Credentials, HeaderEntry, SigV4Failure, header_list, header_value};
 
@@ -820,20 +820,39 @@ impl S3Session {
                     .header("content-length", "0"),
             ));
         }
+        require_atomic_rename(&driver)?;
         let exclusive = existing.is_none() && check_create_only(&head.headers);
+        let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
         write_stream_body(StreamWriteRequest {
             driver: &driver,
-            path: &target.path,
+            path: &staging_path,
             headers: &head.headers,
             body,
             verified,
             credentials: self.options.credentials.as_ref(),
             max_body_bytes: self.options.max_body_bytes,
-            exclusive,
+            exclusive: false,
             create_parent: true,
-            cleanup_on_error: existing.is_none(),
+            cleanup_on_error: true,
         })
         .await?;
+        if exclusive {
+            match driver.stat(&target.path).await {
+                Ok(_) => {
+                    let _ = driver.unlink(&staging_path).await;
+                    return Err(S3Failure::s3("PreconditionFailed"));
+                }
+                Err(error) if error.code == mount_rs_core::ErrorCode::Enoent => {}
+                Err(error) => {
+                    let _ = driver.unlink(&staging_path).await;
+                    return Err(S3Failure::Fs(error));
+                }
+            }
+        }
+        if let Err(error) = driver.rename(&staging_path, &target.path).await {
+            let _ = driver.unlink(&staging_path).await;
+            return Err(S3Failure::Fs(error));
+        }
         if let Some(mtime) = requested_mtime {
             apply_mtime(&driver, &target.path, mtime).await?;
         }
@@ -1277,26 +1296,53 @@ impl S3Session {
             if index + 1 < requested.len() && stats.size < MIN_PART_SIZE {
                 return Err(S3Failure::s3("EntityTooSmall"));
             }
-            parts.push(path);
+            parts.push((path, stats.size));
         }
-        let mut assembled = Vec::new();
-        for path in parts {
-            let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
-            assembled.extend(
-                read_bytes_range(
-                    driver.clone(),
-                    &path,
-                    None,
-                    stats.size,
-                    self.options.read_chunk_bytes,
-                )
-                .await?,
-            );
+        require_atomic_rename(&driver)?;
+        // Assemble through a private staging file instead of collecting all
+        // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
+        // the existing destination unchanged if a part read or metadata update
+        // fails before the final rename.
+        let staging_path = format!(
+            "{}/complete-{}",
+            upload_directory(upload_id),
+            new_upload_id()
+        );
+        let assemble_result: S3Result<()> = async {
+            let destination = driver
+                .open(&staging_path, "w", 0o666)
+                .await
+                .map_err(S3Failure::Fs)?;
+            let mut position = 0_u64;
+            let copy_result: S3Result<()> = async {
+                for (path, size) in &parts {
+                    copy_file_into(
+                        &driver,
+                        path,
+                        &destination,
+                        *size,
+                        self.options.read_chunk_bytes,
+                        &mut position,
+                    )
+                    .await?;
+                }
+                Ok(())
+            }
+            .await;
+            let close_result = destination.close().await.map_err(S3Failure::Fs);
+            copy_result.and(close_result)?;
+            if let Some(mtime) = manifest.mtime_ms {
+                apply_mtime(&driver, &staging_path, mtime).await?;
+            }
+            driver
+                .rename(&staging_path, &target.path)
+                .await
+                .map_err(S3Failure::Fs)
         }
-        ensure_parent(&driver, &target.path).await?;
-        write_bytes(&driver, &target.path, &assembled, false).await?;
-        if let Some(mtime) = manifest.mtime_ms {
-            apply_mtime(&driver, &target.path, mtime).await?;
+        .await;
+        if let Err(error) = assemble_result {
+            let _ = driver.unlink(&staging_path).await;
+            return Err(error);
         }
         let stats = driver.stat(&target.path).await.map_err(S3Failure::Fs)?;
         remove_tree(&driver, &upload_directory(upload_id)).await?;
@@ -1648,6 +1694,48 @@ async fn write_stream_chunk(
         *position += written as u64;
     }
     Ok(())
+}
+
+async fn copy_file_into(
+    driver: &Arc<dyn FsDriver>,
+    source_path: &str,
+    destination: &Arc<dyn mount_rs_core::FileHandle>,
+    size: u64,
+    chunk_bytes: usize,
+    destination_position: &mut u64,
+) -> S3Result<()> {
+    let source = driver
+        .open(source_path, "r", 0)
+        .await
+        .map_err(S3Failure::Fs)?;
+    let mut buffer = vec![0_u8; chunk_bytes.max(1)];
+    let mut source_position = 0_u64;
+    let copy_result: S3Result<()> = async {
+        while source_position < size {
+            let requested = (size - source_position).min(buffer.len() as u64) as usize;
+            let count = source
+                .read(&mut buffer[..requested], Some(source_position))
+                .await
+                .map_err(S3Failure::Fs)?;
+            if count == 0 {
+                return Err(S3Failure::s3("InternalError"));
+            }
+            write_stream_chunk(destination, destination_position, &buffer[..count]).await?;
+            source_position += count as u64;
+        }
+        Ok(())
+    }
+    .await;
+    let close_result = source.close().await.map_err(S3Failure::Fs);
+    copy_result.and(close_result)
+}
+
+fn require_atomic_rename(driver: &Arc<dyn FsDriver>) -> S3Result<()> {
+    if driver.capabilities().atomic_rename {
+        Ok(())
+    } else {
+        Err(S3Failure::s3("NotImplemented"))
+    }
 }
 
 struct StreamingPayloadHash {
@@ -2055,7 +2143,9 @@ fn walk_directory<'a>(
             entry.file_type == FileType::File || entry.file_type == FileType::Directory
         });
         if path == "/" {
-            entries.retain(|entry| entry.name != MULTIPART_PREFIX);
+            entries.retain(|entry| {
+                entry.name != MULTIPART_PREFIX && !entry.name.starts_with(STREAMING_STAGING_PREFIX)
+            });
         }
         entries.sort_by(|left, right| {
             let left_key = if left.is_directory() {
@@ -2125,6 +2215,7 @@ fn listable_prefix(prefix: &str) -> bool {
         || prefix.contains("//")
         || prefix.contains('\0')
         || prefix.starts_with(&format!("{MULTIPART_PREFIX}/"))
+        || prefix.starts_with(STREAMING_STAGING_PREFIX)
     {
         return false;
     }

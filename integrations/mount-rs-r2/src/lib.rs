@@ -209,7 +209,40 @@ fn validate_endpoint(endpoint: &str) -> Result<()> {
             "must include a host authority before any path",
         ));
     }
+    if scheme == "http" {
+        let authority = endpoint_authority(endpoint)?;
+        if !is_local_http_authority(authority) {
+            return Err(invalid_config(
+                "endpoint",
+                "HTTP is only allowed for loopback or Docker test gateways; use HTTPS for remote services",
+            ));
+        }
+    }
     Ok(())
+}
+
+fn is_local_http_authority(authority: &str) -> bool {
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed
+            .split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or_default()
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, port)| {
+                if port.chars().all(|c| c.is_ascii_digit()) {
+                    host
+                } else {
+                    authority
+                }
+            })
+            .unwrap_or(authority)
+    };
+    matches!(
+        host,
+        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
+    )
 }
 
 fn endpoint_authority(endpoint: &str) -> Result<&str> {
@@ -528,6 +561,40 @@ mod tests {
                 config.build_store().is_err(),
                 "built unsafe config: {config:?}"
             );
+        }
+    }
+
+    #[test]
+    fn configuration_validation_rejects_remote_plaintext_http() {
+        for endpoint in [
+            "http://object-store.example",
+            "http://10.0.0.12:9878",
+            "http://localhost.evil.example:9878",
+        ] {
+            let config = R2Config {
+                endpoint: endpoint.to_owned(),
+                bucket: "mount-rs-tests".to_owned(),
+                access_key_id: "test-access".to_owned(),
+                secret_access_key: "test-secret".to_owned(),
+                state_key: "state.json".to_owned(),
+            };
+            let error = config.validate().unwrap_err();
+            assert!(error.to_string().contains("HTTPS"), "{endpoint}: {error}");
+            assert!(config.build_store().is_err(), "{endpoint}");
+        }
+        for endpoint in [
+            "http://127.0.0.1:9000",
+            "http://localhost:9000",
+            "http://host.docker.internal:9000",
+        ] {
+            let config = R2Config {
+                endpoint: endpoint.to_owned(),
+                bucket: "mount-rs-tests".to_owned(),
+                access_key_id: "test-access".to_owned(),
+                secret_access_key: "test-secret".to_owned(),
+                state_key: "state.json".to_owned(),
+            };
+            assert!(config.validate().is_ok(), "{endpoint}");
         }
     }
 
