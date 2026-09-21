@@ -175,8 +175,26 @@ export declare class Mounted {
   get mountpoint(): string
   get source(): string | null
   get active(): boolean
+  /**
+   * The kernel transport used by a 9P mount. Other transport families
+   * return `undefined` because they do not have a 9P `trans=` spelling.
+   */
+  get trans(): string | null
+  /** The shared server behind a native 9P mount, when this is a 9P mount. */
+  get server(): P9Server | null
+  /**
+   * The kernel connection adopted by a native 9P mount, when this is a 9P
+   * mount. The returned wrapper views the same transport connection.
+   */
+  get connection(): P9Connection | null
+  /**
+   * Wait for a native 9P connection-driven teardown. This is a no-op for
+   * other transports so the neutral `Mounted` lifecycle remains usable.
+   */
+  waitClosed(): Promise<void>
   unmount(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
+  readonly closed: Promise<void>
 }
 
 export declare class NativeFuseInodeTable {
@@ -1137,6 +1155,12 @@ export interface JsAutoMountOptions {
   unmountTimeoutMs?: number
   onTransportError?: (error: unknown, peer: string | undefined) => void
   /**
+   * 9P-only mount(8) options. The direct `./9p` mount helper maps its
+   * public option bag here while the automatic facade keeps its shared
+   * fields above.
+   */
+  p9?: JsP9MountOptions
+  /**
    * Apply hard mounts and same-host locking when the selected transport is
    * NFS. This does not enable WAL or distributed SQLite locking.
    */
@@ -1271,6 +1295,36 @@ export interface JsMountFailure {
 
 export interface JsNodeFsOptions {
   readOnly?: boolean
+}
+
+export interface JsP9ClientProbe {
+  usable: boolean
+  platform?: string
+  kernel: boolean
+  transport: boolean
+  modules: boolean
+  root: boolean
+  reason?: string
+}
+
+export interface JsP9MountOptions {
+  /**
+   * Select the kernel's 9P transport. The default is the private Unix
+   * socket path created by the Rust mount helper.
+   */
+  transport?: string
+  host?: string
+  port?: number
+  path?: string
+  mountMsize?: number
+  access?: string
+  cache?: string
+  uname?: string
+  aname?: string
+  readOnly?: boolean
+  useDriverIno?: boolean
+  mountOptions?: Array<string>
+  unmountTimeoutMs?: number
 }
 
 export interface JsR2Options {
@@ -2299,6 +2353,13 @@ export declare function nfsXdrPad(length: number): number
 
 export declare function normalizePath(path: string): string
 
+/**
+ * Probe the Linux v9fs client without attempting to load a module or mount a
+ * filesystem. This is the direct `./9p` helper; the automatic probe exposes
+ * the same result in its `9p` transport summary.
+ */
+export declare function p9ClientProbe(): JsP9ClientProbe
+
 export interface P9DirResume {
   entries: Array<string>
   index: number
@@ -2349,6 +2410,8 @@ export interface P9LockRequest {
 export interface P9LockTableOptions {
   maxLocksPerFile?: number
 }
+
+export declare function p9Platform(): string | null
 
 export interface P9AttachOptions {
   peer?: string

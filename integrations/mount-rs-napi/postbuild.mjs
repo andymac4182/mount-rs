@@ -17,6 +17,8 @@ const facadeExportMarkers = [
   "module.exports.Mounted = nativeBinding.Mounted",
   "module.exports.createNodeFsDriver = nativeBinding.createNodeFsDriver",
   "module.exports.probeTransports = nativeBinding.probeTransports",
+  "module.exports.p9ClientProbe = nativeBinding.p9ClientProbe",
+  "module.exports.p9Platform = nativeBinding.p9Platform",
   "module.exports.mount = nativeBinding.mount",
   "module.exports.liveMounts = nativeBinding.liveMounts",
   "module.exports.unmountAll = nativeBinding.unmountAll",
@@ -96,6 +98,7 @@ types = types.replace(
     if (!body.includes("[Symbol.asyncDispose]")) {
       body += "\n  [Symbol.asyncDispose](): Promise<void>"
     }
+    if (!/\bclosed\s*:/.test(body)) body += "\n  readonly closed: Promise<void>"
     return `export declare class Mounted {${body}\n}`
   },
 )

@@ -537,3 +537,113 @@ module.exports.P9_VERSION_DOTL = "9P2000.L"
 module.exports.P9_VERSION_UNKNOWN = "unknown"
 module.exports.P9_MIN_MSIZE = 4096
 module.exports.V9FS_MAGIC = 0x01021997
+
+// The native binding owns the host probe; the option-string and refusal
+// helpers stay in this shallow facade so they remain usable and testable on
+// non-Linux hosts without attempting a mount.
+const nativeP9ClientProbe = binding.p9ClientProbe
+const nativeP9Platform = binding.p9Platform
+module.exports.p9ClientProbe = () => {
+  const probe = nativeP9ClientProbe()
+  if (probe.platform === null) probe.platform = undefined
+  if (probe.reason === null) probe.reason = undefined
+  return probe
+}
+module.exports.p9Platform = () => nativeP9Platform() ?? undefined
+module.exports.P9_DEFAULT_MOUNT_MSIZE = 128 * 1024 + module.exports.P9_IOHDRSZ
+module.exports.P9_MAX_MOUNT_MSIZE = 1024 * 1024
+module.exports.P9_UNIX_PATH_MAX = 108
+
+function socketPathRefusal(path) {
+  const length = Buffer.byteLength(String(path), "utf8")
+  if (length < module.exports.P9_UNIX_PATH_MAX) return undefined
+  return `the 9P Unix socket path is ${length} bytes; Linux sockaddr_un allows at most ${module.exports.P9_UNIX_PATH_MAX - 1}`
+}
+
+function tcpSourceRefusal(host) {
+  const value = String(host)
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value)
+  if (match && match.slice(1).every((octet) => Number(octet) <= 255)) return undefined
+  return `a trans=tcp 9P mount needs a dotted-quad IPv4 source, got ${JSON.stringify(value)}`
+}
+
+function checkP9OptionValue(name, value) {
+  const text = String(value)
+  if (/[\s,]/.test(text)) {
+    throw new TypeError(`9P mount option ${name} may not contain comma or whitespace`)
+  }
+  return text
+}
+
+function p9Msize(value) {
+  if (value === undefined || Number.isNaN(value)) return module.exports.P9_DEFAULT_MOUNT_MSIZE
+  return Math.min(Math.max(Math.trunc(Number(value)), module.exports.P9_MIN_MSIZE), module.exports.P9_MAX_MOUNT_MSIZE)
+}
+
+function p9Port(value) {
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new RangeError("TCP 9P mounts require an integer port in [1, 65535]")
+  }
+  return value
+}
+
+function p9MountOptions(target, options = {}) {
+  const trans = target?.trans
+  if (trans !== "unix" && trans !== "tcp") {
+    throw new TypeError("9P mount target trans must be unix or tcp")
+  }
+  const parts = [`trans=${trans}`]
+  if (trans === "tcp") parts.push(`port=${p9Port(target.port)}`)
+  parts.push(
+    "version=9p2000.L",
+    `msize=${p9Msize(options.mountMsize)}`,
+    `access=${checkP9OptionValue("access", options.access ?? "client")}`,
+    `cache=${checkP9OptionValue("cache", options.cache ?? "none")}`,
+    `uname=${checkP9OptionValue("uname", options.uname ?? "nobody")}`,
+    `aname=${checkP9OptionValue("aname", options.aname ?? "/")}`,
+  )
+  if (options.readOnly === true) parts.push("ro")
+  parts.push(...(options.mountOptions ?? []))
+  return parts.join(",")
+}
+
+async function mount9p(driver, mountpoint, options = {}) {
+  const trans = options.transport ?? ((options.port !== undefined || options.host !== undefined) ? "tcp" : "unix")
+  const p9 = {
+    transport: trans,
+    host: options.host,
+    port: options.port,
+    path: options.path,
+    mountMsize: options.mountMsize,
+    access: options.access,
+    cache: options.cache,
+    uname: options.uname,
+    aname: options.aname,
+    readOnly: options.readOnly,
+    useDriverIno: options.useDriverIno,
+    mountOptions: options.mountOptions,
+    unmountTimeoutMs: options.unmountTimeout,
+  }
+  return binding.mount(driver, mountpoint, {
+    transport: "9p",
+    readOnly: options.readOnly,
+    unmountTimeoutMs: options.unmountTimeout,
+    onTransportError: options.onTransportError,
+    p9,
+  })
+}
+
+async function live9pMounts() {
+  return (await binding.liveMounts()).filter((mount) => mount.transport === "9p")
+}
+
+async function unmountAll9p() {
+  return (await binding.unmountAll()).filter((failure) => failure.transport === "9p")
+}
+
+module.exports.socketPathRefusal = socketPathRefusal
+module.exports.tcpSourceRefusal = tcpSourceRefusal
+module.exports.p9MountOptions = p9MountOptions
+module.exports.mount9p = mount9p
+module.exports.live9pMounts = live9pMounts
+module.exports.unmountAll9p = unmountAll9p

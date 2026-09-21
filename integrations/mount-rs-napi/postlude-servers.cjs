@@ -10,6 +10,7 @@ const CONNECTION_WRAPPED = Symbol("mountRsConnectionLifecycleWrapped")
 const P9_SERVER_WRAPPED = Symbol("mountRsP9ServerWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
+const MOUNT_CLOSED_STATE = new WeakMap()
 const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
 const S3_STREAM_WRAPPED = Symbol("mountRsS3StreamWrapped")
 const WEBDAV_STREAM_WRAPPED = Symbol("mountRsWebdavStreamWrapped")
@@ -29,6 +30,20 @@ function installStructuralFactories(binding) {
   // liveMounts returns new wrappers for the same native lifecycle. Reconcile
   // owned adapters after unmount through any of those wrappers too.
   const nativeUnmount = binding.Mounted.prototype.unmount
+  const nativeWaitClosed = binding.Mounted.prototype.waitClosed
+  Object.defineProperty(binding.Mounted.prototype, "closed", {
+    configurable: true,
+    get() {
+      let promise = MOUNT_CLOSED_STATE.get(this)
+      if (!promise) {
+        promise = typeof nativeWaitClosed === "function"
+          ? nativeWaitClosed.call(this)
+          : Promise.resolve()
+        MOUNT_CLOSED_STATE.set(this, promise)
+      }
+      return promise
+    },
+  })
   binding.Mounted.prototype.unmount = async function (...args) {
     try {
       return await nativeUnmount.apply(this, args)

@@ -266,6 +266,40 @@ impl AutoMount {
         }
     }
 
+    /// Return the transport-specific 9P connection when this is a 9P mount.
+    /// Other native transports intentionally have no equivalent connection
+    /// object at this facade boundary.
+    pub fn p9_connection(&self) -> Option<mount_rs_9p::P9Connection> {
+        match self {
+            Self::P9 { mount, .. } => Some(mount.connection.clone()),
+            Self::Fuse { .. } | Self::Nfs { .. } => None,
+        }
+    }
+
+    /// Return the server that owns a 9P mount's adopted kernel connection.
+    pub fn p9_server(&self) -> Option<Arc<mount_rs_9p::P9Server>> {
+        match self {
+            Self::P9 { mount, .. } => Some(Arc::clone(&mount.server)),
+            Self::Fuse { .. } | Self::Nfs { .. } => None,
+        }
+    }
+
+    /// Wait for a 9P connection-driven teardown. Non-9P mounts have no
+    /// transport-specific connection promise, so this is an immediate no-op.
+    pub async fn wait_closed(&self) {
+        if let Self::P9 { mount, .. } = self {
+            mount.wait_closed().await;
+        }
+    }
+
+    /// The 9P transport spelling (`unix` or `tcp`) when this is a 9P mount.
+    pub fn p9_transport(&self) -> Option<mount_rs_9p::P9MountTransport> {
+        match self {
+            Self::P9 { mount, .. } => Some(mount.transport),
+            Self::Fuse { .. } | Self::Nfs { .. } => None,
+        }
+    }
+
     /// Delegate teardown to the underlying transport and remove successful
     /// facade-created mounts from the local registry. A failed teardown keeps
     /// the mount registered so callers can retry.

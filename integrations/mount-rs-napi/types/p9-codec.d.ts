@@ -1,6 +1,14 @@
 /// <reference lib="esnext.disposable" />
 
-import type { FileHandle, P9FidTable } from "../index.js"
+import type {
+  FileHandle,
+  Filesystem,
+  FsDriver,
+  Mounted,
+  P9Connection,
+  P9FidTable,
+  P9Server,
+} from "../index.js"
 
 // The 9P entrypoint retains the existing package exports (including the P9
 // server) and adds the Rust-backed 9P2000.L codec surface below.
@@ -203,6 +211,65 @@ export declare const P9_VERSION_DOTL: "9P2000.L"
 export declare const P9_VERSION_UNKNOWN: "unknown"
 export declare const P9_MIN_MSIZE: 4096
 export declare const V9FS_MAGIC: 0x01021997
+
+export declare const P9_DEFAULT_MOUNT_MSIZE: 131096
+export declare const P9_MAX_MOUNT_MSIZE: 1048576
+export declare const P9_UNIX_PATH_MAX: 108
+
+export interface P9MountTarget {
+  trans: "unix" | "tcp"
+  port?: number
+}
+
+/** The N-API 9P mount-helper option subset supported by this package. */
+export interface MountP9Options {
+  transport?: "unix" | "tcp"
+  host?: string
+  port?: number
+  path?: string
+  mountMsize?: number
+  access?: string
+  cache?: string
+  uname?: string
+  aname?: string
+  readOnly?: boolean
+  useDriverIno?: boolean
+  mountOptions?: readonly string[]
+  unmountTimeout?: number
+  onTransportError?: (error: unknown, peer: string | undefined) => void
+}
+
+export interface P9Mount extends Mounted {
+  readonly transport: "9p"
+  readonly trans: "unix" | "tcp"
+  readonly server: P9Server
+  readonly connection: P9Connection
+  readonly closed: Promise<void>
+  waitClosed(): Promise<void>
+}
+
+export interface P9ClientProbe {
+  usable: boolean
+  platform?: "linux"
+  kernel: boolean
+  transport: boolean
+  modules: boolean
+  root: boolean
+  reason?: string
+}
+
+export declare function p9ClientProbe(): P9ClientProbe
+export declare function p9Platform(): "linux" | undefined
+export declare function socketPathRefusal(path: string): string | undefined
+export declare function tcpSourceRefusal(host: string): string | undefined
+export declare function p9MountOptions(target: P9MountTarget, options?: MountP9Options): string
+export declare function mount9p(
+  driver: Filesystem | FsDriver,
+  mountpoint: string,
+  options?: MountP9Options,
+): Promise<P9Mount>
+export declare function live9pMounts(): Promise<Array<P9Mount>>
+export declare function unmountAll9p(): Promise<Array<{ transport?: string; message: string }>>
 
 export declare class P9Reader {
   constructor(bytes: Uint8Array, offset?: number)

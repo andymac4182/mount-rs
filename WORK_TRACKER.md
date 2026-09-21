@@ -26,8 +26,13 @@ with Node error/header semantics for attached and native sessions. The server
 now exposes a live property-shaped `P9Server.clients` array combining native
 and attached connections. `P9ServerOptions.locks` accepts a `P9LockTable` and
 shares its ranges across native and attached sessions, with live option
-handles exposing that table. 9P mount helpers remain open rather than being
-silently narrowed away. The `./9p` constants/message-name
+handles exposing that table. The bounded `./9p` mount-helper facade now
+exposes Linux-client probing, refusal and option-string helpers, strict named
+`mount9p` delegation, 9P live-mount filtering/cleanup, and mounted
+transport/server/connection/closed views. It deliberately does not claim the
+oracle's shared-server injection, signals, extended server-policy/session
+callback fields, or full hosted native-mount lifecycle. The `./9p`
+constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
 exports differentially checked. The transport
 now also broadcasts shutdown safely
@@ -693,6 +698,7 @@ patch):
 | Main | W01 N-API 9P driver and observability parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: live `P9Session.driver`, debug-gated assertion readback/counters, request-error/assertion callbacks, Node error revival, and root/`./9p` factory identity; release build, generated typecheck, focused N-API tests, 31 ordinary 9P tests, formatting, and strict Clippy passed; lock-option, property-shaped clients, mount-helper, and hosted revision gates remain open |
 | Main | W01 N-API 9P property-shaped clients parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Server.clients` is now a generated/property-shaped live array combining native and attached connections; release build, generated typecheck, host-enabled server integration, P9 runtime checks, focused Rust tests, formatting, and strict Clippy passed; lock-option, mount-helper, and hosted revision gates remain open |
 | Main | W01 N-API 9P lock-table option injection parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9ServerOptions.locks` accepts a `P9LockTable`, and injected ranges are shared with native/attached protocol sessions and visible through server/session option handles; release build, generated typecheck, host-enabled server integration, P9 runtime checks, focused Rust tests, formatting, and strict Clippy passed; mount-helper and hosted revision gates remain open |
+| Main | W01 N-API 9P bounded mount-helper facade | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `./9p` probe/refusal/option helpers, strict named `mount9p` delegation, 9P live-mount filtering/cleanup, mounted transport/server/connection/closed views, and nested auto 9P fields; release build, generated typecheck, focused P9 runtime checks, host-enabled server integration, `mount-rs-napi --lib` 17/17, 35 ordinary 9P tests, formatting, and strict Clippy passed; richer oracle mount options and hosted N-API native-mount lifecycle evidence remain open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2

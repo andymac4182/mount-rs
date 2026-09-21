@@ -903,3 +903,88 @@ fn unescape_mount_path(path: &str) -> String {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mount_options_encode_unix_defaults_and_read_only() {
+        let options = P9MountOptions {
+            read_only: true,
+            ..P9MountOptions::default()
+        };
+        assert_eq!(
+            p9_mount_options(
+                &P9MountTarget {
+                    transport: P9MountTransport::Unix,
+                    port: None,
+                },
+                &options,
+            )
+            .expect("unix mount options"),
+            "trans=unix,version=9p2000.L,msize=131096,access=client,cache=none,uname=nobody,aname=/,ro"
+        );
+    }
+
+    #[test]
+    fn mount_options_validate_tcp_port_and_option_values() {
+        let options = P9MountOptions::default();
+        assert_eq!(
+            p9_mount_options(
+                &P9MountTarget {
+                    transport: P9MountTransport::Tcp,
+                    port: Some(4567),
+                },
+                &options,
+            )
+            .expect("tcp mount options"),
+            "trans=tcp,port=4567,version=9p2000.L,msize=131096,access=client,cache=none,uname=nobody,aname=/"
+        );
+        for port in [None, Some(0)] {
+            let error = p9_mount_options(
+                &P9MountTarget {
+                    transport: P9MountTransport::Tcp,
+                    port,
+                },
+                &options,
+            )
+            .expect_err("invalid TCP port must be refused");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        let mut invalid = options.clone();
+        invalid.access = "client,ro".to_owned();
+        assert!(
+            p9_mount_options(
+                &P9MountTarget {
+                    transport: P9MountTransport::Unix,
+                    port: None,
+                },
+                &invalid,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn refusal_helpers_use_kernel_boundaries() {
+        assert!(socket_path_refusal(Path::new(&"a".repeat(P9_UNIX_PATH_MAX - 1))).is_none());
+        assert!(socket_path_refusal(Path::new(&"a".repeat(P9_UNIX_PATH_MAX))).is_some());
+        assert!(tcp_source_refusal("127.0.0.1").is_none());
+        assert!(tcp_source_refusal("127.0.0.256").is_some());
+        assert!(tcp_source_refusal("localhost").is_some());
+    }
+
+    #[test]
+    fn mount_table_unescapes_kernel_path_fields() {
+        let entries = parse_mount_table("/dev/foo /tmp/a\\040b 9p rw 0 0\n");
+        assert_eq!(
+            entries,
+            vec![MountEntry {
+                source: "/dev/foo".to_owned(),
+                target: "/tmp/a b".to_owned(),
+                fs_type: "9p".to_owned(),
+            }]
+        );
+    }
+}
