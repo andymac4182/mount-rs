@@ -1518,7 +1518,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
   retention/lifecycle, prefix ownership, runtime/maintenance roles, and no
-  long-lived credentials. The W25 bucket and role are test resources.
+  long-lived credentials. A read-only resource audit script now checks the
+  qualification controls without mutation. It passed the `myroot` test bucket
+  for all four public-access blocks, BucketOwnerEnforced ownership, AES256
+  default encryption, seven-day `mount-rs-tests/` expiry, and one-day
+  incomplete-multipart abort; the W25 bucket and role are test resources, so
+  production resource review remains open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.

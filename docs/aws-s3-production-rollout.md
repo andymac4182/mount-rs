@@ -19,7 +19,7 @@ for a production deployment result.
 | Gate | Required evidence | Status |
 | --- | --- | --- |
 | Provider contract | `kind: "aws-s3"` uses the real region, signed AWS workload credentials, immutable create, conditional update, and block-only semantics | Passed in local code gates and the live public SDK/CLI run |
-| AWS resource controls | Reviewable IaC or equivalent, private bucket, Block Public Access, Object Ownership, encryption/KMS decision, lifecycle/versioning decision, and prefix ownership | Test-resource controls passed; production resource review open |
+| AWS resource controls | Reviewable IaC or equivalent, private bucket, Block Public Access, Object Ownership, encryption/KMS decision, lifecycle/versioning decision, and prefix ownership | Read-only audit script added; test-resource controls passed; production resource review open |
 | Identity | Runtime and maintenance roles are least-privilege, short-lived, trusted only by the intended workload, and have no committed access keys | Test role and sibling-prefix denial passed; production workload identity open |
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Open; SQLite is single-host evidence only |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
@@ -78,3 +78,21 @@ The authoritative checklist and evidence links live in the W25 section of
 `WORK_TRACKER.md`. This document should be updated with deployment-specific
 evidence when W25.5-W25.9 are completed; it must not be changed to imply a
 production pass from test-account evidence alone.
+
+## Read-only resource audit
+
+Run the audit with an identity that is allowed to read bucket configuration,
+not with the runtime prefix-scoped role:
+
+```sh
+AWS_PROFILE=<approved-audit-profile> \
+AWS_S3_AUDIT_BUCKET=<private-bucket> \
+AWS_S3_AUDIT_REGION=<aws-region> \
+./scripts/audit-aws-s3-resource.sh
+```
+
+The command checks all four Block Public Access settings, BucketOwnerEnforced
+ownership, default server-side encryption, the configured lifecycle expiry and
+multipart-abort days, and reports rather than changes bucket versioning. It is
+safe to run during review, but a passing qualification-bucket audit does not
+close the production-resource gate.
