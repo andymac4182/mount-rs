@@ -9,6 +9,7 @@ import path from "node:path";
 import { URL } from "node:url";
 
 const configPath = process.argv[2];
+const MAX_LEASE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function fail(reason) {
   console.error(`W07_PRODUCTION_CONFIG_POLICY_FAIL reason=${reason}`);
@@ -136,11 +137,24 @@ if (
 ) {
   fail("storage.chunk_size_bytes-must-be-positive-safe-integer");
 }
+if (storage.lease_ttl_ms === undefined) {
+  fail("storage.lease_ttl_ms-is-required-for-production");
+}
+if (
+  !Number.isSafeInteger(storage.lease_ttl_ms) ||
+  storage.lease_ttl_ms <= 0 ||
+  storage.lease_ttl_ms > MAX_LEASE_TTL_MS
+) {
+  fail(
+    "storage.lease_ttl_ms-must-be-positive-safe-integer-at-most-24h",
+  );
+}
 requireString(storage.owner, "storage.owner");
 
 console.log(
   "W07_PRODUCTION_CONFIG_POLICY_PASS " +
     "config_shape=splitstore metadata=foundationdb " +
     "durable_metadata=true durable_blocks=true " +
-    "lease_authority=shared-provider blocks_tls=https secrets=external",
+    "lease_authority=shared-provider lease_ttl=explicit-bounded " +
+    "blocks_tls=https secrets=external",
 );

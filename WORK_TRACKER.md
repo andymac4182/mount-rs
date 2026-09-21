@@ -2044,7 +2044,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `scripts/verify-w07-production-config.mjs` gate and its positive/negative
   fixtures now enforce the accepted production configuration shape in hosted
   qualification: durable FoundationDB metadata, `shared-provider` authority,
-  HTTPS RustFS blocks and external credential references. This is static policy
+  an explicit positive lease TTL bounded to 24 hours, HTTPS RustFS blocks and
+  external credential references. The negative fixtures independently reject
+  inline block credentials and an unsafe lease TTL. This is static policy
   evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
   replication, recovery, capacity, telemetry or release approval.
   The hosted workflow also runs `scripts/verify-w07-rollout-ledger.mjs`, which
