@@ -61,6 +61,13 @@ clock by default. Applications must supply a protected shared `LeaseOracle` with
 `with_oracle`/`with_oracle_arc`; if they do not, lease operations fail closed with
 `ENOTSUP` while block operations and metadata reads remain available.
 
+Production callers should use `with_production_lease_oracle`. That method
+requires the implementation to declare `LeaseAuthorityKind::SharedProvider`
+through `LeaseOracle::authority_kind`; unverified, development, and
+single-authority clocks are rejected when the storage handle opens. The
+declaration is an application trust boundary, not a conversion of a local
+clock into a distributed authority.
+
 The crate also exposes an explicit `with_persisted_lease_oracle` option for a
 single trusted authority or development/test cluster. That oracle stores one
 encoded Unix-epoch millisecond value under the volume's `meta/lease-oracle` key
@@ -80,7 +87,9 @@ A backward jump or a stalled authority can delay expiry and therefore reduce
 availability. Deployments requiring bounded real-time expiry must supply and
 protect a stronger shared clock/lease authority through `LeaseOracle` and must
 document its clock-skew assumptions. The `with_oracle`/`with_oracle_arc` APIs
-accept that authority (the `with_clock` names remain compatibility aliases).
+remain available for explicit test or application injection (the `with_clock`
+names remain compatibility aliases), while
+`with_production_lease_oracle` is the guarded production entry point.
 
 `FoundationDbStorageOptions::without_lease_oracle` makes that fail-closed mode
 explicit and is also the behavior of `new`/`default`. `SystemLeaseClock` is

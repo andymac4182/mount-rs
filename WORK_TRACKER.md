@@ -852,6 +852,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   contract passed. The container supplies `fdb_c`; no host install or mock.
 - [ ] W07.3 Resolve production lease/time semantics: default unsupported clock
   behavior and a development clock do not establish safe distributed fencing.
+  The current safety slice adds `with_production_lease_oracle` plus the
+  `LeaseAuthorityKind::SharedProvider` declaration gate: unverified,
+  development and single-authority clocks now fail closed when a caller opts
+  into the production path, with a focused regression test. This prevents an
+  unsafe default or persisted host clock from being presented as distributed
+  fencing, but the item remains open until a concrete protected shared
+  authority and multi-host clock-skew/recovery evidence are integrated.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.

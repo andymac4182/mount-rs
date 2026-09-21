@@ -168,6 +168,23 @@ fn validate_namespace_chunkers(namespace: &Namespace, limits: FoundationDbLimits
     Ok(())
 }
 
+/// Classifies the trust boundary of a lease-time source.
+///
+/// `SharedProvider` is reserved for an application-owned authority whose time
+/// value is safe to use for independent writers. The other variants are
+/// intentionally not accepted by [`FoundationDbStorageOptions::with_production_lease_oracle`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeaseAuthorityKind {
+    /// The implementation has not declared a production trust boundary.
+    Unverified,
+    /// An independent shared provider/authority owns the time value.
+    SharedProvider,
+    /// One explicitly trusted authority owns this FoundationDB keyspace.
+    SingleAuthority,
+    /// A process-local or development-only clock.
+    Development,
+}
+
 /// A shared provider-time authority used to validate metadata leases.
 ///
 /// FoundationDB has no authoritative wall-clock API. This contract is
@@ -178,6 +195,16 @@ fn validate_namespace_chunkers(namespace: &Namespace, limits: FoundationDbLimits
 #[async_trait]
 pub trait LeaseOracle: Send + Sync {
     async fn now_ms(&self) -> Result<u64>;
+
+    /// Declare the authority boundary of this time source.
+    ///
+    /// Implementations must override this only when an application-owned
+    /// authority really provides the declared guarantee. The conservative
+    /// default keeps custom test clocks out of the production configuration
+    /// path.
+    fn authority_kind(&self) -> LeaseAuthorityKind {
+        LeaseAuthorityKind::Unverified
+    }
 }
 
 /// Backwards-compatible name for the lease authority contract.
@@ -191,6 +218,10 @@ pub struct SystemLeaseClock;
 impl LeaseOracle for SystemLeaseClock {
     async fn now_ms(&self) -> Result<u64> {
         system_now_ms()
+    }
+
+    fn authority_kind(&self) -> LeaseAuthorityKind {
+        LeaseAuthorityKind::Development
     }
 }
 
@@ -271,6 +302,10 @@ impl LeaseOracle for FoundationDbLeaseOracle {
         .await
         .map_err(TxnError::into_fs)
     }
+
+    fn authority_kind(&self) -> LeaseAuthorityKind {
+        LeaseAuthorityKind::SingleAuthority
+    }
 }
 
 /// Configuration for one independent FoundationDB keyspace.
@@ -281,6 +316,7 @@ pub struct FoundationDbStorageOptions {
     limits: FoundationDbLimits,
     oracle: Option<Arc<dyn LeaseOracle>>,
     auto_oracle: bool,
+    require_shared_lease_authority: bool,
 }
 
 impl FoundationDbStorageOptions {
@@ -295,6 +331,7 @@ impl FoundationDbStorageOptions {
             // persisted single-authority development oracle below.
             oracle: None,
             auto_oracle: false,
+            require_shared_lease_authority: false,
         }
     }
 
@@ -322,6 +359,20 @@ impl FoundationDbStorageOptions {
     pub fn with_oracle_arc(mut self, oracle: Arc<dyn LeaseOracle>) -> Self {
         self.oracle = Some(oracle);
         self.auto_oracle = false;
+        self
+    }
+
+    /// Supply an application-owned production lease authority.
+    ///
+    /// The implementation must declare [`LeaseAuthorityKind::SharedProvider`]
+    /// from [`LeaseOracle::authority_kind`]. Unverified, local, and
+    /// single-authority clocks are rejected when the storage handle is opened.
+    /// This is a trust-boundary assertion by the application; it does not turn
+    /// a local clock into a distributed authority.
+    pub fn with_production_lease_oracle<C: LeaseOracle + 'static>(mut self, oracle: C) -> Self {
+        self.oracle = Some(Arc::new(oracle));
+        self.auto_oracle = false;
+        self.require_shared_lease_authority = true;
         self
     }
 
@@ -373,6 +424,20 @@ impl FoundationDbStorageOptions {
     fn validate(self) -> Result<Self> {
         validate_prefix(&self.prefix)?;
         let limits = self.limits.validate()?;
+        if self.require_shared_lease_authority {
+            let Some(oracle) = self.oracle.as_ref() else {
+                return Err(FsError::enotsup("FoundationDB production lease authority")
+                    .with_message(
+                        "a shared provider lease authority is required for production leases",
+                    ));
+            };
+            if oracle.authority_kind() != LeaseAuthorityKind::SharedProvider {
+                return Err(FsError::enotsup("FoundationDB production lease authority")
+                    .with_message(
+                        "the selected lease oracle is not declared as a shared provider authority",
+                    ));
+            }
+        }
         let affected_bytes = metadata_publication_affected_bytes(
             &self.prefix,
             limits.metadata_chunk_bytes,
@@ -1478,6 +1543,20 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct SharedAuthorityTestClock(AtomicU64);
+
+    #[async_trait]
+    impl LeaseOracle for SharedAuthorityTestClock {
+        async fn now_ms(&self) -> Result<u64> {
+            Ok(self.0.load(Ordering::Relaxed))
+        }
+
+        fn authority_kind(&self) -> LeaseAuthorityKind {
+            LeaseAuthorityKind::SharedProvider
+        }
+    }
+
     #[test]
     fn limits_reject_values_that_would_break_fdb_contract() {
         assert!(
@@ -1610,6 +1689,30 @@ mod tests {
         assert!(options.oracle.is_some());
         assert!(!options.auto_oracle);
         assert!(options.validate().is_ok());
+    }
+
+    #[test]
+    fn production_lease_authority_rejects_untrusted_time_sources() {
+        let unverified = FoundationDbStorageOptions::new("test")
+            .with_production_lease_oracle(TestClock::default())
+            .validate()
+            .err()
+            .expect("unverified clock must not open in production mode");
+        assert_eq!(unverified.code, ErrorCode::Enotsup);
+
+        let development = FoundationDbStorageOptions::new("test")
+            .with_production_lease_oracle(SystemLeaseClock)
+            .validate()
+            .err()
+            .expect("development clock must not open in production mode");
+        assert_eq!(development.code, ErrorCode::Enotsup);
+
+        assert!(
+            FoundationDbStorageOptions::new("test")
+                .with_production_lease_oracle(SharedAuthorityTestClock::default())
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
