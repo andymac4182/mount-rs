@@ -2311,10 +2311,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  hosted run `35610661014` at current pushed head `428ce6d` stopped before AWS
-  authentication with `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a
-  successful safety refusal, not acceptance evidence. The preceding hosted run
-  `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
+  observed hosted run `35618187611` at `a83540a` passed the new secret-free
+  validator regression step, then stopped before AWS authentication with
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
+  skipped, so this is a successful safety refusal, not acceptance evidence.
+  The preceding hosted run `35610661014` at `428ce6d` stopped at the same
+  preflight boundary, as did `35608516727` at `8e271cd`. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
