@@ -139,6 +139,14 @@ test itself and real hosted `/dev/fuse` forced-unmount, callback, crash/restart
 and durability execution remain external. This packet is published as
 `987c593bc08adfb161a55a7a9eee27ff82606310`; exact-SHA CI run `35648821996`
 and Fault injection run `35648821873` are pending, so W01 stays NO-GO.
+The next FUSE lifecycle packet now marks a mount inactive as soon as teardown
+starts, rather than waiting for the graceful helper or session task to finish;
+if that helper fails while the kernel mount is still present, the retry path
+restores `active`. A Linux-gated synthetic-helper regression covers the
+transition and terminal cleanup; host FUSE tests, host/Linux-target strict
+Clippy, Linux-target test check, formatting and diff checks pass, while the
+Linux-only runtime execution and hosted native close-race/callback,
+crash/restart and durability gates remain external, so W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,

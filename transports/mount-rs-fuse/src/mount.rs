@@ -300,6 +300,11 @@ impl FuseMount {
         if self.state.unmount_started.swap(true, Ordering::AcqRel) {
             return;
         }
+        // Match the mount lifecycle contract used by the other native
+        // transports: active becomes false as soon as teardown owns the
+        // operation, not only after the kernel helper returns or the session
+        // task happens to observe the stop request.
+        self.state.active.store(false, Ordering::Release);
         *self
             .state
             .unmount_result
@@ -318,6 +323,11 @@ impl FuseMount {
                     operation_state
                         .unmount_started
                         .store(false, Ordering::Release);
+                    // A graceful helper failure leaves the mount live and
+                    // retryable. Publish that fact so a later attempt does
+                    // not leave an otherwise healthy mount permanently
+                    // reported as inactive.
+                    operation_state.active.store(true, Ordering::Release);
                 }
                 *operation_state
                     .unmount_result
@@ -348,6 +358,7 @@ impl Drop for FuseMount {
         if self.state.mounted.load(Ordering::Acquire)
             && !self.state.unmount_started.swap(true, Ordering::AcqRel)
         {
+            self.state.active.store(false, Ordering::Release);
             let state = Arc::clone(&self.state);
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn(async move {
@@ -1836,6 +1847,37 @@ mod tests {
         // The test did not create a real native mount. Prevent Drop from
         // attempting the production unmount fallback for this synthetic state.
         state.mounted.store(false, Ordering::Release);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unmount_marks_mount_inactive_before_helper_returns() {
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-active-transition-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(PathBuf::from("/bin/sh")),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-active-transition-test"),
+        };
+
+        mount.start_unmount();
+        assert!(
+            !mount.is_active(),
+            "teardown should publish inactive immediately"
+        );
+        tokio::time::timeout(Duration::from_secs(1), mount.unmount())
+            .await
+            .expect("unmount helper should settle")
+            .expect("a non-mounted synthetic path should be idempotent");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
     }
 
     #[cfg(target_os = "linux")]
