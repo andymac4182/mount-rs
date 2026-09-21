@@ -1,17 +1,20 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use futures_core::Stream;
 use mount_rs_core::{Capabilities, FileHandle, FsDriver, MemoryFs, Result as FsResult};
 use mount_rs_s3::{
-    CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, PresignRequest, S3BindError,
-    S3ErrorClass, S3Request, S3Response, S3Server, S3ServerHooks, S3ServerOptions, S3Session,
-    S3SessionOptions, S3TransportErrorKind, STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER,
-    STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest, canonical_query, format_amz_date,
-    presign_request, sha256_hex, sign_chunk, sign_request, sign_trailer,
+    CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, MIN_PART_SIZE, PresignRequest,
+    S3BindError, S3ErrorClass, S3Request, S3RequestHead, S3Response, S3Server, S3ServerHooks,
+    S3ServerOptions, S3Session, S3SessionOptions, S3TransportErrorKind, STREAMING_PAYLOAD,
+    STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest, canonical_query,
+    format_amz_date, presign_request, sha256_hex, sign_chunk, sign_request, sign_trailer,
 };
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -144,6 +147,101 @@ fn authorization_signature(authorization: &str) -> &str {
         .rsplit_once("Signature=")
         .map(|(_, signature)| signature)
         .expect("SigV4 authorization signature")
+}
+
+struct PendingBody {
+    first: Option<Vec<u8>>,
+    first_polled: Arc<Notify>,
+}
+
+impl Stream for PendingBody {
+    type Item = Result<Vec<u8>, String>;
+
+    fn poll_next(mut self: Pin<&mut Self>, _context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(first) = self.first.take() {
+            self.first_polled.notify_one();
+            Poll::Ready(Some(Ok(first)))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+async fn wait_for_root_staging(driver: &MemoryFs) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if driver
+                .readdir("/")
+                .await
+                .expect("root directory")
+                .iter()
+                .any(|entry| entry.name.starts_with(".mountx-put-"))
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("streaming PUT created private staging");
+}
+
+async fn wait_for_no_root_staging(driver: &MemoryFs) {
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !driver
+                .readdir("/")
+                .await
+                .expect("root directory")
+                .iter()
+                .any(|entry| entry.name.starts_with(".mountx-put-"))
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled streaming PUT removed private staging");
+}
+
+async fn wait_for_no_part_staging(driver: &MemoryFs, upload_id: &str) {
+    let directory = format!("/.mountx-multipart/{upload_id}");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            let has_staging = driver
+                .readdir(&directory)
+                .await
+                .map(|entries| entries.iter().any(|entry| entry.name.starts_with(".part-")))
+                .unwrap_or(false);
+            if !has_staging {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled multipart part removed private staging");
+}
+
+async fn wait_for_part_staging(driver: &MemoryFs, upload_id: &str) {
+    let directory = format!("/.mountx-multipart/{upload_id}");
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if driver
+                .readdir(&directory)
+                .await
+                .expect("multipart directory")
+                .iter()
+                .any(|entry| entry.name.starts_with(".part-"))
+            {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("streaming multipart overwrite created private staging");
 }
 
 #[tokio::test]
@@ -724,6 +822,56 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
 }
 
 #[tokio::test]
+async fn concurrent_multipart_parts_publish_in_order_and_complete_atomically() {
+    let driver = MemoryFs::empty();
+    let session = Arc::new(S3Session::new(driver));
+    let initiated = session
+        .handle(request("POST", "/mountx/concurrent.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let first_body = vec![b'a'; MIN_PART_SIZE as usize];
+    let (first, second) = tokio::join!(
+        session.handle(request(
+            "PUT",
+            &format!("/mountx/concurrent.bin?uploadId={upload_id}&partNumber=1"),
+            &first_body,
+            &[],
+        )),
+        session.handle(request(
+            "PUT",
+            &format!("/mountx/concurrent.bin?uploadId={upload_id}&partNumber=2"),
+            b"tail",
+            &[],
+        )),
+    );
+    assert_eq!(first.status, 200);
+    assert_eq!(second.status, 200);
+    let first_etag = header(&first, "etag").expect("first part ETag");
+    let second_etag = header(&second, "etag").expect("second part ETag");
+    let complete_body = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{first_etag}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{second_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/concurrent.bin?uploadId={upload_id}"),
+            complete_body.as_bytes(),
+            &[],
+        ))
+        .await;
+    assert_eq!(completed.status, 200);
+
+    let object = session
+        .handle(request("GET", "/mountx/concurrent.bin", [], &[]))
+        .await;
+    assert_eq!(object.status, 200);
+    let mut expected = first_body;
+    expected.extend_from_slice(b"tail");
+    assert_eq!(object.body, expected);
+}
+
+#[tokio::test]
 async fn multipart_uploads_survive_session_replacement_and_complete_from_disk() {
     let driver = MemoryFs::empty();
     let first = S3Session::new(driver.clone());
@@ -842,6 +990,115 @@ async fn invalid_multipart_complete_releases_finalization_claim_for_retry() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn cancelled_streaming_put_removes_private_staging_and_request_ticket() {
+    let driver = MemoryFs::empty();
+    let session = Arc::new(S3Session::new(driver.clone()));
+    let first_polled = Arc::new(Notify::new());
+    let first_notification = first_polled.notified();
+    let body_notification = Arc::clone(&first_polled);
+    let request = S3RequestHead::new("PUT", "/mountx/cancelled-stream.txt")
+        .with_header("content-length", "7");
+    let task = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .handle_request_stream(
+                    request,
+                    Box::pin(PendingBody {
+                        first: Some(b"partial".to_vec()),
+                        first_polled: body_notification,
+                    }),
+                )
+                .await
+        }
+    });
+
+    first_notification.await;
+    wait_for_root_staging(&driver).await;
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    wait_for_no_root_staging(&driver).await;
+
+    assert!(driver.stat("/cancelled-stream.txt").await.is_err());
+    assert!(session.assertions().is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_streaming_part_preserves_existing_part_and_staging_budget() {
+    let driver = MemoryFs::empty();
+    let session = Arc::new(S3Session::new(driver.clone()));
+    let initiated = session
+        .handle(request("POST", "/mountx/atomic-part.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let original = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/atomic-part.bin?uploadId={upload_id}&partNumber=1"),
+            b"original part",
+            &[],
+        ))
+        .await;
+    assert_eq!(original.status, 200);
+
+    let first_polled = Arc::new(Notify::new());
+    let first_notification = first_polled.notified();
+    let body_notification = Arc::clone(&first_polled);
+    let request = S3RequestHead::new(
+        "PUT",
+        format!("/mountx/atomic-part.bin?uploadId={upload_id}&partNumber=1"),
+    )
+    .with_header("content-length", "partial replacement".len().to_string());
+    let task = tokio::spawn({
+        let session = Arc::clone(&session);
+        async move {
+            session
+                .handle_request_stream(
+                    request,
+                    Box::pin(PendingBody {
+                        first: Some(b"partial replacement".to_vec()),
+                        first_polled: body_notification,
+                    }),
+                )
+                .await
+        }
+    });
+
+    first_notification.await;
+    wait_for_part_staging(&driver, &upload_id).await;
+    let has_part_staging = driver
+        .readdir(&format!("/.mountx-multipart/{upload_id}"))
+        .await
+        .expect("multipart directory")
+        .iter()
+        .any(|entry| entry.name.starts_with(".part-"));
+    assert!(
+        has_part_staging,
+        "streaming overwrite reached private staging"
+    );
+    task.abort();
+    assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+    wait_for_no_part_staging(&driver, &upload_id).await;
+
+    let path = format!("/.mountx-multipart/{upload_id}/part-1");
+    let stats = driver.stat(&path).await.expect("original part remains");
+    let handle = driver
+        .open(&path, "r", 0)
+        .await
+        .expect("open original part");
+    let mut bytes = vec![0_u8; stats.size as usize];
+    let count = handle
+        .read(&mut bytes, Some(0))
+        .await
+        .expect("read original part");
+    handle.close().await.expect("close original part");
+    bytes.truncate(count);
+    assert_eq!(bytes, b"original part");
+    assert!(session.assertions().is_empty());
 }
 
 #[derive(Clone)]
