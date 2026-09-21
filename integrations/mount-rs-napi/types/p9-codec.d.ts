@@ -223,6 +223,8 @@ export interface P9MountTarget {
 
 /** The N-API 9P mount-helper option subset supported by this package. */
 export interface MountP9Options {
+  /** Reuse a configured native server and its policy/lock table. */
+  server?: P9Server
   transport?: "unix" | "tcp"
   host?: string
   port?: number

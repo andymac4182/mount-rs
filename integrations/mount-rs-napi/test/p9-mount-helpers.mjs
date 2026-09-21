@@ -67,4 +67,22 @@ await assert.rejects(
   (error) => error?.message === "FsDriver method 'stat' must be a function",
 )
 
+await assert.rejects(
+  () => mount9p({}, "/tmp/mount-rs-p9-invalid-server", { server: {} }),
+  (error) => error instanceof TypeError && error.message === "9P mount server must be a P9Server",
+)
+
+let serverListenCalls = 0
+const probeServer = {
+  async listen() {
+    serverListenCalls += 1
+    return this
+  },
+}
+await assert.rejects(
+  () => mount9p({}, "/tmp/mount-rs-p9-invalid-driver-with-server", { server: probeServer }),
+  (error) => error?.message === "FsDriver method 'stat' must be a function",
+)
+assert.equal(serverListenCalls, probe.usable ? 1 : 0)
+
 console.log("mount-rs N-API P9 mount helpers: PASS")

@@ -490,6 +490,7 @@ function checkServerAndKvSubpaths(): void {
   const nfsSessionDestroy: Promise<void> = nfsSession.destroy()
   const nfsV4SessionDestroy: Promise<void> = nfsV4Session.destroy()
   const p9Server: P9Server = createP9Server(filesystem, p9Options)
+  const p9MountWithServer: MountP9Options = { server: p9Server }
   const s3Server: S3Server = createS3Server(filesystem, s3Options)
   const multiBucket: S3Server = createS3Server({ buckets: { files: filesystem } }, s3Options)
   // @ts-expect-error Every bucket must be a filesystem, not a path or an arbitrary value.
@@ -516,6 +517,7 @@ function checkServerAndKvSubpaths(): void {
   const p9Path: string | null = p9Server.path
   const p9Listen: Promise<P9Server> = p9Server.listen()
   const p9Close: Promise<void> = p9Server.close()
+  void p9MountWithServer
   const s3Url: string = s3Server.url
   const s3Connections: number = s3Server.connections
   const s3Buckets: Array<string> = s3Server.buckets

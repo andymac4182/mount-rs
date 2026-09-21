@@ -3191,6 +3191,17 @@ impl P9Server {
             assertion: None,
         }
     }
+
+    /// Return the already-bound transport for the native mount adapter.
+    /// Mounting a configured server is deliberately distinct from creating a
+    /// second listener: the mount must adopt the same server policy, lock
+    /// table, callbacks, and client set that the caller configured.
+    pub(crate) fn transport_server(&self) -> Result<Arc<TransportP9Server>, Error> {
+        let state = self.state.lock().expect("9P state lock");
+        state.server.as_ref().cloned().ok_or_else(|| {
+            config_error("9P mount server must be listening before it can be mounted")
+        })
+    }
 }
 
 #[napi]

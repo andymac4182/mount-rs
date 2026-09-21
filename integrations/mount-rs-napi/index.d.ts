@@ -1384,6 +1384,12 @@ export interface JsP9MountOptions {
   useDriverIno?: boolean
   mountOptions?: Array<string>
   unmountTimeoutMs?: number
+  /**
+   * Reuse a configured native 9P server. The server must be listening
+   * before the native mount is started; the JavaScript mount helper starts
+   * it when the Linux client probe is usable.
+   */
+  server?: P9Server
 }
 
 export interface JsR2Options {
