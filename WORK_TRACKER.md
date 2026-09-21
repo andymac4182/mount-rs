@@ -2201,7 +2201,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   policy transport-deny resource now covers every object key in the bucket,
   not only the owned prefix; the revised template passed the read-only
   CloudFormation validation API on 2026-09-22 without creating a stack or
-  change set.
+  change set. Its versioning lifecycle now also expires noncurrent versions
+  using the same reviewed retention parameter, avoiding an unbounded version
+  accumulation path.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
