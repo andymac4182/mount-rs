@@ -45,15 +45,16 @@ artifact is `aws-s3-qualification-35629600687-1` (7,649 bytes). This artifact
 is available for a completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
-The latest tested integrated repository boundary `00d2b80277991a6d826874ad7e3e3c1593e34ae3`
-passed formatting, the full locked offline workspace test gate, and strict
-workspace Clippy with `-D warnings` on an explicitly isolated Cargo target
-after rebasing onto `origin/main`, with the required local loopback permission.
-The isolated target was used because concurrent worktrees share the normal
-Cargo target and can expose cross-worktree artifact races; this gate therefore
-binds to the checked-out source rather than another thread's compiled
-metadata. Ignored native/service rows remain explicit prerequisites and are
-not treated as production acceptance.
+The latest tested integrated repository boundary
+`0bb628b0323901a1632b05dd8321c32fcabca7d8` passed formatting, the full locked
+offline workspace/all-target test gate, and strict workspace Clippy with
+`-D warnings` on an explicitly isolated Cargo target after the documentation
+chunk was rebased onto and pushed to `origin/main`, with the required local
+loopback permission. The isolated target was used because concurrent
+worktrees share the normal Cargo target and can expose cross-worktree artifact
+races; this gate therefore binds to the checked-out source rather than another
+thread's compiled metadata. Ignored native/service rows remain explicit
+prerequisites and are not treated as production acceptance.
 
 ## Deployment contract
 
