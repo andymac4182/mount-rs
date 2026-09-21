@@ -412,7 +412,15 @@ jobs:
       - name: Check packaging validation regressions
         run: node integrations/mount-rs-napi/test/distribution-aggregate.mjs
       - name: Validate all five native distribution packages without publishing
-        run: pnpm --dir integrations/mount-rs-napi run aggregate:artifacts -- --input-dir "$RUNNER_TEMP/mount-rs-native-artifacts"
+        run: >-
+          pnpm --dir integrations/mount-rs-napi run aggregate:artifacts --
+          --input-dir "$RUNNER_TEMP/mount-rs-native-artifacts"
+          --staging-dir "$RUNNER_TEMP/mount-rs-native-package"
+          --keep-staging
+      - name: Install and smoke-test a clean consumer from the staged package
+        run: >-
+          pnpm --dir integrations/mount-rs-napi run test:distribution:consumer --
+          --package-dir "$RUNNER_TEMP/mount-rs-native-package"
 
   native-fuse:
     runs-on: ubuntu-latest
