@@ -2,8 +2,8 @@
 
 Status snapshot: **2026-09-21 21:54 AEST**
 Repository: `andymac4182/mount-rs`  
-Current published tip: `origin/main` at `077b6c2` (the W08 evidence chunk was
-committed as `67e0938` and published after concurrent-main reconciliation)
+Publication snapshot: `origin/main` at `077b6c2` before the final ledger-sync
+commit `ffdcf1f` (the W08 evidence chunk itself was committed as `67e0938`)
 Authoritative W08 hosted evidence: CI run `35585066458`, source `9c098e5`
 (W08-relevant jobs all terminal success)
 
@@ -226,7 +226,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 21:17–21:21 AEST | Re-ran the W08 production policy’s missing/unsafe TLS cases and checked the local provider prerequisites without printing credentials. | ~3 min | ~0 min | Missing `MOUNT_RS_TIDB_TLS_URL`, `require_ssl=false`, `verify_identity=false` and `built_in_roots=false` all failed closed. Provider URLs/credentials are absent; Docker CLI is present but its daemon check is unusable, so no new local provider evidence can be claimed. |
 | 2026-09-21 21:22–21:31 AEST | Corrected tracker evidence to the latest hosted policy job and added `docs/W08-operations-runbook.md` with deployment admission, incident response, backup/restore, rollback, observability handoff and D01–D09 timed drills; committed `ea01338`, reconciled concurrent changes and published `0e624d3`. | ~6 min | ~2 min remote fetch/merge/push wait | W08.7 implementation documentation is complete; all operational/provider drills remain explicitly unexecuted until named staging/production owners and systems are available. |
 | 2026-09-21 21:32–21:39 AEST | Added W08.8 bounded TiDB/RustFS soak coverage with configurable workload parameters and p50/p95/p99/throughput markers; enabled 64-operation hosted composition coverage; ran syntax, explicit-skip and missing-gate rejection checks. | ~7 min | ~0 min | The soak implementation is ready for hosted qualification; local provider and production-capacity evidence remain unavailable. P06 stays open pending terminal markers and approved workload/resource targets. |
-| 2026-09-21 21:44–21:58 AEST | Followed current-main CI run `35595664981`, extracted terminal `tidb-rustfs` job `106319766691` markers, committed the evidence update as `67e0938`, reconciled concurrent main changes and published the result at `077b6c2`. | ~5 min | ~12 min hosted/remote wait | Both seed and reopen bounded soak phases passed with zero errors and recorded latency/throughput metrics. W08.8 bounded hosted qualification is complete; P06 remains open for production-shaped workload, resource/headroom, failover, multi-hour and SLO/cost evidence. |
+| 2026-09-21 21:44–21:58 AEST | Followed current-main CI run `35595664981`, extracted terminal `tidb-rustfs` job `106319766691` markers, committed the evidence update as `67e0938`, reconciled concurrent main changes and published the result at `077b6c2`; the final ledger-pointer sync was then published as `ffdcf1f`. | ~5 min | ~12 min hosted/remote wait | Both seed and reopen bounded soak phases passed with zero errors and recorded latency/throughput metrics. W08.8 bounded hosted qualification is complete; P06 remains open for production-shaped workload, resource/headroom, failover, multi-hour and SLO/cost evidence. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
