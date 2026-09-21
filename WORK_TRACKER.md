@@ -1019,6 +1019,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
   result may be promoted to a production PASS.
+  The production gate ledger, deployment contract and rollout sequence are
+  tracked in [`docs/foundationdb-production-rollout.md`](docs/foundationdb-production-rollout.md).
 
 ## W08 — TiDB
 
