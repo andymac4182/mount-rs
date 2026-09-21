@@ -1032,6 +1032,7 @@ async function exerciseS3() {
 async function exerciseWebdav() {
   const filesystem = memoryFilesystem();
   const reports = [];
+  const sessionErrors = [];
   const server = createWebdavServer(filesystem, {
     host: "127.0.0.1",
     port: 0,
@@ -1048,6 +1049,9 @@ async function exerciseWebdav() {
     onTransportError(error, peer) {
       reports.push({ error, peer });
     },
+    onError(error, head) {
+      sessionErrors.push({ error, head });
+    },
   });
   let listening;
   let faultSocket;
@@ -1058,6 +1062,8 @@ async function exerciseWebdav() {
     assert.ok(server.session instanceof WebdavSession);
     assert.ok(server.session.driver instanceof Filesystem);
     assert.deepEqual(server.session.assertions, []);
+    assert.ok(server.session.stats.methods instanceof Map);
+    assert.equal(server.session.stats.methods.size, 0);
     assert.deepEqual(server.session.options, {
       realm: "mount-rs-integration",
       readChunkBytes: 16 * 1024,
@@ -1078,6 +1084,7 @@ async function exerciseWebdav() {
     );
     assert.ok([200, 201, 204].includes(direct.status));
     assert.equal(direct.body ?? null, null);
+    assert.equal(server.session.stats.methods.get("PUT"), 1);
 
     const lock = await server.session.handleRequest(
       {
@@ -1230,6 +1237,12 @@ async function exerciseWebdav() {
     assert.equal(methodUnlock.status, 204);
     const unsupported = await directRequest("PATCH", "/direct-methods/moved.txt");
     assert.equal(unsupported.status, 405);
+    await new Promise((resolve) => setImmediate(resolve));
+    const sessionError = sessionErrors.at(-1);
+    assert.ok(sessionError);
+    assert.ok(sessionError.error instanceof Error);
+    assert.equal(sessionError.head.method, "PATCH");
+    assert.equal(sessionError.head.target, "/direct-methods/moved.txt");
     const remove = await directRequest("DELETE", "/direct-methods/moved.txt");
     assert.equal(remove.status, 204);
 

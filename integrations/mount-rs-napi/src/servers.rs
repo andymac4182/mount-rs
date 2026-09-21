@@ -46,10 +46,13 @@ use mount_rs_s3::{
     S3TransportError as TransportS3Error, S3TransportErrorHook as TransportS3ErrorHook,
 };
 use mount_rs_webdav::{
-    WebdavBody as TransportWebdavBody, WebdavError as TransportWebdavBodyError, WebdavRequestBody,
-    WebdavRequestHead as TransportWebdavRequestHead, WebdavResponse as TransportWebdavResponse,
-    WebdavServer as TransportWebdavServer, WebdavServerHooks as TransportWebdavServerHooks,
+    WebdavBody as TransportWebdavBody, WebdavError as TransportWebdavRequestError,
+    WebdavError as TransportWebdavBodyError, WebdavErrorHook as TransportWebdavRequestErrorHook,
+    WebdavRequestBody, WebdavRequestHead as TransportWebdavRequestHead,
+    WebdavResponse as TransportWebdavResponse, WebdavServer as TransportWebdavServer,
+    WebdavServerHooks as TransportWebdavServerHooks,
     WebdavServerOptions as TransportWebdavServerOptions, WebdavSession as TransportWebdavSession,
+    WebdavSessionHooks as TransportWebdavSessionHooks,
     WebdavTransportError as TransportWebdavError,
     WebdavTransportErrorHook as TransportWebdavErrorHook, XmlNode as TransportWebdavXmlNode,
 };
@@ -130,6 +133,100 @@ impl From<TransportS3Error> for TransportErrorEvent {
 pub(crate) struct TransportErrorCallback {
     callback: Mutex<Option<Arc<TransportErrorTsfn>>>,
     closed: AtomicBool,
+}
+
+pub(crate) type JsWebdavErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type WebdavErrorCall = FnArgs<(Error, Option<WebdavRequestHead>)>;
+type WebdavErrorTsfn =
+    ThreadsafeFunction<WebdavErrorEvent, Unknown<'static>, WebdavErrorCall, Status, false, false>;
+
+#[derive(Clone)]
+struct WebdavErrorEvent {
+    message: String,
+    head: Option<WebdavRequestHead>,
+}
+
+/// Owns the JavaScript callback for request-level WebDAV errors.
+pub(crate) struct WebdavErrorCallback {
+    callback: Mutex<Option<Arc<WebdavErrorTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl WebdavErrorCallback {
+    pub(crate) fn new(function: JsWebdavErrorCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<WebdavErrorEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| {
+                let event = context.value;
+                Ok(FnArgs::from((
+                    Error::new(Status::GenericFailure, event.message),
+                    event.head,
+                )))
+            })?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn report(&self, error: TransportWebdavRequestError, head: TransportWebdavRequestHead) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        let event = WebdavErrorEvent {
+            message: error.to_string(),
+            head: Some(webdav_request_head(head)),
+        };
+        let _ = callback.call_with_return_value(
+            event,
+            ThreadsafeFunctionCallMode::NonBlocking,
+            |result, _env| {
+                let _ = result;
+                Ok(())
+            },
+        );
+    }
+
+    pub(crate) fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for WebdavErrorCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 impl TransportErrorCallback {
@@ -238,6 +335,21 @@ pub(crate) fn webdav_hooks(
             let callback = Arc::clone(callback);
             Arc::new(move |error: TransportWebdavError| callback.report(error.into()))
                 as TransportWebdavErrorHook
+        }),
+    }
+}
+
+pub(crate) fn webdav_session_hooks(
+    callback: Option<&Arc<WebdavErrorCallback>>,
+) -> TransportWebdavSessionHooks {
+    TransportWebdavSessionHooks {
+        on_error: callback.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(
+                move |error: TransportWebdavRequestError, head: TransportWebdavRequestHead| {
+                    callback.report(error, head);
+                },
+            ) as TransportWebdavRequestErrorHook
         }),
     }
 }
@@ -2221,6 +2333,8 @@ pub struct WebdavServerOptions {
     pub debug: Option<bool>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
+    #[napi(ts_type = "(error: unknown, head: WebdavRequestHead | undefined) => void")]
+    pub on_error: Option<JsWebdavErrorCallback>,
 }
 
 #[napi(object)]
@@ -2241,17 +2355,15 @@ pub struct WebdavSessionOptionsView {
     pub debug: bool,
 }
 
-fn webdav_options(
-    options: Option<WebdavServerOptions>,
-) -> Result<
-    (
-        String,
-        u16,
-        TransportWebdavServerOptions,
-        Option<JsTransportErrorCallback>,
-    ),
-    Error,
-> {
+type ParsedWebdavOptions = (
+    String,
+    u16,
+    TransportWebdavServerOptions,
+    Option<JsTransportErrorCallback>,
+    Option<JsWebdavErrorCallback>,
+);
+
+fn webdav_options(options: Option<WebdavServerOptions>) -> Result<ParsedWebdavOptions, Error> {
     let options = options.unwrap_or(WebdavServerOptions {
         host: None,
         port: None,
@@ -2264,8 +2376,10 @@ fn webdav_options(
         drain_timeout: None,
         debug: None,
         on_transport_error: None,
+        on_error: None,
     });
     let on_transport_error = options.on_transport_error;
+    let on_error = options.on_error;
     let host = options.host.unwrap_or_else(|| "127.0.0.1".to_owned());
     let port = u16_number("port", options.port, 0)?;
     let mut output = TransportWebdavServerOptions {
@@ -2315,7 +2429,7 @@ fn webdav_options(
     output.drain_timeout =
         duration_ms("drainTimeout", options.drain_timeout, output.drain_timeout)?;
     output.session.debug = options.debug.unwrap_or(output.session.debug);
-    Ok((host, port, output, on_transport_error))
+    Ok((host, port, output, on_transport_error, on_error))
 }
 
 #[napi(object)]
@@ -2363,6 +2477,7 @@ pub struct WebdavHeader {
     pub value: String,
 }
 
+#[derive(Clone)]
 #[napi(object)]
 pub struct WebdavRequestHead {
     pub method: String,
@@ -2633,6 +2748,18 @@ fn transport_webdav_head(head: WebdavRequestHead) -> TransportWebdavRequestHead 
     }
 }
 
+fn webdav_request_head(head: TransportWebdavRequestHead) -> WebdavRequestHead {
+    WebdavRequestHead {
+        method: head.method,
+        target: head.target,
+        headers: head
+            .headers
+            .into_iter()
+            .map(|(name, value)| WebdavHeader { name, value })
+            .collect(),
+    }
+}
+
 /// Read-only N-API view of the in-process WebDAV session shared by a server.
 #[napi]
 pub struct WebdavSession {
@@ -2763,6 +2890,7 @@ pub struct WebdavServer {
     host: String,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
+    session_error: Option<Arc<WebdavErrorCallback>>,
 }
 
 #[napi]
@@ -2811,6 +2939,9 @@ impl WebdavServer {
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
+        if let Some(callback) = &self.session_error {
+            callback.release();
+        }
         self.inner
             .close()
             .await
@@ -2823,20 +2954,23 @@ pub fn create_webdav_server(
     driver: &Filesystem,
     options: Option<WebdavServerOptions>,
 ) -> napi::Result<WebdavServer> {
-    let (host, _requested_port, options, on_transport_error) = webdav_options(options)?;
-    let callback = on_transport_error
+    let (host, _requested_port, options, on_transport_error, on_error) = webdav_options(options)?;
+    let transport_error_callback = on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;
-    let inner = mount_rs_webdav::create_webdav_server_with_hooks(
+    let session_error_callback = on_error.map(WebdavErrorCallback::new).transpose()?;
+    let inner = mount_rs_webdav::create_webdav_server_with_session_hooks(
         Arc::clone(&driver.driver),
         options,
-        webdav_hooks(callback.as_ref()),
+        webdav_hooks(transport_error_callback.as_ref()),
+        webdav_session_hooks(session_error_callback.as_ref()),
     )
     .map_err(|error| transport_error("WebDAV create", error))?;
     Ok(WebdavServer {
         inner: Arc::new(inner),
         host,
         closed: AtomicBool::new(false),
-        transport_error: callback,
+        transport_error: transport_error_callback,
+        session_error: session_error_callback,
     })
 }

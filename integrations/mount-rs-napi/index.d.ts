@@ -2462,6 +2462,7 @@ export interface WebdavServerOptions {
   drainTimeout?: number
   debug?: boolean
   onTransportError?: (error: unknown, peer: string | undefined) => void
+  onError?: (error: unknown, head: WebdavRequestHead | undefined) => void
 }
 
 export interface WebdavSessionOptionsView {
@@ -2478,7 +2479,7 @@ export interface WebdavSessionStats {
   requests: number
   replies: number
   errors: number
-  methods: Record<string, number>
+  methods: Map<string, number>
   assertions: number
 }
 

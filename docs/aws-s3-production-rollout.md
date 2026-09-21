@@ -23,7 +23,7 @@ for a production deployment result.
 | Identity | Runtime and maintenance roles are least-privilege, short-lived, trusted only by the intended workload, and have no committed access keys | Test role and sibling-prefix denial passed; production workload identity open |
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Partial AWS S3 plus external PGlite qualification passed; production provider selection, multi-writer, backup/restore, and failure-recovery evidence remain open |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
-| Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open; the S3 gateway now exposes a bounded `S3Session::stats()` snapshot for latency, buffered and consumed streaming request/response bytes, operation counts, and authentication/conditional/throttling/client/server error classes. The public SDK's optional observability path records provider block latency, errors, bytes, and reconciliation scanned/protected/recent/deleted counts through local snapshots, tracing, and OTLP counters. [`docs/aws-s3-operations-runbook.md`](aws-s3-operations-runbook.md) defines the deployment handoff and drills. These are implementation surfaces only: exporter wiring, retry visibility, credential-expiry detection, cost/retention alerts, SLO thresholds, and exercised staging procedures remain deployment gates |
+| Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open; the S3 gateway exposes a bounded `S3Session::stats()` snapshot for latency, buffered and consumed streaming request/response bytes, operation counts, and authentication/conditional/throttling/client/server error classes. The immutable AWS/R2 block adapter now also exposes a bounded, clone-shared `R2BlockStore::stats()` snapshot for logical block operations, latency, bytes, conditional ID collisions, terminal retry-exhaustion markers, and bounded error classes. The public SDK's optional observability path records provider block latency, errors, bytes, and reconciliation scanned/protected/recent/deleted counts through local snapshots, tracing, and OTLP counters. [`docs/aws-s3-operations-runbook.md`](aws-s3-operations-runbook.md) defines the deployment handoff and drills. These are implementation surfaces only: exporter wiring, successful internal retry-attempt measurement, credential-expiry detection, cost/retention alerts, SLO thresholds, and exercised staging procedures remain deployment gates |
 | Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed current-source Standard scan `02d2c6eb-66e1-41f8-be59-d14aab9fde87` targets `4ebba4926045de28e9f03ac75b938947f4487a4b`, reports zero reportable findings across six W25 surfaces, and records partial coverage of a 650-file inventory. Its deferred non-W25 surfaces and external AWS/GitHub deployment state are not a production approval. Hosted run [`35629600687`](https://github.com/andymac4182/mount-rs/actions/runs/35629600687) at `62383df` passed provenance and synthetic contract suites, then safely stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS authentication and acceptance were skipped. OIDC/protected-environment setup, load/soak/fault/restore, canary, rollback, and post-deploy smoke remain open. Bounded publication, listing, quota/TTL, backing-file-aware staging cleanup, the explicit AWS client retry budget, and SDK diagnostic redaction have landed |
 
 The sealed Standard scan is current source-review evidence for the six W25
@@ -52,16 +52,17 @@ account, versioning, and role inputs were blank. This is a current safety
 refusal rather than an implementation failure or AWS acceptance result.
 
 The latest tested integrated repository boundary
-`984e070b1568e50c7e30962a7064049a7c95f846` passed formatting, the full locked
+`43a34d28c2173c2429bcfa1f653dd048dc150b22` passed formatting, the full locked
 offline workspace/all-target test gate with the required local loopback
 permission, and strict workspace Clippy with `-D warnings` on the explicitly
-isolated Cargo target `/private/tmp/mount-rs-w25-current-shared-gate`. The gate
-included the 18-case S3 gateway suite and the current W01/S3 source. The
-isolated target was used because concurrent worktrees share the normal Cargo
-target and can expose cross-worktree artifact races; this gate therefore binds
-to the checked-out source rather than another thread's compiled metadata.
-Ignored native/service rows remain explicit prerequisites and are not treated
-as production acceptance.
+isolated Cargo target `/private/tmp/mount-rs-w25-current-stats-gate`. The gate
+included the 9P loopback integration, the 16-case R2 provider suite including
+the bounded block-store diagnostics test, the 18-case S3 gateway suite, and
+the other non-ignored workspace rows. The isolated target was used because
+concurrent worktrees share the normal Cargo target and can expose cross-
+worktree artifact races; this gate therefore binds to the checked-out source
+rather than another thread's compiled metadata. Ignored native/service rows
+remain explicit prerequisites and are not treated as production acceptance.
 
 ## Deployment contract
 
@@ -145,6 +146,15 @@ recovery, DR, and operational sign-off remain open.
 - The current shared source `2101e5553e2594ce6e24aac6e28510cce2ec0b96` passed
   a fresh authorized `myroot` qualification on 2026-09-22 under
   `mount-rs-tests/aws-s3/20260921T180316Z-14071-597ad4c6c87b5c310fe02d98120c0036`:
+  sibling-prefix denial, public SDK/CLI self-test, composed AWS S3 filesystem,
+  process reopen, independent PGlite metadata, writer fencing, PGlite
+  backup/restore, fresh-server reopen, and exact owned-prefix cleanup all
+  passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted.
+  This remains qualification-account and local-metadata evidence only, not
+  production deployment acceptance.
+- The latest pushed source `870348184b5a047faea01f584a68cb961b34f810` passed a
+  fresh authorized `myroot` qualification on 2026-09-22 under
+  `mount-rs-tests/aws-s3/20260921T183403Z-86652-1728a866a9affcd4348775aa8416f075`:
   sibling-prefix denial, public SDK/CLI self-test, composed AWS S3 filesystem,
   process reopen, independent PGlite metadata, writer fencing, PGlite
   backup/restore, fresh-server reopen, and exact owned-prefix cleanup all
@@ -279,6 +289,11 @@ protected environment inputs/secret, `missing_github_oidc_provider`, and
 `role_missing_immutable_github_subject_trust`. It made no GitHub or AWS
 changes; hosted OIDC evidence remains blocked until the deployment owner
 configures and approves those controls.
+The latest read-only rerun at pushed source
+`9b5acfbac3d88d5f17a969defd447f5d44ee3023` on 2026-09-22 returned the same
+fail-closed blocker set and made no GitHub or AWS changes; hosted OIDC evidence
+remains blocked until the deployment owner configures and approves those
+controls.
 
 ## Rollout sequence
 
@@ -361,6 +376,12 @@ BucketOwnerEnforced ownership, AES256 encryption, `None` versioning, seven-day
 `mount-rs-tests/` lifecycle, and one-day incomplete-multipart abort checks. It
 made no AWS changes and remains qualification-account evidence only; the
 production bucket, policy, roles, and approved change set remain open.
+The latest read-only audit at pushed source
+`9b5acfbac3d88d5f17a969defd447f5d44ee3023` on 2026-09-22 repeated the same
+account/region, public-access, ownership, AES256 encryption, `None` versioning,
+seven-day lifecycle, and one-day incomplete-multipart abort controls without
+mutating AWS. It remains qualification-account evidence only; the production
+bucket, policy, roles, and approved change set remain open.
 The latest full integrated qualification is the current shared-source
 `2101e555` run recorded above. This is qualification-account evidence only;
 production
