@@ -1,21 +1,19 @@
 //! FoundationDB-backed `mount-rs` metadata and immutable block stores.
 //!
-//! The implementation is intentionally isolated from the core workspace until
-//! the workspace owner registers this crate. FoundationDB's native client
-//! network must be booted by the application before opening a database and the
-//! returned network guard must outlive every store handle.
+//! The provider is registered in the core workspace, but its native client is
+//! still opt-in. FoundationDB's native client network must be booted by the
+//! application before opening a database and the returned network guard must
+//! outlive every store handle.
 
-#![cfg(feature = "foundationdb")]
-
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "linux", target_arch = "aarch64"),
-    all(target_os = "macos", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64"),
-)))]
-compile_error!(
-    "mount-rs-foundationdb requires a FoundationDB native client on Linux x86_64/aarch64 or macOS x86_64/aarch64"
-);
+#![cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
 
 use async_trait::async_trait;
 use foundationdb::options::TransactionOption;

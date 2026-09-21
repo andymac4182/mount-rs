@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Verifying; local S3/R2 HTTP and configuration gates pass, but live provider acceptance is still credential-gated | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; standalone crate committed, root registration pending | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition passed; target-gated root member landed; production authority, consumer/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -881,9 +881,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 
 ## W07 — FoundationDB
 
-- [x] W07.1 Review the separate FoundationDB integration crate and commit its
-  provider/test harness. It remains a standalone package until target-gated root
-  registration is safe for Windows all-features CI.
+- [x] W07.1 Review and register the FoundationDB integration crate and its
+  provider/test harness as a target-gated root workspace member. The feature-off
+  package remains portable for client-free workspace and Windows all-features
+  checks; native FDB compilation remains opt-in on supported targets.
 - [x] W07.2 Finish isolated real FoundationDB client/server harness. Main ran
   the real pinned 7.4.7 Linux ARM64 server/client in Docker; the provider
   contract passed. The container supplies `fdb_c`; no host install or mock.
@@ -904,12 +905,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
-  FoundationDB service-restart evidence. FDB service restart, root integration,
-  and hosted composition coverage remain open; no emulated acceptance.
+  FoundationDB service-restart evidence. FDB service restart and hosted
+  composition coverage remain open; no emulated acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
-  restart, root-registration or hosted-composition boundaries above. The
+  restart or hosted-composition boundaries above. The
   published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
   fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
   handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
