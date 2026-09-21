@@ -3,10 +3,14 @@ import assert from "node:assert/strict"
 import { Filesystem, createWebdavServer } from "../index.js"
 
 const filesystem = Filesystem.memory()
+const requestErrors = []
 const server = createWebdavServer(filesystem, {
   host: "127.0.0.1",
   port: 0,
   readChunkBytes: 4 * 1024,
+  onError(error, head) {
+    requestErrors.push({ error, head })
+  },
 })
 const objects = Array.from({ length: 16 }, (_, index) =>
   Buffer.alloc(64 * 1024 + index, index),
@@ -84,6 +88,17 @@ try {
   assert.deepEqual(Buffer.from(await streamedGet.arrayBuffer()), streamedObject)
   assert.equal(server.session.stats.methods.get("PUT"), 17)
   assert.equal(server.session.stats.methods.get("GET"), 17)
+
+  const unsupported = await fetch(`${server.url}/concurrent-http/streamed.bin`, {
+    method: "PATCH",
+    signal: AbortSignal.timeout(10_000),
+  })
+  assert.equal(unsupported.status, 405)
+  await unsupported.arrayBuffer()
+  assert.equal(requestErrors.length, 1)
+  assert.ok(requestErrors[0].error instanceof Error)
+  assert.equal(requestErrors[0].head.method, "PATCH")
+  assert.equal(requestErrors[0].head.target, "/concurrent-http/streamed.bin")
 
   authServer = createWebdavServer(filesystem, {
     host: "127.0.0.1",
