@@ -1416,6 +1416,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   preserves the 30-second default, and validates the W04 policy value as a
   positive safe integer no greater than 24 hours. Focused CLI/SDK/provider-
   matrix tests and positive/negative credential-free policy fixtures pass;
+  current-tip hosted policy run `35641832862`, job `106472745045`, also passed
+  the bounded-TTL positive fixture and all three expected rejection markers;
   the deployment-specific TTL, provider-scope, persistence/rollback,
   observability, ownership, and release decision remain tracked as **NO-GO**
   in [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
