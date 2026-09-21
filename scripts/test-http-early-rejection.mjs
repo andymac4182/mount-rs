@@ -239,13 +239,20 @@ async function writeUntilEarlyResponse(request) {
       resolve(state);
     };
 
-    client.on("error", (error) => {
+    const handleRequestError = (error) => {
       if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
         state.requestError = error;
         return;
       }
       fail(error);
-    });
+    };
+
+    client.on("error", handleRequestError);
+    // On macOS, a peer that closes after the early response can surface the
+    // expected EPIPE on the underlying socket instead of the ClientRequest.
+    // Keep the same bounded handling on both event sources so the negative
+    // path remains strict for unexpected transport errors.
+    client.on("socket", (socket) => socket.on("error", handleRequestError));
 
     client.once("close", () => {
       state.requestClosed = true;

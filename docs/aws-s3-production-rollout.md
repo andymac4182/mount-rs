@@ -96,11 +96,11 @@ the retention period, and the encryption choice.
 
 The template defaults to BucketOwnerEnforced ownership, all four S3 public
 access blocks, versioning enabled, retained state on stack deletion or
-replacement, a one-day incomplete-multipart abort, and SSE-S3. It can select
+replacement, a one-day incomplete-multipart abort, and SSE-S3. Its bucket
+policy denies insecure transport for the bucket and every object key. It can select
 SSE-KMS and an optional customer-managed key ARN. The runtime role can list,
 read, and publish only objects below the owned prefix; version listing and
-deletion are reserved for the maintenance role. A bucket policy denies
-insecure transport.
+deletion are reserved for the maintenance role.
 
 The template was syntax-validated with the read-only AWS CloudFormation API on
 2026-09-21 and revalidated after tightening `OwnedPrefix` to reject empty and

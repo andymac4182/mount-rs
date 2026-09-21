@@ -1,0 +1,184 @@
+name: W08 release targets
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: w08-release-targets-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }} release target
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - label: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - name: Build and qualify release target
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+          TARGET_LABEL: ${{ matrix.label }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => { const m = JSON.parse(s); const p = m.packages.find((candidate) => candidate.name === "mount-rs-cli"); if (!p) process.exit(1); console.log(p.version); });')"
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$target" = "$EXPECTED_TARGET"
+          release_target="$RUNNER_TEMP/w08-release-target-$TARGET_LABEL"
+          release_dir="$RUNNER_TEMP/w08-release-artifact-$TARGET_LABEL"
+          mkdir -p "$release_dir"
+
+          CARGO_TARGET_DIR="$release_target" \
+            ./scripts/cargo-shared test --locked -p mount-rs-cli --all-targets
+          CARGO_TARGET_DIR="$release_target" \
+            ./scripts/cargo-shared build --locked --release -p mount-rs-cli
+
+          version_output="$release_target/release/mount-rs"
+          test "$("$version_output" --version)" = "mount-rs $package_version"
+          artifact="mount-rs-${package_version}-${target}.tar.gz"
+          cp "$version_output" "$release_dir/mount-rs"
+          chmod 755 "$release_dir/mount-rs"
+          COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" \
+            -C "$release_dir" mount-rs
+
+          node scripts/write-w08-release-manifest.mjs \
+            --artifact "$release_dir/$artifact" \
+            --output "$release_dir/release-manifest.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --version "$package_version" \
+            --tag "v${package_version}-cli-${TARGET_LABEL}" \
+            --target "$target" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --workflow-run-id "$GITHUB_RUN_ID"
+          node scripts/verify-w08-release-manifest.mjs \
+            "$release_dir/release-manifest.json" \
+            "$release_dir/$artifact"
+
+          cargo metadata --locked --format-version 1 > "$release_dir/cargo-metadata.json"
+          node scripts/write-w08-release-sbom.mjs \
+            --metadata "$release_dir/cargo-metadata.json" \
+            --output "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$release_dir/$artifact"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$release_dir/$artifact"
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$release_dir" && sha256sum "$artifact" release-manifest.json release-sbom.json > SHA256SUMS)
+            (cd "$release_dir" && sha256sum -c SHA256SUMS)
+          else
+            (cd "$release_dir" && shasum -a 256 "$artifact" release-manifest.json release-sbom.json > SHA256SUMS)
+            (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
+          fi
+
+          test "$(tar -tzf "$release_dir/$artifact")" = "mount-rs"
+          extracted_dir="$RUNNER_TEMP/w08-release-extracted-$TARGET_LABEL"
+          mkdir -p "$extracted_dir"
+          tar -xzf "$release_dir/$artifact" -C "$extracted_dir"
+          test "$("$extracted_dir/mount-rs" --version)" = "mount-rs $package_version"
+          echo "W08_RELEASE_TARGET_PASS target=$target artifact=$artifact package=$package_version"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: w08-release-target-${{ matrix.label }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/w08-release-artifact-${{ matrix.label }}/*.tar.gz
+            ${{ runner.temp }}/w08-release-artifact-${{ matrix.label }}/SHA256SUMS
+            ${{ runner.temp }}/w08-release-artifact-${{ matrix.label }}/release-manifest.json
+            ${{ runner.temp }}/w08-release-artifact-${{ matrix.label }}/release-sbom.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-download:
+    name: Verify downloaded ${{ matrix.label }} assets
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - label: macos-arm64
+            target: aarch64-apple-darwin
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Download target assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w08-release-target-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/w08-release-downloaded-${{ matrix.label }}
+
+      - name: Verify downloaded target assets
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+          TARGET_LABEL: ${{ matrix.label }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/w08-release-downloaded-$TARGET_LABEL"
+          artifact="$(find "$release_dir" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          test -n "$artifact"
+          package_version="$(node -e 'const manifest = require(process.argv[1]); console.log(manifest.version)' "$release_dir/release-manifest.json")"
+          target="$(node -e 'const manifest = require(process.argv[1]); console.log(manifest.target)' "$release_dir/release-manifest.json")"
+          test "$target" = "$EXPECTED_TARGET"
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd "$release_dir" && sha256sum -c SHA256SUMS)
+          else
+            (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
+          fi
+          node scripts/verify-w08-release-manifest.mjs \
+            "$release_dir/release-manifest.json" \
+            "$artifact"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$artifact"
+          test "$(tar -tzf "$artifact")" = "mount-rs"
+          echo "W08_RELEASE_TARGET_DOWNLOAD_PASS target=$target artifact=$(basename "$artifact") package=$package_version"

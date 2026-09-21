@@ -111,7 +111,7 @@ Resources:
             Action: s3:*
             Resource:
               - !GetAtt MountRsBucket.Arn
-              - !Sub '${MountRsBucket.Arn}/${OwnedPrefix}/*'
+              - !Sub '${MountRsBucket.Arn}/*'
             Condition:
               Bool:
                 aws:SecureTransport: false

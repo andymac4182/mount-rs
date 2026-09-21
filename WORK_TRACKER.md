@@ -1932,8 +1932,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
-  role are test resources, so production resource review remains open. The
-  A fresh read-only resource audit rerun on 2026-09-22 at audit commit
+  role are test resources, so production resource review remains open. A
+  fresh read-only resource audit rerun on 2026-09-22 at audit commit
   `2f13354` also passed the account/region binding, all four public-access
   blocks, BucketOwnerEnforced ownership, AES256 encryption, seven-day
   lifecycle, and one-day incomplete-multipart abort checks for that
@@ -1949,7 +1949,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   closed on inherited endpoint/service-profile
   overrides, requires an expected caller account, and verifies bucket
   location before reporting controls; approved production parameters, role
-  trust, change-set review, and live production audit remain open.
+  trust, change-set review, and live production audit remain open. The bucket
+  policy transport-deny resource now covers every object key in the bucket,
+  not only the owned prefix; the revised template passed the read-only
+  CloudFormation validation API on 2026-09-22 without creating a stack or
+  change set.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
