@@ -1,9 +1,14 @@
-use mount_rs_core::{FsDriver, MemoryFs};
+use async_trait::async_trait;
+use mount_rs_core::{
+    Capabilities, DirEntry, FileHandle, FsDriver, FsError, MemoryFs, Result, S_IFREG, Stats,
+};
 use mount_rs_fuse::{
     RequestHeader,
     constants::{
-        FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_INTERRUPT, FUSE_IOCTL,
-        FUSE_LSEEK, FUSE_POLL, FUSE_RENAME2, FUSE_STATFS,
+        FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_INTERRUPT,
+        FUSE_IOCTL, FUSE_LINK, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_POLL,
+        FUSE_READLINK, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_STATFS, FUSE_SYMLINK,
+        FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::FuseSession,
@@ -32,14 +37,62 @@ fn frame_with_credentials(opcode: u32, nodeid: u64, body: &[u8], uid: u32, gid: 
 fn number(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }
+fn errno(bytes: &[u8]) -> i32 {
+    i32::from_le_bytes(bytes[4..8].try_into().unwrap())
+}
+fn name_body(name: &str) -> Vec<u8> {
+    let mut body = name.as_bytes().to_vec();
+    body.push(0);
+    body
+}
+fn mknod_body(mode: u32, dev: u32, name: &str) -> Vec<u8> {
+    let mut body = vec![0; 16];
+    body[..4].copy_from_slice(&mode.to_le_bytes());
+    body[4..8].copy_from_slice(&dev.to_le_bytes());
+    body.extend(name_body(name));
+    body
+}
+fn mkdir_body(mode: u32, name: &str) -> Vec<u8> {
+    let mut body = vec![0; 8];
+    body[..4].copy_from_slice(&mode.to_le_bytes());
+    body.extend(name_body(name));
+    body
+}
+fn symlink_body(name: &str, target: &str) -> Vec<u8> {
+    let mut body = name_body(name);
+    body.extend(name_body(target));
+    body
+}
+fn rename_body(newdir: u64, old: &str, new: &str) -> Vec<u8> {
+    let mut body = newdir.to_le_bytes().to_vec();
+    body.extend(name_body(old));
+    body.extend(name_body(new));
+    body
+}
+fn link_body(oldnodeid: u64, name: &str) -> Vec<u8> {
+    let mut body = oldnodeid.to_le_bytes().to_vec();
+    body.extend(name_body(name));
+    body
+}
+fn access_body(mask: u32) -> Vec<u8> {
+    let mut body = mask.to_le_bytes().to_vec();
+    body.extend([0; 4]);
+    body
+}
+async fn negotiate(session: &mut FuseSession) {
+    if session.negotiated.is_some() {
+        return;
+    }
+    let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
+        .into_iter()
+        .flat_map(u32::to_le_bytes)
+        .collect();
+    let reply = session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
+    assert_eq!(&reply[4..8], &[0; 4]);
+}
 async fn request(session: &mut FuseSession, op: u32, node: u64, body: &[u8]) -> Vec<u8> {
     if session.negotiated.is_none() && op != 26 {
-        let init: Vec<u8> = [7u32, 41, 65536, u32::MAX, u32::MAX]
-            .into_iter()
-            .flat_map(u32::to_le_bytes)
-            .collect();
-        let reply = session.handle(&frame(26, 0, &init)).await.unwrap().unwrap();
-        assert_eq!(&reply[4..8], &[0; 4]);
+        negotiate(session).await;
     }
     let reply = session
         .handle(&frame(op, node, body))
@@ -53,6 +106,46 @@ async fn request(session: &mut FuseSession, op: u32, node: u64, body: &[u8]) -> 
         reply.len()
     );
     reply[16..].to_vec()
+}
+async fn failed_request(session: &mut FuseSession, op: u32, node: u64, body: &[u8]) -> i32 {
+    negotiate(session).await;
+    let reply = session
+        .handle(&frame(op, node, body))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(number(&reply, 8), 42);
+    assert_eq!(reply.len(), 16);
+    errno(&reply)
+}
+
+struct NoMknodDriver {
+    inner: Arc<MemoryFs>,
+}
+
+#[async_trait]
+impl FsDriver for NoMknodDriver {
+    fn capabilities(&self) -> Capabilities {
+        let mut capabilities = self.inner.capabilities();
+        capabilities.mknod = false;
+        capabilities
+    }
+
+    async fn stat(&self, path: &str) -> Result<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn mknod(&self, _path: &str, _mode: u32, _dev: u64) -> Result<()> {
+        Err(FsError::enosys("mknod"))
+    }
 }
 
 #[tokio::test]
@@ -76,14 +169,257 @@ async fn lifecycle_requires_handshake_and_rejects_requests_after_destroy() {
 }
 
 #[tokio::test]
+async fn simple_namespace_operations_roundtrip_and_cleanup_inode_paths() {
+    let fs = Arc::new(MemoryFs::empty());
+    let mut session = FuseSession::new(fs.clone());
+
+    let directory = number(
+        &request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o750, "dir")).await,
+        0,
+    );
+    let target = number(
+        &request(
+            &mut session,
+            FUSE_MKNOD,
+            1,
+            &mknod_body(S_IFREG | 0o640, 0x1234, "target"),
+        )
+        .await,
+        0,
+    );
+    let symlink = number(
+        &request(
+            &mut session,
+            FUSE_SYMLINK,
+            directory,
+            &symlink_body("alias", "../target"),
+        )
+        .await,
+        0,
+    );
+    assert_eq!(
+        request(&mut session, FUSE_READLINK, symlink, &[]).await,
+        b"../target"
+    );
+
+    let hardlink = request(
+        &mut session,
+        FUSE_LINK,
+        1,
+        &link_body(target, "target-hard"),
+    )
+    .await;
+    assert_eq!(number(&hardlink, 0), target);
+    assert_eq!(fs.stat("/target").await.unwrap().nlink, 2);
+
+    request(
+        &mut session,
+        FUSE_RENAME,
+        1,
+        &rename_body(1, "dir", "moved"),
+    )
+    .await;
+    assert_eq!(session.inodes.require_path(directory).unwrap(), "/moved");
+    assert_eq!(
+        session.inodes.require_path(symlink).unwrap(),
+        "/moved/alias"
+    );
+    assert!(fs.lstat("/moved/alias").await.is_ok());
+
+    assert_eq!(
+        failed_request(&mut session, FUSE_RMDIR, 1, &name_body("moved")).await,
+        -39
+    );
+    assert!(session.inodes.at("/moved").is_some());
+
+    request(&mut session, FUSE_UNLINK, 1, &name_body("target-hard")).await;
+    assert!(session.inodes.at("/target-hard").is_none());
+    assert_eq!(fs.stat("/target").await.unwrap().nlink, 1);
+
+    request(&mut session, FUSE_UNLINK, directory, &name_body("alias")).await;
+    assert!(session.inodes.at("/moved/alias").is_none());
+    assert!(session.inodes.get(symlink).unwrap().paths.is_empty());
+
+    request(&mut session, FUSE_RMDIR, 1, &name_body("moved")).await;
+    assert!(fs.lstat("/moved").await.is_err());
+    assert!(session.inodes.at("/moved").is_none());
+    assert!(session.inodes.get(directory).unwrap().paths.is_empty());
+}
+
+#[tokio::test]
+async fn simple_namespace_errors_preserve_backend_and_inode_state() {
+    let fs = Arc::new(MemoryFs::empty());
+    let mut session = FuseSession::new(fs.clone());
+    let directory = number(
+        &request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o755, "dir")).await,
+        0,
+    );
+    let file = number(
+        &request(
+            &mut session,
+            FUSE_MKNOD,
+            1,
+            &mknod_body(S_IFREG | 0o644, 0, "file"),
+        )
+        .await,
+        0,
+    );
+    request(
+        &mut session,
+        FUSE_MKNOD,
+        directory,
+        &mknod_body(S_IFREG | 0o600, 0, "child"),
+    )
+    .await;
+
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_SYMLINK,
+            1,
+            &symlink_body("file", "target")
+        )
+        .await,
+        -17
+    );
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_MKNOD,
+            1,
+            &mknod_body(S_IFREG | 0o600, 0, "file"),
+        )
+        .await,
+        -17
+    );
+    assert_eq!(
+        failed_request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o755, "dir")).await,
+        -17
+    );
+    assert_eq!(
+        failed_request(&mut session, FUSE_UNLINK, 1, &name_body("dir")).await,
+        -21
+    );
+    assert_eq!(
+        failed_request(&mut session, FUSE_RMDIR, 1, &name_body("file")).await,
+        -20
+    );
+    assert_eq!(
+        failed_request(&mut session, FUSE_RMDIR, 1, &name_body("dir")).await,
+        -39
+    );
+    assert_eq!(
+        failed_request(&mut session, FUSE_UNLINK, 1, &name_body("missing")).await,
+        -2
+    );
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_RENAME,
+            1,
+            &rename_body(1, "missing", "new")
+        )
+        .await,
+        -2
+    );
+    assert_eq!(
+        failed_request(&mut session, FUSE_LINK, 1, &link_body(u64::MAX, "alias")).await,
+        -116
+    );
+
+    assert!(fs.lstat("/dir").await.is_ok());
+    assert!(fs.lstat("/dir/child").await.is_ok());
+    assert!(fs.lstat("/file").await.is_ok());
+    assert!(fs.lstat("/new").await.is_err());
+    assert!(session.inodes.at("/dir").is_some());
+    assert!(session.inodes.at("/dir/child").is_some());
+    assert_eq!(session.inodes.require_path(file).unwrap(), "/file");
+}
+
+#[tokio::test]
+async fn mknod_falls_back_only_for_regular_files_without_driver_support() {
+    let fs = Arc::new(MemoryFs::empty());
+    let driver = Arc::new(NoMknodDriver { inner: fs.clone() });
+    let mut session = FuseSession::new(driver);
+
+    let regular = request(
+        &mut session,
+        FUSE_MKNOD,
+        1,
+        &mknod_body(S_IFREG | 0o600, 0, "regular"),
+    )
+    .await;
+    assert_eq!(
+        number(&regular, 0),
+        session.inodes.at("/regular").unwrap().nodeid
+    );
+    assert_eq!(fs.lstat("/regular").await.unwrap().mode & 0o7777, 0o600);
+
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_MKNOD,
+            1,
+            &mknod_body(0o010_600, 0x22, "fifo"),
+        )
+        .await,
+        -38
+    );
+    assert!(fs.lstat("/fifo").await.is_err());
+    assert!(session.inodes.at("/fifo").is_none());
+}
+
+#[tokio::test]
+async fn namespace_name_limit_matches_statfs_and_rejects_long_frames() {
+    let fs = Arc::new(MemoryFs::empty());
+    let mut session = FuseSession::new(fs.clone());
+    let maximum = "m".repeat(255);
+    request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o755, &maximum)).await;
+    assert!(fs.lstat(&format!("/{maximum}")).await.is_ok());
+
+    let file = number(
+        &request(
+            &mut session,
+            FUSE_MKNOD,
+            1,
+            &mknod_body(S_IFREG | 0o600, 0, "file"),
+        )
+        .await,
+        0,
+    );
+    let too_long = "n".repeat(256);
+    let cases = [
+        (FUSE_LOOKUP, 1, name_body(&too_long)),
+        (FUSE_SYMLINK, 1, symlink_body(&too_long, "target")),
+        (FUSE_MKNOD, 1, mknod_body(S_IFREG | 0o600, 0, &too_long)),
+        (FUSE_MKDIR, 1, mkdir_body(0o755, &too_long)),
+        (FUSE_UNLINK, 1, name_body(&too_long)),
+        (FUSE_RMDIR, 1, name_body(&too_long)),
+        (FUSE_RENAME, 1, rename_body(1, &too_long, "new")),
+        (FUSE_LINK, 1, link_body(file, &too_long)),
+    ];
+    for (opcode, nodeid, body) in cases {
+        assert_eq!(
+            failed_request(&mut session, opcode, nodeid, &body).await,
+            -36,
+            "opcode {opcode}"
+        );
+    }
+    assert!(fs.lstat("/new").await.is_err());
+    assert!(session.inodes.at("/new").is_none());
+    assert!(session.inodes.at(&format!("/{too_long}")).is_none());
+}
+
+#[tokio::test]
 async fn access_dispatch_checks_credentials_and_fixed_wire_mask() {
     let fs = Arc::new(MemoryFs::empty());
     let file = fs.open("/owned", "w", 0o640).await.unwrap();
     file.close().await.unwrap();
     fs.chown("/owned", 1000, 2000).await.unwrap();
     fs.chmod("/owned", 0o640).await.unwrap();
+    fs.symlink("owned", "/alias").await.unwrap();
 
-    let mut session = FuseSession::new(fs);
+    let mut session = FuseSession::new(fs.clone());
     let inode = number(&request(&mut session, 1, 1, b"owned\0").await, 0);
     let access = |mask: u32| {
         let mut body = mask.to_le_bytes().to_vec();
@@ -124,6 +460,46 @@ async fn access_dispatch_checks_credentials_and_fixed_wire_mask() {
         i32::from_le_bytes(invalid_mask[4..8].try_into().unwrap()),
         -22
     );
+
+    let alias = number(&request(&mut session, FUSE_LOOKUP, 1, b"alias\0").await, 0);
+    let through_symlink = session
+        .handle(&frame_with_credentials(
+            FUSE_ACCESS,
+            alias,
+            &access_body(6),
+            1000,
+            2000,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&through_symlink[4..8], &[0; 4]);
+
+    fs.chmod("/owned", 0o600).await.unwrap();
+    let root_read = session
+        .handle(&frame_with_credentials(
+            FUSE_ACCESS,
+            inode,
+            &access_body(4),
+            0,
+            0,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&root_read[4..8], &[0; 4]);
+    let root_execute = session
+        .handle(&frame_with_credentials(
+            FUSE_ACCESS,
+            inode,
+            &access_body(1),
+            0,
+            0,
+        ))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&root_execute), -13);
 }
 
 #[tokio::test]

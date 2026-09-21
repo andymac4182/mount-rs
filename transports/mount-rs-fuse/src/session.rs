@@ -20,6 +20,8 @@ use std::{collections::HashMap, sync::Arc};
 
 type DirectorySnapshot = Option<Vec<(String, u32)>>;
 const FUSE_IOCTL_IN_SIZE: usize = 32;
+// Keep path-component validation aligned with the `namelen` in STATFS.
+const NAME_MAX: usize = 255;
 
 async fn stat_of(driver: &dyn FsDriver, path: &str) -> Result<Stats> {
     match driver.lstat(path).await {
@@ -261,6 +263,10 @@ impl FuseSession {
     fn child(&self, parent: u64, name: &str) -> Result<String> {
         if name.is_empty() || name.contains('/') || name == "." || name == ".." {
             return Err(FsError::new(ErrorCode::Einval));
+        }
+        // `str::len()` counts UTF-8 bytes, which is the POSIX limit here.
+        if name.len() > NAME_MAX {
+            return Err(FsError::new(ErrorCode::Enametoolong));
         }
         Ok(format!(
             "{}/{name}",
@@ -657,7 +663,7 @@ impl FuseSession {
                         files: stats.files,
                         ffree: stats.files_free,
                         bsize: block,
-                        namelen: 255,
+                        namelen: NAME_MAX as u32,
                         frsize: block,
                     }),
                     self.protocol_context(),
