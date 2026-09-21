@@ -80,6 +80,13 @@ A fresh current-source rerun at `3fca802` passed the same CLI, composed,
 process-reopen, independent-PGlite, fencing, restore/reopen, and exact cleanup
 gates under
 `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
+The latest integrated qualification at audit commit `d7ccdc7` passed the same
+scoped-role, public SDK/CLI, composed filesystem, process-reopen, independent
+PGlite, fencing, restore/reopen, and exact cleanup gates under
+`mount-rs-tests/aws-s3/20260921T152108Z-66596-90bba238142882ef153e6e3c246d0003`;
+the same source's read-only resource audit passed the account/region,
+public-access, ownership, encryption, versioning, lifecycle, and multipart-
+abort checks.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
@@ -106,8 +113,9 @@ deletion are reserved for the maintenance role.
 
 The template was syntax-validated with the read-only AWS CloudFormation API on
 2026-09-21 and revalidated after tightening `OwnedPrefix` to reject empty and
-dot components on 2026-09-22; no stack or change set was created. Validation
-does not approve
+dot components, widening the transport deny to all object keys, and expiring
+noncurrent versions on 2026-09-22; no stack or change set was created.
+Validation does not approve
 the production parameters, role trust policies, metadata topology, backup
 plan, or deployment promotion. Those remain W25.5-W25.9 gates.
 
