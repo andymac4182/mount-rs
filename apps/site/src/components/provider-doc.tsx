@@ -406,7 +406,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
     name: 'RustFS',
     eyebrow: 'Provider / local S3-compatible service',
     maturity: 'Validated',
-    maturityNote: 'Pinned service contract, restart, CAS, range, hosted RustFS checks, and real FoundationDB/TiDB composition checkpoints passed; replicated topology and broader consumer coverage remain open.',
+    maturityNote: 'Pinned service contract, restart, CAS, range, hosted RustFS checks, and real FoundationDB/TiDB composition checkpoints passed; bounded TiDB/RustFS Node and CLI configuration gates are wired, while replicated topology and credential-gated live consumer coverage remain open.',
     summary: (
       <>
         RustFS is the reproducible local/CI S3-compatible service used to
@@ -469,7 +469,9 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
         replicated-durability evidence. TiDB/FoundationDB composition passed
         bounded single-node checkpoints, while replicated topology, provider
         restart promotion, broader CLI/Node coverage, and release
-        qualification remain tracked separately.
+        qualification remain tracked separately. The TiDB/RustFS consumer rows
+        require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS credentials;
+        without them, those rows remain explicit skips.
       </>
     ),
     evidence: (
@@ -478,14 +480,21 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
         SQLite and PGlite metadata compositions, N-API factories, remote CLI
         HTTP reopen, SQLite VFS over RustFS blocks, fault recovery, service
         restart/reopen, and the RustFS benchmark. FoundationDB and TiDB mixed
-        provider runs also passed, with TiDB limited to single-node v8.5.7.
-        The maturity label is scoped to these service paths, not every
-        S3-compatible server or a replicated production topology.
+        provider runs also passed, with TiDB limited to single-node v8.5.7. The
+        bounded consumer slice now wires TiDB metadata with RustFS/S3-compatible
+        <code>r2</code> blocks through the public Rust SDK, N-API, and both
+        CLIs, covering configuration, partial write, truncate, shutdown/reopen,
+        and owned-prefix cleanup. Its local matrix records Node
+        <code>pass=4 skip=3 fail=0</code> and CLI
+        <code>pass=10 skip=3 fail=0</code>; live mixed-store rows remain
+        credential-gated. The maturity label is scoped to these service paths,
+        not every S3-compatible server or a replicated production topology.
       </>
     ),
     sources: [
       { label: 'RustFS requirements and harness boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/REQUIREMENTS.md#rustfs-integration-test-service' },
       { label: 'RustFS evidence in the tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w06--rustfs-integration-service' },
+      { label: 'TiDB/RustFS consumer matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w08--tidb' },
     ],
   },
   tidb: {
@@ -493,7 +502,7 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     name: 'TiDB',
     eyebrow: 'Provider / distributed SQL',
     maturity: 'Experimental',
-    maturityNote: 'Provider and single-node ARM64 checks exist; durable topology and mixed-store acceptance remain open.',
+    maturityNote: 'Provider and single-node ARM64 checks exist; bounded Node and CLI consumer matrices are wired, while live credential-gated rows, durable topology, and native/hosted acceptance remain open.',
     summary: (
       <>
         TiDB can supply either side of the split store using the MySQL wire
@@ -555,22 +564,30 @@ LIMIT 20;`,
     limitations: (
       <>
         A MySQL-compatible server is not TiDB acceptance. The durable 3PD/3TiKV
-        topology and provider restart promotion remain capacity-gated, while
-        Node, CLI, native-mount, and hosted restart coverage remain open.
+        topology and provider restart promotion remain capacity-gated. A bounded
+        Node/CLI consumer slice now covers configuration, partial write,
+        truncate, shutdown/reopen, and owned RustFS-prefix cleanup, but native
+        mount and hosted restart coverage remain open. Its live TiDB/RustFS
+        rows require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS
+        credentials.
       </>
     ),
     evidence: (
       <>
         The real single-node v8.5.7 service run passed TiDB metadata/block
         composition with durable-scope checks, block-absence assertions,
-        metadata-row cleanup, and symlink-path rejection. The maturity label
-        stays Experimental until replicated/durable topology and broader
-        consumer gates are complete.
+        metadata-row cleanup, and symlink-path rejection. The bounded consumer
+        matrix records Node <code>pass=4 skip=3 fail=0</code> and CLI
+        <code>pass=10 skip=3 fail=0</code>; its live TiDB/RustFS rows are
+        explicit credential-gated skips. The maturity label stays Experimental
+        until replicated/durable topology and broader consumer gates are
+        complete.
       </>
     ),
     sources: [
       { label: 'TiDB provider README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-tidb/README.md' },
       { label: 'TiDB provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-tidb/src/storage.rs' },
+      { label: 'TiDB/RustFS consumer matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w08--tidb' },
     ],
   },
   foundationdb: {
@@ -760,7 +777,7 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway block/restart checkpoint; mixed stores and hosted topology remain open.',
+    maturityNote: 'Pinned 2.2.1 gateway block/restart checkpoint; a dedicated hosted SQLite/PGlite composition job is wired, but its result, mixed stores, and hosted topology remain open.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -821,22 +838,28 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
     ),
     limitations: (
       <>
-        Hosted Linux-amd64 results, mixed metadata-provider composition, and
-        Node/CLI acceptance remain open. The non-secure all-in-one service is
-        loopback-only and is not production authentication or durability
-        evidence.
+        Hosted Linux-amd64 results and the dedicated
+        <code>ozone-compositions</code> job result remain open. Node/CLI
+        acceptance and mixed TiDB/FoundationDB stores also remain open. The
+        non-secure all-in-one service is loopback-only and is not production
+        authentication or durability evidence; the CI composition job covers
+        SQLite/PGlite only and does not imply TiDB/FoundationDB coverage.
       </>
     ),
     evidence: (
       <>
         The current maturity is Experimental: the real gateway harness has a
-        meaningful block/restart checkpoint, but the broader backend matrix and
-        deployment topology are not yet accepted.
+        meaningful block/restart checkpoint. A dedicated hosted
+        <code>ozone-compositions</code> job now installs PGlite and runs the
+        real SQLite/PGlite mixed-metadata gate; its result is still pending, so
+        the broader backend matrix and deployment topology are not yet
+        accepted.
       </>
     ),
     sources: [
       { label: 'Ozone acceptance requirements', href: 'https://github.com/andymac4182/mount-rs/blob/main/REQUIREMENTS.md#apache-ozone-backend-acceptance' },
       { label: 'Ozone workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w26--apache-ozone-s3-backend' },
+      { label: 'Ozone composition CI job', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

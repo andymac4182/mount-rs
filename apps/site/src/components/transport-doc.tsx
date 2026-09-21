@@ -86,7 +86,8 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>UNLINK</code>, <code>RMDIR</code>, <code>RENAME</code>,
         <code>LINK</code>, <code>ACCESS</code>,
         <code>BATCH_FORGET</code>, <code>INTERRUPT</code>, <code>POLL</code>,
-        <code>FALLOCATE</code>, <code>RENAME2</code>, <code>LSEEK</code>, and
+        <code>FALLOCATE</code>, <code>RENAME2</code>, <code>LSEEK</code>,
+        <code>GETLK</code>/<code>SETLK</code>/<code>SETLKW</code>, and
         <code>COPY_FILE_RANGE</code>, <code>RELEASE</code>/<code>RELEASEDIR</code>,
         <code>FLUSH</code>, and <code>FSYNC</code>/<code>FSYNCDIR</code> bodies,
         plus <code>SETXATTR</code>/<code>GETXATTR</code>/<code>LISTXATTR</code>/
@@ -128,6 +129,12 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>BMAP</code> request/reply bodies are now covered by pinned-oracle
         differentials as well; these remain focused codecs rather than a full
         native session. The latest packet also adds typed
+        <code>GETLK</code>/<code>SETLK</code>/<code>SETLKW</code> request codecs
+        and the typed <code>GETLK</code> reply. Its pinned-oracle differential
+        covers the 48-byte request, 24-byte reply, truncation, trailing-byte,
+        and empty status-reply boundaries; generated bindings, declarations,
+        typecheck, release build, and the full N-API suite passed. Native FUSE
+        lock/session semantics remain open. The latest packet also adds typed
         <code>SYMLINK</code>, <code>MKNOD</code>, <code>MKDIR</code>,
         <code>UNLINK</code>, <code>RMDIR</code>, <code>RENAME</code>,
         <code>RENAME2</code>, <code>LINK</code>, <code>ACCESS</code>,
@@ -465,13 +472,19 @@ curl -H 'Authorization: Bearer demo-memory' \
         caller-owned telemetry handle through
         <code>HttpServerOptions::with_telemetry</code>; the OTLP variant accepts
         only W3C trace propagation and emits bounded operation metadata without
-        paths, tokens, file contents, block IDs, or arbitrary headers. Collector
-        reachability and broader multi-drive and hosted coverage remain open.
+        paths, tokens, file contents, block IDs, or arbitrary headers. The
+        macOS arm64 W30.5 loopback collector test now receives non-empty
+        <code>/v1/traces</code>, <code>/v1/metrics</code>, and
+        <code>/v1/logs</code> payloads without raw path bytes, and the HTTP
+        observability integration gate recorded 7 passes. This verifies the
+        local exporter/collector boundary; external collector reachability and
+        broader multi-drive and hosted coverage remain open.
       </>
     ),
     sources: [
       { label: 'HTTP transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/README.md' },
       { label: 'HTTP observability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/observability.md' },
+      { label: 'Observability platform qualification', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w30.5-platform-qualification.md' },
       { label: 'HTTP server options and telemetry seam', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-http/src/server.rs' },
       { label: 'CLI HTTP example', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#quick-local-demo' },
     ],
