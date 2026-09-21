@@ -78,9 +78,16 @@ async fn real_ozone_block_contract() {
             .collect::<Vec<_>>();
         let first_id = blocks.put(&payload).await.unwrap();
         let second_id = blocks.put(&payload).await.unwrap();
-        assert_ne!(
+        assert_eq!(
             first_id, second_id,
-            "immutable block publication reused an ID"
+            "identical immutable block bytes must reuse their content-addressed ID"
+        );
+        let mut different_payload = payload.clone();
+        different_payload[0] ^= 1;
+        let different_id = blocks.put(&different_payload).await.unwrap();
+        assert_ne!(
+            first_id, different_id,
+            "different immutable block bytes must not share an ID"
         );
         assert_eq!(blocks.get(&first_id).await.unwrap(), payload);
         blocks.flush().await.unwrap();
