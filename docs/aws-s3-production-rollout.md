@@ -38,14 +38,17 @@ then safely refused the unconfigured protected environment with
 completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
-The latest tested repository boundary `daf2a51` passed formatting, the full
-locked offline workspace test gate, and strict workspace Clippy with
-`-D warnings` on an explicitly isolated Cargo target. The isolated target was
-used because concurrent worktrees share the normal Cargo target and can expose
-cross-worktree artifact races; this gate therefore binds to the checked-out
-source rather than another thread's compiled metadata.
-Ignored native/service rows remain explicit prerequisites and are not treated
-as production acceptance.
+The current integrated repository boundary `75b900f3f25923eed5b30792dab08c7e9a748158`
+passed formatting, the full locked offline workspace test gate, and strict
+workspace Clippy with `-D warnings` on an explicitly isolated Cargo target
+after rebasing onto `origin/main`. The first unprivileged test attempt was
+refused only because the sandbox denied the 9P loopback listener; the same
+command rerun with the required local-network permission passed. The isolated
+target was used because concurrent worktrees share the normal Cargo target and
+can expose cross-worktree artifact races; this gate therefore binds to the
+checked-out source rather than another thread's compiled metadata. Ignored
+native/service rows remain explicit prerequisites and are not treated as
+production acceptance.
 
 ## Deployment contract
 
@@ -215,7 +218,7 @@ federation grants. It never reads secret values or mutates GitHub or AWS. The
 current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
-result. The fresh read-only audit on 2026-09-22 returned
+result. The fresh read-only audit at current source `32b0609` on 2026-09-22 returned
 `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
 non-self-approvable reviewer, protected-environment inputs and secret, missing
 GitHub OIDC provider, and missing immutable-subject role trust; it made no
@@ -289,7 +292,7 @@ prefix-scoped runtime and maintenance statements from the reviewable
 CloudFormation contract. It never prints the policy or role values and fails
 closed when the bucket policy is absent or differs from that contract.
 
-The latest read-only qualification-bucket audit at pushed head `74b5150`
+The latest read-only qualification-bucket audit at current source `32b0609`
 passed in account `922978963556` with the expected versioning status `None`,
 alongside the existing public-access, ownership, encryption, lifecycle, and
 multipart-abort checks. It did not mutate the bucket or rerun the full service

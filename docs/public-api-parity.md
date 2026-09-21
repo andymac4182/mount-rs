@@ -225,6 +225,11 @@ Current focused behavior:
   `Duplex`; the supported Node stream-injection boundary is `attach`.
   The public `peer` type retains the native listener's `null` absence while
   allowing the attached-stream contract's `undefined` absence.
+- The supported N-API P9 session boundary is intentionally smaller than the
+  oracle's internal/debug surface: direct calls, destroy, stats, lifecycle,
+  clients, connection identity, and attached streams are exposed; mutable
+  driver/options/fid/lock maps, `userFor`, assertions, debug hooks, and other
+  upstream implementation helpers are not exposed or claimed for parity.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
@@ -294,8 +299,8 @@ accepts async-iterable or Web ReadableStream request bodies and returns a
 pull-based response iterator; the session also exposes read-only active lock
 records with expiry cleanup. The direct probe covers the class 1/2/3 method
 matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
-return, deliberate request-body failure mapping, and one typed peer-aware
-callback from a Node socket reset. The
+return, deliberate request-body failure mapping, one typed peer-aware callback
+from a Node socket reset, and one malformed-HTTP callback. The
 pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
 provider/native, restart, and complete member-parity gates remain open.
 

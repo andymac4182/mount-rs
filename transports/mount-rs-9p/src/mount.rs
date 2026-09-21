@@ -186,6 +186,8 @@ impl P9Mount {
     }
 
     /// Wait until the kernel connection ends and server resources are released.
+    /// This does not detach a still-live kernel mount; call [`P9Mount::unmount`]
+    /// after a server-close or EOF path when the mount itself must be removed.
     pub async fn wait_closed(&self) {
         self.connection.wait_closed().await;
         self.state.stopping.store(true, Ordering::Release);
@@ -201,8 +203,10 @@ impl P9Mount {
         self.wait_completion().await;
     }
 
-    /// Unmount idempotently. A failed unmount leaves the server alive so the
-    /// operation can be retried, matching the upstream lifecycle contract.
+    /// Unmount idempotently, including after [`P9Mount::wait_closed`] has
+    /// released the server resources. A failed unmount leaves the server alive
+    /// so the operation can be retried, matching the upstream lifecycle
+    /// contract.
     pub async fn unmount(&self) -> io::Result<()> {
         let _unmount = self.state.unmount_lock.lock().await;
         self.state.stopping.store(true, Ordering::Release);
