@@ -96,6 +96,15 @@ await assert.rejects(
 assert.equal((await bounded.readdirBounded("/", 3)).length, 3)
 await bounded.shutdown()
 
+const legacyStore = makeStore()
+delete legacyStore.getKeysBounded
+const legacy = createUnstorageDriver(legacyStore)
+await assert.rejects(
+  () => legacy.readdirBounded("/", 2),
+  (error) => error.code === "ENOTSUP",
+)
+await legacy.shutdown()
+
 const readOnly = createUnstorageDriver(store, { readOnly: true })
 assert.equal(readOnly.capabilities.readOnly, true)
 await assert.rejects(
