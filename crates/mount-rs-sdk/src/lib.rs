@@ -5,6 +5,7 @@
 //! filesystem, compose independent metadata/block providers, access the
 //! shared [`mount_rs_core::FsDriver`] contract, and finish provider cleanup.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,7 +57,7 @@ pub use mount_rs_observability::{
 /// Credentials are passed as values by the application. Configuration files
 /// and CLIs should resolve environment references before constructing this
 /// value so the SDK never needs to know about a configuration-file schema.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum StoreConfig {
     Memory,
     Sqlite {
@@ -94,6 +95,77 @@ pub enum StoreConfig {
         prefix: String,
         durable: bool,
     },
+}
+
+impl fmt::Debug for StoreConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Memory => formatter.write_str("Memory"),
+            Self::Sqlite { path } => formatter
+                .debug_struct("Sqlite")
+                .field("path", path)
+                .finish(),
+            Self::Pglite {
+                connection: _,
+                volume_key,
+                durable,
+            } => formatter
+                .debug_struct("Pglite")
+                .field("connection", &"<redacted>")
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .finish(),
+            Self::Tidb {
+                connection: _,
+                volume_key,
+                durable,
+            } => formatter
+                .debug_struct("Tidb")
+                .field("connection", &"<redacted>")
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .finish(),
+            Self::FoundationDb {
+                cluster_file,
+                volume_key,
+                durable,
+                lease_authority,
+            } => formatter
+                .debug_struct("FoundationDb")
+                .field("cluster_file", cluster_file)
+                .field("volume_key", volume_key)
+                .field("durable", durable)
+                .field("lease_authority", lease_authority)
+                .finish(),
+            Self::R2 {
+                endpoint,
+                bucket,
+                prefix,
+                durable,
+                ..
+            } => formatter
+                .debug_struct("R2")
+                .field("endpoint", endpoint)
+                .field("bucket", bucket)
+                .field("prefix", prefix)
+                .field("access_key_id", &"<redacted>")
+                .field("secret_access_key", &"<redacted>")
+                .field("durable", durable)
+                .finish(),
+            Self::AwsS3 {
+                bucket,
+                region,
+                prefix,
+                durable,
+            } => formatter
+                .debug_struct("AwsS3")
+                .field("bucket", bucket)
+                .field("region", region)
+                .field("prefix", prefix)
+                .field("durable", durable)
+                .finish(),
+        }
+    }
 }
 
 /// Lease authority choices exposed by consumer configuration.
@@ -825,6 +897,32 @@ fn open_foundationdb_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_config_debug_redacts_credential_bearing_values() {
+        let r2 = StoreConfig::R2 {
+            endpoint: "https://example.invalid".to_owned(),
+            bucket: "bucket".to_owned(),
+            prefix: "volume".to_owned(),
+            access_key_id: "access-key".to_owned(),
+            secret_access_key: "secret-value".to_owned(),
+            durable: true,
+        };
+        let pglite = StoreConfig::Pglite {
+            connection: "postgres://user:password@example.invalid/db".to_owned(),
+            volume_key: "volume".to_owned(),
+            durable: true,
+        };
+
+        let r2_debug = format!("{r2:?}");
+        let pglite_debug = format!("{pglite:?}");
+
+        assert!(r2_debug.contains("<redacted>"));
+        assert!(!r2_debug.contains("access-key"));
+        assert!(!r2_debug.contains("secret-value"));
+        assert!(pglite_debug.contains("<redacted>"));
+        assert!(!pglite_debug.contains("password"));
+    }
 
     #[tokio::test]
     async fn memory_sdk_roundtrip_uses_public_driver() {
