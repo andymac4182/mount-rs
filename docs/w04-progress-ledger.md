@@ -10,8 +10,9 @@ gate required by W04.2.
 
 | Field | Current value |
 | --- | --- |
-| Ledger revision | `d4f7281f2ab2570fc096e25aeabab54d89967d0a` (current synced `origin/main`) |
-| Snapshot time | 2026-09-21 17:41 AEST / 2026-09-21 07:41 UTC |
+| Snapshot base revision | `d4f7281f2ab2570fc096e25aeabab54d89967d0a` (origin/main immediately before the ledger commit) |
+| Ledger commit | `8501c1dd4b3742eecb64289a3300330a0e628e8d` (published to `origin/main`) |
+| Snapshot time | 2026-09-21 17:44 AEST / 2026-09-21 07:44 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
 | Checklist completion | **87.5%**: 7 of 8 W04 checklist items are checked; W04.2 remains open |
 | Implementation/local qualification | **Complete for the recorded packet**; current-head rerun is not implied by historical evidence |
