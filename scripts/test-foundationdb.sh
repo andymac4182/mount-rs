@@ -22,6 +22,9 @@ run_id="$(date +%s)-$$"
 network="mount-rs-foundationdb-net-$run_id"
 server="mount-rs-foundationdb-server-$run_id"
 client_container=""
+probe_key="mount-rs/foundationdb/readiness/$run_id"
+probe_value="ready"
+probe_key_written=0
 provided_cluster_file=${MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE:-}
 external_network=${MOUNT_RS_FOUNDATIONDB_NETWORK:-}
 external_server=${MOUNT_RS_FOUNDATIONDB_SERVER_CONTAINER:-}
@@ -39,6 +42,9 @@ cleanup_status=0
 cleanup() {
   exit_status=$?
   trap - EXIT INT TERM
+  if [ "$probe_key_written" -eq 1 ]; then
+    docker exec "$server" fdbcli --exec "writemode on; clear $probe_key" >/dev/null 2>&1 || true
+  fi
   if [ -n "$client_container" ] && docker container inspect "$client_container" >/dev/null 2>&1; then
     docker rm --force "$client_container" >/dev/null 2>&1 || cleanup_status=1
   fi
@@ -153,7 +159,22 @@ wait_for_foundationdb() {
   ticks=0
   while :; do
     if docker exec "$server" fdbcli --exec 'status json' >"$run_dir/status.json" 2>"$run_dir/status.err"; then
-      return 0
+      probe_log="$run_dir/transaction-probe.log"
+      probe_get="$run_dir/transaction-probe-get.log"
+      if docker exec "$server" fdbcli --exec "writemode on; set $probe_key $probe_value" >"$probe_log" 2>&1 \
+        && grep -Fq 'Committed' "$probe_log" \
+        && docker exec "$server" fdbcli --exec "get $probe_key" >"$probe_get" 2>&1 \
+        && grep -Fq "$probe_value" "$probe_get" \
+        && docker exec "$server" fdbcli --exec "writemode on; clear $probe_key" >>"$probe_log" 2>&1 \
+        && grep -Fq 'Committed' "$probe_log"; then
+        probe_key_written=0
+        echo "FOUNDATIONDB_TRANSACTION_READY server=$server"
+        return 0
+      fi
+      probe_key_written=1
+      echo "FoundationDB status is available but its transaction probe is not ready; retrying" >&2
+      tail -40 "$probe_log" >&2 || true
+      tail -40 "$probe_get" >&2 || true
     fi
     if [ "$ticks" -ge 90 ]; then
       docker logs --tail 160 "$server" >&2 || true
