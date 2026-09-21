@@ -7,8 +7,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
