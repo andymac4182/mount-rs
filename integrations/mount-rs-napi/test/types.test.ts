@@ -280,6 +280,7 @@ function checkServerAndKvSubpaths(): void {
       secretAccessKey: "secret-key",
     },
     region: "us-east-1",
+    drainTimeout: 1000,
   }
   const webdavOptions: WebdavServerOptions = {
     host: "127.0.0.1",
