@@ -503,7 +503,7 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             continue;
         }
         if std::ptr::eq(link_path, &link)
-            && error.raw_os_error() == Some(206)
+            && matches!(error.raw_os_error(), Some(2) | Some(3) | Some(206))
             && extended_link != link
         {
             // ERROR_FILENAME_EXCED_RANGE: first try the short aliases of the
