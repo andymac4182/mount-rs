@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "mountpoint": "/var/lib/mount-rs/w04-pglite",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "pglite",
+        "connection": {
+          "env": "MOUNT_RS_PGLITE_URL"
+        },
+        "volume_key": "mount-rs/production/w04/metadata",
+        "durable": true
+      },
+      "blocks": {
+        "kind": "pglite",
+        "connection": {
+          "env": "MOUNT_RS_PGLITE_URL"
+        },
+        "volume_key": "mount-rs/production/w04/blocks",
+        "durable": true
+      },
+      "chunk_size_bytes": 4194304,
+      "owner": "mount-rs-production-w04"
+    }
+  }
+}
