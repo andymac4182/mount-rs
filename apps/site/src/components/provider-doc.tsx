@@ -311,7 +311,7 @@ SQL`,
     name: 'Cloudflare R2 / S3-compatible blocks',
     eyebrow: 'Provider / object storage',
     maturity: 'Validated',
-    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, both metadata-provider composition gates, and the public-NAPI benchmark passed; a budgeted main-only live-R2 workflow is wired with a bounded remote trace lane, while hosted credentials, broader benchmark, and release gates remain separate.',
+    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, both metadata-provider composition gates, the public-NAPI benchmark, and a complete budgeted hosted live-R2 workflow passed; broader native and release gates remain separate.',
     summary: (
       <>
         R2 is the remote block plane in the current split-store design. It is
@@ -378,12 +378,12 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         R2 is block-only here; it does not solve metadata fencing or garbage
         collection. Orphan blocks can remain after uncertain publication, and
         native/hosted benchmark and full release matrices remain separate from
-        the authenticated live gate. The new main-only workflow admits at most
-        20 runs per month under a worst-case $100 monthly envelope (up to $4 per
-        run). Hosted run <code>35575940720</code> passed its budget gate but
-        failed the remote CLI graceful-shutdown/reopen check with
-        <code>ESTALE: stale file handle, metadata lease</code> after the
-        60-second watchdog; it is not a hosted acceptance pass.
+        the authenticated live gate. The main-only workflow admits at most 20
+        runs per month under a worst-case $100 monthly envelope (up to $4 per
+        run). Hosted run <code>35579174675</code> completed the full R2 packet
+        after the earlier <code>35575940720</code> ESTALE failure; this still
+        does not establish native mount, power-loss, or full release
+        acceptance.
       </>
     ),
     evidence: (
@@ -409,13 +409,15 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         wires a budget-gated <code>Live Cloudflare R2</code> workflow with
         pinned Rust/Node tooling, a pinned mountx checkout, AWS CLI cleanup,
         the full Rust/Node/CLI/PGlite/trace packet, and an uploaded benchmark
-        artifact. Hosted run <code>35575940720</code> passed the budget gate,
-        the live Rust backend and PGlite SDK/CLI packet, and the bounded
-        one-seed R2 trace with <code>621</code> operations. It then failed at
-        <code>remote_cli_http_durable_reopen_after_graceful_shutdown</code>:
-        the CLI exited with <code>ESTALE: stale file handle, metadata
-        lease</code> after the 60-second watchdog. The workflow therefore
-        produced useful partial hosted evidence but no acceptance pass.
+        artifact. Hosted run <code>35579174675</code> on revision
+        <code>c0aa081</code> passed the budget gate, Rust backend, PGlite
+        SDK/CLI, the bounded remote R2 trace for seed <code>4182</code> with
+        <code>621</code> operations, Rust CLI, Node SDK, and service-evidence
+        cleanup, emitting <code>CLOUDFLARE_R2_FULL_PASS</code>. Its local
+        five-seed differential packet also passed all <code>3,105/3,105</code>
+        operations, and the benchmark artifact was uploaded. This supersedes
+        the earlier <code>35575940720</code> ESTALE failure for hosted
+        acceptance while preserving that failure as historical evidence.
       </>
     ),
     sources: [
@@ -424,7 +426,8 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'Configuration-driven provider matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/config-pglite-r2.json' },
       { label: 'Budgeted live-R2 workflow', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cloudflare-r2.yml' },
       { label: 'R2 progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w05-progress-ledger.md' },
-      { label: 'Hosted R2 run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575940720' },
+      { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
+      { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
     ],
   },
   rustfs: {
