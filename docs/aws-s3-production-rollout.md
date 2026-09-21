@@ -24,7 +24,7 @@ for a production deployment result.
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Open; SQLite is single-host evidence only |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open |
-| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed security review at `efda441b5fe1522e57928caafa4457d137504ba5` identified 9 findings (2 high, 6 medium, 1 low). Bounded publication and listing remediations have landed, while staging-retention/repository-coverage remediation and hosted/deployment evidence remain open |
+| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed security review at `efda441b5fe1522e57928caafa4457d137504ba5` identified 9 findings (2 high, 6 medium, 1 low). Bounded publication, listing, quota/TTL, and backing-file-aware staging cleanup remediations have landed; repository-coverage remediation and hosted/deployment evidence remain open |
 
 ## Deployment contract
 

@@ -22,6 +22,11 @@ memory and failed copies do not replace an existing destination.
 ListObjectsV2 uses continuation-aware depth-first traversal with prefix pruning
 and retains at most one page plus one look-ahead candidate in memory; empty
 directories and `/` delimiter common prefixes retain their S3 response shape.
+Multipart and temporary streaming staging are bounded by
+`S3SessionOptions::multipart_staging_max_bytes` (8 GiB by default) and reaped
+after `multipart_staging_ttl_ms` (24 hours by default). Capacity failures return
+`SlowDown`; `DeleteObjects` removes the corresponding backing staging tree or
+returns an error instead of reporting an unperformed deletion.
 
 `cargo test -p mount-rs-s3` is rootless and runs on macOS and Linux. It does
 not prove FUSE, NFS, macFUSE, or Linux kernel mount behavior. Native mount
