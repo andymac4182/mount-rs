@@ -46,6 +46,11 @@ const requiredMarkers = [
     /W07_PRODUCTION_CONFIG_POLICY_FAIL reason=config\.driver\.storage\.blocks\.secret_access_key-must-not-be-inline\b/u,
   ],
   [
+    "lease-publication-policy",
+    "FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS",
+    /FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS lease_ttl_ms=\d+ publication_interval_ms=\d+ max_forward_jump_ms=\d+\b/u,
+  ],
+  [
     "rustfs-network",
     "FOUNDATIONDB_RUSTFS_NETWORK_READY",
     /FOUNDATIONDB_RUSTFS_NETWORK_READY\b/u,

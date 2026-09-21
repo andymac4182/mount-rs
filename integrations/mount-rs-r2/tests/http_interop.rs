@@ -100,10 +100,13 @@ async fn signed_r2_client_retries_transient_read_over_http() {
     let payload = b"retryable R2 block";
     let id = blocks.put(payload).await.unwrap();
 
-    assert_eq!(blocks.get(&id).await.unwrap(), payload);
+    // Reopen the block client so this assertion exercises the signed HTTP
+    // retry path rather than the process-local immutable-block cache.
+    let fresh = R2BlockStore::from_config(&config, "http-retry/blocks").unwrap();
+    assert_eq!(fresh.get(&id).await.unwrap(), payload);
     assert_eq!(remaining_read_failures.load(Ordering::Acquire), 0);
 
-    blocks.delete(&id).await.unwrap();
+    fresh.delete(&id).await.unwrap();
     let remaining = object_store
         .list_with_delimiter(Some(&ObjectPath::from("http-retry/blocks")))
         .await
@@ -310,6 +313,6 @@ async fn signed_r2_client_reopens_and_rejects_stale_writes_over_http() {
         unexpected_objects.is_empty() && remaining.common_prefixes.is_empty(),
         "HTTP test objects remained after exact cleanup: {unexpected_objects:?}"
     );
-    assert_eq!(blocks.get(&id).await.unwrap_err().code, ErrorCode::Enoent);
+    assert_eq!(fresh.get(&id).await.unwrap_err().code, ErrorCode::Enoent);
     server.close().await.unwrap();
 }

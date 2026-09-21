@@ -1662,7 +1662,37 @@ impl S3Session {
             self.options.credentials.as_ref(),
         )?;
         let requested = parse_complete_document(&body, self.options.max_xml_bytes)?;
-        let marker = claim_multipart_finalization(&driver, upload_id, &target.key).await?;
+        // Reserve the completion inode before claiming the persisted terminal
+        // marker. S3 ETags include the object inode for parity with the
+        // TypeScript gateway; creating the marker first would shift the
+        // completed object's identity without changing its bytes or mtime.
+        let staging_path = format!(
+            "{}/complete-{}",
+            upload_directory(upload_id),
+            new_upload_id()
+        );
+        let mut staging_cleanup = StagedPathCleanup::new(Arc::clone(&driver), staging_path.clone());
+        let reservation =
+            driver
+                .open(&staging_path, "wx", 0o666)
+                .await
+                .map_err(|error| match error.code {
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir => {
+                        S3Failure::s3("NoSuchUpload")
+                    }
+                    _ => S3Failure::Fs(error),
+                })?;
+        if let Err(error) = reservation.close().await {
+            staging_cleanup.cleanup_now().await;
+            return Err(S3Failure::Fs(error));
+        }
+        let marker = match claim_multipart_finalization(&driver, upload_id, &target.key).await {
+            Ok(marker) => marker,
+            Err(error) => {
+                staging_cleanup.cleanup_now().await;
+                return Err(error);
+            }
+        };
         let mut marker_cleanup = StagedPathCleanup::new(Arc::clone(&driver), marker.clone());
         let result: S3Result<S3Response> = async {
             let manifest = read_manifest(&driver, upload_id, &target.key).await?;
@@ -1708,16 +1738,9 @@ impl S3Session {
             // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
             // the existing destination unchanged if a part read or metadata update
             // fails before the final rename.
-            let staging_path = format!(
-                "{}/complete-{}",
-                upload_directory(upload_id),
-                new_upload_id()
-            );
-            let mut staging_cleanup =
-                StagedPathCleanup::new(Arc::clone(&driver), staging_path.clone());
             let assemble_result: S3Result<()> = async {
                 let destination = driver
-                    .open(&staging_path, "w", 0o666)
+                    .open(&staging_path, "r+", 0o666)
                     .await
                     .map_err(S3Failure::Fs)?;
                 let mut position = 0_u64;
@@ -1769,6 +1792,7 @@ impl S3Session {
         .await;
         if result.is_err() {
             marker_cleanup.cleanup_now().await;
+            staging_cleanup.cleanup_now().await;
         } else {
             marker_cleanup.disarm();
         }

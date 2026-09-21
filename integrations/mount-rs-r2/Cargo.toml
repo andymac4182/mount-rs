@@ -12,6 +12,7 @@ futures-util = "0.3"
 mount-rs-core = { path = "../.." }
 mount-rs-persist = { path = "../mount-rs-persist" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
+sha2 = "0.10"
 
 [dev-dependencies]
 mount-rs-s3 = { path = "../../transports/mount-rs-s3" }

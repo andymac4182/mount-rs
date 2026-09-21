@@ -4,8 +4,9 @@
 //! manifest. Each successful \`put\` is one provider-confirmed object upload;
 //! metadata providers remain responsible for publishing references to it.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -15,12 +16,13 @@ use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
+use sha2::{Digest, Sha256};
 
 const BLOCK_ID_PREFIX: char = 'b';
-const BLOCK_ID_HEX_BYTES: usize = 32;
-const MAX_CREATE_ATTEMPTS: usize = 16;
-
-static NEXT_BLOCK_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+const LEGACY_BLOCK_ID_HEX_CHARS: usize = 32;
+const CONTENT_BLOCK_ID_HEX_CHARS: usize = 64;
+const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHE_ENTRIES: usize = 4096;
 
 /// Stable, bounded classes for object-store block errors.
 ///
@@ -60,6 +62,7 @@ pub struct R2BlockStoreStats {
     pub conditional_conflicts: u64,
     pub id_collision_exhausted: u64,
     pub retry_exhausted: u64,
+    pub cache_hits: u64,
     pub error_classes: BTreeMap<R2BlockStoreErrorClass, u64>,
 }
 
@@ -78,6 +81,7 @@ struct R2BlockStoreStatsState {
     conditional_conflicts: AtomicU64,
     id_collision_exhausted: AtomicU64,
     retry_exhausted: AtomicU64,
+    cache_hits: AtomicU64,
     not_found_errors: AtomicU64,
     authentication_errors: AtomicU64,
     permission_errors: AtomicU64,
@@ -138,6 +142,10 @@ impl R2BlockStoreStatsState {
         increment(&self.conditional_conflicts);
     }
 
+    fn cache_hit(&self) {
+        increment(&self.cache_hits);
+    }
+
     fn snapshot(&self) -> R2BlockStoreStats {
         let mut error_classes = BTreeMap::new();
         insert_nonzero(
@@ -189,7 +197,73 @@ impl R2BlockStoreStatsState {
             conditional_conflicts: load(&self.conditional_conflicts),
             id_collision_exhausted: load(&self.id_collision_exhausted),
             retry_exhausted: load(&self.retry_exhausted),
+            cache_hits: load(&self.cache_hits),
             error_classes,
+        }
+    }
+}
+
+#[derive(Default)]
+struct R2BlockCacheState {
+    entries: HashMap<String, Vec<u8>>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+#[derive(Default)]
+struct R2BlockCache {
+    state: Mutex<R2BlockCacheState>,
+}
+
+impl R2BlockCache {
+    fn get(&self, id: &str) -> Option<Vec<u8>> {
+        let mut state = self.state.lock().ok()?;
+        let bytes = state.entries.get(id)?.clone();
+        if let Some(position) = state.order.iter().position(|entry| entry == id) {
+            state.order.remove(position);
+        }
+        state.order.push_back(id.to_owned());
+        Some(bytes)
+    }
+
+    fn insert(&self, id: &str, bytes: &[u8]) {
+        if bytes.len() > MAX_CACHE_BYTES {
+            return;
+        }
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(previous) = state.entries.remove(id) {
+            state.bytes = state.bytes.saturating_sub(previous.len());
+            if let Some(position) = state.order.iter().position(|entry| entry == id) {
+                state.order.remove(position);
+            }
+        }
+        while (state.entries.len() >= MAX_CACHE_ENTRIES
+            || state.bytes.saturating_add(bytes.len()) > MAX_CACHE_BYTES)
+            && !state.order.is_empty()
+        {
+            let Some(evicted) = state.order.pop_front() else {
+                break;
+            };
+            if let Some(previous) = state.entries.remove(&evicted) {
+                state.bytes = state.bytes.saturating_sub(previous.len());
+            }
+        }
+        state.bytes = state.bytes.saturating_add(bytes.len());
+        state.entries.insert(id.to_owned(), bytes.to_vec());
+        state.order.push_back(id.to_owned());
+    }
+
+    fn remove(&self, id: &str) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        if let Some(previous) = state.entries.remove(id) {
+            state.bytes = state.bytes.saturating_sub(previous.len());
+        }
+        if let Some(position) = state.order.iter().position(|entry| entry == id) {
+            state.order.remove(position);
         }
     }
 }
@@ -274,6 +348,7 @@ pub struct R2BlockStore {
     prefix: ObjectPath,
     durable: bool,
     stats: Arc<R2BlockStoreStatsState>,
+    cache: Arc<R2BlockCache>,
 }
 
 impl R2BlockStore {
@@ -294,6 +369,7 @@ impl R2BlockStore {
             prefix: validate_prefix(&prefix.into())?,
             durable,
             stats: Arc::new(R2BlockStoreStatsState::default()),
+            cache: Arc::new(R2BlockCache::default()),
         })
     }
 
@@ -332,53 +408,73 @@ impl BlockStore for R2BlockStore {
 
     async fn put(&self, bytes: &[u8]) -> Result<BlockId> {
         let started = self.stats.start(BlockOperation::Put);
-        for _ in 0..MAX_CREATE_ATTEMPTS {
-            let id = BlockId(next_block_id());
-            let path = self.object_path(&id)?;
-            let result = self
-                .store
-                .put_opts(
-                    &path,
-                    PutPayload::from(bytes.to_vec()),
-                    PutOptions {
-                        mode: PutMode::Create,
-                        ..Default::default()
+        let id = BlockId(block_id(bytes));
+        if self.cache.get(&id.0).is_some() {
+            self.stats.cache_hit();
+            self.stats.success(started, 0, bytes.len() as u64);
+            return Ok(id);
+        }
+        let path = self.object_path(&id)?;
+        let result = self
+            .store
+            .put_opts(
+                &path,
+                PutPayload::from(bytes.to_vec()),
+                PutOptions {
+                    mode: PutMode::Create,
+                    ..Default::default()
+                },
+            )
+            .await;
+        match result {
+            Ok(_) => {
+                self.cache.insert(&id.0, bytes);
+                self.stats.success(started, 0, bytes.len() as u64);
+                Ok(id)
+            }
+            // Content addressing makes a conditional-create conflict an
+            // idempotent success only after the existing object is checked.
+            // The digest is still validated by comparing the immutable bytes;
+            // a collision or manually-corrupted object fails closed.
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => {
+                self.stats.conditional_conflict();
+                let existing = match self.store.get(&path).await {
+                    Ok(result) => match result.bytes().await {
+                        Ok(bytes) => bytes,
+                        Err(error) => {
+                            self.stats.error(started, &error);
+                            return Err(backend_error(format!("verify R2 block: {error}")));
+                        }
                     },
-                )
-                .await;
-            match result {
-                Ok(_) => {
-                    self.stats.success(started, 0, bytes.len() as u64);
-                    return Ok(id);
+                    Err(error) => {
+                        self.stats.error(started, &error);
+                        return Err(map_not_found(error));
+                    }
+                };
+                if existing.as_ref() != bytes {
+                    increment(&self.stats.errors);
+                    return Err(backend_error("R2 content-addressed block collision"));
                 }
-                // A process-local sequence is only a collision avoidance
-                // hint. The provider's conditional create is the authority
-                // when multiple writers generate the same candidate ID.
-                Err(object_store::Error::AlreadyExists { .. })
-                | Err(object_store::Error::Precondition { .. }) => {
-                    self.stats.conditional_conflict();
-                    continue;
-                }
-                Err(error) => {
-                    self.stats.error(started, &error);
-                    return Err(backend_error(format!("put R2 block: {error}")));
-                }
+                self.cache.insert(&id.0, bytes);
+                self.stats.success(started, 0, bytes.len() as u64);
+                Ok(id)
+            }
+            Err(error) => {
+                self.stats.error(started, &error);
+                Err(backend_error(format!("put R2 block: {error}")))
             }
         }
-        increment(&self.stats.errors);
-        let elapsed_ms = elapsed_ms(started);
-        add(&self.stats.duration_ms_total, elapsed_ms);
-        update_max(&self.stats.duration_ms_max, elapsed_ms);
-        increment(&self.stats.id_collision_exhausted);
-        self.stats.conditional_conflict();
-        Err(FsError::new(ErrorCode::Eagain)
-            .with_syscall("put block")
-            .with_message("exhausted immutable block ID collision retries"))
     }
 
     async fn get(&self, id: &BlockId) -> Result<Vec<u8>> {
         let path = self.object_path(id)?;
         let started = self.stats.start(BlockOperation::Get);
+        if let Some(bytes) = self.cache.get(&id.0) {
+            self.stats.cache_hit();
+            self.stats.success(started, bytes.len() as u64, 0);
+            return Ok(bytes);
+        }
         let result = match self.store.get(&path).await {
             Ok(result) => result,
             Err(error) => {
@@ -388,6 +484,7 @@ impl BlockStore for R2BlockStore {
         };
         match result.bytes().await {
             Ok(bytes) => {
+                self.cache.insert(&id.0, &bytes);
                 self.stats.success(started, bytes.len() as u64, 0);
                 Ok(bytes.to_vec())
             }
@@ -414,6 +511,7 @@ impl BlockStore for R2BlockStore {
         }
         match self.store.delete(&path).await {
             Ok(()) => {
+                self.cache.remove(&id.0);
                 self.stats.success(started, 0, 0);
                 Ok(())
             }
@@ -481,6 +579,7 @@ impl BlockStore for R2BlockStore {
             }
             match self.store.delete(&object.location).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {
+                    self.cache.remove(&id.0);
                     report.deleted = report.deleted.saturating_add(1);
                 }
                 Err(error) => {
@@ -515,7 +614,8 @@ fn validate_prefix(prefix: &str) -> Result<ObjectPath> {
 fn validate_block_id(id: &BlockId) -> Result<()> {
     let mut chars = id.0.chars();
     if chars.next() != Some(BLOCK_ID_PREFIX)
-        || id.0.len() != 1 + BLOCK_ID_HEX_BYTES
+        || (id.0.len() != 1 + LEGACY_BLOCK_ID_HEX_CHARS
+            && id.0.len() != 1 + CONTENT_BLOCK_ID_HEX_CHARS)
         || !chars.all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
     {
         return Err(invalid_scope("invalid R2 block ID"));
@@ -542,14 +642,14 @@ fn map_get_error(error: object_store::Error) -> FsError {
     map_not_found(error)
 }
 
-fn next_block_id() -> String {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .ok()
-        .and_then(|duration| u64::try_from(duration.as_nanos()).ok())
-        .unwrap_or_default();
-    let sequence = NEXT_BLOCK_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("{BLOCK_ID_PREFIX}{timestamp:016x}{sequence:016x}")
+fn block_id(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut encoded = String::with_capacity(1 + CONTENT_BLOCK_ID_HEX_CHARS);
+    encoded.push(BLOCK_ID_PREFIX);
+    for byte in digest {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded
 }
 
 #[cfg(test)]
@@ -573,7 +673,7 @@ mod tests {
 
         let first_id = first.put(b"first bytes").await.unwrap();
         let second_id = first.put(b"first bytes").await.unwrap();
-        assert_ne!(first_id, second_id, "each upload receives a unique ID");
+        assert_eq!(first_id, second_id, "R2 blocks are content-addressed");
         assert_eq!(first.get(&first_id).await.unwrap(), b"first bytes");
         assert_eq!(first.get(&second_id).await.unwrap(), b"first bytes");
         first.flush().await.unwrap();
@@ -598,7 +698,7 @@ mod tests {
             .list_with_delimiter(Some(&ObjectPath::from("vol-a/blocks")))
             .await
             .unwrap();
-        assert_eq!(listing.objects.len(), 2);
+        assert_eq!(listing.objects.len(), 1);
         assert!(
             listing
                 .objects
@@ -690,6 +790,7 @@ mod tests {
         assert_eq!(stats.bytes_read, 5);
         assert_eq!(stats.conditional_conflicts, 0);
         assert_eq!(stats.id_collision_exhausted, 0);
+        assert_eq!(stats.cache_hits, 1);
         assert_eq!(stats.retry_exhausted, 0);
         assert_eq!(
             stats.error_classes.get(&R2BlockStoreErrorClass::NotFound),
