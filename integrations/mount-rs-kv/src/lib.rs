@@ -925,12 +925,7 @@ where
         let prefix = prefix_of(&base);
         let Some(keys) = self
             .inner
-            .keys_under_bounded(
-                &base,
-                max_entries.saturating_add(1),
-                "scandir",
-                &parent_path,
-            )
+            .keys_under_bounded(&base, max_entries, "scandir", &parent_path)
             .await?
         else {
             return Err(FsError::enotsup("scandir")
