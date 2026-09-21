@@ -162,12 +162,12 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Source `7addaf12` was freshly reverified locally after the concurrent NFS/9P/
-WebDAV/HTTP/provider, Ozone, FUSE, chunked and 9P parity updates: the full
-locked workspace test suite exited 0 and strict workspace Clippy with
-`-D warnings` exited 0. This is source-health evidence only and does not close
-any production gate. Provider/native rows requiring TiDB, RustFS, PGlite, R2,
-FUSE or NFS remained explicit opt-in skips.
+Source `4b9787f9` was freshly reverified locally after the concurrent NFS/9P/
+WebDAV/HTTP/provider, Ozone, FUSE, chunked, 9P parity and bounded teardown
+updates: the full locked workspace test suite exited 0 and strict workspace
+Clippy with `-D warnings` exited 0. This is source-health evidence only and
+does not close any production gate. Provider/native rows requiring TiDB,
+RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips.
 
 The latest read-only production-boundary audit at **2026-09-22 08:49 AEST**
 returned HTTP 404 from the GitHub repository, `w08-production` environment and
