@@ -580,9 +580,17 @@ if [ "$run_napi" -eq 1 ]; then
         ''|*[!0-9]*|0)
           echo "FoundationDB IOPS settings must be positive integers" >&2
           exit 2
-          ;;
+        ;;
       esac
     done
+    if [ "$iops_payload_bytes" != "4096" ] || [ "$iops_iterations" != "400" ] || [ "$iops_concurrency" != "64" ]; then
+      echo "FoundationDB IOPS qualification requires payload=4096 iterations=400 concurrency=64" >&2
+      exit 2
+    fi
+    if [ "$iops_minimum" -lt 1000 ]; then
+      echo "FoundationDB IOPS qualification minimum must be at least 1000" >&2
+      exit 2
+    fi
     node_command="$node_command && node benchmarks/storage/runner.mjs --providers mount-rs-split-foundationdb-r2 --sizes $iops_size_mib --payload-bytes $iops_payload_bytes --iterations $iops_iterations --concurrency $iops_concurrency --min-iops $iops_minimum --require-configured --network-context ozone-ci --output /fdb/foundationdb-ozone-iops.json"
   fi
   napi_status=0
@@ -640,6 +648,10 @@ if [ "$run_napi" -eq 1 ]; then
       mkdir -p "$(dirname "$host_iops_output")"
       cp "$run_dir/foundationdb-ozone-iops.json" "$host_iops_output"
       if [ "$napi_status" -eq 0 ]; then
+        node "$repo_dir/scripts/verify-w26-ozone-iops-artifact.mjs" \
+          --output "$host_iops_output" \
+          --providers mount-rs-split-foundationdb-r2 \
+          --minimum-iops "$iops_minimum"
         echo "FOUNDATIONDB_OZONE_IOPS_PASS provider=foundationdb-r2 target=$iops_minimum output=$host_iops_output"
       fi
     else

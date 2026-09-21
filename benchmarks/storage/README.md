@@ -105,6 +105,15 @@ controlled CI/provider qualification measurement; it is not proof that every
 customer Ozone deployment can sustain 1,000 IOPS or meet the customer's
 99.99%/RPO/RTO objectives.
 
+The W26 shell lanes reject a weakened production profile and run
+`scripts/verify-w26-ozone-iops-artifact.mjs` before emitting their provider
+pass marker. The verifier requires the 4 KiB, 400-iteration, concurrency-64
+profile, a target of at least 1,000 IOPS, the exact requested provider set,
+zero skipped/configuration-failed rows, successful cleanup, and a passing
+machine-readable result for every size. This protects the CI evidence marker;
+it does not replace hosted provider, customer-capacity, availability or
+recovery evidence.
+
 ## Provider matrix and evidence boundaries
 
 | Provider id | Implementation/binding | Metadata | Blocks | Topology | Configuration |

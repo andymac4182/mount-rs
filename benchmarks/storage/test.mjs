@@ -1,6 +1,12 @@
 import assert from "node:assert/strict"
 
 import {
+  validateArtifact,
+  W26_IOPS_MINIMUM,
+  W26_IOPS_PROFILE,
+} from "../../scripts/verify-w26-ozone-iops-artifact.mjs"
+
+import {
   BenchmarkTimeoutError,
   errorRecord,
   isTimeout,
@@ -183,6 +189,83 @@ async function testRequiredProviderConfiguration() {
   )
 }
 
+function qualificationArtifact() {
+  const provider = "mount-rs-split-sqlite-r2"
+  const size = {
+    status: "ok",
+    summary: {
+      successfulIterations: W26_IOPS_PROFILE.iterations,
+      failedIterations: 0,
+      successfulOperations: W26_IOPS_PROFILE.iterations * 3,
+      attemptedOperations: W26_IOPS_PROFILE.iterations * 3,
+      iops: 1_200,
+      iopsTarget: W26_IOPS_MINIMUM,
+      iopsTargetMet: true,
+    },
+  }
+  return {
+    schemaVersion: "mount-rs.storage-benchmark.v1",
+    status: "ok",
+    config: {
+      sizesMiB: [1],
+      payloadBytes: W26_IOPS_PROFILE.payloadBytes,
+      iterations: W26_IOPS_PROFILE.iterations,
+      concurrency: W26_IOPS_PROFILE.concurrency,
+      minIops: W26_IOPS_MINIMUM,
+      requireConfigured: true,
+    },
+    counts: {
+      providersRequested: 1,
+      providersFailed: 0,
+      providersSkipped: 0,
+      configurationFailures: 0,
+      sizeResultsFailed: 0,
+      sizeResultsSkipped: 0,
+    },
+    configurationFailures: [],
+    providers: [
+      {
+        provider,
+        status: "ok",
+        cleanup: {
+          remainingPaths: 0,
+          failures: [],
+          resource: { status: "ok" },
+        },
+        sizes: [size],
+      },
+    ],
+  }
+}
+
+async function testQualificationArtifact() {
+  const artifact = qualificationArtifact()
+  assert.deepEqual(
+    validateArtifact(artifact, {
+      providers: ["mount-rs-split-sqlite-r2"],
+      minimumIops: W26_IOPS_MINIMUM,
+    }),
+    {
+      providers: ["mount-rs-split-sqlite-r2"],
+      minimumIops: W26_IOPS_MINIMUM,
+      sizesMiB: [1],
+      profile: { ...W26_IOPS_PROFILE },
+    },
+  )
+  assert.throws(
+    () => validateArtifact({ ...artifact, config: { ...artifact.config, minIops: 999 } }, {
+      providers: ["mount-rs-split-sqlite-r2"],
+    }),
+    /config\.minIops-must-be-safe-integer-at-least-1000/,
+  )
+  assert.throws(
+    () => validateArtifact({ ...artifact, counts: { ...artifact.counts, providersSkipped: 1 } }, {
+      providers: ["mount-rs-split-sqlite-r2"],
+    }),
+    /counts\.providersSkipped-must-equal-0/,
+  )
+}
+
 async function testExecutionSurfaceLabels() {
   const definitions = providerById({})
   assert.deepEqual(definitions.get("mount-rs-memory").executionSurface, {
@@ -268,6 +351,7 @@ await testStats()
 await testErrors()
 await testCli()
 await testRequiredProviderConfiguration()
+await testQualificationArtifact()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()

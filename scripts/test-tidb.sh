@@ -113,6 +113,16 @@ if [ "${MOUNT_RS_TIDB_IOPS:-0}" = "1" ]; then
         ;;
     esac
   done
+  if [ "${MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES:-4096}" != "4096" ] || \
+    [ "${MOUNT_RS_TIDB_IOPS_ITERATIONS:-400}" != "400" ] || \
+    [ "${MOUNT_RS_TIDB_IOPS_CONCURRENCY:-64}" != "64" ]; then
+    echo "test-tidb.sh: IOPS qualification requires payload=4096 iterations=400 concurrency=64" >&2
+    exit 2
+  fi
+  if [ "${MOUNT_RS_TIDB_IOPS_MIN:-1000}" -lt 1000 ]; then
+    echo "test-tidb.sh: IOPS qualification minimum must be at least 1000" >&2
+    exit 2
+  fi
 fi
 case "$docker_platform" in
   linux/arm64|linux/amd64) ;;
@@ -686,6 +696,10 @@ run_node_provider_test() {
         --require-configured \
         --network-context "ozone-ci" \
         --output "$iops_output"
+    node "$repo_dir/scripts/verify-w26-ozone-iops-artifact.mjs" \
+      --output "$iops_output" \
+      --providers mount-rs-split-tidb-r2 \
+      --minimum-iops "$iops_minimum"
     echo "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=$iops_minimum output=$iops_output"
   fi
 }

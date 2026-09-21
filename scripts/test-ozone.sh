@@ -668,6 +668,20 @@ if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
   iops_concurrency=${MOUNT_RS_OZONE_IOPS_CONCURRENCY:-64}
   iops_minimum=${MOUNT_RS_OZONE_IOPS_MIN:-1000}
   iops_providers=${MOUNT_RS_OZONE_IOPS_PROVIDERS:-mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2}
+  if [ "$iops_payload_bytes" != "4096" ] || [ "$iops_iterations" != "400" ] || [ "$iops_concurrency" != "64" ]; then
+    echo "Ozone IOPS qualification requires payload=4096 iterations=400 concurrency=64" >&2
+    exit 2
+  fi
+  case "$iops_minimum" in
+    ''|*[!0-9]*|0)
+      echo "Ozone IOPS minimum must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$iops_minimum" -lt 1000 ]; then
+    echo "Ozone IOPS qualification minimum must be at least 1000" >&2
+    exit 2
+  fi
   export MOUNT_RS_PGLITE_DATABASE_URL="$PGLITE_DATABASE_URL"
   export MOUNT_RS_PGLITE_DURABLE=1
   export MOUNT_RS_R2_ENDPOINT="$R2_ENDPOINT"
@@ -685,6 +699,10 @@ if [ "${MOUNT_RS_OZONE_IOPS:-0}" = "1" ]; then
     --require-configured \
     --network-context "ozone-ci" \
     --output "$iops_output"
+  node "$repo_dir/scripts/verify-w26-ozone-iops-artifact.mjs" \
+    --output "$iops_output" \
+    --providers "$iops_providers" \
+    --minimum-iops "$iops_minimum"
   echo "OZONE_IOPS_PASS providers=$iops_providers target=$iops_minimum output=$iops_output"
 fi
 
