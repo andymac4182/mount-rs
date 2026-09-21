@@ -14,7 +14,7 @@ use mount_rs_core::{
 use tokio::sync::{Notify, RwLock};
 
 use crate::constants::*;
-use crate::fids::{FidOpenState, FidTable, qid_version, walk_step};
+use crate::fids::{DirCursor, FidOpenState, FidTable, FidView, qid_version, walk_step};
 use crate::locks::{P9LockClient, P9LockRequest, P9LockTable};
 use crate::protocol::*;
 use crate::wire::{P9Error, P9Qid, P9Reader, P9Writer};
@@ -215,6 +215,197 @@ impl P9Session {
     /// protocol requests and teardown use.
     pub fn lock_client(&self) -> P9LockClient {
         self.inner.locks.clone()
+    }
+
+    pub fn fid_size(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .len()
+    }
+
+    pub fn fid_qid_path_count(&self) -> usize {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .qid_path_count()
+    }
+
+    pub fn fid_exists(&self, fid: u32) -> bool {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .get(fid)
+            .is_some()
+    }
+
+    pub fn fid_view(&self, fid: u32) -> FsResult<FidView> {
+        let state = self.inner.state.lock().expect("9P session mutex poisoned");
+        state
+            .fids
+            .view(fid)
+            .ok_or_else(|| FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}")))
+    }
+
+    pub fn fid_ids(&self) -> Vec<u32> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .fids()
+    }
+
+    pub fn fid_create(&self, fid: u32, path: &str) -> FsResult<()> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .create(fid, path)
+            .map(|_| ())
+    }
+
+    pub fn fid_clone(&self, from: u32, to: u32) -> FsResult<()> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .clone_fid(from, to)
+            .map(|_| ())
+    }
+
+    pub fn fid_clunk(&self, fid: u32) -> FsResult<FidView> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .clunk(fid)
+            .map(|entry| entry.view())
+    }
+
+    pub fn fid_set_path(&self, fid: u32, path: &str) -> FsResult<()> {
+        let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
+        state
+            .fids
+            .get_mut(fid)
+            .ok_or_else(|| {
+                FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}"))
+            })?
+            .set_path(path);
+        Ok(())
+    }
+
+    pub fn fid_set_open(&self, fid: u32, open: Option<FidOpenState>) -> FsResult<()> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .set_open(fid, open)
+    }
+
+    pub fn fid_set_iounit(&self, fid: u32, iounit: u32) -> FsResult<()> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .set_iounit(fid, iounit)
+    }
+
+    pub fn fid_set_cursor(&self, fid: u32, cursor: Option<DirCursor>) -> FsResult<()> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .set_cursor(fid, cursor)
+    }
+
+    pub fn fid_resume(&self, fid: u32, offset: u64) -> FsResult<Option<(Vec<String>, usize)>> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .resume(fid, offset)
+    }
+
+    pub fn fid_snapshot_entries(
+        &self,
+        fid: u32,
+        entries: Vec<String>,
+    ) -> FsResult<(Vec<String>, usize)> {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .snapshot(fid, entries)
+    }
+
+    pub fn fid_note_offset(&self, fid: u32, offset: u64, index: usize) {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .note_offset(fid, offset, index);
+    }
+
+    pub fn fid_qid_for(&self, stats: &Stats, path: &str) -> P9Qid {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .qid_for(stats, path)
+    }
+
+    pub fn fid_qid_path_for(&self, stats: &Stats, path: &str) -> u64 {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .qid_for(stats, path)
+            .path
+    }
+
+    pub fn fid_release(&self, path: &str) {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .release(path);
+    }
+
+    pub fn fid_remap(&self, from: &str, to: &str) {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .remap(from, to);
+    }
+
+    pub fn fid_clear(&self) {
+        self.inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .fids
+            .clear();
     }
 
     /// Answer one complete frame. Malformed framing has no trustworthy tag and
@@ -941,6 +1132,7 @@ impl P9Session {
                 request.fid,
                 FidOpenState {
                     flags: reopen_flags(driver_flags),
+                    wire_flags: request.flags,
                     handle: None,
                     directory: true,
                     qid: None,
@@ -978,6 +1170,7 @@ impl P9Session {
                 request.fid,
                 FidOpenState {
                     flags: reopen_flags(driver_flags),
+                    wire_flags: request.flags,
                     handle: open_handle,
                     directory: false,
                     qid: None,
@@ -1055,6 +1248,7 @@ impl P9Session {
                         entry.set_path(&path);
                         entry.open = Some(FidOpenState {
                             flags: reopen_flags(flags),
+                            wire_flags: request.flags,
                             handle: keep.then(|| Arc::clone(&handle)),
                             directory: false,
                             qid: Some(qid),

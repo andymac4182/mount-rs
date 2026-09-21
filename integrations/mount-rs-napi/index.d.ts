@@ -467,6 +467,48 @@ export declare class P9Connection {
   readonly stream: Duplex | undefined
 }
 
+export declare class P9Fid {
+  get fid(): number
+  get path(): string
+  set path(path: string)
+  get open(): P9FidOpenState | undefined
+  set open(open: P9FidOpenState | undefined | null)
+  get iounit(): number
+  set iounit(iounit: number)
+  get cursor(): P9FidCursor | undefined
+  set cursor(cursor: P9FidCursor | undefined | null)
+}
+
+export declare class P9FidOpenState {
+  constructor(flags?: number | undefined | null, handle?: FileHandle | undefined | null, directory?: boolean | undefined | null, qid?: NativeP9Qid | undefined | null)
+  get flags(): number
+  get handle(): FileHandle | undefined
+  get directory(): boolean
+  get qid(): NativeP9Qid | undefined
+}
+
+export declare class P9FidTable {
+  constructor(options?: P9FidTableOptions | undefined | null)
+  get size(): number
+  get qidPathCount(): number
+  get(fid: number): P9Fid | undefined
+  require(fid: number): P9Fid
+  create(fid: number, path: string): P9Fid
+  clone(from: number, to: number): P9Fid
+  clunk(fid: number): P9Fid
+  resume(entry: P9Fid, offset: bigint): P9DirResume | undefined
+  snapshot(entry: P9Fid, entries: Array<string>): P9DirResume
+  noteOffset(entry: P9Fid, offset: bigint, index: number): void
+  qidFor(stats: P9StatsLike, path: string): NativeP9Qid
+  qidPathFor(stats: P9StatsLike, path: string): bigint
+  release(path: string): void
+  remap(from: string, to: string): void
+  fids(): Array<number>
+  entries(): Array<P9Fid>
+  openHandles(): Array<P9OpenHandle>
+  clear(): void
+}
+
 export declare class P9LockClient {
   get table(): P9LockTable
   get id(): number
@@ -488,6 +530,11 @@ export declare class P9LockTable {
   remap(from: string, to: string): void
   release(path: string): void
   client(): P9LockClient
+}
+
+export declare class P9OpenHandle {
+  get fid(): P9Fid
+  get handle(): FileHandle
 }
 
 export declare class P9Server {
@@ -535,6 +582,11 @@ export declare class P9Session {
    * stable across getter calls and teardown releases the same ranges.
    */
   get locks(): P9LockClient
+  /**
+   * The live per-connection fid table. The table is backed by the same
+   * transport state used by protocol dispatch.
+   */
+  get fids(): P9FidTable
   get msize(): number | null
   get version(): string | null
   get generation(): number
@@ -2222,6 +2274,25 @@ export declare function nfsXdrPad(length: number): number
 
 export declare function normalizePath(path: string): string
 
+export interface P9DirResume {
+  entries: Array<string>
+  index: number
+}
+
+export interface P9FidCursor {
+  entries: Array<string>
+  offsets: Array<P9FidOffset>
+}
+
+export interface P9FidOffset {
+  offset: bigint
+  index: number
+}
+
+export interface P9FidTableOptions {
+  useDriverIno?: boolean
+}
+
 export interface P9Lock {
   type: number
   start: bigint
@@ -2295,6 +2366,13 @@ export interface P9SessionStats {
   dropped: number
   flushed: number
   messages: Record<string, number>
+}
+
+export interface P9StatsLike {
+  dev: number
+  ino: number
+  mode: number
+  mtimeMs: number
 }
 
 export interface P9User {

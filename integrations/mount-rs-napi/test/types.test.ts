@@ -56,14 +56,24 @@ import {
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
+  FidTable,
+  FIRST_QID_PATH,
   MESSAGE_NAMES,
   P9_GETATTR_ALL,
   P9_NOFID,
   P9_TVERSION,
   P9_VERSION_DOTL,
   messageName,
+  qidType,
+  qidVersion,
+  walkStep,
   type P9AttachOptions,
   type P9Connection,
+  type DirCursor,
+  type DirResume,
+  type Fid,
+  type FidOpenState,
+  type FidTableOptions,
   type P9Lock,
   type P9LockClient,
   type P9LockHolder,
@@ -371,6 +381,30 @@ function checkServerAndKvSubpaths(): void {
   const p9Version: "9P2000.L" = P9_VERSION_DOTL
   const p9MessageNames: Readonly<Record<number, string>> = MESSAGE_NAMES
   const p9MessageName: string = messageName(p9MessageType)
+  const p9FidOptions: FidTableOptions = { useDriverIno: true }
+  const p9FidTable: FidTable = new FidTable(p9FidOptions)
+  const p9Fid = p9FidTable.create(1, "/")
+  const p9FidResume: DirResume<string> = p9FidTable.snapshot(p9Fid, ["entry"])
+  const p9FidCursor: DirCursor<string> = {
+    entries: ["entry"],
+    offsets: new Map<bigint, number>(),
+  }
+  const p9FidOpen: FidOpenState = {
+    flags: 0,
+    handle: undefined,
+    directory: true,
+  }
+  const p9FidShape: Fid<string> = {
+    fid: 1,
+    path: "/",
+    open: p9FidOpen,
+    iounit: 0,
+    cursor: p9FidCursor,
+  }
+  const p9FirstQidPath: 1n = FIRST_QID_PATH
+  const p9QidType: number = qidType(0o100644)
+  const p9QidVersion: number = qidVersion({ mtimeMs: 1 })
+  const p9Walked: string = walkStep("/", "entry")
   const s3Options: S3ServerOptions = {
     host: "127.0.0.1",
     port: 0,
@@ -553,6 +587,13 @@ function checkServerAndKvSubpaths(): void {
   void p9Version
   void p9MessageNames
   void p9MessageName
+  void p9FidTable
+  void p9FidResume
+  void p9FidShape
+  void p9FirstQidPath
+  void p9QidType
+  void p9QidVersion
+  void p9Walked
 }
 
 function checkFuseInodeSubpath(): void {

@@ -2279,6 +2279,7 @@ pub struct JsWriteResult {
 /// owns the cursor and access mode; this layer only performs Node's
 /// offset/length/position slicing and returns the requested buffer/result
 /// shapes.
+#[derive(Clone)]
 #[napi]
 pub struct FileHandle {
     inner: Arc<dyn CoreFileHandle>,

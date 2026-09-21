@@ -141,6 +141,14 @@ lifecycle tests at exact SHA `431affd`. Native listener connections expose
 stream is not transferable to a Node `Duplex`; crash/reset/half-close recovery
 remains supervisor-owned rather than a library claim.
 
+The follow-up 9P fid packet adds the Rust-backed `FidTable` alias and live
+`P9Session.fids` view, mutable path/open/iounit/cursor state, deterministic
+fid ordering, qid identity/cursor helpers, detached clunk snapshots, and
+retained open-handle enumeration. Focused N-API and Rust tests pass, including
+hardlink/release identity, large inode values, and a real opened session fid;
+the remaining driver/assertion/debug/lock-option/member and mount-helper gaps
+remain explicit, and production remains **NO-GO**.
+
 ## Detailed work items
 
 ### W01.1 — Applicable public exports and behavior ledger

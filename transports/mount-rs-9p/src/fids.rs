@@ -12,11 +12,13 @@ use crate::wire::P9Qid;
 #[derive(Clone)]
 pub struct FidOpenState {
     pub flags: mount_rs_core::OpenFlags,
+    pub wire_flags: u32,
     pub handle: Option<Arc<dyn FileHandle>>,
     pub directory: bool,
     pub qid: Option<P9Qid>,
 }
 
+#[derive(Clone)]
 pub struct DirCursor {
     pub entries: Vec<String>,
     pub offsets: HashMap<u64, usize>,
@@ -51,6 +53,53 @@ impl Fid {
 }
 
 #[derive(Clone)]
+pub struct FidOpenView {
+    pub flags: u32,
+    pub handle: Option<Arc<dyn FileHandle>>,
+    pub directory: bool,
+    pub qid: Option<P9Qid>,
+}
+
+#[derive(Clone)]
+pub struct FidCursorView {
+    pub entries: Vec<String>,
+    pub offsets: Vec<(u64, usize)>,
+}
+
+#[derive(Clone)]
+pub struct FidView {
+    pub fid: u32,
+    pub path: String,
+    pub open: Option<FidOpenView>,
+    pub iounit: u32,
+    pub cursor: Option<FidCursorView>,
+}
+
+impl Fid {
+    pub fn view(&self) -> FidView {
+        FidView {
+            fid: self.fid,
+            path: self.path.clone(),
+            open: self.open.as_ref().map(|open| FidOpenView {
+                flags: open.wire_flags,
+                handle: open.handle.as_ref().map(Arc::clone),
+                directory: open.directory,
+                qid: open.qid,
+            }),
+            iounit: self.iounit,
+            cursor: self.cursor.as_ref().map(|cursor| FidCursorView {
+                entries: cursor.entries.clone(),
+                offsets: cursor
+                    .offsets
+                    .iter()
+                    .map(|(offset, index)| (*offset, *index))
+                    .collect(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone)]
 struct QidIdentity {
     id: u64,
     key: Option<String>,
@@ -60,6 +109,7 @@ struct QidIdentity {
 pub struct FidTable {
     use_driver_ino: bool,
     fids: HashMap<u32, Fid>,
+    order: Vec<u32>,
     qid_by_path: HashMap<String, QidIdentity>,
     qid_by_key: HashMap<String, u64>,
     next_qid_path: u64,
@@ -70,6 +120,7 @@ impl FidTable {
         Self {
             use_driver_ino,
             fids: HashMap::new(),
+            order: Vec::new(),
             qid_by_path: HashMap::new(),
             qid_by_key: HashMap::new(),
             next_qid_path: 1,
@@ -84,12 +135,51 @@ impl FidTable {
         self.fids.is_empty()
     }
 
+    pub fn qid_path_count(&self) -> usize {
+        self.qid_by_path.len()
+    }
+
     pub fn get(&self, fid: u32) -> Option<&Fid> {
         self.fids.get(&fid)
     }
 
+    pub fn view(&self, fid: u32) -> Option<FidView> {
+        self.fids.get(&fid).map(Fid::view)
+    }
+
+    pub fn views(&self) -> Vec<FidView> {
+        self.order
+            .iter()
+            .filter_map(|fid| self.fids.get(fid).map(Fid::view))
+            .collect()
+    }
+
     pub fn get_mut(&mut self, fid: u32) -> Option<&mut Fid> {
         self.fids.get_mut(&fid)
+    }
+
+    pub fn set_open(&mut self, fid: u32, open: Option<FidOpenState>) -> Result<()> {
+        let entry = self.get_mut(fid).ok_or_else(|| {
+            FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}"))
+        })?;
+        entry.open = open;
+        Ok(())
+    }
+
+    pub fn set_iounit(&mut self, fid: u32, iounit: u32) -> Result<()> {
+        let entry = self.get_mut(fid).ok_or_else(|| {
+            FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}"))
+        })?;
+        entry.iounit = iounit;
+        Ok(())
+    }
+
+    pub fn set_cursor(&mut self, fid: u32, cursor: Option<DirCursor>) -> Result<()> {
+        let entry = self.get_mut(fid).ok_or_else(|| {
+            FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid}"))
+        })?;
+        entry.cursor = cursor;
+        Ok(())
     }
 
     pub fn require(&self, fid: u32) -> Result<&Fid> {
@@ -108,6 +198,7 @@ impl FidTable {
                 .with_message(format!("EINVAL: fid {fid} is already in use")));
         }
         self.fids.insert(fid, Fid::new(fid, path));
+        self.order.push(fid);
         Ok(self.fids.get_mut(&fid).expect("inserted fid exists"))
     }
 
@@ -122,14 +213,17 @@ impl FidTable {
     }
 
     pub fn clunk(&mut self, fid: u32) -> Result<Fid> {
-        self.fids.remove(&fid).ok_or_else(|| {
+        let entry = self.fids.remove(&fid).ok_or_else(|| {
             FsError::new(ErrorCode::Ebadf).with_message(format!("EBADF: fid {fid} is not in use"))
-        })
+        })?;
+        self.order.retain(|current| *current != fid);
+        Ok(entry)
     }
 
     pub fn open_handles(&self) -> Vec<(u32, Arc<dyn FileHandle>)> {
-        self.fids
-            .values()
+        self.order
+            .iter()
+            .filter_map(|fid| self.fids.get(fid))
             .filter_map(|fid| {
                 fid.open.as_ref().and_then(|open| {
                     open.handle
@@ -141,11 +235,12 @@ impl FidTable {
     }
 
     pub fn fids(&self) -> Vec<u32> {
-        self.fids.keys().copied().collect()
+        self.order.clone()
     }
 
     pub fn clear(&mut self) {
         self.fids.clear();
+        self.order.clear();
         self.qid_by_path.clear();
         self.qid_by_key.clear();
     }
@@ -252,7 +347,13 @@ impl FidTable {
         if let Some(key) = &identity.key {
             self.qid_by_key.insert(key.clone(), identity.id);
         }
-        self.qid_by_path.insert(path.to_owned(), identity);
+        // Every path entry carries the same complete identity snapshot. If a
+        // hard link is added after the first path, keeping only the new path's
+        // expanded list lets a later release of the old name resurrect stale
+        // paths from an outdated snapshot.
+        for bound in &identity.paths {
+            self.qid_by_path.insert(bound.clone(), identity.clone());
+        }
     }
 
     fn detach_qid(&mut self, identity: &QidIdentity, path: &str) {
@@ -327,4 +428,55 @@ pub fn walk_step(path: impl AsRef<str>, name: &str) -> Result<String> {
             .with_message("EINVAL: walk element is not a single path name"));
     }
     Ok(join_path(&[path.as_ref(), name]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stats(ino: u64) -> Stats {
+        Stats {
+            dev: 7,
+            ino,
+            mode: 0o100644,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            size: 0,
+            blksize: 4096,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        }
+    }
+
+    #[test]
+    fn hardlink_release_does_not_resurrect_stale_paths() {
+        let mut table = FidTable::new(true);
+        let first = table.qid_for(&stats(42), "/a").path;
+        assert_eq!(table.qid_for(&stats(42), "/b").path, first);
+
+        table.release("/a");
+        table.release("/b");
+
+        assert_ne!(table.qid_for(&stats(42), "/a").path, first);
+        assert_eq!(table.qid_path_count(), 1);
+    }
+
+    #[test]
+    fn fid_creation_order_survives_clunk() {
+        let mut table = FidTable::new(true);
+        table.create(4, "/4").unwrap();
+        table.create(2, "/2").unwrap();
+        table.create(9, "/9").unwrap();
+        assert_eq!(table.fids(), vec![4, 2, 9]);
+
+        table.clunk(2).unwrap();
+        assert_eq!(table.fids(), vec![4, 9]);
+        table.clear();
+        assert!(table.fids().is_empty());
+    }
 }
