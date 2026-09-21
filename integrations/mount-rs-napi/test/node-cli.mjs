@@ -97,6 +97,7 @@ try {
           metadata: { kind: "sqlite", path: "./metadata.sqlite" },
           blocks: { kind: "sqlite", path: "./blocks.sqlite" },
           chunk_size_bytes: 7,
+          lease_ttl_ms: 120000,
           owner: `node-cli-sdk-${process.pid}`,
         },
       },
@@ -112,6 +113,26 @@ try {
     /sdk self-test passed: Node SDK wrote, shut down, reopened, and read/,
   );
   assert.doesNotMatch(output(durable), /^mounted\s+/im);
+
+  const invalidTtlConfig = join(durableRoot, "invalid-ttl.json");
+  await fs.writeFile(
+    invalidTtlConfig,
+    `${JSON.stringify({
+      version: 1,
+      driver: {
+        kind: "splitstore",
+        storage: {
+          metadata: { kind: "sqlite", path: "./metadata.sqlite" },
+          blocks: { kind: "sqlite", path: "./blocks.sqlite" },
+          lease_ttl_ms: 0,
+        },
+      },
+    }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  const invalidTtl = await runCli(["--config", invalidTtlConfig, "--check"]);
+  assert.equal(invalidTtl.code, 1, output(invalidTtl));
+  assert.match(invalidTtl.stderr, /lease_ttl_ms must be a positive integer/);
 } finally {
   await fs.rm(durableRoot, { recursive: true, force: true });
 }

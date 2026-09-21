@@ -330,6 +330,10 @@ from a Node socket reset, one malformed-HTTP callback, and same-driver server
 recreation preserving file bytes while resetting session locks. It also
 completes eight parallel unique-file PUT/GET requests through one direct
 session with exact body readback; this is in-process same-driver evidence only.
+The pinned TypeScript-vs-Rust loopback HTTP differential also passes all 40
+paired S3+WebDAV cases, including 16 authenticated WebDAV cases covering
+streaming PUT, XML property updates, GET/HEAD/range/conditional behavior,
+PROPFIND, COPY/MOVE, refusal, missing-resource, and DELETE responses.
 The Rust XML boundary accepts the five predefined and bounded numeric
 references used by valid WebDAV owner documents while refusing DTD/custom
 entities.

@@ -155,7 +155,11 @@ Explicit command-line flags override only the config fields they name.
 Unspecified flags retain config values. Relative config paths are resolved
 relative to the config file. An omitted splitstore owner gets a
 process-and-instance-specific writer-fence owner; explicit owners are
-validated before provider construction.
+validated before provider construction. Splitstore also accepts the optional
+`lease_ttl_ms` field, in milliseconds; it defaults to 30 seconds. Set it
+explicitly for remote providers when the observed operation latency requires
+more lease headroom, while keeping stale-writer recovery within the
+deployment's recovery objective.
 
 ## Unmounted HTTP service
 

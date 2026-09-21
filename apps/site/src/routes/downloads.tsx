@@ -40,6 +40,21 @@ function DownloadsPage() {
           </p>
         </div>
 
+        <div className="callout callout-blue">
+          <strong>Build-matrix qualification is ahead of publication.</strong>
+          <p>
+            Hosted W08 target run{' '}
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35638433010" {...externalProps()}>
+              35638433010
+            </a>{' '}
+            qualified the Linux x86_64 and macOS arm64 build, download,
+            checksum, CycloneDX SBOM, and Sigstore-attestation checks for the
+            target assets. It did not execute the approved tag-triggered
+            publication flow, so this page still lists only the release assets
+            that are actually present below.
+          </p>
+        </div>
+
         <section className="download-release-card" aria-labelledby="download-release-heading">
           <div>
             <p className="eyebrow">Current verified preview</p>

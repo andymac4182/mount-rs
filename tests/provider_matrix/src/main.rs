@@ -13,6 +13,7 @@ use object_store::path::Path as ObjectPath;
 use std::collections::BTreeSet;
 use std::env;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 const PAYLOAD: &[u8] = b"mount-rs\0provider\xff";
 const CHUNK_SIZE: usize = 7;
@@ -205,6 +206,7 @@ async fn open_sdk_split(
         blocks,
         chunk_size_bytes: CHUNK_SIZE,
         owner,
+        lease_ttl: Duration::from_secs(30),
         uid: 0,
         gid: 0,
         umask: 0,
