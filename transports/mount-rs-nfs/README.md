@@ -30,6 +30,12 @@ in-flight bound. A restart-boundary test reuses the backend with a replacement
 server and confirms that the old v4 session is rejected with
 `NFS4ERR_BADSESSION`.
 
+The rootless process-restart gate also starts a real child server over a
+`HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
+and recovers the file through MOUNT/LOOKUP/READ from a replacement server.
+This is backend data-recovery evidence for a process crash; it does not claim
+power-loss durability or persistent NFSv4 lease, replay, or file-handle state.
+
 The shared file-handle table accepts `max_handles` through
 `NfsSessionOptions`/`NfsServerOptions` (and `maxHandles` through the N-API
 server options). A positive value is a soft LRU cap: the root and the entry
