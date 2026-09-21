@@ -4,7 +4,7 @@
 //! request to one response, owns no listener, and uses the shared
 //! mount-rs-core::FsDriver contract for all storage.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -979,23 +979,43 @@ impl S3Session {
                 "This copy request is illegal because you are trying to copy an object to itself without changing the metadata.",
             )));
         }
-        let bytes = read_bytes_range(
-            source_driver,
-            &source.path,
-            None,
-            source_stats.size,
-            self.options.read_chunk_bytes,
-        )
-        .await?;
+        require_atomic_rename(&destination_driver)?;
         ensure_parent(&destination_driver, &destination.path).await?;
-        write_bytes(&destination_driver, &destination.path, &bytes, false).await?;
         let mtime = if replace_metadata {
             parse_meta_mtime(header_value(&head.headers, "x-amz-meta-mtime").as_deref())
                 .unwrap_or_else(now_ms)
         } else {
             source_stats.mtime_ms
         };
-        apply_mtime(&destination_driver, &destination.path, mtime).await?;
+        let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
+        let copy_result: S3Result<()> = async {
+            let destination_handle = destination_driver
+                .open(&staging_path, "w", 0o666)
+                .await
+                .map_err(S3Failure::Fs)?;
+            let mut destination_position = 0_u64;
+            let copy_result = copy_file_between_drivers(
+                &source_driver,
+                &source.path,
+                &destination_handle,
+                source_stats.size,
+                self.options.read_chunk_bytes,
+                &mut destination_position,
+            )
+            .await;
+            let close_result = destination_handle.close().await.map_err(S3Failure::Fs);
+            copy_result.and(close_result)?;
+            apply_mtime(&destination_driver, &staging_path, mtime).await?;
+            destination_driver
+                .rename(&staging_path, &destination.path)
+                .await
+                .map_err(S3Failure::Fs)
+        }
+        .await;
+        if let Err(error) = copy_result {
+            let _ = destination_driver.unlink(&staging_path).await;
+            return Err(error);
+        }
         let destination_stats = destination_driver
             .stat(&destination.path)
             .await
@@ -1052,34 +1072,8 @@ impl S3Session {
         } else {
             start_after.unwrap_or_default().to_owned()
         };
-        let entries = collect_listing(driver.clone()).await?;
-        let mut candidates = Vec::new();
-        let mut seen_prefixes = std::collections::HashSet::new();
-        for entry in entries {
-            if !entry.key.starts_with(prefix)
-                || compare_utf8(&entry.key, &after) != std::cmp::Ordering::Greater
-            {
-                continue;
-            }
-            if let Some(delimiter) = delimiter {
-                let rest = &entry.key[prefix.len()..];
-                if let Some(index) = rest.find(delimiter) {
-                    let common = format!("{}{}", prefix, &rest[..index + delimiter.len()]);
-                    if seen_prefixes.insert(common.clone()) {
-                        candidates.push(ListCandidate::Prefix(common));
-                    }
-                    continue;
-                }
-            }
-            let stats = driver.stat(&entry.path).await.map_err(S3Failure::Fs)?;
-            candidates.push(ListCandidate::Object {
-                key: entry.key,
-                stats,
-            });
-        }
-        candidates.sort_by(|left, right| compare_utf8(left.key(), right.key()));
-        let truncated = max_keys > 0 && candidates.len() > max_keys;
-        let page = candidates.into_iter().take(max_keys).collect::<Vec<_>>();
+        let (page, truncated) =
+            collect_listing_page(driver.clone(), prefix, &after, delimiter, max_keys).await?;
         let next = truncated
             .then(|| {
                 page.last()
@@ -1316,7 +1310,7 @@ impl S3Session {
             let mut position = 0_u64;
             let copy_result: S3Result<()> = async {
                 for (path, size) in &parts {
-                    copy_file_into(
+                    copy_file_between_drivers(
                         &driver,
                         path,
                         &destination,
@@ -1469,12 +1463,6 @@ async fn collect_request_body(body: &mut S3RequestBody, max_bytes: usize) -> S3R
     Ok(output)
 }
 
-#[derive(Debug, Clone)]
-struct ListingEntry {
-    key: String,
-    path: String,
-}
-
 #[derive(Debug)]
 enum ListCandidate {
     Prefix(String),
@@ -1489,6 +1477,18 @@ impl ListCandidate {
         }
     }
 }
+
+struct ListingPageState {
+    prefix: String,
+    after: String,
+    delimiter: Option<String>,
+    limit: usize,
+    candidates: Vec<ListCandidate>,
+    seen_prefixes: HashSet<String>,
+}
+
+type ListingPageResult = (Vec<ListCandidate>, bool);
+type ListingPageFuture<'a> = Pin<Box<dyn Future<Output = S3Result<ListingPageResult>> + Send + 'a>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct UploadManifest {
@@ -1696,15 +1696,15 @@ async fn write_stream_chunk(
     Ok(())
 }
 
-async fn copy_file_into(
-    driver: &Arc<dyn FsDriver>,
+async fn copy_file_between_drivers(
+    source_driver: &Arc<dyn FsDriver>,
     source_path: &str,
     destination: &Arc<dyn mount_rs_core::FileHandle>,
     size: u64,
     chunk_bytes: usize,
     destination_position: &mut u64,
 ) -> S3Result<()> {
-    let source = driver
+    let source = source_driver
         .open(source_path, "r", 0)
         .await
         .map_err(S3Failure::Fs)?;
@@ -1718,6 +1718,9 @@ async fn copy_file_into(
                 .await
                 .map_err(S3Failure::Fs)?;
             if count == 0 {
+                return Err(S3Failure::s3("InternalError"));
+            }
+            if count > requested {
                 return Err(S3Failure::s3("InternalError"));
             }
             write_stream_chunk(destination, destination_position, &buffer[..count]).await?;
@@ -2120,24 +2123,42 @@ fn remove_tree<'a>(
     })
 }
 
-fn collect_listing(
+fn collect_listing_page<'a>(
     driver: Arc<dyn FsDriver>,
-) -> Pin<Box<dyn Future<Output = S3Result<Vec<ListingEntry>>> + Send>> {
+    prefix: &'a str,
+    after: &'a str,
+    delimiter: Option<&'a str>,
+    max_keys: usize,
+) -> ListingPageFuture<'a> {
     Box::pin(async move {
-        let mut output = Vec::new();
-        walk_directory(driver, "/".to_owned(), String::new(), &mut output).await?;
-        output.sort_by(|left, right| compare_utf8(&left.key, &right.key));
-        Ok(output)
+        if max_keys == 0 {
+            return Ok((Vec::new(), false));
+        }
+        let mut state = ListingPageState {
+            prefix: prefix.to_owned(),
+            after: after.to_owned(),
+            delimiter: delimiter.map(str::to_owned),
+            limit: max_keys.saturating_add(1),
+            candidates: Vec::new(),
+            seen_prefixes: HashSet::new(),
+        };
+        walk_listing_directory(driver, "/".to_owned(), String::new(), &mut state).await?;
+        let truncated = state.candidates.len() > max_keys;
+        state.candidates.truncate(max_keys);
+        Ok((state.candidates, truncated))
     })
 }
 
-fn walk_directory<'a>(
+fn walk_listing_directory<'a>(
     driver: Arc<dyn FsDriver>,
     path: String,
     key: String,
-    output: &'a mut Vec<ListingEntry>,
-) -> Pin<Box<dyn Future<Output = S3Result<bool>> + Send + 'a>> {
+    state: &'a mut ListingPageState,
+) -> Pin<Box<dyn Future<Output = S3Result<()>> + Send + 'a>> {
     Box::pin(async move {
+        if state.candidates.len() >= state.limit {
+            return Ok(());
+        }
         let mut entries = driver.readdir(&path).await.map_err(S3Failure::Fs)?;
         entries.retain(|entry| {
             entry.file_type == FileType::File || entry.file_type == FileType::Directory
@@ -2148,63 +2169,105 @@ fn walk_directory<'a>(
             });
         }
         entries.sort_by(|left, right| {
-            let left_key = if left.is_directory() {
-                format!("{}/", left.name)
-            } else {
-                left.name.clone()
-            };
-            let right_key = if right.is_directory() {
-                format!("{}/", right.name)
-            } else {
-                right.name.clone()
-            };
+            let left_key = listing_entry_key(&key, left);
+            let right_key = listing_entry_key(&key, right);
             compare_utf8(&left_key, &right_key)
         });
         if entries.is_empty() {
             if !key.is_empty() {
-                output.push(ListingEntry { key, path });
-                return Ok(false);
+                append_listing_entry(&driver, state, key, path).await?;
             }
-            return Ok(false);
+            return Ok(());
         }
-        let mut visible = false;
         for entry in entries {
+            if state.candidates.len() >= state.limit {
+                break;
+            }
             let child_path = if path == "/" {
                 format!("/{}", entry.name)
             } else {
                 format!("{path}/{}", entry.name)
             };
-            let child_key = if key.is_empty() {
-                if entry.is_directory() {
-                    format!("{}/", entry.name)
-                } else {
-                    entry.name.clone()
-                }
-            } else if entry.is_directory() {
-                format!("{key}{}/", entry.name)
-            } else {
-                format!("{key}{}", entry.name)
-            };
+            let child_key = listing_entry_key(&key, &entry);
             if entry.is_directory() {
-                let before = output.len();
-                let child_visible = walk_directory(
-                    driver.clone(),
-                    child_path.clone(),
-                    child_key.clone(),
-                    output,
-                )
-                .await?;
-                visible = visible || child_visible || output.len() > before;
+                if !listing_subtree_matches(&child_key, &state.prefix)
+                    || !listing_subtree_follows_after(&child_key, &state.after)
+                {
+                    continue;
+                }
+                if let Some(delimiter) = state.delimiter.as_deref()
+                    && child_key != state.prefix
+                    && child_key.starts_with(&state.prefix)
+                {
+                    let rest = &child_key[state.prefix.len()..];
+                    if let Some(index) = rest.find(delimiter) {
+                        let common =
+                            format!("{}{}", state.prefix, &rest[..index + delimiter.len()]);
+                        if compare_utf8(&common, &state.after) == std::cmp::Ordering::Greater
+                            && state.seen_prefixes.insert(common.clone())
+                        {
+                            state.candidates.push(ListCandidate::Prefix(common));
+                        }
+                        continue;
+                    }
+                }
+                walk_listing_directory(driver.clone(), child_path, child_key, state).await?;
             } else {
-                output.push(ListingEntry {
-                    key: child_key,
-                    path: child_path,
-                });
-                visible = true;
+                append_listing_entry(&driver, state, child_key, child_path).await?;
             }
         }
-        Ok(visible)
+        Ok(())
     })
+}
+
+fn listing_entry_key(key: &str, entry: &mount_rs_core::DirEntry) -> String {
+    if key.is_empty() {
+        if entry.is_directory() {
+            format!("{}/", entry.name)
+        } else {
+            entry.name.clone()
+        }
+    } else if entry.is_directory() {
+        format!("{key}{}/", entry.name)
+    } else {
+        format!("{key}{}", entry.name)
+    }
+}
+
+fn listing_subtree_matches(child_key: &str, prefix: &str) -> bool {
+    prefix.is_empty() || child_key.starts_with(prefix) || prefix.starts_with(child_key)
+}
+
+fn listing_subtree_follows_after(child_key: &str, after: &str) -> bool {
+    after.is_empty()
+        || after.starts_with(child_key)
+        || compare_utf8(child_key, after) == std::cmp::Ordering::Greater
+}
+
+async fn append_listing_entry(
+    driver: &Arc<dyn FsDriver>,
+    state: &mut ListingPageState,
+    key: String,
+    path: String,
+) -> S3Result<()> {
+    if !key.starts_with(&state.prefix)
+        || compare_utf8(&key, &state.after) != std::cmp::Ordering::Greater
+    {
+        return Ok(());
+    }
+    if let Some(delimiter) = state.delimiter.as_deref() {
+        let rest = &key[state.prefix.len()..];
+        if let Some(index) = rest.find(delimiter) {
+            let common = format!("{}{}", state.prefix, &rest[..index + delimiter.len()]);
+            if state.seen_prefixes.insert(common.clone()) {
+                state.candidates.push(ListCandidate::Prefix(common));
+            }
+            return Ok(());
+        }
+    }
+    let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+    state.candidates.push(ListCandidate::Object { key, stats });
+    Ok(())
 }
 
 fn listable_prefix(prefix: &str) -> bool {

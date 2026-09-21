@@ -21,9 +21,12 @@ cargo test --manifest-path tests/foundationdb/Cargo.toml \
 It requires `MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE`, `R2_ENDPOINT`, `R2_BUCKET`,
 `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `RUSTFS_COMBO_PREFIX`. The
 repository `scripts/test-foundationdb.sh` supplies the FDB server/client in a
-disposable container. When invoked by `scripts/test-rustfs.sh`, it rewrites the
-loopback RustFS endpoint to `host.docker.internal` for the test container; the
-RustFS lifecycle and run directory remain owned by that harness.
+disposable container. When invoked by `scripts/test-rustfs.sh`, it attaches the
+RustFS container to the FoundationDB client network as `mount-rs-rustfs` and
+uses the service's internal port 9000; this keeps the composed path working on
+Linux runners where a host-published loopback port is not reachable from a
+client container. The RustFS lifecycle and run directory remain owned by that
+harness.
 
 The repository-level composed lane is:
 

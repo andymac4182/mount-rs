@@ -67,6 +67,7 @@ case "$temp_root" in
 esac
 run_dir=$(mktemp -d "$temp_root/mount-rs-foundationdb.XXXXXX")
 cleanup_status=0
+rustfs_network_connected=0
 
 cleanup() {
   exit_status=$?
@@ -87,6 +88,10 @@ cleanup() {
         docker rm --force "$fdb_server" >/dev/null 2>&1 || cleanup_status=1
       fi
     done
+  fi
+  if [ "$rustfs_network_connected" -eq 1 ] && [ -n "${RUSTFS_HARNESS_CONTAINER:-}" ] \
+    && docker network inspect "$network" >/dev/null 2>&1; then
+    docker network disconnect --force "$network" "$RUSTFS_HARNESS_CONTAINER" >/dev/null 2>&1 || cleanup_status=1
   fi
   if [ "$owns_network" -eq 1 ] && docker network inspect "$network" >/dev/null 2>&1; then
     docker network rm "$network" >/dev/null 2>&1 || cleanup_status=1
@@ -369,12 +374,27 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
     echo "FoundationDB + RustFS service-restart gate requires an owned FoundationDB server; refusing external mode" >&2
     exit 2
   fi
-  case "$R2_ENDPOINT" in
-    http://127.0.0.1:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://127.0.0.1}" ;;
-    http://localhost:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://localhost}" ;;
-    http://host.docker.internal:*) rustfs_endpoint="$R2_ENDPOINT" ;;
-    *) echo "Refusing non-local RustFS endpoint in composed gate: $R2_ENDPOINT" >&2; exit 2 ;;
-  esac
+  rustfs_network_alias="mount-rs-rustfs"
+  if [ -n "${RUSTFS_HARNESS_CONTAINER:-}" ]; then
+    if ! docker container inspect "$RUSTFS_HARNESS_CONTAINER" >/dev/null 2>&1; then
+      echo "RustFS harness container does not exist: $RUSTFS_HARNESS_CONTAINER" >&2
+      exit 2
+    fi
+    if ! docker network connect --alias "$rustfs_network_alias" "$network" "$RUSTFS_HARNESS_CONTAINER"; then
+      echo "Could not attach RustFS harness container to the FoundationDB client network" >&2
+      exit 1
+    fi
+    rustfs_network_connected=1
+    rustfs_endpoint="http://$rustfs_network_alias:9000"
+    echo "FOUNDATIONDB_RUSTFS_NETWORK_READY alias=$rustfs_network_alias container=$RUSTFS_HARNESS_CONTAINER"
+  else
+    case "$R2_ENDPOINT" in
+      http://127.0.0.1:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://127.0.0.1}" ;;
+      http://localhost:*) rustfs_endpoint="http://host.docker.internal${R2_ENDPOINT#http://localhost}" ;;
+      http://host.docker.internal:*) rustfs_endpoint="$R2_ENDPOINT" ;;
+      *) echo "Refusing non-local RustFS endpoint in composed gate: $R2_ENDPOINT" >&2; exit 2 ;;
+    esac
+  fi
   test_manifest=tests/foundationdb/Cargo.toml
   # The first composed client proves the split ChunkedFs path and the provider
   # contract against the same real cluster. A second client runs after the
