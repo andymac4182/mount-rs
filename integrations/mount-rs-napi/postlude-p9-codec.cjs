@@ -198,6 +198,12 @@ function installP9Codec(binding) {
   binding.P9_QID_SIZE = 13
   binding.P9_MAX_STRING = 0xffff
   binding.P9_MAX_ITEM = 16 * 1024 * 1024
+  binding.DEFAULT_P9_PORT = 564
+  binding.DEFAULT_SOCKET_MODE = 0o600
+  binding.DEFAULT_MAX_IN_FLIGHT = 16
+  binding.DEFAULT_MSIZE = 1024 * 1024
+  binding.P9_LOCK_EOF_END = 1n << 64n
+  binding.DEFAULT_MAX_LOCKS_PER_FILE = 1024
 
   binding.encodeP9 = (write, capacity = 256) => {
     const writer = new Writer(capacity)
