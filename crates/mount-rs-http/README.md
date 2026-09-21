@@ -12,8 +12,9 @@ Unauthenticated `GET`/`HEAD /readyz` reports `ready` and the configured drive
 count when at least one drive is registered, and returns `503` with
 `not_ready` for an empty registry. These are process/configuration probes only;
 they do not claim that a remote provider, object store, TLS endpoint, or
-external dependency is healthy. Use the provider-specific checks and
-application-owned telemetry for those gates.
+external dependency is healthy. Responses are marked `Cache-Control: no-store`
+and `X-Content-Type-Options: nosniff` for deployment-safe probing. Use the
+provider-specific checks and application-owned telemetry for those gates.
 
 All routes are versioned under `/v1`:
 

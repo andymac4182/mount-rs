@@ -11,7 +11,10 @@ use mount_rs_http::{DriveConfig, DriveRegistry, HttpServer, HttpServerError, Htt
 #[cfg(feature = "observability")]
 use mount_rs_observability::{Telemetry, TelemetryConfig};
 use mount_rs_sqlite::open_sqlite_memory;
-use reqwest::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_RANGE, RANGE, WWW_AUTHENTICATE};
+use reqwest::header::{
+    AUTHORIZATION, CACHE_CONTROL, CONTENT_LENGTH, CONTENT_RANGE, RANGE, WWW_AUTHENTICATE,
+    X_CONTENT_TYPE_OPTIONS,
+};
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -268,6 +271,20 @@ async fn health_and_readiness_are_unauthenticated_and_bounded() {
         .await
         .expect("health response");
     assert_eq!(health.status(), reqwest::StatusCode::OK);
+    assert_eq!(
+        health
+            .headers()
+            .get(CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("no-store")
+    );
+    assert_eq!(
+        health
+            .headers()
+            .get(X_CONTENT_TYPE_OPTIONS)
+            .and_then(|value| value.to_str().ok()),
+        Some("nosniff")
+    );
     assert_eq!(
         health
             .json::<serde_json::Value>()
