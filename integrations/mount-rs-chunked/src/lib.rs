@@ -559,26 +559,32 @@ where
         buffer: &mut [u8],
         position: u64,
     ) -> Result<usize> {
-        let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
-        let (mut namespace, revision) = self.snapshot()?;
-        let (node, orphan) = self.node_snapshot(&namespace, inode, "read", path)?;
-        let layout = match &node.data {
-            NodeData::File(layout) => layout.clone(),
-            NodeData::Directory { .. } => {
-                return Err(error_with_path(ErrorCode::Eisdir, "read", path));
-            }
-            NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "read", path)),
-            NodeData::Symlink { .. } => return Err(error_with_path(ErrorCode::Eio, "read", path)),
-        };
-        let size = node.stats.size;
-        let count = if position >= size {
-            0
-        } else {
-            let available = size - position;
-            buffer
-                .len()
-                .min(usize::try_from(available).unwrap_or(usize::MAX))
+        let _lifecycle = self.inner.lifecycle.read().await;
+        let (layout, original, orphan, size, count) = {
+            let _gate = self.inner.gate.lock().await;
+            self.ensure_operation_lease().await?;
+            let (namespace, _) = self.snapshot()?;
+            let (node, orphan) = self.node_snapshot(&namespace, inode, "read", path)?;
+            let layout = match &node.data {
+                NodeData::File(layout) => layout.clone(),
+                NodeData::Directory { .. } => {
+                    return Err(error_with_path(ErrorCode::Eisdir, "read", path));
+                }
+                NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "read", path)),
+                NodeData::Symlink { .. } => {
+                    return Err(error_with_path(ErrorCode::Eio, "read", path));
+                }
+            };
+            let size = node.stats.size;
+            let count = if position >= size {
+                0
+            } else {
+                let available = size - position;
+                buffer
+                    .len()
+                    .min(usize::try_from(available).unwrap_or(usize::MAX))
+            };
+            (layout, node, orphan, size, count)
         };
         if count > 0 {
             read_layout_into(
@@ -592,6 +598,8 @@ where
             )
             .await?;
         }
+        let _gate = self.inner.gate.lock().await;
+        self.ensure_operation_lease().await?;
         if orphan {
             let mut state = self.lock_state()?;
             if let Some(node) = state.orphans.get_mut(&inode) {
@@ -599,10 +607,21 @@ where
             }
             return Ok(count);
         }
-        if let Some(node) = namespace.nodes.get_mut(&inode) {
+        let (mut namespace, revision) = self.snapshot()?;
+        if namespace
+            .nodes
+            .get(&inode)
+            .is_some_and(|node| write_base_unchanged(node, &original))
+        {
+            if let Some(node) = namespace.nodes.get_mut(&inode) {
+                node.stats.atime_ms = now_ms();
+            }
+            self.publish_namespace(revision, namespace, false).await?;
+        } else if let Some(node) = self.lock_state()?.orphans.get_mut(&inode)
+            && write_base_unchanged(node, &original)
+        {
             node.stats.atime_ms = now_ms();
         }
-        self.publish_namespace(revision, namespace, false).await?;
         Ok(count)
     }
 
