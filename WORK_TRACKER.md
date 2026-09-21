@@ -818,10 +818,13 @@ transport tracker together.
 | W01-WebDAV | [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 
 Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
-`listen()`/`close()` lifecycle transitions and guards the accept loop against
-an immediate-close shutdown lost wakeup; the N-API WebDAV wrapper serializes
-its closed-state check with the transport lifecycle, and the focused wrapper
-race test passes 40 alternating real-loopback iterations. The opt-in
+`listen()`/`close()` lifecycle transitions, guards the accept loop against an
+immediate-close shutdown lost wakeup, and retains a timed-out drain state so a
+second `close()` cannot report false success or rebind while a stalled
+connection remains active. The focused Rust target passes 18/18 with strict
+Clippy and formatting. The N-API WebDAV wrapper serializes its closed-state
+check with the transport lifecycle, and the focused wrapper race test passes
+40 alternating real-loopback iterations. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
