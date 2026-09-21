@@ -217,6 +217,18 @@ checks remain green, while the hosted native rerun is still required. W01
 remains **NO-GO**.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
+The forced-unmount lifecycle follow-up now rechecks `/proc/self/mounts` after
+the `umount`/lazy-detach ladder before publishing terminal state. If the
+kernel mount remains present, the session stays `mounted=true` but
+`active=false` because its serving task has been closed, and a later unmount
+retry remains possible; only confirmed absence clears `mounted`. A Linux-gated
+stuck-helper regression covers the still-present `/` case. Host FUSE
+all-target tests (14 unit, 6 INIT, 0 native, 6 notify/record, 11 protocol, 20
+session, 4 sync-barrier), formatting/diff checks, and Linux-target strict
+Clippy pass; the Linux-only regression is compiled but not run on this macOS
+host, while hosted forced-unmount, callback, crash/restart, concurrency, locks
+and durability evidence remain external, so W01 stays NO-GO.
+
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
 direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed
 state, scalar server/session options and `P9Session.userFor`, shared byte-range

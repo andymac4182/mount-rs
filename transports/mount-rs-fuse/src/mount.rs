@@ -341,7 +341,12 @@ impl FuseMount {
                     // retryable. Publish that fact so a later attempt does
                     // not leave an otherwise healthy mount permanently
                     // reported as inactive.
-                    operation_state.active.store(true, Ordering::Release);
+                    // A forced teardown has already closed the session task,
+                    // so a still-present kernel mount must remain inactive
+                    // until a later unmount retry removes it.
+                    if !operation_state.closed.load(Ordering::Acquire) {
+                        operation_state.active.store(true, Ordering::Release);
+                    }
                 }
                 *operation_state
                     .unmount_result
@@ -658,6 +663,7 @@ impl MountState {
     async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
         let timeout = self.options.unmount_timeout;
         let mut forced_deadline = None;
+        let mut forced_mount_present = None;
         let result = match attempt_unmount(&self, timeout).await {
             UnmountAttempt::Done => Ok(()),
             UnmountAttempt::TimedOut => {
@@ -684,13 +690,23 @@ impl MountState {
                 }
                 force.await;
                 forced_deadline = Some(deadline);
+                let mount_still_present = mounted_at(&self.mountpoint);
+                forced_mount_present = Some(mount_still_present);
                 self.record_transport_error(FuseTransportError::from_message(
                     FuseTransportErrorKind::Task,
-                    format!(
-                        "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested",
-                        self.mountpoint.display(),
-                        timeout.as_millis()
-                    ),
+                    if mount_still_present {
+                        format!(
+                            "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested but the mount remains present",
+                            self.mountpoint.display(),
+                            timeout.as_millis()
+                        )
+                    } else {
+                        format!(
+                            "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested",
+                            self.mountpoint.display(),
+                            timeout.as_millis()
+                        )
+                    },
                 ));
                 Err(MountError::Timeout {
                     operation: "unmount",
@@ -714,7 +730,8 @@ impl MountState {
         // Make the terminal state idempotent so wait_closed() is guaranteed
         // to complete after every bounded teardown path.
         self.mark_closed();
-        self.mounted.store(false, Ordering::Release);
+        self.mounted
+            .store(forced_mount_present.unwrap_or(false), Ordering::Release);
         result
     }
 
@@ -3283,6 +3300,64 @@ mod tests {
         let _ = std::fs::remove_file(&helper);
         let _ = std::fs::remove_file(&marker);
         let _ = std::fs::remove_file(forced_marker);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn forced_unmount_preserves_state_when_kernel_mount_remains_present() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-stuck-present-unmount-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::write(&helper, b"#!/bin/sh\nwhile :; do :; done\n").expect("write stuck helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("stuck helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make stuck helper executable");
+
+        let timeout = Duration::from_millis(100);
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                unmount_timeout: timeout,
+                ..MountOptions::default()
+            },
+            Some(helper.clone()),
+            FuseMountHooks::default(),
+        ));
+        state.set_task(tokio::spawn(std::future::pending::<()>()));
+
+        assert!(mounted_at(Path::new("/")));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/"),
+        };
+        let result = tokio::time::timeout(Duration::from_secs(1), mount.unmount())
+            .await
+            .expect("forced unmount should settle within its bounded phases");
+        let _ = std::fs::remove_file(&helper);
+
+        assert!(result.is_err());
+        assert!(
+            state.mounted.load(Ordering::Acquire),
+            "forced teardown must not claim a still-present kernel mount is gone"
+        );
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.unmount_started.load(Ordering::Acquire));
+
+        // This synthetic test deliberately leaves `/` mounted. Prevent the
+        // mount object's Drop fallback from starting another helper attempt.
+        state.mounted.store(false, Ordering::Release);
     }
 
     #[cfg(target_os = "linux")]
