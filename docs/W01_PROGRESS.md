@@ -172,6 +172,20 @@ injection run `35652258903`, CI run `35652258837`, and W08 release targets run
 `35652258840` are pending, while W04 production policy run `35652258913`
 succeeded but is unrelated. W01 stays NO-GO.
 
+The latest FUSE boundary packet also rejects native `max_frame` values below
+the modern `FUSE_WRITE` header plus one page (`4176` bytes), so INIT cannot
+advertise a write frame that the device receive limit would reject. Its README
+now carries the explicit upstream mount-member ledger: direct Rust supports
+the validated native options; the root automatic N-API surface intentionally
+exposes only common options; `readers`, process-wide `signals`, and live
+native `tap` are not claimed; request `onError` is mount-free only; terminal
+`onTransportError` is supported; and transport-specific root members plus
+automatic crash/restart recovery remain outside the supported contract. Host
+FUSE tests, host/Linux-target strict Clippy, Linux-target checks, formatting,
+and diff checks pass; Darwin cannot execute the Linux-only validation test, and
+hosted Linux native lifecycle/callback evidence remains external. W01 stays
+NO-GO.
+
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
 direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed

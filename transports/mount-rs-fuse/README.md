@@ -112,3 +112,25 @@ handle. Exposing nullable or fabricated FUSE members on the transport-neutral
 wrapper would misrepresent the 9P/NFS variants and the current native
 ownership boundary. Linux hosted mount/callback/lifecycle qualification is
 still required independently of this API-scope decision.
+
+## Native option and callback ledger
+
+The pinned mountx FUSE mount has a wider JavaScript convenience surface than
+the native Rust transport. The following decisions are deliberate and are
+part of the supported contract; an upstream member not listed as supported
+must not be inferred from the wire codec or from a mount-free test.
+
+| Upstream member | mount-rs contract | Evidence or boundary |
+| --- | --- | --- |
+| `fsname` / `source` | Supported. Rust `MountOptions.fsname`, `FuseMount::source()`, automatic `source`, and root N-API `Mounted.source` expose the configured source. | The source-parity regression and pinned mountx source audit cover this mapping. |
+| `subtype`, `defaultPermissions`, `allowOther`, `readOnly`, `maxRead`, `mountOptions`, `device`, `initTimeout`, `unmountTimeout` | Supported on the direct Rust Linux `MountOptions` path. The root N-API automatic facade exposes only the common `readOnly` and `unmountTimeoutMs` controls; it does not claim a nested FUSE-options object. | Native option validation is fail-closed. `max_frame` is independent of `maxRead` and must fit a modern `FUSE_WRITE` frame plus one page (`4176` bytes minimum). |
+| `readers` | Not supported as a public option. The Rust device uses one event-driven `AsyncFd` receive loop and bounds backend positional reads at 16 tasks with a serialized reply writer. | This is a different concurrency model from the upstream libuv threadpool reader knob; no threadpool-sized reader claim is made. |
+| `signals` | Not supported as a library-owned process policy. Rust and the root N-API facade do not install process-wide signal handlers; callers own signal routing and invoke `unmount()` or async disposal. | Avoids global handler ownership and preserves embedding-process signal policy. |
+| `tap` | Not supported on the live native device. The supported deterministic byte seam is the mount-free `record`/`replay` and N-API transcript surface. | Native device bytes remain owned by the serving task; no live callback is exposed. |
+| request-level `onError` | Supported for the mount-free session observation boundary only. The live Rust mount has no per-request callback; backend errors become FUSE replies, while transport/session-terminal failures use `FuseMountHooks.on_transport_error`. | Keeps request error observation separate from terminal device failure reporting. |
+| `onTransportError` | Supported. Rust reports the first terminal `Read`, `Write`, `Protocol`, or `Task` failure exactly once with callback-panic isolation; the root N-API automatic facade forwards an owned callback. | Native callback-event execution still requires the hosted Linux `/dev/fuse` gate. |
+| live `session`, `fd`, `closed`, and invalidation methods on root `Mounted` | Not supported on the transport-neutral root wrapper. The supported root surface is `transport`, `mountpoint`, `source`, `active`, `unmount()`, and async disposal; direct Rust exposes `wait_closed()`, and mount-free `FuseSession`/notification encoders remain available under `./fuse`. | The serving task retains the native session/device, so fabricated or nullable FUSE members would misrepresent 9P/NFS mounts. |
+
+The library does not claim automatic process crash/restart supervision or
+stale-mount recovery. Those are deployment/supervisor responsibilities and
+remain hosted Linux lifecycle gates rather than local protocol evidence.
