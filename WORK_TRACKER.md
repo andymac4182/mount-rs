@@ -718,7 +718,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
-| W26 | Apache Ozone S3 backend | W26 qualification complete; customer-deployed Ozone integration track is open and currently NO-GO pending CI qualification for all feasible providers, 1,000 IOPS per drive, 99.99%/5-minute objective boundaries, security and end-to-end client coverage | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; customer-deployed Ozone integration track is currently NO-GO after terminal run `35635486040` missed the hard 1,000-IOPS-per-drive target for SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2. Secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -3204,8 +3204,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   benchmark unit/missing-provider regression, Node/shell/YAML/diff checks pass.
   Commit `d46e091` was published in `74fe4c7`; focused scan
   `60269206-bb22-4b78-aaf7-f05d16ffcca0` found zero reportable findings.
-  Terminal hosted provider markers/artifacts, provider TLS/IAM and customer
-  capacity evidence remain open.
+  Terminal run `35635486040` exercised all four configured provider rows without
+  skipping any requested provider. SQLite/R2 measured 61.97 IOPS, PGlite/R2
+  63.56, TiDB/R2 14.14 and FoundationDB/R2 23.07 against the hard 1,000
+  target; all lifecycle calls completed, but no provider pass marker was
+  emitted. Provider TLS/IAM and customer capacity evidence remain open.
 - [x] W26.9 Make IOPS pass markers depend on an intact production qualification
   artifact and fixed workload profile. `scripts/verify-w26-ozone-iops-artifact.mjs`
   requires the exact requested provider set, `requireConfigured=true`, 4 KiB
@@ -3216,7 +3219,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   markers. Local unit/verifier negative cases, Node/shell syntax and diff checks
   pass. Commit `66f3670` was published in `00d2b80`; focused scan
   `1d97028f-e153-4b49-9fac-c3a8c1fc1117` found zero reportable findings.
-  Terminal hosted artifacts, provider performance, TLS/IAM and customer
+  Terminal hosted artifacts were retained for diagnosis, but the four provider
+  rows measured 61.97, 63.56, 14.14 and 23.07 IOPS respectively and were
+  correctly rejected before their pass markers. Provider TLS/IAM and customer
   capacity evidence remain open.
 - [x] W26.10 Make W26 IOPS artifact retention fail closed. The generic,
   TiDB and FoundationDB Ozone upload steps in `.github/workflows/ci.yml` now
@@ -3237,9 +3242,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   shell syntax, YAML parsing and diff checks pass. Commit `08f4530` was merged
   with concurrent mainline changes and published at `097ed00`; security scan
   `c67ae8e0-99af-4ade-8284-a612d599b5e4` found zero reportable findings.
-  Terminal hosted provider/aggregate results and customer security/capacity
-  evidence remain open; current CI `35630094815` is pending and no result is
-  promoted from it.
+  Terminal run `35635486040` retained all four producer artifacts and the
+  aggregate job `106458415293` downloaded them, then failed closed because the
+  provider logs lacked `OZONE_IOPS_PASS` after missing the hard target. This is
+  diagnostic evidence only; customer security/capacity evidence remains open.
 - [x] W26.12 Make the IOPS artifact verifier reject incomplete performance
   evidence. It now requires the fixed payload-size mapping, 100% lifecycle
   success, finite elapsed/operation statistics, zero timeout and cleanup
@@ -3248,8 +3254,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   checks pass. Commit `e875ba6` was merged with concurrent mainline changes
   and published at `1775895`; security scan
   `04c7ba9d-ad9f-40aa-a5b2-d28b9a46a564` found zero reportable findings.
-  Hosted provider performance, artifact review and customer capacity remain
-  open; no current-tip hosted result is promoted.
+  The terminal artifacts had complete lifecycle and metric maps, but reported
+  SQLite/R2 61.97, PGlite/R2 63.56, TiDB/R2 14.14 and FoundationDB/R2 23.07
+  IOPS, so the verifier correctly rejected them. Artifact review and customer
+  capacity remain open; no performance pass is promoted.
 - [x] W26.13 Add the credential-free customer production-rollout contract.
   `scripts/verify-w26-ozone-rollout-contract.mjs` requires the Tier-1
   99.99%-availability/5-minute-RPO/5-minute-RTO envelope, qualified Ozone
@@ -3279,12 +3287,26 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `20a06b8` was reconciled with concurrent mainline changes and published at
   `0e0454d`; focused security diff scan
   `e4ce1aab-c6cd-44e4-b20d-3130ca357412` found zero reportable findings.
-  Manual qualification run `35635486040` is active on
-  `cfe7e29e001dc01f2fa430a54bc8981b44db0b05` with Ozone, composition and TiDB
-  jobs running and FoundationDB queued; no queued/in-progress result is
-  promoted. Terminal hosted provider/aggregate results, native/mount
+  Terminal qualification run `35635486040` on
+  `cfe7e29e001dc01f2fa430a54bc8981b44db0b05` passed the base Ozone job
+  `106451808629`, but `ozone-compositions` `106451808739`, `ozone-tidb`
+  `106451809745`, `ozone-foundationdb` `106451808796` and aggregate
+  `w26-ozone-evidence` `106458415293` failed. Every configured provider
+  completed its lifecycle samples, but SQLite/R2 61.97, PGlite/R2 63.56,
+  TiDB/R2 14.14 and FoundationDB/R2 23.07 IOPS missed the hard 1,000 target;
+  no failed artifact or missing pass marker is promoted. Native/mount
   qualification, customer secure-runtime evidence and measured SLO/RPO/RTO
   remain open.
+- [ ] W26.15 Resolve the terminal per-drive IOPS qualification blocker. The
+  hosted packet exposed that `ChunkedFs` holds its volume-wide async gate across
+  remote block I/O and full namespace publication, yielding 61.97/63.56/14.14/
+  23.07 IOPS in the fixed 4 KiB/400-iteration/concurrency-64 profile. Design,
+  implement and test a correctness-preserving concurrency/publication path, or
+  obtain a production-like Ozone capacity/topology qualification that
+  demonstrates the fixture is not representative. Preserve fencing, revision
+  CAS, immutable-block ordering, POSIX semantics, cleanup and fail-closed
+  artifact verification; do not lower the 1,000 target or convert failed rows
+  into skips.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
