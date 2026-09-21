@@ -431,13 +431,13 @@ if [ -n "$rustfs_endpoint" ] || [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq
   if [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq 1 ]; then
     test_command="${test_command} && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture"
     if [ "$run_native_cli" -eq 1 ]; then
-      test_command="${test_command} && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle cli_foundationdb_rustfs_config_binary_mounts_and_reopens -- --ignored --exact --nocapture"
+      test_command="${test_command} && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle cli_foundationdb_rustfs_config_binary_mounts_and_reopens -- --ignored --exact --nocapture && echo FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse"
     fi
   fi
 fi
 native_mount_args=""
 if [ "$run_native_cli" -eq 1 ]; then
-  native_mount_args="--device /dev/fuse --cap-add SYS_ADMIN"
+  native_mount_args="--device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined"
 fi
 
 napi_build_prefix=""
@@ -469,7 +469,10 @@ if [ "$soak_rounds" -gt 0 ]; then
     round=$((round + 1))
   done
   echo "FOUNDATIONDB_SOAK_PASS rounds=$MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS"'
-  test_command="${test_command} && ${soak_test_command}"
+  # Keep the loop in a command group. Appending a multiline while-loop
+  # directly after && would let a preceding native CLI failure be masked by
+  # the loop's final echo and incorrectly emit FOUNDATIONDB_TEST_PASS.
+  test_command="${test_command} && { ${soak_test_command}; }"
 fi
 client_fdb_volume="$run_dir:/fdb:ro"
 if [ "$run_napi" -eq 1 ]; then

@@ -8,6 +8,7 @@ FOUNDATIONDB_SOAK_PASS rounds=5
 FOUNDATIONDB_NAPI_PASS image=node:24-bookworm
 FOUNDATIONDB_SERVICE_RESTART_READY topology=durable server=fixture
 FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS volume_prefix=fixture
+FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse
 FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5
 RUSTFS_COMBO_PASS name=foundationdb-production-qualification
 RUSTFS_INTEGRATION_PASS endpoint=http://127.0.0.1:32769 bucket=mount-rs-rustfs-test prefix=fixture

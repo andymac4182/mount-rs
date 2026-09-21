@@ -72,6 +72,11 @@ const requiredMarkers = [
     /FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS\b/u,
   ],
   [
+    "cli",
+    "FOUNDATIONDB_CLI_PASS",
+    /FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse\b/u,
+  ],
+  [
     "rustfs-combination",
     "RUSTFS_COMBO_PASS",
     /RUSTFS_COMBO_PASS\b/u,
@@ -137,6 +142,16 @@ if (
     latency.throughputOpsPerSec <= 0)
 ) {
   missing.push("latency-values");
+}
+
+if (
+  lines.some((line) =>
+    /(?:FOUNDATIONDB_SOAK_FAIL|RUSTFS_COMBO_FAIL|FOUNDATIONDB_CLI_FAIL)\b/u.test(
+      line,
+    ),
+  )
+) {
+  missing.push("unexpected-failure-marker");
 }
 
 if (missing.length > 0) {
