@@ -4,11 +4,11 @@ Status snapshot: **2026-09-22 07:29 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
-implementation was qualified at hosted source `e0ab07d6`; the latest fetched
-public `origin/main` is `f1362442` (verified at **07:29 AEST**) after further
-concurrent mainline reconciliation. The W08.35 implementation and hosted-
-result ledger history remain in the same public ancestry; this pointer-only
-sync does not change any W08 production-gate decision.
+implementation was qualified at hosted source `e0ab07d6`; the latest W08 ledger
+pointer commit is `f1362442`, contained in the current public ancestry after
+further concurrent mainline reconciliation. The W08.35 implementation and
+hosted-result ledger history remain in the same public ancestry; subsequent
+unrelated mainline merges do not change any W08 production-gate decision.
 W08.34 implementation commit `59149b95`, hosted-boundary documentation commit
 `25ff75c1` and hosted-success documentation commit `aec7fbdd` remain in the
 same public ancestry.
