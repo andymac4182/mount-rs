@@ -2017,8 +2017,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `EOVERFLOW` wrapping. KV integration (13), N-API Rust tests (16), release
   packaging, unstorage bridge, typecheck, chunked smoke, strict affected-
   package Clippy and formatting passed. Providers without the callback remain
-  explicit `ENOTSUP`/pagination gates, and `MOUNTX_SOURCE` parity remains an
-  environment-gated hosted check.
+  explicit `ENOTSUP`/pagination gates. Follow-up capable-provider fixtures pass
+  bounded overflow/success while legacy/absent callbacks fail closed with
+  `ENOTSUP`; `MOUNTX_SOURCE` parity remains an environment-gated hosted check.
 
 ### W26 production-rollout readiness (post-demo; currently NO-GO)
 
