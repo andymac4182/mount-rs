@@ -904,8 +904,8 @@ check with the transport lifecycle; the shared postbuild server facade now
 clears a failed close promise so a timed-out WebDAV close can be retried after
 the peer exits. The focused wrapper race test passes 40 alternating
 real-loopback iterations, its stalled-request timeout/retry regression passes,
-and the focused direct-session concurrency probe passes 64 concurrent PUT/GET
-requests, while the network-concurrency/auth test passes 64 concurrent HTTP
+and the focused direct-session concurrency probe passes 128 concurrent PUT/GET
+requests, while the network-concurrency/auth test passes 128 concurrent HTTP
 PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 opt-in
@@ -971,7 +971,7 @@ and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
 `/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
 acceptance. The host-enabled WebDAV session
-packet also completes 64 parallel unique-file PUTs and GETs through one
+packet also completes 128 parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
@@ -1470,7 +1470,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   full supported server/session prototype-member differential and full direct
   class 1/2/3 method matrix now pass; the oracle-only controls remain outside
   scope. Active lock-record readback and
-  post-UNLOCK cleanup, 64 parallel unique-file direct-session PUT/GET
+  post-UNLOCK cleanup, 128 parallel unique-file direct-session PUT/GET
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
