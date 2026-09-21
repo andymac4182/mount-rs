@@ -1702,6 +1702,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   ledger snapshot. No queued, partial, or pre-fix result is promoted to W04
   or production acceptance; production remains **NO-GO**.
 
+- Recovery run `35666527609` has produced partial but useful evidence on its
+  pre-Ozone-fix head: ARM Node job `106553420990` passed the exact PGlite
+  integration/restart-recovery step and fragmented HTTP early-rejection step;
+  Windows Node job `106553420495` passed package and consumer checks. Ozone /
+  TiDB job `106553420645` reached the functional block contract but failed the
+  hard 1,000-IOPS target at 30.34 IOPS, while Ozone/FoundationDB job
+  `106553422646` passed durable chunk/reopen and cleanup markers but failed the
+  same target at 56.72 IOPS. Intel macOS remains in progress and macOS-latest,
+  Linux Node, and Ubuntu Rust remain queued at the current snapshot. This is
+  not W04 or production acceptance; a current-main run containing `23c0ba7e`
+  is still required for Ozone requalification and the complete Node matrix.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
