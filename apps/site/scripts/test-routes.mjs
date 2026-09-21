@@ -111,7 +111,7 @@ const routes = [
     path: '/docs/transports/fuse',
     status: 200,
     contentType: 'text/html',
-    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'GETATTR', 'SETATTR', 'OPEN', 'OPENDIR', 'CREATE', 'LOOKUP', 'READLINK', 'STATFS', 'BATCH_FORGET', 'INTERRUPT', 'RELEASE', 'FSYNC', 'READDIRPLUS', 'ACCESS', 'FUSE_INIT_EXT', 'packDirentsPlus', 'CI is queued'],
+    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'GETATTR', 'SETATTR', 'OPEN', 'OPENDIR', 'CREATE', 'LOOKUP', 'READLINK', 'STATFS', 'BATCH_FORGET', 'INTERRUPT', 'RELEASE', 'FSYNC', 'READDIRPLUS', 'ACCESS', 'FUSE_INIT_EXT', 'packDirentsPlus', 'Hosted CI run 35575442663'],
   },
   {
     path: '/docs/transports/nfs',
