@@ -126,7 +126,8 @@ fn local_rustfs_config() -> R2Config {
     assert!(
         config.endpoint.starts_with("http://127.0.0.1:")
             || config.endpoint.starts_with("http://localhost:")
-            || config.endpoint.starts_with("http://host.docker.internal:"),
+            || config.endpoint.starts_with("http://host.docker.internal:")
+            || config.endpoint.starts_with("http://mount-rs-rustfs:"),
         "composition gate accepts only the harness endpoint, got {}",
         config.endpoint
     );
