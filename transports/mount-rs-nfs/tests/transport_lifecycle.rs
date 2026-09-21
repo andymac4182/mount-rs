@@ -255,3 +255,17 @@ async fn connection_close_cancels_a_queued_request_waiting_for_a_slot() {
     let _ = peer.shutdown().await;
     server.close().await.expect("close NFS server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_listen_calls_share_one_nfs_listener() {
+    let server = Arc::new(NfsServer::new(
+        MemoryFs::empty(),
+        NfsServerOptions::default(),
+    ));
+    let (first, second) = tokio::join!(server.listen(), server.listen());
+    let first = first.expect("first NFS listen");
+    let second = second.expect("second NFS listen");
+    assert_eq!(first, second);
+    assert_eq!(server.connections(), 0);
+    server.close().await.expect("close NFS server");
+}

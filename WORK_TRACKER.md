@@ -80,7 +80,8 @@ W01 gates and unresolved public parity.
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state,
-including cancellation while a queued request waits for an in-flight slot.
+including cancellation while a queued request waits for an in-flight slot and
+serialized concurrent listen/close lifecycle calls.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch. The forced-crash boundary tests

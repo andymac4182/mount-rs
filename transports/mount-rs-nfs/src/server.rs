@@ -186,6 +186,7 @@ pub struct NfsServer {
     clients: Arc<Mutex<HashMap<u64, NfsConnection>>>,
     next_connection_id: Arc<AtomicU64>,
     active_connections: Arc<AtomicUsize>,
+    listen_lock: Arc<AsyncMutex<()>>,
 }
 
 /// Construct an NFSv3/MOUNTv3 and NFSv4.1 TCP server backed by an [`FsDriver`].
@@ -256,6 +257,7 @@ impl NfsServer {
             clients: Arc::new(Mutex::new(HashMap::new())),
             next_connection_id: Arc::new(AtomicU64::new(1)),
             active_connections: Arc::new(AtomicUsize::new(0)),
+            listen_lock: Arc::new(AsyncMutex::new(())),
         }
     }
 
@@ -312,6 +314,7 @@ impl NfsServer {
     }
 
     pub async fn listen(&self) -> io::Result<SocketAddr> {
+        let _listen_guard = self.listen_lock.lock().await;
         if let Some(address) = self.local_addr() {
             return Ok(address);
         }
@@ -402,6 +405,7 @@ impl NfsServer {
     }
 
     pub async fn close(&self) -> io::Result<()> {
+        let _listen_guard = self.listen_lock.lock().await;
         if let Some(sender) = self.shutdown.lock().expect("NFS shutdown lock").take() {
             let _ = sender.send(());
         }

@@ -34,7 +34,9 @@ userspace concurrency evidence. A restart-boundary test reuses the backend
 with a replacement server and confirms that the old v4 session is rejected
 with `NFS4ERR_BADSESSION`; both halves of the eight-byte write verifier
 contribute to its session identity, avoiding the observed rapid-replacement
-alias.
+alias. Concurrent `NfsServer::listen()` calls share one bound listener, and
+`close()` is serialized with bind so a lifecycle race cannot leave an
+untracked listener running after teardown begins.
 
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
