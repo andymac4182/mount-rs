@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-21 10:41 UTC / 20:41 AEST**
+Status snapshot: **2026-09-21 10:44 UTC / 20:44 AEST**
 Repository: `andymac4182/mount-rs`  
 Functional evidence tip (before this documentation chunk): `origin/main` at
 `bb27fe0`
@@ -105,6 +105,8 @@ for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
 | `./scripts/cargo-shared check --locked -p mount-rs-tidb --features rustls` | PASS | TLS-capable provider graph compilation only; no endpoint handshake. |
 | `./scripts/cargo-shared check --locked -p mount-rs-sdk --features rustls`, `-p mount-rs-cli --features rustls`, `-p mount-rs-napi --features rustls` | PASS | Public TLS feature propagation; no credentials, CA policy or live provider evidence. |
 | `sh -n scripts/test-tidb-tls.sh` plus credential-free positive/negative URL-policy checks | PASS | Guardrail logic only; `TIDB_TLS_CONFIG_ONLY_PASS` does not connect or prove a TLS handshake. |
+| `./scripts/cargo-shared test --locked -p mount-rs-tidb --features rustls` | PASS, 6 provider unit tests | TLS-enabled provider unit/error-redaction coverage; ignored service tests remained explicitly ignored because no endpoint was available. |
+| `./scripts/cargo-shared clippy --locked -p mount-rs-tidb --all-targets --features rustls -- -D warnings` | PASS | Strict-Clippy TLS feature build; not live provider or production evidence. |
 | N-API library tests | PASS, 15 tests | Binding/lifecycle unit coverage. |
 | TiDB library tests | PASS, 6 tests | Provider unit coverage. |
 | Ignored TiDB acceptance binaries `tidb`, `ambiguous_commit`, `chunked_rustfs` | PASS compile-only | Does not claim that live services ran. |
@@ -196,6 +198,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 10:26–10:29 | Followed hosted run `35588858142` and retained `tidb-tls-compile` job `106298487587` as terminal success for source `e515036`. | ~2 min | ~1 min hosted wait | Hosted TLS feature compilation passed; live TLS/provider and production rollout gates remain open. |
 | 2026-09-21 10:29–10:37 | Added `scripts/test-tidb-tls.sh`, validated its positive and fail-closed URL-policy paths without credentials, and added the guardrail checks to the hosted TLS compile job. | ~8 min | ~0 min | A reproducible live TLS-provider command now exists; no live endpoint or production IAM/certificate evidence is available here. |
 | 2026-09-21 10:37–10:41 | Followed hosted run `35589825356` and retained `tidb-tls-compile` job `106301529923` as terminal success for source `ea062c0`. | ~1 min | ~3 min hosted wait | The fail-closed TLS deployment guard is remotely verified; live credentials, certificates and production provider evidence remain open. |
+| 2026-09-21 10:41–10:44 | Ran the TLS-enabled TiDB provider unit suite and strict-Clippy gate locally; the six unit tests passed and the ignored service tests remained explicit. | ~3 min | ~0 min | Repository TLS implementation is locally tested and lint-clean; no live endpoint is available for P07 closure. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
