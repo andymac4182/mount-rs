@@ -360,6 +360,8 @@ export declare class Nfs4Session {
    * decoded calls return one encoded RPC reply.
    */
   handleCall(bytes: Buffer): Promise<Buffer | null>
+  /** Sweep expired NFSv4 client leases and release their process-local state. */
+  sweepExpired(): Promise<number>
   get stats(): NfsSessionStats
   get handles(): Array<NfsHandleEntry>
   get destroyed(): boolean

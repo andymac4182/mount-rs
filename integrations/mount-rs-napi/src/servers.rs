@@ -783,6 +783,12 @@ impl Nfs4Session {
             .map(Buffer::from)
     }
 
+    /// Sweep expired NFSv4 client leases and release their process-local state.
+    #[napi]
+    pub async fn sweep_expired(&self) -> f64 {
+        self.inner.sweep_expired().await as f64
+    }
+
     #[napi(getter)]
     pub fn stats(&self) -> NfsSessionStats {
         let stats = self.inner.stats();

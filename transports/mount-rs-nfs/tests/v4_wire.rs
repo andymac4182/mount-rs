@@ -5,7 +5,9 @@
 //! namespace cleanup. It deliberately does not invoke the host kernel mount
 //! client; native mount prerequisites are platform- and privilege-specific.
 
-use std::time::Duration;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use mount_rs_core::MemoryFs;
 use mount_rs_nfs::v4::{
@@ -14,8 +16,8 @@ use mount_rs_nfs::v4::{
     NFS4ERR_TOOSMALL, UNSTABLE4,
 };
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler, XdrReader,
-    XdrWriter, decode_reply, encode_call, frame_record,
+    NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler,
+    XdrReader, XdrWriter, decode_reply, encode_call, frame_record,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -1180,6 +1182,133 @@ fn nfs_v4_session_state_is_process_local_after_server_restart() {
         .expect("spawn v4 restart boundary test thread")
         .join()
         .expect("v4 restart boundary test thread panicked");
+}
+
+#[test]
+fn nfs_v4_expired_lease_sweeps_session_state() {
+    std::thread::Builder::new()
+        .name("nfs-v4-lease-expiry-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 lease expiry test runtime")
+                .block_on(async {
+                    let ticks = Arc::new(AtomicU64::new(0));
+                    let base = Instant::now();
+                    let clock_ticks = Arc::clone(&ticks);
+                    let clock = Nfs4Clock::from_fn(move || {
+                        base + Duration::from_secs(clock_ticks.load(Ordering::Acquire))
+                    });
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.lease_seconds = 1;
+                    options.session.nfs4.clock = clock;
+                    let server = NfsServer::new(MemoryFs::empty(), options);
+                    let address = server.listen().await.expect("listen lease test server");
+                    let mut stream = TcpStream::connect(address)
+                        .await
+                        .expect("connect lease test client");
+                    let clientid = parse_exchange(
+                        rpc(&mut stream, 501, compound("exchange", &[exchange_args()])).await,
+                    );
+                    let session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            502,
+                            compound("create-session", &[create_session_args(clientid)]),
+                        )
+                        .await,
+                    );
+                    let client = Client {
+                        session,
+                        clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    parse_sequence_and_handle(
+                        rpc(
+                            &mut stream,
+                            503,
+                            compound(
+                                "lease-renewal",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_GETFH, |_| {}),
+                                ],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    ticks.store(1, Ordering::Release);
+                    let mut response = rpc(
+                        &mut stream,
+                        504,
+                        compound("expired-session", &[sequence(&client)]),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 0),
+                        NFS4ERR_BADSESSION,
+                        "dispatch sweeps an expired lease before the next request"
+                    );
+                    response.end("expired session response").unwrap();
+                    assert_eq!(server.v4_session().sweep_expired().await, 0);
+
+                    let second_clientid = parse_exchange(
+                        rpc(
+                            &mut stream,
+                            505,
+                            compound(
+                                "exchange-second-client",
+                                &[exchange_args_for(b"mount-rs-v4-expired")],
+                            ),
+                        )
+                        .await,
+                    );
+                    let second_session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            506,
+                            compound(
+                                "create-second-session",
+                                &[create_session_args(second_clientid)],
+                            ),
+                        )
+                        .await,
+                    );
+                    let second_client = Client {
+                        session: second_session,
+                        clientid: second_clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    ticks.store(2, Ordering::Release);
+                    assert_eq!(server.v4_session().sweep_expired().await, 1);
+                    let mut response = rpc(
+                        &mut stream,
+                        507,
+                        compound("explicitly-expired-session", &[sequence(&second_client)]),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 0),
+                        NFS4ERR_BADSESSION,
+                        "an explicit sweep removes the session before the next request"
+                    );
+                    response.end("explicitly expired session response").unwrap();
+
+                    stream.shutdown().await.expect("close lease test client");
+                    server.close().await.expect("close lease test server");
+                });
+        })
+        .expect("spawn v4 lease expiry test thread")
+        .join()
+        .expect("v4 lease expiry test thread panicked");
 }
 
 #[test]

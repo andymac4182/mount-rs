@@ -73,9 +73,11 @@ open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
 options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
 an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
 refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
-`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Upstream
-callback ID-map, injectable clock/lease, and session `onError` parity remain
-explicit gaps; deterministic seeded identities are now covered.
+`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Rust
+`Nfs4Clock` now drives automatic and explicit lease expiry sweeps with a
+rootless wire test covering both paths; N-API clock injection, callback ID-map,
+and session `onError` parity remain explicit gaps. Deterministic seeded
+identities are covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -1163,9 +1165,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The pinned oracle upstream NFS gate passed 266 cases with 18 explicit
   capability/root skips, the N-API NFS codec differential passed, and the
   focused NFS target passed 33 unit, rootless wire 1, pipelined concurrency 1,
-  transport errors 4, v4 barrier 1, and v4 wire 4 tests; richer `onError` and
-  NFSv4 lease/ID-map/state-limit/reclaim knobs plus native/hosted/crash gates
-  remain explicitly open.
+  transport errors 4, v4 barrier 1, and v4 wire 4 tests; upstream `onError`,
+  callback ID maps, N-API clock injection, and native/hosted/crash gates remain
+  explicitly open.
 - [x] The NFSv4 lock-cap follow-up applies `maxLocksPerFile` to extensions of
   existing lock state, preserves conflict-before-cap ordering, and adds a
   rootless wire assertion for the additional-range rejection. The complete
@@ -1185,9 +1187,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
   `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
   release addon/typecheck, live N-API server integration, and strict affected
-  Clippy pass. Callback-based maps, injectable clock/lease controls, and
-  session `onError` remain explicit parity gaps; deterministic seeded
-  identities are covered by the rootless wire test.
+  Clippy pass. Callback-based maps, N-API clock injection, and session
+  `onError` remain explicit parity gaps; deterministic seeded identities are
+  covered by the rootless wire test.
+- [x] The NFSv4 lease packet adds deterministic Rust `Nfs4Clock` control,
+  automatic expiry before COMPOUND dispatch, explicit `sweep_expired`, and
+  release of expired sessions, locks, open states, and pinned backend handles;
+  the v4 wire test covers automatic and explicit expiry. N-API clock injection,
+  callback maps, `onError`, native Linux/hosted lifecycle, and crash/durability
+  gates remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
