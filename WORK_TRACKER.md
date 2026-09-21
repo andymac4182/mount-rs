@@ -1256,6 +1256,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   the policy fixtures. This is stable hosted artifact-path evidence; tag
   publication, signing/SBOM, target-platform acceptance, canary, rollback and
   approval remain W08-P09 gates.
+- [x] W08.14 **Unsigned SBOM generation and release-artifact binding:**
+  `scripts/write-w08-release-sbom.mjs` derives the `mount-rs-cli` transitive
+  dependency closure from locked Cargo metadata and emits CycloneDX 1.5;
+  `scripts/verify-w08-release-sbom.mjs` checks the graph, source identity and
+  artifact SHA-256/size, including a local wrong-source negative test. The CLI
+  preview and dedicated policy workflows generate and verify the SBOM, with
+  the preview path publishing and re-downloading it beside the artifact,
+  manifest and `SHA256SUMS`. Hosted run `35614345209`, source `9c9d0e4`,
+  `w08-release-policy` job `106381893114` passed the real Ubuntu artifact path
+  with `components=288` and `W08_RELEASE_SBOM_PASS`. The SBOM is unsigned and
+  the manifest remains `sbom=pending`; signing/attestation, target-platform
+  parity, canary, rollback and approval remain W08-P07/P09 gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1355,9 +1367,11 @@ reproducible in a production-like environment.
   actual CLI preview artifact path and hosted generator policy job
   `106363893748`; W08.13 runs a real Ubuntu artifact path in dedicated
   non-cancelling hosted job `106372777281` from run `35611883547`, source
-  `f432441`. These slices do not create signing/SBOM evidence or run a real tag
+  `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
+  job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
+  not create cryptographic signing/attestation evidence or run a real tag
   release, canary, rollback or approval. *(Release implementation + hosted;
-  registry, signing, SBOM tooling, deployment controller and approvers are
+  registry, signing/attestation, deployment controller and approvers are
   external.)*
 
 ## W09 — napi-rs, Node API and packaging

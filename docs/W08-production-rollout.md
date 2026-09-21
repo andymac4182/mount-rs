@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator wired into the CLI preview workflow, a dedicated non-cancelling hosted release-policy gate, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, real-artifact and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator and locked-Cargo CycloneDX SBOM generator/verifier wired into the CLI preview workflow, a dedicated non-cancelling hosted release-policy gate, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, real-artifact, SBOM and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -38,7 +38,7 @@ planning result.
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
 | P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
-| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring and dedicated real-artifact policy slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `.github/workflows/cli-release.yml` now generates/verifies the manifest before upload and after download. Dedicated `.github/workflows/w08-release-policy.yml` builds a real Ubuntu CLI artifact, checks the tarball/checksum/manifest path, and runs without main-branch cancellation. Hosted run `35611883547`, source `f432441`, `w08-release-policy` job `106372777281` reached terminal success. Exit still requires an approved tag-triggered publication, signing/SBOM, target-platform package checks, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
+| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact and unsigned-SBOM policy slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. `.github/workflows/cli-release.yml` now generates/verifies the manifest and unsigned SBOM before upload and after download. Dedicated `.github/workflows/w08-release-policy.yml` builds a real Ubuntu CLI artifact and verifies the tarball/checksum/manifest/SBOM path without main-branch cancellation. Hosted run `35614345209`, source `9c9d0e4`, `w08-release-policy` job `106381893114` reached terminal success. Exit still requires an approved tag-triggered publication, cryptographic signing/attestation, target-platform package/SBOM checks, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
 
 No P01–P09 item is terminally accepted. P01/P02/P07 implementation progress is
 also covered locally by
@@ -72,6 +72,17 @@ checksum and artifact-derived manifest, and running direct plus extracted
 binary smoke checks. This proves a stable hosted artifact path, not a published
 tag release: signing, SBOM, target-platform acceptance, canary, rollback and
 approval remain open.
+
+W08.14 adds `scripts/write-w08-release-sbom.mjs` and
+`scripts/verify-w08-release-sbom.mjs`. The scripts derive the `mount-rs-cli`
+transitive closure from locked Cargo metadata, emit a CycloneDX 1.5 document,
+and bind it to the release artifact SHA-256 and source commit. Hosted run
+`35614345209`, source `9c9d0e4`, job `106381893114` emitted
+`W08_RELEASE_SBOM_PASS` for 288 components and tarball SHA-256
+`c3d1a3200c06830f95527dd62310455e66b4632080aee7ead3a118e4783f4543`. This is
+an unsigned SBOM artifact-path pass; the manifest intentionally remains
+`sbom=pending` until the approved signing/attestation process runs. The tag
+release, target-platform parity, canary, rollback and approval remain open.
 
 ## Deployment contract
 
@@ -176,6 +187,7 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 | `CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-release-target ./scripts/cargo-shared build --locked --release -p mount-rs-cli` plus tarball/`SHA256SUMS`/manifest verification | Local `mount-rs 0.1.0` release artifact and checksum/manifest/content path passed; tarball SHA-256 `da0782596d7402ce64869f2037075d95b273f59f389b9493e26a0ba1e39822c7`, size `6910193` | No published tag, registry, signing/SBOM, target-platform matrix, canary, rollback or approval evidence |
 | Hosted CI run `35609172786`, source `66544b5`, `w08-release-policy` job `106363893748` | Terminal hosted generator plus pending/strict-accepted/expected-negative policy evidence | Tag-triggered macOS release publication, asset inspection, signing/SBOM, target-platform acceptance, canary, rollback, approval and production deployment |
 | Hosted CI run `35611883547`, source `f432441`, `w08-release-policy` job `106372777281` | Terminal success from the dedicated non-cancelling workflow: real Ubuntu CLI release build/package, `SHA256SUMS`, artifact-derived manifest, tar-content check, direct/extracted `--version` checks and pending/strict-accepted/expected-negative fixture paths | Tag-triggered macOS release publication, published asset inspection, signing/SBOM, target-platform acceptance, canary, rollback, approval and production deployment |
+| Hosted CI run `35614345209`, source `9c9d0e4`, `w08-release-policy` job `106381893114` | Terminal success from the dedicated non-cancelling workflow: real Ubuntu CLI artifact, `SHA256SUMS`, artifact-derived manifest, 288-component CycloneDX SBOM, tar-content check, direct/extracted `--version` checks and policy fixtures; SBOM marker carried tarball SHA-256 `c3d1a3200c06830f95527dd62310455e66b4632080aee7ead3a118e4783f4543` | Tag-triggered macOS release publication, published asset inspection, cryptographic signing/attestation, target-platform package/SBOM acceptance, canary, rollback, approval and production deployment |
 
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate
@@ -200,9 +212,10 @@ jobs failed; it is not an aggregate-green release result either.
 4. Close P06 and P08 with production-shaped workload, soak, fault injection,
    runbook and on-call exercises. Record resource headroom and rollback timing.
 5. Confirm the dedicated W08 policy gate is terminal on the release candidate,
-   then run the approved tag-triggered CLI release workflow and retain its
-   actual tarball, `SHA256SUMS` and manifest; close P09 with signatures/SBOM, a
-   held-back canary, live SLO observation, rollback verification and
+   including the unsigned SBOM path, then run the approved tag-triggered CLI
+   release workflow and retain its actual tarball, `SHA256SUMS`, manifest and
+   SBOM; close P09 with cryptographic signing/attestation, target-platform
+   parity, a held-back canary, live SLO observation, rollback verification and
    release-owner approval. The synthetic accepted fixture, local tarball and
    hosted CI artifact are not sufficient.
 6. Promote in stages only after the evidence packet passes the final audit. On
