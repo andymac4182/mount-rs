@@ -1332,6 +1332,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   4 unit, 6 chunked, 23 gateway, and 5 public-API tests. This is bounded local
   fault-injection evidence, not power-loss durability, provider failure,
   broader ordering/concurrency, or native/hosted acceptance.
+- [x] The follow-up S3 cancellation/concurrency packet stages streaming PUT and
+  multipart part replacement behind unique private files and atomic rename;
+  cancelling a request removes abandoned staging, preserves an existing part,
+  and releases the debug in-flight ticket, while two concurrent multipart parts
+  complete in numeric order. The loopback-enabled target passes 4 unit, 6
+  chunked, 26 gateway, and 5 public-API tests; provider-backed failure,
+  power-loss/torn-write durability, live AWS/R2, and native/hosted acceptance
+  remain open.
 - [x] The same multipart replacement flow is exercised through the generated
   N-API S3 facade: release build/declarations, direct session create/part/list/
   complete/GET, streamed traffic, cancellation, bucket isolation, connection

@@ -11,11 +11,12 @@ The crate supports the core object operations, ListObjectsV2, ranges and HTTP
 conditionals, copy, DeleteObjects, and multipart create/upload/list/complete/
 abort using the driver's reserved `.mountx-multipart` staging tree.
 
-Streaming PUT and multipart completion publish through private staging files
-and an atomic rename, so a failed integrity check or part read does not replace
-an existing object. Drivers that do not advertise `atomic_rename` receive an
-explicit `NotImplemented` response for those operations instead of a weaker
-direct-write fallback; the staging buffer is bounded by `read_chunk_bytes`.
+Streaming PUT, multipart part replacement, and multipart completion publish
+through private staging files and an atomic rename, so a failed integrity check,
+cancelled request, or part read does not replace an existing object. Drivers
+that do not advertise `atomic_rename` receive an explicit `NotImplemented`
+response for those operations instead of a weaker direct-write fallback; the
+staging buffer is bounded by `read_chunk_bytes`.
 CopyObject uses the same bounded, cross-driver staging path and atomic
 publication contract, so large copies do not accumulate the source object in
 memory and failed copies do not replace an existing destination.
