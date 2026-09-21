@@ -859,7 +859,11 @@ hosted/native acceptance. At exact scope-packet SHA
 successful `native-webdav (macos-latest)` job `106469172312` and
 `native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
 native WebDAV I/O for that packet only, not the overall CI run or production
-acceptance. A read-only status check for the published tip
+acceptance. The focused N-API SQLite provider/reopen probe now also preserves
+exact file bytes across orderly provider/server recreation and observes zero
+replacement-session locks, classifying bytes as durable and locks as
+process-local for that provider; it does not qualify crash/power-loss or live
+remote-provider durability. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -1286,6 +1290,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   millisecond boundary. N-API keeps serializable options, empty assertion
   readback, and expiry-aware `WebdavLockView[]` snapshots; broader session/
   server parity and the external W01 gates remain open.
+- [x] The focused N-API SQLite WebDAV provider/reopen probe is now part of the
+  package test sequence: `node test/typecheck.mjs && node
+  test/webdav-sqlite.mjs` passed exact PUT-byte readback after orderly
+  server/provider shutdown and a replacement-session zero-lock check. This
+  classifies local SQLite byte persistence and process-local WebDAV locks only;
+  crash/power-loss and live-provider durability remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
