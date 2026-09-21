@@ -15,8 +15,12 @@ mod linux {
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use mount_rs_core::MemoryFs;
-    use mount_rs_fuse::mount::{MountOptions, mount};
+    use async_trait::async_trait;
+    use mount_rs_core::{FileHandle, FsDriver, MemoryFs};
+    use mount_rs_fuse::mount::{
+        FuseMountHooks, FuseTransportError, FuseTransportErrorKind, MountOptions, mount,
+        mount_with_hooks,
+    };
 
     fn native_mount_opted_in() -> bool {
         std::env::var_os("MOUNT_RS_RUN_NATIVE_FUSE").as_deref() == Some(std::ffi::OsStr::new("1"))
@@ -57,6 +61,104 @@ mod linux {
             "mount-rs-fuse-native-{}-{nonce}",
             std::process::id()
         ))
+    }
+
+    fn assert_native_prerequisites() {
+        assert!(
+            native_mount_opted_in(),
+            "set MOUNT_RS_RUN_NATIVE_FUSE=1 when explicitly running this ignored native harness"
+        );
+        assert!(
+            Path::new("/dev/fuse").exists(),
+            "native FUSE harness requires /dev/fuse; this is an environment prerequisite, not a skip"
+        );
+        let uid = unsafe { libc::geteuid() };
+        assert!(
+            uid == 0 || helper_available(),
+            "native FUSE harness requires root/CAP_SYS_ADMIN or an executable fusermount helper"
+        );
+    }
+
+    fn native_mount_options() -> MountOptions {
+        MountOptions {
+            default_permissions: false,
+            fsname: "mount-rs-native-test".to_owned(),
+            init_timeout: std::time::Duration::from_secs(10),
+            unmount_timeout: std::time::Duration::from_secs(10),
+            ..Default::default()
+        }
+    }
+
+    struct PanicReadHandle {
+        inner: Arc<dyn FileHandle>,
+    }
+
+    #[async_trait]
+    impl FileHandle for PanicReadHandle {
+        async fn read(
+            &self,
+            _buffer: &mut [u8],
+            _position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            panic!("injected native FUSE read panic");
+        }
+
+        async fn write(
+            &self,
+            buffer: &[u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn sync(&self) -> mount_rs_core::Result<()> {
+            self.inner.sync().await
+        }
+
+        async fn datasync(&self) -> mount_rs_core::Result<()> {
+            self.inner.datasync().await
+        }
+
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.inner.close().await
+        }
+    }
+
+    struct PanicReadDriver {
+        inner: Arc<MemoryFs>,
+    }
+
+    #[async_trait]
+    impl FsDriver for PanicReadDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn FileHandle>> {
+            let inner = self.inner.open(path, flags, mode).await?;
+            Ok(Arc::new(PanicReadHandle { inner }))
+        }
     }
 
     async fn client_round_trip(path: PathBuf) -> Result<(), String> {
@@ -111,29 +213,11 @@ mod linux {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "requires an explicitly enabled Linux FUSE kernel harness"]
     async fn native_mount_round_trip_is_opt_in_and_real() {
-        assert!(
-            native_mount_opted_in(),
-            "set MOUNT_RS_RUN_NATIVE_FUSE=1 when explicitly running this ignored native harness"
-        );
-        assert!(
-            Path::new("/dev/fuse").exists(),
-            "native FUSE harness requires /dev/fuse; this is an environment prerequisite, not a skip"
-        );
-        let uid = unsafe { libc::geteuid() };
-        assert!(
-            uid == 0 || helper_available(),
-            "native FUSE harness requires root/CAP_SYS_ADMIN or an executable fusermount helper"
-        );
+        assert_native_prerequisites();
 
         let mountpoint = unique_mountpoint();
         std::fs::create_dir(&mountpoint).expect("create native mountpoint");
-        let options = MountOptions {
-            default_permissions: false,
-            fsname: "mount-rs-native-test".to_owned(),
-            init_timeout: std::time::Duration::from_secs(10),
-            unmount_timeout: std::time::Duration::from_secs(10),
-            ..Default::default()
-        };
+        let options = native_mount_options();
         let mounted = match tokio::time::timeout(
             std::time::Duration::from_secs(15),
             mount(Arc::new(MemoryFs::empty()), &mountpoint, options),
@@ -164,5 +248,99 @@ mod linux {
         assert!(unmounted.is_ok(), "native unmount timed out: {unmounted:?}");
         assert!(unmounted.as_ref().is_ok_and(Result::is_ok), "{unmounted:?}");
         assert!(removed.is_ok(), "remove native mountpoint: {removed:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires an explicitly enabled Linux FUSE kernel harness"]
+    async fn native_backend_read_panic_reports_transport_error_and_closes() {
+        assert_native_prerequisites();
+
+        let mountpoint = unique_mountpoint();
+        std::fs::create_dir(&mountpoint).expect("create native panic mountpoint");
+        let observed = Arc::new(std::sync::Mutex::new(Vec::<FuseTransportError>::new()));
+        let observed_callback = Arc::clone(&observed);
+        let driver = Arc::new(PanicReadDriver {
+            inner: Arc::new(MemoryFs::empty()),
+        });
+        let mounted = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            mount_with_hooks(
+                driver,
+                &mountpoint,
+                native_mount_options(),
+                FuseMountHooks {
+                    on_transport_error: Some(Arc::new(move |error| {
+                        observed_callback
+                            .lock()
+                            .expect("transport callback lock")
+                            .push(error);
+                    })),
+                },
+            ),
+        )
+        .await
+        {
+            Ok(Ok(mounted)) => mounted,
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_dir(&mountpoint);
+                panic!("opted-in native panic FUSE mount failed: {error}");
+            }
+            Err(_) => {
+                let _ = std::fs::remove_dir(&mountpoint);
+                panic!("native panic FUSE mount did not complete within 15 seconds");
+            }
+        };
+
+        let file = mountpoint.join("panic.txt");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking({
+                let file = file.clone();
+                move || std::fs::write(file, b"panic")
+            }),
+        )
+        .await
+        .expect("native panic file write timed out")
+        .expect("native panic file write task failed")
+        .expect("native panic file write failed");
+
+        let read_result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking(move || std::fs::read(file)),
+        )
+        .await
+        .expect("native panic read timed out")
+        .expect("native panic read task failed");
+        assert!(
+            read_result.is_err(),
+            "the backend panic must not produce a successful read"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(15), mounted.wait_closed())
+            .await
+            .expect("native panic session did not close");
+
+        {
+            let observed = observed.lock().expect("transport callback lock");
+            assert_eq!(observed.len(), 1);
+            assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
+            assert_eq!(observed[0].message, "FUSE read task panicked");
+        }
+
+        let unmounted =
+            tokio::time::timeout(std::time::Duration::from_secs(15), mounted.unmount()).await;
+        let removed = std::fs::remove_dir(&mountpoint);
+        assert!(
+            unmounted.is_ok(),
+            "native panic unmount timed out: {unmounted:?}"
+        );
+        assert!(
+            unmounted.as_ref().is_ok_and(Result::is_ok),
+            "native panic unmount failed: {unmounted:?}"
+        );
+        assert!(
+            removed.is_ok(),
+            "remove native panic mountpoint: {removed:?}"
+        );
     }
 }

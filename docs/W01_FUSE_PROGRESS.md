@@ -12,14 +12,15 @@ Status: **In progress — production NO-GO**
 
 This tracker owns the FUSE protocol, mount-free session, native mount,
 callback, and lifecycle boundary. A focused codec or session pass does not
-close native Linux mount, hosted CI, FSKit, or root-callback acceptance.
+close native Linux mount, hosted CI, or root-callback acceptance; the
+macOS/FSKit boundary is an explicit unsupported-scope decision recorded below.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
 | Public FUSE exports and typed/raw protocol behavior | In progress | Pinned-oracle body/whole-message differentials and generated declarations |
 | Rust-backed mount-free session | In progress | INIT, options, cache, lookup, flush, errors, handles, callbacks, and lifecycle coverage |
 | Linux native FUSE | External gate | Hosted `/dev/fuse`/`fuse3` mount, read/write, unmount, fault and callback-event result |
-| macOS/FSKit boundary | External gate | Supported/unsupported decision backed by an actual host result |
+| macOS/FSKit boundary | Accepted out of scope | Actual Darwin 27.0.0 arm64 host has no `/dev/fuse`; `mount::tests::mount_is_explicitly_unsupported_without_touching_the_path` passes, and this crate makes no FSKit or macFUSE FUSE-protocol claim |
 | Errors, cancellation, concurrency, crash, restart and cleanup | Open | Deterministic and native lifecycle evidence with explicit failure classification |
 
 ## Current queue
@@ -51,6 +52,8 @@ close native Linux mount, hosted CI, FSKit, or root-callback acceptance.
 | 2026-09-22 | Unsupported operation body validation | The mount-free session now validates codec-backed `BMAP`, `SETXATTR`, `GETXATTR`, `LISTXATTR`, and `REMOVEXATTR` bodies with the negotiated protocol context before returning their explicit `ENOSYS` boundary; malformed legacy and `SETXATTR_EXT` forms return `EINVAL` without backend mutation | `./scripts/cargo-shared test -p mount-rs-fuse --all-targets --locked` passed 14 unit, 6 INIT, 6 notify/record, 11 protocol, 20 session, and 3 sync-barrier tests; strict warning-denied Clippy passed; native xattr support remains intentionally unadvertised |
 | 2026-09-22 | In-flight native FUSE read interrupt | Registered positional read workers by request unique, aborts only a known worker for `FUSE_INTERRUPT`, preserves the existing `EAGAIN` reply for unknown targets, and drains read workers before the next serialized stateful request; a Linux-gated Unix-stream regression proves an interrupted read does not close the session and orderly stop remains callback-silent | Host all-target tests and strict Clippy, formatting/diff checks, and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior, native mutation/write concurrency, close/crash/restart, callback events, locks and durability remain external |
 | 2026-09-22 | Native Linux FUSE concurrency harness | Extended the ignored `/dev/fuse` harness to run eight concurrent blocking kernel clients, each writing, reading, renaming, and rereading a distinct file before asserting the mounted directory contains all eight results; this exercises the native session boundary without promoting local compile evidence to a runtime pass | Host harness compilation, Linux-target strict Clippy, formatting and diff checks pass; the hosted `native-fuse` job must execute the harness before native concurrency is accepted |
+| 2026-09-22 | Native Linux FUSE callback fault harness | Added an ignored `/dev/fuse` scenario with a driver that panics only on a file read; the test requires the kernel read to fail, waits for session closure, asserts one owned `Task` transport callback, and completes bounded unmount/cleanup | Focused host tests, Linux-target strict Clippy, formatting and diff checks pass; the hosted `native-fuse` job must execute this case before native callback-event and panic/cleanup evidence is accepted |
+| 2026-09-22 | macOS FUSE/FSKit scope boundary | On the actual Darwin 27.0.0 arm64 host, `/dev/fuse` is absent and the non-Linux mount path returns `UnsupportedPlatform` without touching the requested path; the supported native macOS path remains NFS, and no FSKit or macFUSE FUSE-protocol parity is claimed | This closes the macOS FUSE/FSKit decision as explicitly outside supported scope; Linux hosted `/dev/fuse`, callback, lifecycle, concurrency, crash/restart and durability gates remain open |
 
 ## Completion rule
 

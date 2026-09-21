@@ -18,8 +18,10 @@ coverage. It now also exposes the effective scalar server/session policy and
 the public `P9LockTable`/`P9LockClient` surface, with generated declarations and
 attach/runtime lock checks; the upstream driver/fid/assertion/debug graphs,
 full fid graph, lock-table option injection, property-shaped `clients` contract,
-and 9P mount/barrel helpers remain open rather than being silently narrowed
-away. The transport now also broadcasts shutdown safely
+and 9P mount helpers remain open rather than being silently narrowed away. The
+`./9p` constants/message-name barrel is now complete against the pinned
+upstream surface, with all 124 exports differentially checked. The transport
+now also broadcasts shutdown safely
 across the accept loop and all connections, closes the active-connection
 accept-loop race, and
 reaps completed request tasks while reporting task failures; its in-flight
@@ -278,6 +280,18 @@ harness checks that all eight entries are visible through the mounted root.
 The host harness compiles and Linux-target strict Clippy passes, but only the
 hosted `native-fuse` execution can qualify this as native runtime evidence;
 W01 remains NO-GO until that result and the other lifecycle gates are green.
+The same ignored Linux harness now includes a driver that panics only when a
+mounted file is read. It requires the kernel read to fail, waits for the
+session to close, asserts exactly one owned `Task` transport callback, and
+completes bounded unmount and mountpoint cleanup. Local focused tests and
+Linux-target strict Clippy pass; hosted execution is still required for native
+callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
+The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
+non-Linux mount regression returns `UnsupportedPlatform` without touching its
+requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
+macOS native path remains NFS, with no FSKit or macFUSE FUSE-protocol claim.
+This closes the macOS platform-scope decision but does not qualify any Linux
+hosted or lifecycle gate, so W01 remains NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -800,6 +814,12 @@ cancelled; [W04 production policy
 35633305932](https://github.com/andymac4182/mount-rs/actions/runs/35633305932)
 succeeded, and no fresh Live Cloudflare R2 run was listed. No hosted WebDAV
 PASS is claimable from the current tip.
+The immediately preceding tracker tip `4b103b1ab9be142b15638a9679999bfd43d3bd80`
+had [CI run 35633547228](https://github.com/andymac4182/mount-rs/actions/runs/35633547228)
+pending and [fault-injection run
+35633547086](https://github.com/andymac4182/mount-rs/actions/runs/35633547086)
+in progress at the read-only check; W04 policy succeeded, but no hosted
+WebDAV PASS was claimable.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -2681,6 +2701,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   gateway, SDK/CLI, N-API, W01, W04, W26, and other non-ignored workspace rows.
   Explicitly ignored native/service rows remain separate prerequisites and are
   not promoted to production evidence.
+- [x] Current credential-free W25 rollout-contract fixtures at pushed source
+  `70d37fefe26e41a2406bde32b27de5f563c3ab2f` passed on 2026-09-22:
+  CloudFormation template structure (`AWS_S3_TEMPLATE_CONTRACT_PASS`),
+  synthetic bucket-policy contract and tamper cases
+  (`AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`), the seven-case CI-input
+  validator (`AWS_S3_CI_CONFIG_TEST_PASS cases=7`), and the three-case
+  protected-environment fixture (`AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`).
+  These are credential-free fail-closed safeguards only; they do not approve
+  the external GitHub environment, IAM trust, or production parameters.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2746,6 +2775,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
   abort. It did not mutate the bucket or rerun service acceptance; this is
   qualification-account evidence only.
+- [x] A current-source read-only resource audit at pushed source
+  `313fb2f2a6bd6e68305a86bc55036d77c563ca8c` on 2026-09-22 passed the same
+  qualification-bucket account/region binding, all four public-access blocks,
+  `BucketOwnerEnforced` ownership, AES256 default encryption, `None`
+  versioning, seven-day `mount-rs-tests/` lifecycle, and one-day
+  incomplete-multipart abort checks. It made no AWS changes and remains
+  qualification-account evidence only; the production bucket, policy, roles,
+  and approved change set remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -2833,6 +2870,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
   non-self-approvable reviewer, protected-environment inputs and secret,
   missing GitHub OIDC provider, and missing immutable-subject role trust; it
+  made no changes. A current-source rerun at pushed source
+  `cf18d93d7fdd1656d853f208db81b8b133265fe5` returned the same blocked set and
   made no changes. The
   workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The

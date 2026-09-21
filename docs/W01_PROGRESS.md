@@ -51,7 +51,7 @@ ledger in the same commit as an implementation/evidence chunk.
 
 | Track | Scope | Current boundary | Production-ready gate |
 | --- | --- | --- | --- |
-| W01-FUSE | FUSE protocol, mount-free session, native mount, callbacks and lifecycle | Focused Rust/N-API protocol/session evidence exists; native Linux, callback events, remaining session parity and lifecycle races remain | Hosted Linux native mount/read/write/unmount, callback-event and lifecycle evidence, plus the supported macOS/FSKit decision |
+| W01-FUSE | FUSE protocol, mount-free session, native mount, callbacks and lifecycle | Focused Rust/N-API protocol/session evidence exists; macOS FUSE/FSKit is explicitly outside supported scope on the actual Darwin host, while native Linux, callback events, remaining session parity and lifecycle races remain | Hosted Linux native mount/read/write/unmount, callback-event and lifecycle evidence, plus the remaining supported-scope/lifecycle gates |
 | W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Rust/N-API attached Node Duplex with typed per-attachment peer/ownership/frame/in-flight bounds and source-specific peer absence (`undefined` for an attached stream, `null` for a native listener connection), direct session, scalar server/session options, `userFor`, ownership, duplicate-attach, bounded backpressure, write-fault, server-teardown, broadcast-shutdown, active-connection close-race, shutdown-aware permit waits, bounded task-reaping, and session-destroy/Tflush-wakeup evidence passes; the dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344) at `431affd` passed kernel probing plus all four ignored Linux lifecycle tests; native Tokio listener connections intentionally expose no Node stream and use the supported `attach` seam | Upstream driver/fid/lock/assertion/debug, property-shaped `clients`, and mount/barrel parity remain open; crash/reset/half-close recovery is explicitly supervisor-owned rather than a library claim, and the overall W01/release decision remains NO-GO |
 | W01-NFS | NFSv3/v4 router, sessions, handles, native mount and lifecycle | v3/v4 direct routing, shared server state, BigInt handle snapshots, active connection objects/count, close/wait lifecycle, v4 view, process-lifetime session continuity across an orderly TCP reconnect, rootless pipelined v3 dispatch, pinned 266-case upstream conformance, codec differential, bounded `maxHandles`/NFSv4 pinning, bounded v4 channel/state knobs, `maxLocksPerFile` enforcement, and refused-`CREATE_SESSION` replay/retry are evidenced; full stateful matrix and native/hosted qualification remain | Shared v3/v4 handle/state proof, native macOS/Linux lifecycle, v4 behavior matrix, and crash/close evidence |
 | W01-S3 | S3 protocol, session, streaming, providers and lifecycle | Local protocol and structural-driver evidence exists; live provider and complete member parity remain | Applicable API ledger, live AWS/R2, fault/restart and concurrency evidence |
@@ -88,6 +88,18 @@ harness checks that all eight entries are visible through the mounted root.
 The host harness compiles and Linux-target strict Clippy passes, but only the
 hosted `native-fuse` execution can qualify this as native runtime evidence;
 W01 remains NO-GO until that result and the other lifecycle gates are green.
+The same ignored Linux harness now includes a driver that panics only when a
+mounted file is read. It requires the kernel read to fail, waits for the
+session to close, asserts exactly one owned `Task` transport callback, and
+completes bounded unmount and mountpoint cleanup. Local focused tests and
+Linux-target strict Clippy pass; hosted execution is still required for native
+callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
+The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
+non-Linux mount regression returns `UnsupportedPlatform` without touching its
+requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
+macOS native path remains NFS, with no FSKit or macFUSE FUSE-protocol claim.
+This closes the macOS platform-scope decision but does not qualify any Linux
+hosted or lifecycle gate, so W01 remains NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
@@ -283,7 +295,7 @@ it combines behavior verification with host and kernel prerequisites.
 | Node SDK CLI macOS NFS | Done | Native self-test passed mount/read/write/unmount/persistence |
 | Linux FUSE native mount | External gate | Structural job and CI wiring exist; hosted `/dev/fuse` result is still required |
 | Linux 9P and native NFS | External gate | The revision-matched hosted Linux 9P job `35616832528` / `native-9p` job `106389895603` passed kernel-module probing and privileged native mount/read/write/unmount on the prior packet, and the macOS native NFSv3 loopback package gate passes; the current 9P shutdown/reaping/concurrent-I/O packet and Linux NFSv4.1 mount/read/write/unmount still need fresh hosted evidence, with native fault/race/crash evidence open |
-| macOS FSKit/macFUSE boundary | Open/external | Current implementation does not claim FSKit or macFUSE FUSE-protocol parity |
+| macOS FSKit/macFUSE boundary | Accepted out of scope | Actual Darwin 27.0.0 arm64 host has no `/dev/fuse`; the focused non-Linux mount regression returns `UnsupportedPlatform` without touching its path, and the implementation makes no FSKit or macFUSE FUSE-protocol claim |
 | Hosted Windows runtime | External gate | Windows-target checks exist; hosted runtime evidence remains required |
 | Errors, paths, bytes, links, timestamps | In progress | Strong mount-free and macOS NFS evidence; cross-platform/native coverage remains |
 | Handles and lifecycle | In progress | Mount-free inode/handle readback, NFS `Mounted.port`, signal teardown, async disposal, and NFS evidence exist; NFS handle parity and native cleanup races remain |
@@ -365,6 +377,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | Classified the remaining session member boundary against the pinned source: N-API exposes scalar options, snapshot lock records, stats and assertions, but does not claim injectable `now`, `onError`, `onAssertion`, a live `DavLockTable`, or `Map`-shaped method counters | — | 72% W01.1 planning view | These public-parity items remain OPEN pending implementation or explicit supported-scope acceptance; native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Read-only status for published tip `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5`: [CI run 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088) and [fault-injection run 35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044) were cancelled, and [Live Cloudflare R2 run 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090) failed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Read-only status for current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871`: [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914) and [fault-injection run 35633305962](https://github.com/andymac4182/mount-rs/actions/runs/35633305962) were cancelled; the unrelated [W04 production-policy run 35633305932](https://github.com/andymac4182/mount-rs/actions/runs/35633305932) succeeded, and no fresh Live Cloudflare R2 run was listed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable from the current tip; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Read-only status for tracker tip `4b103b1ab9be142b15638a9679999bfd43d3bd80`: [CI run 35633547228](https://github.com/andymac4182/mount-rs/actions/runs/35633547228) was pending and [fault-injection run 35633547086](https://github.com/andymac4182/mount-rs/actions/runs/35633547086) was in progress; the unrelated [W04 production-policy run 35633547306](https://github.com/andymac4182/mount-rs/actions/runs/35633547306) succeeded | — | 72% W01.1 planning view | Pending/in-progress workflows are not hosted WebDAV acceptance; no WebDAV PASS is claimable and the hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency gates remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 
