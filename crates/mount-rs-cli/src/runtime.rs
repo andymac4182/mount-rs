@@ -249,6 +249,15 @@ fn sdk_store_config(provider: &StorageProvider) -> Result<StoreConfig, CliError>
             volume_key: volume_key.clone(),
             durable: *durable,
         }),
+        StorageProvider::Tidb {
+            connection,
+            volume_key,
+            durable,
+        } => Ok(StoreConfig::Tidb {
+            connection: resolve_storage_env(connection)?,
+            volume_key: volume_key.clone(),
+            durable: *durable,
+        }),
         StorageProvider::R2 {
             endpoint,
             bucket,
@@ -381,14 +390,35 @@ async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Resu
         unique_default_owner()
     );
     let expected = b"mount-rs Rust SDK CLI self-test payload\0";
+    let patch = b"partial";
+    let patch_offset = 3_u64;
+    let final_length = expected.len() - 2;
+    let mut expected_final = expected.to_vec();
+    expected_final[patch_offset as usize..patch_offset as usize + patch.len()]
+        .copy_from_slice(patch);
+    expected_final.truncate(final_length);
     let view = Loopback::from_arc(runtime.driver());
     let result = async {
         view.write_file(&path, expected).await?;
+        let handle = view.open(&path, "r+", 0o666).await?;
+        let result = async {
+            let written = handle.write(patch, Some(patch_offset)).await?;
+            if written != patch.len() {
+                return Err(FsError::new(ErrorCode::Eio)
+                    .with_syscall("sdk-self-test")
+                    .with_message("Rust SDK CLI partial write length mismatch"));
+            }
+            handle.sync().await
+        }
+        .await;
+        handle.close().await?;
+        result?;
+        view.truncate(&path, final_length as u64).await?;
         let actual = view.read_file(&path).await?;
-        if actual != expected {
+        if actual != expected_final {
             return Err(FsError::new(ErrorCode::Eio)
                 .with_syscall("sdk-self-test")
-                .with_message("Rust SDK CLI readback mismatch"));
+                .with_message("Rust SDK CLI partial/truncate readback mismatch"));
         }
         view.syncfs().await?;
         if !reopen {
@@ -407,10 +437,10 @@ async fn sdk_self_test_command(config_path: Option<&Path>, reopen: bool) -> Resu
         let reopened_view = Loopback::from_arc(reopened.driver());
         let result = async {
             let actual = reopened_view.read_file(&path).await?;
-            if actual != expected {
+            if actual != expected_final {
                 return Err(FsError::new(ErrorCode::Eio)
                     .with_syscall("sdk-self-test")
-                    .with_message("Rust SDK CLI reopen readback mismatch"));
+                    .with_message("Rust SDK CLI reopen partial/truncate readback mismatch"));
             }
             reopened_view.unlink(&path).await?;
             reopened_view.syncfs().await

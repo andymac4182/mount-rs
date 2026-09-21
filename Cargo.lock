@@ -1277,6 +1277,7 @@ dependencies = [
  "mount-rs-r2",
  "mount-rs-s3",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
  "mount-rs-webdav",
  "napi",
  "napi-build",
@@ -1378,6 +1379,7 @@ dependencies = [
  "mount-rs-pglite",
  "mount-rs-r2",
  "mount-rs-sqlite",
+ "mount-rs-tidb",
  "tokio",
 ]
 

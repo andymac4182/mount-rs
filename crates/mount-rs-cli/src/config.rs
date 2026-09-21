@@ -64,6 +64,11 @@ pub enum StorageProvider {
         volume_key: String,
         durable: bool,
     },
+    Tidb {
+        connection: EnvReference,
+        volume_key: String,
+        durable: bool,
+    },
     R2 {
         endpoint: String,
         bucket: String,
@@ -511,6 +516,27 @@ fn parse_provider(
                 path,
             )?;
             StorageProvider::Pglite {
+                connection: required_env_reference(
+                    object,
+                    "connection",
+                    &format!("{path}.connection"),
+                )?,
+                volume_key: optional_nonempty_string(object, "volume_key", path)?
+                    .unwrap_or_else(|| "mount-rs".to_owned()),
+                durable: object
+                    .get("durable")
+                    .map(|value| required_value_bool(value, &format!("{path}.durable")))
+                    .transpose()?
+                    .unwrap_or(false),
+            }
+        }
+        "tidb" => {
+            reject_unknown(
+                object,
+                &["kind", "connection", "volume_key", "durable"],
+                path,
+            )?;
+            StorageProvider::Tidb {
                 connection: required_env_reference(
                     object,
                     "connection",
@@ -1318,6 +1344,52 @@ mod tests {
         assert_eq!(connection.name, "PGLITE_URL");
         assert_eq!(access_key_id.name, "R2_ACCESS_KEY_ID");
         assert_eq!(secret_access_key.name, "R2_SECRET_ACCESS_KEY");
+    }
+
+    #[test]
+    fn tidb_and_rustfs_storage_is_strict_and_uses_env_references() {
+        let spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {
+                            "kind": "tidb",
+                            "connection": {"env": "MOUNT_RS_TIDB_URL"},
+                            "volume_key": "cli-tidb-rustfs",
+                            "durable": true
+                        },
+                        "blocks": {
+                            "kind": "r2",
+                            "endpoint": "http://127.0.0.1:9878",
+                            "bucket": "mount-rs-rustfs",
+                            "prefix": "mount-rs/tidb-rustfs",
+                            "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
+                            "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"}
+                        }
+                    }
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        let Some(SplitStorageConfig {
+            metadata:
+                StorageProvider::Tidb {
+                    connection,
+                    volume_key,
+                    durable,
+                },
+            blocks: StorageProvider::R2 { .. },
+            ..
+        }) = spec.storage
+        else {
+            panic!("expected TiDB metadata and RustFS-compatible R2 blocks");
+        };
+        assert_eq!(connection.name, "MOUNT_RS_TIDB_URL");
+        assert_eq!(volume_key, "cli-tidb-rustfs");
+        assert!(durable);
     }
 
     #[test]

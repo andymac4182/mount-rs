@@ -912,6 +912,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   capacity/restart markers; its real TiDB/RustFS lane remains blocked by the
   unavailable Docker daemon, so no service result is counted.
 - [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+- [x] W08.4a The bounded Node/CLI consumer slice is wired through the public
+  Rust SDK, N-API and Rust/Node CLI configuration: TiDB metadata can compose
+  with RustFS/S3-compatible `r2` chunks, with explicit `durable` assertions.
+  The provider matrix covers configuration, partial write, truncate, shutdown,
+  reopen and owned RustFS-prefix cleanup. Local evidence: `cargo fmt --all -- --check`,
+  focused Clippy, Rust SDK `2 passed`, CLI `40 library + 9 CLI
+  tests passed`, N-API chunked/CLI/shutdown tests passed, Node matrix
+  `pass=4 skip=3 fail=0`, and CLI matrix `pass=10 skip=3 fail=0`. The live
+  TiDB+RustFS rows are explicit skips because `MOUNT_RS_TIDB_URL` and the
+  loopback RustFS credential set are absent here. The consumer cleanup row
+  removes only owned RustFS objects and verifies provider shutdown; exact TiDB
+  metadata-row deletion remains the W08.5 service-harness boundary.
+- [ ] W08.4b Native-mount and live TiDB/RustFS consumer acceptance remain open.
+  The host has no Docker daemon/service run, and the full CLI all-target test's
+  two HTTP subprocess cases are blocked before readiness by the sandbox's
+  `Operation not permitted` mount denial; those are not counted as passes.
 - [x] W08.5 **TiDB metadata + RustFS S3 chunks:** the real single-node v8.5.7
   TiDB service and pinned loopback RustFS endpoint passed the mixed-provider
   seed, partial-write, truncate, reopen, CAS/fencing and exact cleanup path.

@@ -23,6 +23,7 @@ mount-rs-observability = { path = "../mount-rs-observability", optional = true }
 mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
 mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
 mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+mount-rs-tidb = { path = "../../integrations/mount-rs-tidb" }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
