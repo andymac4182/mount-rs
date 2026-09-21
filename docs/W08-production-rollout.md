@@ -63,6 +63,17 @@ workflow does not replace the canary, rollback or explicit production GO gates.
 The implementation was published as `dff55858` in merge tip `6abc0535` on
 `origin/main` after concurrent mainline reconciliation.
 
+The live read-only production-boundary audit on **2026-09-22 07:35 AEST**
+confirms that this P09 path is externally blocked: the GitHub `w08-production`
+environment and its environment-secret surface both return HTTP 404,
+`gh release list` shows only the `v0.1.0-cli-preview` prerelease,
+`git ls-remote` finds no `v*-cli-production-candidate*` tag, and
+`gh run list --workflow w08-production-release.yml` returns no production
+workflow runs. The protected workflow file does exist on the remote mainline
+(blob `9cacf0f19c8fc475df508684cf0ffcc591c96625`), so the current gap is
+hosted environment/tag/execution configuration rather than missing repository
+code. No release, canary, rollback or approval claim is inferred.
+
 W08.29 then qualified the latest published-main target path in hosted run
 `35638433010`, source `9d3a6e502eccec9ba54c00e80c98e6e1da175177`. Both Linux
 x86_64 and macOS arm64 builds, downloaded bundles, provenance attestations,

@@ -2829,6 +2829,13 @@ reproducible in a production-like environment.
   final release assets and attestations, and requires the `w08-production`
   environment before publishing a prerelease. It has not been run from an
   approved tag and does not close the canary, rollback or approval gates.
+  A live read-only audit on 2026-09-22 07:35 AEST found HTTP 404 for the
+  `w08-production` environment and its environment-secret surface, no
+  `v*-cli-production-candidate*` tag, no run for
+  `w08-production-release.yml`, and only the `v0.1.0-cli-preview` prerelease;
+  the protected workflow file is present on remote mainline (blob
+  `9cacf0f19c8fc475df508684cf0ffcc591c96625`). This is an external hosted
+  environment/tag/execution blocker, not missing repository implementation.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
