@@ -726,13 +726,16 @@ transport-hook plumbing. The Rust WebDAV target passed 13/13 tests; the
 isolated locked N-API check, release addon, generated declarations, and direct
 N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
 return, and deliberate body failure. The oracle differential is explicitly
-skipped without `MOUNTX_SOURCE`, the sandbox blocks the live N-API loopback
-bind with `Operation not permitted`, and complete member parity, provider,
-hosted, native, network-client concurrency, and restart/durability gates
-remain open. The host-enabled WebDAV session packet also completes eight
-parallel unique-file PUTs and GETs through one direct session with exact
-byte-for-byte readback; that is same-process same-driver evidence only. W01
-and production status remain **NO-GO**.
+skipped without `MOUNTX_SOURCE`; with the pinned source at
+`/private/tmp/mountx-source-w01-20260921` (oracle
+`85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
+differential and source-backed host-enabled server phase pass. The sandbox
+blocks the live N-API loopback bind with `Operation not permitted`, and full
+session/member parity, provider, hosted, native, network-client concurrency,
+and restart/durability gates remain open. The host-enabled WebDAV session
+packet also completes eight parallel unique-file PUTs and GETs through one
+direct session with exact byte-for-byte readback; that is same-process
+same-driver evidence only. W01 and production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -2683,6 +2686,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   with `cargo metadata --locked` before any AWS authentication. This improves
   evidence integrity but does not create AWS authentication or deployment
   evidence. A fresh
+  hosted rerun `35629600687` at pushed head `62383df` passed the new root and
+  standalone AWS manifest provenance capture, including the standalone
+  `tests/aws/Cargo.lock` hash, plus the seven-case validator, bucket-policy,
+  CloudFormation, and environment-approval contract suites. It then stopped
+  safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS credentials,
+  identity, and acceptance were skipped. Its non-expired artifact is
+  `aws-s3-qualification-35629600687-1` (7,649 bytes). This is a successful
+  safety refusal and provenance-contract result, not hosted AWS acceptance.
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
