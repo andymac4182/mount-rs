@@ -28,7 +28,10 @@ hold connection teardown behind a blocked earlier request. The rootless wire
 suite also proves that a v4.1 session can be used again after an
 orderly TCP transport reconnect while this server process remains alive, and
 that multiple v3 calls can be pipelined on one connection within the configured
-in-flight bound. Two independent v4.1 sessions also complete concurrent
+in-flight bound. A blocked v3 RPC does not hold a later fast RPC on the same
+connection behind it: replies are matched by XID and may complete in worker
+completion order, with the focused real-TCP test asserting that neither reply
+is lost. Two independent v4.1 sessions also complete concurrent
 distinct-file OPEN/WRITE/READ round trips. This is rootless in-process
 userspace concurrency evidence. A restart-boundary test reuses the backend
 with a replacement server and confirms that the old v4 session is rejected
