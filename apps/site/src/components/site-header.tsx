@@ -1,6 +1,23 @@
+import { useEffect, useState } from 'react'
 import { Link } from '@tanstack/react-router'
 
+type Theme = 'light' | 'dark'
+
 export function SiteHeader() {
+  const [theme, setTheme] = useState<Theme>('light')
+
+  useEffect(() => {
+    const currentTheme = document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'
+    setTheme(currentTheme)
+  }, [])
+
+  function toggleTheme() {
+    const nextTheme: Theme = theme === 'dark' ? 'light' : 'dark'
+    document.documentElement.dataset.theme = nextTheme
+    localStorage.setItem('mount-rs-theme', nextTheme)
+    setTheme(nextTheme)
+  }
+
   return (
     <header className="site-header">
       <div className="page-frame header-inner">
@@ -25,6 +42,19 @@ export function SiteHeader() {
             Brand lab
           </Link>
           <a href="https://github.com/andymac4182/mount-rs">GitHub</a>
+          <button
+            className="theme-toggle"
+            type="button"
+            aria-pressed={theme === 'dark'}
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+            onClick={toggleTheme}
+          >
+            <span className="theme-toggle-icon" aria-hidden="true">
+              {theme === 'dark' ? '☼' : '☾'}
+            </span>
+            <span>{theme === 'dark' ? 'Light' : 'Dark'} mode</span>
+          </button>
           <span className="status-chip">
             <span className="status-dot" aria-hidden="true" />
             prerelease
