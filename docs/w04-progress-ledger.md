@@ -15,13 +15,14 @@ gate required by W04.2.
 | Current-head local evidence revision | `5424080afbc2027d5dcb0ab79a09ca9a4a32fdc8` (the docs-only `fac9c7e` sync landed after the gate) |
 | Latest synced verification revision | `113724487e9efc172ab69254d995377cfcfab296` (workspace test and scoped Clippy evidence; unrelated W26/TiDB/CLI changes are included) |
 | Latest full W04 gate revision | `6d59d204af80c883bf47a59ffb5a4b77829f8ec8` (current `origin/main` after the chunked-shutdown fix; exact pinned oracle; full `scripts/test-pglite.sh` exited 0) |
-| Snapshot time | 2026-09-21 18:30 AEST / 2026-09-21 08:30 UTC |
+| Latest published repository revision | `1938a4911cf02c1123b953d5613677c13963ee50` (ledger-only change after the post-fix gate) |
+| Snapshot time | 2026-09-21 18:33 AEST / 2026-09-21 08:33 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
 | Checklist completion | **87.5%**: 7 of 8 W04 checklist items are checked; W04.2 remains open |
 | Implementation/local qualification | **Complete for the recorded packet**; the fresh post-fix oracle-enabled W04 gate passed at `6d59d20`, and synced workspace tests plus scoped W04 Clippy passed at `1137244` |
 | Hosted/native/provider acceptance | **Incomplete**: hosted Linux Node evidence is green; hosted macOS Node evidence is still queued; R2/TiDB rows are explicit local skips |
 | Overall release decision | **Not complete** until W04.2's post-fix macOS and Linux Node logs pass |
-| Current external blocker | GitHub Actions jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) have remained `queued` with no `started_at` |
+| Current external blocker | Target run jobs [106211636737](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636737) and [106211636695](https://github.com/andymac4182/mount-rs/actions/runs/35560240894/job/106211636695) remain `queued` with no runner; corroborating run [35578377706](https://github.com/andymac4182/mount-rs/actions/runs/35578377706) has Ubuntu Node jobs in progress while both macOS Node jobs are also queued |
 
 The 87.5% figure is a checklist ratio, not a readiness claim. The open item
 is the acceptance gate that determines whether the workstream can be called
@@ -93,6 +94,10 @@ fully working.
 - The two macOS Node jobs have remained queued since `2026-09-21T04:14:51Z`
   with no `started_at`. Queued is an external wait, not a failure and not a
   pass. The active heartbeat monitor is responsible for rechecking them.
+- As a diagnostic only, newer run `35578377706` started its Ubuntu Node jobs
+  while its `macos-latest` and `macos-15-intel` Node jobs remained queued. This
+  corroborates a macOS runner-capacity/platform queue; it is not substituted
+  for the required monitored run and does not change W04.2's open status.
 - The same CI run contains unrelated non-W04 failures in other jobs. They must
   remain visible in CI review but do not change the W04-specific conclusion.
 
@@ -146,6 +151,7 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 | 2026-09-21 18:15–18:18 AEST | Reran `scripts/test-pglite.sh` on the exact published `origin/main` tree. | Full W04 gate exited 0; Rust SDK `6/3/0`, Node SDK `5/3/0`, and CLI `12/2/0` pass/skip/fail summaries remained green, with provider prerequisites explicitly skipped. | Engineering/verification, ~0.25h |
 | 2026-09-21 18:19–18:24 AEST | Fetched the exact pinned mountx oracle, installed the pinned oracle/upstream dependencies, and reran the full gate with `MOUNTX_SOURCE` enabled. | Upstream `1,200 passed / 82 skipped`; trace `40/40` across five seeds and eight backends; all W04 lifecycle/provider-matrix stages remained green with explicit provider skips. | Engineering/verification, ~0.25h |
 | 2026-09-21 18:25–18:30 AEST | Rebased onto the unrelated `c71c8ee` chunked-shutdown fix, rebuilt the N-API addon with the shared target, restored generated declarations, and reran the oracle-enabled gate. | Post-fix gate at `6d59d20` exited 0 with upstream `1,200 passed / 82 skipped` and trace `40/40`; no tracked build artifact changes remained. | Engineering/verification, ~0.25h |
+| 2026-09-21 18:31–18:33 AEST | Compared the required run with the newest CI run after the next push. | Target macOS jobs remained queued; diagnostic run `35578377706` showed Ubuntu Node jobs in progress while both macOS Node jobs were queued. | Hosted verification, ~0.1h; external queue remains non-engineering time |
 
 ## Publication note
 
