@@ -281,18 +281,17 @@ SQL`,
     ),
     evidence: (
       <>
-        Fresh current-tree PGlite lifecycle acceptance covers provider
-        parity/reconnect/fencing/cancellation, disk-server restart, split
-        metadata/blocks, Rust/Node/CLI matrices, and all 40 PGlite-inclusive
-        seeded trace lanes. The dedicated provider matrix passed Rust SDK 4/4,
-        Node SDK 5/5, and CLI 7/7 gated cases; the Node CLI uses the same
-        versioned provider configuration and reopen flow as the Rust CLI. The
-        latest focused matrix passed 5 Rust SDK, 4 Node SDK, and 9 CLI cases,
-        with PGlite and R2 remaining explicit prerequisite skips. A separate
-        configured Rust CLI consumer check passed PGlite split-store write,
-        shutdown, reopen, and readback; with PGlite enabled, the CLI matrix is
-        10 passes and one explicit R2 skip. No config-validation row is counted
-        as live R2 evidence. These are focused consumer checks, not
+        The latest exact published-tree PGlite rerun passed provider
+        lifecycle/reconnect/fencing/cancellation, SQLite VFS round-trip,
+        fresh-provider reconnect, disk-server restart, split stores, N-API,
+        chunked storage, userspace FUSE, Rust SDK 6/6, Node SDK 5/5, CLI 11/11,
+        the upstream suite at 1,200 passed and 82 skipped, and all 40
+        PGlite-inclusive seeded oracle lanes. R2 factory/runtime rows remained
+        explicit credential-gated
+        skips, so no config-validation row is counted as live R2 evidence. The
+        earlier focused matrix also passed 5 Rust SDK, 4 Node SDK, and 9 CLI
+        cases; the local R2 adapter contract also recorded 10 passes and one
+        explicit R2 skip. These are focused consumer checks, not
         live-provider or native-mount acceptance; hosted and release
         acceptance remain separate. The current provider initializes and
         validates durable version metadata on reconnect, including head,
@@ -386,10 +385,14 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         The current tracker records authenticated R2 filesystem checks,
         five-seed differential traces, Node and CLI coverage, ranged reads,
         reopen, owned-prefix cleanup, and both supported metadata-provider
-        compositions. The portable provider matrix also adds seeded
-        positional writes, truncate, flush, and reopen checks, but its R2 row
-        remains an explicit credential gate. Local object-store tests and
-        RustFS results are not substituted for those live Cloudflare results.
+        compositions. The latest isolated rerun also passed the signed-HTTP
+        adapter contract (10/10 unit tests and 1/1 HTTP test), including eight
+        concurrent publications, prefix isolation, and exact cleanup; its live
+        Cloudflare rows stopped at credential preflight with
+        <code>R2_ENDPOINT</code> unset. The portable provider matrix also adds
+        seeded positional writes, truncate, flush, and reopen checks. Local
+        object-store tests and RustFS results are not substituted for recorded
+        live Cloudflare results.
       </>
     ),
     sources: [
@@ -575,7 +578,7 @@ LIMIT 20;`,
     name: 'FoundationDB',
     eyebrow: 'Provider / transactional key-value store',
     maturity: 'Experimental',
-    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, including exact owned-prefix cleanup; lease authority and broader integration remain open.',
+    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, including exact owned-prefix cleanup; production lease authority is now guarded by an explicit shared-provider declaration, while protected multi-host evidence remains open.',
     summary: (
       <>
         FoundationDB stores the split filesystem in a volume-scoped keyspace.
@@ -614,7 +617,11 @@ LIMIT 20;`,
         <code>ENOTSUP</code>. Maybe-committed non-idempotent metadata operations
         return an error for reopen/reconciliation rather than being replayed.
         <code>with_durable(true)</code> remains a caller assertion about the
-        cluster.
+        cluster. The guarded <code>with_production_lease_oracle</code> entry
+        point rejects unverified, development, and single-authority clocks
+        unless <code>LeaseOracle::authority_kind</code> declares
+        <code>SharedProvider</code>; that declaration is a trust boundary, not
+        proof of distributed safety.
       </>
     ),
     inspectLabel: 'Inspect a volume-scoped key range with fdbcli',
@@ -637,17 +644,21 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     limitations: (
       <>
         The feature is opt-in and requires a matching FoundationDB 7.4 native
-        client and cluster. The lease oracle's clock-skew/availability tradeoff,
-        service restart, hosted root integration, Node/CLI, and broader platform
-        coverage remain open; commit versions are not wall-clock expiry.
+        client and cluster. The production path now fails closed for
+        unverified, development, and single-authority clocks. A concrete
+        protected shared authority, multi-host clock-skew/recovery evidence,
+        service restart, hosted root integration, Node/CLI, and broader
+        platform coverage remain open; commit versions are not wall-clock
+        expiry.
       </>
     ),
     evidence: (
       <>
         The real pinned Linux ARM64 provider and RustFS composition checks cover
         blocks, metadata, CAS, fencing, reopen, and the latest exact owned-
-        prefix cleanup with sibling/parent sentinel preservation. This is not
-        yet a general production or release-readiness claim.
+        prefix cleanup with sibling/parent sentinel preservation. A focused
+        safety regression now covers the guarded production lease-oracle path.
+        This is not yet a general production or release-readiness claim.
       </>
     ),
     sources: [
@@ -660,12 +671,13 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     name: 'AWS S3',
     eyebrow: 'Provider / remote object storage',
     maturity: 'Planned',
-    maturityNote: 'Private AWS bucket provisioning is recorded; Rust provider and composed acceptance are still pending.',
+    maturityNote: 'AWS API/SDK service-side checks now cover immutable publication, ranges, conditional behavior, concurrency, and owned-prefix cleanup; Rust provider, least-privilege, and composed acceptance remain pending.',
     summary: (
       <>
         AWS S3 is the next remote object-store target for the S3-compatible
-        block path. The project has provisioned a private test bucket, but a
-        bucket existing is not the same as a completed Rust integration gate.
+        block path. An authenticated AWS API/SDK probe now covers an owned
+        prefix and service-side object behavior, but that is not a completed
+        Rust integration gate.
       </>
     ),
     metadata: (
@@ -720,17 +732,22 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     ),
     limitations: (
       <>
-        AWS S3 Rust integration, restart/reopen, ranges, conditional writes,
-        composed metadata providers, and cleanup evidence remain open in the
-        tracker. The private bucket is infrastructure preparation, not a
-        passing backend result.
+        AWS S3 Rust integration, restart/reopen, composed metadata providers,
+        least-privilege authorization, and cleanup evidence remain open in the
+        tracker. The service-side probe used an account-root caller and a
+        bucket without a bucket policy; it is not a deployment authorization
+        or passing Rust-backend result.
       </>
     ),
     evidence: (
       <>
-        The maturity label is Planned because the current evidence stops at
-        private bucket provisioning and read-back. Cloudflare R2 and RustFS
-        results are useful comparisons but do not substitute for AWS S3.
+        The maturity label is Planned because current AWS evidence is limited
+        to an API/SDK probe: immutable create and duplicate rejection, byte
+        ranges, stale conditional/CAS rejection, current-ETag CAS, a 65,537-byte
+        boundary read, four concurrent writers, scoped deletion, and empty-
+        prefix verification passed. Rust provider, least-privilege, and
+        composed acceptance remain open; Cloudflare R2 and RustFS results do
+        not substitute for AWS S3.
       </>
     ),
     sources: [
