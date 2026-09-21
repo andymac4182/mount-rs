@@ -936,7 +936,8 @@ skipped without `MOUNTX_SOURCE`; with the pinned source at
 `/private/tmp/mountx-source-w01-20260921` (oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
 differential and source-backed host-enabled server phase pass. The supported
-N-API session/server member differential also passes with
+N-API session/server callable-member differential also passes with explicit
+buffered/streamed session and server lifecycle member assertions, using
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node
 test/webdav-session-parity.mjs`, covering effective credentials/lock/session
 options, driver and lifecycle members, Map-shaped method counters, the full
@@ -949,7 +950,7 @@ and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
 `/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
 acceptance. The host-enabled WebDAV session
-packet also completes eight parallel unique-file PUTs and GETs through one
+packet also completes 32 parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
@@ -1439,7 +1440,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   peer-aware callback event for both S3 and WebDAV. The supported WebDAV
   session/member differential and full direct class 1/2/3 method matrix now
   pass; the oracle-only controls remain outside scope. Active lock-record readback and
-  post-UNLOCK cleanup, eight parallel unique-file direct-session PUT/GET
+  post-UNLOCK cleanup, 32 parallel unique-file direct-session PUT/GET
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
@@ -2853,11 +2854,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `0ab9bf41` was freshly reverified after the concurrent NFS/WebDAV/
-  provider updates with the full locked workspace test suite (exit 0) and
-  strict workspace Clippy with `-D warnings` (exit 0). Subsequent concurrent
-  9P/WebDAV changes were published in `2d840df9` after that run, so no full
-  source-health claim is made for the newer tip.
+  Source `b7d77432` was freshly reverified after the concurrent NFS/9P/WebDAV/
+  provider and Ozone updates with the full locked workspace test suite (exit 0)
+  and strict workspace Clippy with `-D warnings` (exit 0). This is
+  source-health evidence only and does not close W08-P01–P09.
   Provider/native tests requiring TiDB, RustFS, PGlite, R2, FUSE or NFS
   remained explicit opt-in skips; this is source-health evidence only and does
   not close W08-P01–P09.

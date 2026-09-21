@@ -26,9 +26,11 @@ task; the server-owned protocol state remains available to other clients. The
 rootless wire suite also proves that a v4.1 session can be used again after an
 orderly TCP transport reconnect while this server process remains alive, and
 that multiple v3 calls can be pipelined on one connection within the configured
-in-flight bound. A restart-boundary test reuses the backend with a replacement
-server and confirms that the old v4 session is rejected with
-`NFS4ERR_BADSESSION`.
+in-flight bound. Two independent v4.1 sessions also complete concurrent
+distinct-file OPEN/WRITE/READ round trips. This is rootless in-process
+userspace concurrency evidence. A restart-boundary test reuses the backend
+with a replacement server and confirms that the old v4 session is rejected
+with `NFS4ERR_BADSESSION`.
 
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
@@ -147,7 +149,9 @@ minor-version behavior is verified, and native Linux CI is not wired by this
 crate.
 
 UDP transport, portmapper registration, NLM/NSM locking, and persistent
-cross-process file-handle recovery remain unimplemented. File handles and
+cross-process file-handle recovery remain unimplemented. The two-client v4.1
+round-trip does not qualify cross-process concurrency or native-client
+ordering. File handles and
 exclusive-create verifiers are process-local unless the caller supplies a
 stable handle verifier. A caller can reconnect to a still-running server and
 reuse the tested session, but `NfsConnection` close/wait state does not provide
