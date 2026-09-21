@@ -948,16 +948,20 @@ return, and deliberate body failure. The oracle differential is explicitly
 skipped without `MOUNTX_SOURCE`; with the pinned source at
 `/private/tmp/mountx-source-w01-20260921` (oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
-differential and source-backed host-enabled server phase pass. The supported
-N-API session/server callable-member differential also passes with explicit
-buffered/streamed session and server lifecycle member assertions, using
+differential and source-backed host-enabled server phase pass. The full supported
+N-API server/session prototype-member differential also passes with explicit
+string/public-symbol prototype audits plus buffered/streamed session and server
+lifecycle member assertions, using
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node
 test/webdav-session-parity.mjs`, covering effective credentials/lock/session
 options, driver and lifecycle members, Map-shaped method counters, the full
 supported WebDAV class 1/2/3 direct-method set, recursive owner lock snapshots,
-and request/reply/error/assertion counters. Its XML comparisons normalize only
-dynamic timestamps, and COPY/MOVE destination reads plus DELETE-missing readback
-verify side effects. The sandbox blocks the live N-API loopback bind with
+and request/reply/error/assertion counters. Native-only `handleRequestStream` and
+`lockCount` are explicit supported additions, while internal wrapper symbols are
+filtered from the oracle comparison; three repeated parity runs pass. Its XML
+comparisons normalize dynamic HTTP/ISO timestamps and opaque ETags, and COPY/MOVE
+destination reads plus DELETE-missing readback verify side effects. The sandbox
+blocks the live N-API loopback bind with
 `Operation not permitted`, while provider, hosted, network-client concurrency,
 and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
@@ -1451,8 +1455,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   records after LOCK and observes zero records after UNLOCK. Direct Node
   socket-reset tests now produce exactly one typed
   peer-aware callback event for both S3 and WebDAV. The supported WebDAV
-  session/member differential and full direct class 1/2/3 method matrix now
-  pass; the oracle-only controls remain outside scope. Active lock-record readback and
+  full supported server/session prototype-member differential and full direct
+  class 1/2/3 method matrix now pass; the oracle-only controls remain outside
+  scope. Active lock-record readback and
   post-UNLOCK cleanup, 64 parallel unique-file direct-session PUT/GET
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
