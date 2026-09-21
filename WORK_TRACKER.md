@@ -2406,12 +2406,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  observed hosted run `35620404949` at `0010246` passed the secret-free
-  validator regression step, then stopped before AWS authentication with
+  observed hosted run `35622312798` at `4242c24` passed provenance capture,
+  the seven-case validator and bucket-policy contract tests, then stopped
+  before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
   skipped, so this is a successful safety refusal, not acceptance evidence.
-  The preceding hosted run `35619552809` at `a84fa3e` stopped at the same
-  preflight boundary, as did `35618187611` at `a83540a`. A fresh
+  The run uploaded the non-expired artifact
+  `aws-s3-qualification-35622312798-1` (6,338 bytes). The preceding hosted
+  run `35620404949` at `0010246` stopped at the same preflight boundary, as
+  did `35619552809` at `a84fa3e`. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium

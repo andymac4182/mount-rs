@@ -28,9 +28,13 @@ for a production deployment result.
 
 The hosted workflow also records the exact source SHA, lockfile/template/script
 hashes, Rust toolchain metadata, and bounded acceptance log in a pinned
-14-day artifact. This artifact is available for a completed run or a safe
-preflight refusal; it does not substitute for successful AWS authentication,
-acceptance, or production deployment evidence.
+14-day artifact. The latest run [`35622312798`](https://github.com/andymac4182/mount-rs/actions/runs/35622312798)
+at `4242c24` passed provenance capture and both synthetic contract suites,
+then safely refused the unconfigured protected environment with
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its non-expired artifact is
+`aws-s3-qualification-35622312798-1`. This artifact is available for a
+completed run or a safe preflight refusal; it does not substitute for
+successful AWS authentication, acceptance, or production deployment evidence.
 
 ## Deployment contract
 
