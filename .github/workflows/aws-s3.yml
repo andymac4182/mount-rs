@@ -17,6 +17,7 @@ on:
       - 'infra/aws-s3-production.yaml'
       - 'scripts/audit-aws-s3-bucket-policy.sh'
       - 'scripts/audit-aws-s3-ci-oidc.sh'
+      - 'scripts/check-aws-s3-ci-environment.jq'
       - 'scripts/audit-aws-s3-resource.sh'
       - 'scripts/cargo-shared*'
       - 'scripts/check-aws-s3-bucket-policy.jq'
@@ -83,6 +84,7 @@ jobs:
             scripts/audit-aws-s3-resource.sh \
             scripts/audit-aws-s3-bucket-policy.sh \
             scripts/audit-aws-s3-ci-oidc.sh \
+            scripts/check-aws-s3-ci-environment.jq \
             scripts/test-aws-s3.sh \
             scripts/test-aws-s3-pglite.sh \
             tests/aws/Cargo.toml \
@@ -96,6 +98,9 @@ jobs:
 
       - name: Test production AWS S3 CloudFormation contract
         run: ruby scripts/test-aws-s3-production-template.rb
+
+      - name: Test protected AWS S3 environment contract
+        run: ./scripts/test-aws-s3-ci-environment.sh
 
       - name: Validate protected AWS S3 CI configuration
         env:

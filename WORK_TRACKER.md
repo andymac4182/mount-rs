@@ -2513,9 +2513,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   evidence. The read-only
   [`scripts/audit-aws-s3-ci-oidc.sh`](scripts/audit-aws-s3-ci-oidc.sh) now
   checks the immutable GitHub subject, OIDC provider, exact single GitHub
-  federation trust statement, protected environment, and required input names
-  without mutating either system; additional or broad GitHub federation trust
-  statements fail closed. The
+  federation trust statement, protected environment branch policy, and a
+  non-self-approvable required reviewer plus required input names without
+  mutating either system; additional or broad GitHub federation trust
+  statements fail closed. Its credential-free three-case environment fixture
+  test is wired into the hosted preflight. The
   fresh read-only audit on 2026-09-22 returned
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
   secret, missing GitHub OIDC provider, and missing immutable-subject role

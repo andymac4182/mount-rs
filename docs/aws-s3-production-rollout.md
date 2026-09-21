@@ -202,11 +202,12 @@ AWS_S3_CI_ROLE_ARN=<approved-ci-role-arn> \
 ```
 
 The audit verifies the repository's immutable owner/repository subject shape,
-the protected environment and main-branch policy, the required variable and
-secret names, the AWS OIDC provider and `sts.amazonaws.com` audience, and one
-exact `AssumeRoleWithWebIdentity` trust statement without additional broad
-GitHub federation grants. It never reads secret values or mutates GitHub or
-AWS. The current account audit is expected to fail
+the protected environment and main-branch policy, a non-self-approvable
+required reviewer, the required variable and secret names, the AWS OIDC
+provider and `sts.amazonaws.com` audience, and one exact
+`AssumeRoleWithWebIdentity` trust statement without additional broad GitHub
+federation grants. It never reads secret values or mutates GitHub or AWS. The
+current account audit is expected to fail
 until the approved OIDC provider, role trust, protected environment, and CI
 inputs are configured; that failure is a rollout blocker, not a hosted test
 result. The fresh read-only audit on 2026-09-22 returned
