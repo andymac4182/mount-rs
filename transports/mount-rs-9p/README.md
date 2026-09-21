@@ -34,6 +34,17 @@ specific. macOS has no built-in 9P client, so this crate's macOS verification
 is the rootless wire/TCP suite; an external userspace client would be required
 for an actual macOS mount. The crate does not provide a native mount wrapper.
 
+## Lifecycle and crash boundary
+
+`P9Mount::wait_closed()` waits for the kernel connection and releases the
+server resources; it does not implicitly run `umount(8)` on a still-live
+mount. Call `P9Mount::unmount()` after a server-close or EOF path when the
+kernel mount must also be detached. The transport provides bounded graceful
+close, external-unmount observation, and retryable unmount semantics. It does
+not promise automatic recovery from a process crash or transparent recovery
+of arbitrary kernel reset/half-close behavior; deployments that require those
+properties must provide a supervisor and an explicit cleanup/restart policy.
+
 ## Deliberate protocol boundaries
 
 The implemented `.L` operations include version/attach/walk, `Tlopen`,

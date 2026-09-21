@@ -26,10 +26,13 @@ target, strict 9P Clippy and formatting pass. Hosted run `35616832528` / job
 `106389895603` passed the prior Linux kernel-client mount/read/write/unmount
 packet; the later current run `35625437327` / native-9p job `106418844564`
 passed 3/4 ignored tests but exposed a live-mount cleanup failure in the
-server-close test. Corrective run `35626340158` at `c2290b2` was canceled
-before jobs materialized. The local follow-up separates kernel unmount
-coordination from resource teardown and uses cancellation-safe serialization;
-a fresh hosted run is required to verify it and the concurrent-I/O harness.
+server-close test. Corrective runs `35626340158` at `c2290b2` and
+`35626765411` at `6fc9a19` were canceled before jobs materialized. The local
+follow-up separates kernel unmount coordination from resource teardown and
+uses cancellation-safe serialization; a fresh hosted run is required to
+verify it and the concurrent-I/O harness. `wait_closed()` releases server
+resources but does not implicitly detach a live kernel mount; callers must
+invoke `unmount()`.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
