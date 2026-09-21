@@ -893,7 +893,9 @@ second `close()` cannot report false success or rebind while a stalled
 connection remains active, and aborts tracked connection tasks when the
 drain deadline expires. The preceding implementation packet `4bc10ad1`
 passed the focused Rust target 18/18 with strict
-Clippy and formatting. The N-API WebDAV wrapper serializes its closed-state
+Clippy and formatting. The later exact packet `22f9169bbc90c6887bb1bddafcde5795cd7098d1`
+also passed 18/18, strict warning-denied Clippy, and formatting using the shared
+Cargo target; the native mount probe remains ignored. The N-API WebDAV wrapper serializes its closed-state
 check with the transport lifecycle; the shared postbuild server facade now
 clears a failed close promise so a timed-out WebDAV close can be retried after
 the peer exits. The focused wrapper race test passes 40 alternating
