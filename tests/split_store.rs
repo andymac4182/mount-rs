@@ -9,7 +9,7 @@ use mount_rs_core::{
     storage::{BlockId, BlockStore, MetadataStore},
 };
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
-use mount_rs_r2::{R2BlockStore, R2Config};
+use mount_rs_r2::{AwsS3Config, R2BlockStore, R2Config};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
@@ -92,18 +92,22 @@ async fn memory_metadata_with_memory_blocks() {
 /// a bucket or a pre-existing prefix. Cleanup runs only after the driver
 /// closes and verifies that the unique owned prefix is empty.
 #[derive(Clone)]
-struct TrackedR2Blocks {
+struct TrackedObjectStoreBlocks {
     inner: R2BlockStore,
     object_store: Arc<dyn ObjectStore>,
     prefix: String,
     created: Arc<Mutex<BTreeSet<String>>>,
 }
 
-impl TrackedR2Blocks {
-    fn new(config: &R2Config, prefix: String) -> Self {
+impl TrackedObjectStoreBlocks {
+    fn from_r2_config(config: &R2Config, prefix: String) -> Self {
         let object_store = config.build_store().expect("live R2 object store");
+        Self::from_object_store(object_store, prefix)
+    }
+
+    fn from_object_store(object_store: Arc<dyn ObjectStore>, prefix: String) -> Self {
         let inner = R2BlockStore::new(object_store.clone(), prefix.clone(), true)
-            .expect("live R2 block store");
+            .expect("live object-store block store");
         Self {
             inner,
             object_store,
@@ -155,7 +159,7 @@ impl TrackedR2Blocks {
     }
 }
 
-async fn run_with_exact_r2_cleanup<F>(blocks: TrackedR2Blocks, operation: F)
+async fn run_with_exact_object_cleanup<F>(blocks: TrackedObjectStoreBlocks, operation: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -168,7 +172,7 @@ where
 }
 
 #[async_trait::async_trait]
-impl BlockStore for TrackedR2Blocks {
+impl BlockStore for TrackedObjectStoreBlocks {
     fn durable(&self) -> bool {
         self.inner.durable()
     }
@@ -195,7 +199,7 @@ impl BlockStore for TrackedR2Blocks {
     }
 }
 
-async fn assert_live_r2_block_contract(config: &R2Config, blocks: &TrackedR2Blocks) {
+async fn assert_live_r2_block_contract(config: &R2Config, blocks: &TrackedObjectStoreBlocks) {
     let payload = (0_u32..131_072)
         .map(|index| (index.wrapping_mul(37) & 0xff) as u8)
         .collect::<Vec<_>>();
@@ -399,13 +403,8 @@ async fn live_r2_blocks_with_independent_sqlite_metadata() {
             .unwrap()
             .as_nanos()
     );
-    let blocks = TrackedR2Blocks {
-        inner: mount_rs_r2::R2BlockStore::from_config(&config, prefix.clone()).unwrap(),
-        object_store: config.build_store().unwrap(),
-        prefix: prefix.clone(),
-        created: Default::default(),
-    };
-    run_with_exact_r2_cleanup(blocks.clone(), async move {
+    let blocks = TrackedObjectStoreBlocks::from_r2_config(&config, prefix.clone());
+    run_with_exact_object_cleanup(blocks.clone(), async move {
         assert_live_r2_block_contract(&config, &blocks).await;
         let directory = tempfile::tempdir().unwrap();
         let metadata_path = directory.path().join("metadata.sqlite");
@@ -492,8 +491,8 @@ async fn live_r2_blocks_with_independent_pglite_metadata() {
             .as_nanos()
     );
     let prefix = format!("mount-rs-tests/{scope}");
-    let blocks = TrackedR2Blocks::new(&config, prefix.clone());
-    run_with_exact_r2_cleanup(blocks.clone(), async move {
+    let blocks = TrackedObjectStoreBlocks::from_r2_config(&config, prefix.clone());
+    run_with_exact_object_cleanup(blocks.clone(), async move {
         assert_live_r2_block_contract(&config, &blocks).await;
         exercise(
             PgliteMetadataStore::connect_with_key(&url, &scope)
@@ -529,6 +528,82 @@ async fn live_r2_blocks_with_independent_pglite_metadata() {
     .await;
     // The metadata volume belongs to the isolated test server. Never clear a
     // shared database or list/delete objects outside the exact created IDs.
+}
+
+#[tokio::test]
+#[ignore = "requires the selected AWS S3 bucket and an isolated real PGlite server"]
+async fn live_aws_s3_blocks_with_independent_pglite_metadata() {
+    use mount_rs_pglite::PgliteMetadataStore;
+
+    let bucket = std::env::var("AWS_S3_TEST_BUCKET").expect("AWS_S3_TEST_BUCKET required");
+    let region = std::env::var("AWS_S3_TEST_REGION").expect("AWS_S3_TEST_REGION required");
+    let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
+    let scope = format!(
+        "mount-rs-aws-s3-pglite-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let prefix = std::env::var("AWS_S3_TEST_PREFIX").unwrap_or_else(|_| {
+        format!(
+            "mount-rs-tests/aws-s3/pglite-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    });
+    let config = AwsS3Config { bucket, region };
+    let blocks = TrackedObjectStoreBlocks::from_object_store(
+        config.build_store().expect("live AWS S3 object store"),
+        prefix.clone(),
+    );
+
+    run_with_exact_object_cleanup(blocks.clone(), async move {
+        exercise(
+            PgliteMetadataStore::connect_with_key(&url, &scope)
+                .await
+                .unwrap(),
+            blocks.clone(),
+        )
+        .await;
+
+        // Reopen through a fresh PGlite connection and a fresh signed AWS
+        // client. The metadata and immutable block providers therefore cross
+        // independent connection boundaries rather than reusing the original
+        // in-process handles.
+        let reopened = ChunkedFs::open(
+            PgliteMetadataStore::connect_with_key(&url, &scope)
+                .await
+                .unwrap(),
+            R2BlockStore::new(
+                config.build_store().expect("fresh AWS S3 object store"),
+                prefix,
+                true,
+            )
+            .unwrap(),
+            ChunkedOptions::fixed("aws-s3-pglite-reopen", 65536).unwrap(),
+        )
+        .await
+        .unwrap();
+        let mut expected = (0..33).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+        expected[5..14].copy_from_slice(&[0, 255, 12, 14, 16, 18, 20, 22, 24]);
+        expected.resize(84, 0);
+        expected[82..].copy_from_slice(&[99, 98]);
+        assert_eq!(
+            Loopback::new(reopened.clone())
+                .read_file("/alias")
+                .await
+                .unwrap(),
+            expected
+        );
+        reopened.shutdown().await.unwrap();
+        println!("AWS_S3_PGLITE_PASS prefix={}", blocks.inner.prefix());
+    })
+    .await;
 }
 
 #[tokio::test]
