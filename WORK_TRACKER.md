@@ -87,7 +87,8 @@ including cancellation while a queued request waits for an in-flight slot and
 serialized concurrent listen/close lifecycle calls.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
-NFSv3 calls under bounded in-flight dispatch. The forced-crash boundary tests
+NFSv3 calls under bounded in-flight dispatch, and a blocked NFSv3 RPC does not
+hold a later fast RPC on the same connection behind it. The forced-crash boundary tests
 now reject a pre-crash NFSv3 file handle with `NFS3ERR_STALE`, a pre-crash v4
 session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
 `NFS4ERR_STALE`; the v4 session identity folds both write-verifier halves to
@@ -1416,6 +1417,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   transport errors 4, v4 barrier 1, v4 wire 6), release addon/typecheck, live
   N-API harness, and strict affected Clippy pass. Native Linux/hosted lifecycle
   and crash/durability remain open.
+- [x] The NFS transport concurrency packet now directly proves completion-order
+  replies: a blocked NFSv3 `GETATTR` does not hold a later fast `GETATTR` on the
+  same TCP connection, and both XIDs arrive exactly once. The focused target
+  passed 2/2, the complete locked NFS target passed 39 unit tests, process
+  restart 2, rootless wire 1, transport concurrency 2, transport errors 4,
+  lifecycle 4, v4 barrier 1, and v4 wire 7; strict Clippy, formatting, and diff
+  checks pass. Native-client ordering, cross-process concurrency, and crash/
+  durability remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
