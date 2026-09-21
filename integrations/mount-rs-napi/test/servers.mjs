@@ -1600,8 +1600,17 @@ async function exerciseWebdav() {
   }
 }
 
+const requestedServerPhase = process.env.MOUNT_RS_SERVER_PHASE
+
 await within(
   (async () => {
+    if (requestedServerPhase === "webdav") {
+      await runPhase("WebDAV exercise", exerciseWebdav)
+      return
+    }
+    if (requestedServerPhase !== undefined) {
+      throw new Error(`unknown server phase: ${requestedServerPhase}`)
+    }
     await runPhase("NFS exercise", exerciseNfs);
     await runPhase("9P exercise", exerciseP9);
     await runPhase("9P attached stream", exerciseP9AttachedStream);

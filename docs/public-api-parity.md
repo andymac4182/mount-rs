@@ -365,7 +365,9 @@ The Rust listener lifecycle itself is locally qualified by concurrent
 `listen()` serialization and an immediate `listen()`/`close()` shutdown-wakeup
 regression. The N-API WebDAV wrapper also serializes its closed-state check
 with the transport lifecycle; a rebuilt 40-iteration real-loopback race test
-passes. N-API network/hosted concurrency and hosted lifecycle remain open.
+passes. The opt-in `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase
+also passes the host-enabled WebDAV network/fault/restart matrix; N-API
+network/hosted concurrency and hosted lifecycle remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full
