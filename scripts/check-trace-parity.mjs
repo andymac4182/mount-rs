@@ -5,6 +5,7 @@ import {isDeepStrictEqual} from 'node:util';
 import {pathToFileURL, fileURLToPath} from 'node:url';
 
 const repo = fileURLToPath(new URL('..', import.meta.url));
+const cargoShared = resolve(repo, 'scripts', 'cargo-shared');
 const ORACLE_REPOSITORY = 'https://github.com/pithings/mountx';
 const ORACLE_REVISION = '85361a8212ff9bff8e69f62fa8993ef2c2ec51e8';
 const REPORT_SCHEMA = 'mount-rs/w01.3-trace-evidence@1';
@@ -336,7 +337,7 @@ function parseBackendOutput(raw, {commands, expected, backend, seed}) {
 
 function runBackend(backend, seed, commands, expected) {
   try {
-    const output = execFileSync('cargo', ['run', '--quiet', '--locked', '--example', 'trace_oracle', '--', backend], {
+    const output = execFileSync(cargoShared, ['run', '--quiet', '--locked', '--example', 'trace_oracle', '--', backend], {
       cwd: repo,
       input: `${commands.map(command => JSON.stringify(command)).join('\n')}\n`,
       encoding: 'utf8',

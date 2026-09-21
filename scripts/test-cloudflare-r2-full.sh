@@ -58,7 +58,16 @@ MOUNT_RS_PGLITE_R2_BENCHMARK=1 \
 echo "CLOUDFLARE_R2_PGLITE_SDK_CLI_PASS"
 
 echo "CLOUDFLARE_R2_TRACE_START"
-MOUNT_RS_TRACE_R2=1 MOUNTX_SOURCE="$MOUNTX_SOURCE" \
+# The PGlite gate above already runs the complete five-seed trace across every
+# local and PGlite backend. Keep the remote R2 trace bounded to one seed by
+# default: the live SDK, CLI, block, benchmark and service-evidence gates above
+# exercise the remaining remote paths, while this preserves an explicit live
+# differential check without repeating the local matrix over paid HTTP.
+r2_trace_seeds="${MOUNT_RS_TRACE_R2_SEEDS:-4182}"
+MOUNT_RS_TRACE_R2=1 \
+MOUNT_RS_TRACE_BACKENDS=r2 \
+MOUNT_RS_TRACE_SEEDS="$r2_trace_seeds" \
+  MOUNTX_SOURCE="$MOUNTX_SOURCE" \
   node "$repo_dir/scripts/check-trace-parity.mjs"
 echo "CLOUDFLARE_R2_TRACE_PASS"
 
