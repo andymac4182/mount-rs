@@ -1902,6 +1902,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
   role are test resources, so production resource review remains open. The
+  fresh read-only resource audit at the current source also passed the
+  account/region binding, all four public-access blocks, BucketOwnerEnforced
+  ownership, AES256 encryption, seven-day lifecycle, and one-day incomplete-
+  multipart abort checks for that qualification bucket. The
   reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
   contract now expresses retained state, versioning, encryption choice,
   lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
