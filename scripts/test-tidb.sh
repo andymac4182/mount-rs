@@ -655,6 +655,10 @@ wait_for_store_count
 
 begin_phase "TiDB startup"
 tidb_container="mount-rs-tidb-$run_id-tidb"
+# TiDB's force-init-stats gate can withhold the SQL/status service while it
+# rebuilds optimizer statistics after a frontend restart. W08 validates the
+# provider and replicated-store durability, not optimizer warm-up; keep
+# readiness independent of that optional startup phase.
 docker run --detach \
   --platform "$docker_platform" \
   --name "$tidb_container" \
@@ -672,6 +676,7 @@ docker run --detach \
   -P=4000 \
   -L=warn \
   --status=10080 \
+  --force-init-stats=false \
   >/dev/null
 created_containers="$created_containers $tidb_container"
 tidb_container_name=$tidb_container
