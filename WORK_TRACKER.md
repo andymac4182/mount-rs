@@ -34,11 +34,14 @@ shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
-NFSv3 calls under bounded in-flight dispatch. The opt-in macOS native NFSv3
-loopback mount gate passed 1/1 in 0.14s on the exact published tree. Production
+NFSv3 calls under bounded in-flight dispatch. A restart-boundary test also
+proves that a replacement server rejects the old v4 session with
+`NFS4ERR_BADSESSION`, classifying session/lease/replay state as process-local.
+The opt-in macOS native NFSv3
+loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
 remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
 stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-and crash/durable-restart qualification.
+backend durability, crash injection, and durable-restart qualification.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -189,6 +192,17 @@ coverage. Its locked N-API check/Clippy, debug addon build, focused session/
 codec/typecheck tests, FUSE tests, formatting and diff checks pass; the full
 `MOUNTX_SOURCE` package suite, native Linux callback events, FSKit, cancellation,
 concurrency, crash/restart and durability remain open.
+
+The current W01-FUSE callback slice threads `FuseMountHooks` through
+`mount-rs-auto` and exposes the root N-API `mount(..., { onTransportError })`
+option. The JavaScript callback is converted to an owned thread-safe function
+before `Env::spawn_future`, so the async mount path never carries a non-`Send`
+N-API value. The generated declarations, locked auto/N-API check and Clippy,
+16 N-API unit tests, debug addon build, generated TypeScript check, default
+facade test, and focused FUSE suite pass locally. `MOUNTX_SOURCE` codec rows
+remain explicit skips, and hosted Linux callback-event delivery, native
+mount/lifecycle, FSKit, cancellation, concurrency, crash/restart and durability
+remain open; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -538,7 +552,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; hosted Linux Node/CLI/native-FUSE qualification is green at `35620006731`/`aa3dae3`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1391,6 +1405,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
   `RUSTFS_INTEGRATION_PASS`. This is a stronger bounded hosted qualification
   signal, not production-duration, capacity, failover, or release acceptance.
+  The corrected follow-up
+  [35620006731](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731)
+  (job
+  [106402140768](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731/job/106402140768))
+  tested revision `aa3dae3` on `ubuntu-24.04` and completed green in 11m05s.
+  Its retained qualification artifact reported `qualification-pass` and
+  emitted `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9593
+  p95_us=48162 p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. This closes the hosted Linux/native-FUSE
+  qualification checkpoint for that revision; production identity/ACL/TLS,
+  backup/recovery, capacity, observability, macOS and release-owner gates
+  remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1443,10 +1473,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
-  - [ ] **Hosted and platform evidence:** obtain green hosted
-    FoundationDB/RustFS, Node, CLI/native Linux and macOS/Linux build/native
-    acceptance runs. Record the actual runner, cluster/image, revision and
-  result; failed, skipped, cancelled or unavailable evidence remains open.
+  - [ ] **Hosted and platform evidence:** the hosted FoundationDB/RustFS,
+    Node, CLI/native Linux checkpoint is green for revision `aa3dae3` in run
+    `35620006731` on `ubuntu-24.04`, with the retained
+    `qualification-pass` artifact. Complete the advertised macOS/Linux
+    build/native matrix and any remaining clean-install/package evidence;
+    record the actual runner, cluster/image, revision and result. Failed,
+    skipped, cancelled or unavailable evidence remains open.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
@@ -1601,7 +1634,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
 - [x] W08.17 **Hosted cryptographic provenance and SBOM attestation wiring:**
   `.github/workflows/cli-release.yml` now grants OIDC/attestation permissions
   only to the tag-release job, invokes pinned
-  `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d` (`v4.2.2`) for the
+  `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6` (`v4.2.2`) for the
   exact CLI tarball and CycloneDX SBOM, and verifies both with
   `gh attestation verify` against the repository, signer workflow, source
   commit, tag ref and hosted-runner identity. After those checks it rewrites
@@ -1609,11 +1642,14 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   three-entry `SHA256SUMS`. `.github/workflows/w08-release-targets.yml` also
   exposes a manual `attest=true` path that performs the same per-target
   provenance/SBOM qualification. Local YAML, embedded-Bash and `gh` flag
-  checks pass. The tag workflow and manual attestation dispatch have not yet
-  run; no Sigstore bundle, attestation ID/URL, release-registry result, canary,
-  rollback or approval is claimed. *(Release implementation slice; GitHub
-  OIDC/attestation availability, release owner and production approvers are
-  external gates.)*
+  checks pass. Manual run `35620932700` reached terminal target-build and
+  downloaded-asset PASS jobs, but both attestation jobs failed during setup
+  because GitHub rejected the shortened action ref; no action step, OIDC token
+  or Sigstore bundle was created. The full v4.2.2 SHA correction is now in the
+  workflow and requires a rerun. No attestation ID/URL, release-registry
+  result, canary, rollback or approval is claimed. *(Release implementation
+  slice; GitHub OIDC/attestation availability, release owner and production
+  approvers are external gates.)*
 - [x] W08.18 **Attestation dispatch concurrency isolation:**
   `.github/workflows/w08-release-targets.yml` now keys its concurrency group by
   event type and ref, separating the explicit manual `workflow_dispatch`
@@ -1625,6 +1661,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   target attestations, tag publication, canary, rollback and approval remain
   W08-P09 gates. *(Release workflow implementation; hosted concurrency and
   GitHub OIDC/attestation service are external gates.)*
+- [x] W08.19 **Full SHA pin correction after hosted setup failure:** both
+  `actions/attest` references now use the full immutable
+  `1e69f48acb82d1966a394da916b4c1698aa569d6` commit for `v4.2.2`. Hosted run
+  `35620932700` passed both target builds and downloaded-asset checks, but its
+  attestation jobs `106406881524` and `106406881625` failed before any action
+  step because GitHub rejected the shortened ref; no OIDC token or Sigstore
+  bundle was created. The correction is implementation-complete but requires a
+  fresh `attest=true` hosted run; target attestation, tag publication, canary,
+  rollback and approval remain W08-P09 gates. *(Release implementation fix;
+  GitHub action resolution and hosted attestation are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1727,8 +1773,8 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.18's pinned attestation wiring and
-  dispatch isolation, but they do not create executed cryptographic
+  target/download matrix and W08.17–W08.19's pinned attestation wiring,
+  dispatch isolation and full-pin correction, but they do not create executed cryptographic
   signing/attestation evidence or run a real tag release, and do not close the
   canary, rollback or approval gates.
   *(Release implementation + hosted;
@@ -2285,6 +2331,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   the AWS S3 provider, SDK/CLI, gateway, CI-safety changes, and the integrated
   workstream code present at that commit; later unrelated NFS/W01 commits are
   outside this evidence boundary.
+- [x] Current-head repository gates at `8004999` passed on 2026-09-22:
+  `cargo fmt --all -- --check`,
+  `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
+  --all-targets --locked --offline`, and strict workspace Clippy with
+  `--all-targets --locked --offline -- -D warnings`. The passing test gate
+  includes the AWS provider, SDK/CLI, S3 gateway, policy/preflight support, and
+  current integrated source. Explicitly ignored native/service rows remain
+  separate prerequisites and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2387,12 +2441,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  observed hosted run `35620404949` at `0010246` passed the secret-free
-  validator regression step, then stopped before AWS authentication with
+  observed hosted run `35622312798` at `4242c24` passed provenance capture,
+  the seven-case validator and bucket-policy contract tests, then stopped
+  before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
   skipped, so this is a successful safety refusal, not acceptance evidence.
-  The preceding hosted run `35619552809` at `a84fa3e` stopped at the same
-  preflight boundary, as did `35618187611` at `a83540a`. A fresh
+  The run uploaded the non-expired artifact
+  `aws-s3-qualification-35622312798-1` (6,338 bytes). The preceding hosted
+  run `35620404949` at `0010246` stopped at the same preflight boundary, as
+  did `35619552809` at `a84fa3e`. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
@@ -2425,7 +2482,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   and temporary staging now have a configured byte quota, request-boundary TTL
   reaper, and backing-file-aware DeleteObjects behavior. Remaining repository-
   coverage findings from the sealed review remain open. Do not place AWS
-  secrets in the repository or CI logs.
+  secrets in the repository or CI logs. The hosted workflow now captures the
+  exact source SHA, lockfile/template/script hashes, Rust toolchain metadata,
+  and bounded acceptance log as a pinned 14-day artifact even when the
+  preflight safely refuses to authenticate; a successful run is still
+  required before this becomes release evidence.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.

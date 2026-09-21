@@ -236,12 +236,12 @@ jobs:
           printf 'artifact=%s\n' "$artifact" >> "$GITHUB_OUTPUT"
 
       - name: Generate artifact provenance attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.asset.outputs.artifact }}
 
       - name: Generate CycloneDX SBOM attestation
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d # v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: ${{ steps.asset.outputs.artifact }}
           sbom-path: ${{ steps.asset.outputs.release_dir }}/release-sbom.json

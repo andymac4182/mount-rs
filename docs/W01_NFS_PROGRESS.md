@@ -41,13 +41,14 @@ semantics.
 | 2026-09-22 | active connections and shared handle inspection | Rust `NfsServer::connections()` now reports active accepted socket tasks and close awaits their teardown; N-API `NfsServer.connections`, `NfsSession.handles`, and `Nfs4Session.handles` are generated and exercised with BigInt handle identity. Rust tests pass 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; release N-API build, generated typecheck, and live server integration pass | Full v3/v4 stateful matrix, remaining upstream connection/session member parity, native/hosted lifecycle, and crash/durability gates |
 | 2026-09-22 | live NFS connection objects | Rust `NfsServer::clients()` now exposes stable-id/peer connection objects with shared v3/v4 sessions and abort-safe `close`/`wait_closed`; N-API `NfsConnection` and the `./nfs` subpath export are generated and exercised against a live loopback client | Full v3/v4 stateful matrix, hosted lifecycle, Linux NFSv4.1, crash/durability, and any remaining upstream member differences |
 | 2026-09-22 | transport reconnect and pipelined concurrency | Rootless NFSv4.1 proves a session can continue across an orderly TCP transport reconnect while the server process remains alive; a rootless NFSv3 connection completes eight pipelined MOUNT NULL calls with `max_in_flight=4`. The complete NFS target passes 31 unit, rootless wire 1, transport concurrency 1, transport errors 4, v4 barrier 1, and v4 wire 3 | This is userspace/process-lifetime evidence only; automatic reconnect, crash/restart and durable lease/reply recovery, native Linux v4.1, hosted lifecycle, and the full stateful/member matrix remain open |
-| 2026-09-22 | macOS native NFSv3 loopback | The refreshed opt-in `native_loopback_mount_round_trip` gate passed 1/1 in 0.14s, including the temporary native mount, filesystem round trips, and bounded cleanup | Privileged Linux NFSv4.1, hosted lifecycle, full stateful matrix, remaining upstream member differences, and crash/durability gates |
+| 2026-09-22 | restart-boundary state classification | A rootless restart-boundary test reuses the backend across two server instances, proves `NfsServer::close()` destroys the first v4 session, and verifies the old session is rejected with `NFS4ERR_BADSESSION` by the replacement server. The v4 wire target now passes 4/4 | This proves process-local session/lease/replay state is not crash-durable; backend data durability, crash injection, native Linux v4.1, hosted lifecycle, and full upstream state/member parity remain open |
+| 2026-09-22 | macOS native NFSv3 loopback | The refreshed opt-in `native_loopback_mount_round_trip` gate passed 1/1 in 0.11s on the exact pushed tip, including the temporary native mount, filesystem round trips, and bounded cleanup | Privileged Linux NFSv4.1, hosted lifecycle, full stateful matrix, remaining upstream member differences, and crash/durability gates |
 
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
   31 unit tests, rootless wire 1, transport concurrency 1, transport errors 4,
-  v4 commit barrier 1, and v4 wire 3; the native mount target remains 1
+  v4 commit barrier 1, and v4 wire 4; the native mount target remains 1
   explicitly ignored test. The reconnect and pipelining rows are rootless
   userspace evidence, not native or hosted-client acceptance.
 - `(cd integrations/mount-rs-napi && pnpm build)` — PASS: release addon and
@@ -61,7 +62,7 @@ semantics.
   root/`./nfs` export identity checks, including `NfsConnection`; the pinned
   byte differential is SKIP because `MOUNTX_SOURCE` was not configured and is
   not acceptance evidence.
-- `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture` — PASS: macOS native NFSv3 loopback mount, filesystem round trips, unmount, and bounded cleanup; 1 passed, 0 failed, 0.14s on the exact published tree.
+- `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture` — PASS: macOS native NFSv3 loopback mount, filesystem round trips, unmount, and bounded cleanup; 1 passed, 0 failed, 0.11s on the exact pushed tip.
 - Linux v4.1 native qualification remains an external gate and was not run on
   this macOS host; it requires the separate
   `MOUNT_RS_NFS_NATIVE_V4_TEST=1` lane plus a privileged Linux NFS client.

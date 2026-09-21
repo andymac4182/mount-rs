@@ -26,6 +26,21 @@ for a production deployment result.
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open; the S3 gateway now exposes a bounded `S3Session::stats()` snapshot for latency, buffered bytes, operation counts, and authentication/conditional/throttling/client/server error classes. The public SDK's optional observability path records provider block latency, errors, bytes, and reconciliation scanned/protected/recent/deleted counts through local snapshots, tracing, and OTLP counters. [`docs/aws-s3-operations-runbook.md`](aws-s3-operations-runbook.md) defines the deployment handoff and drills. These are implementation surfaces only: exporter wiring, retry visibility, credential-expiry detection, cost/retention alerts, SLO thresholds, and exercised staging procedures remain deployment gates |
 | Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the sealed Standard scan `bb69ddae-798a-4387-bb87-f3e7acd496cb` covers pushed head `227f81932b48fa1fe8b4999ed619add812a88e42` with zero reportable findings in 22 directly reviewed W25 surfaces, while the remaining repository inventory was explicitly deferred. The completed scan `c6992ddb-3762-4638-b37e-f1399bd77e42` at target `8e271cd24de1458519c9dca61363c427784a3dd3` found one medium `StoreConfig` debug-credential disclosure and partial coverage (10 W25 surfaces of a 606-file inventory). That finding is fixed at `3fca80270070635ea6e63c00099ab7342a2ffdf1` with a redacting SDK `Debug` implementation and regression test; the W25 evidence boundary recorded here is `20baa9e` after later IaC, CI, and documentation commits, so the scan predates the reviewed boundary and is not current-head security evidence. Hosted OIDC/deployment evidence, repository-coverage follow-up, load/soak/fault/recovery drills, canary, rollback, and post-deploy smoke remain open. The latest observed hosted run [`35620404949`](https://github.com/andymac4182/mount-rs/actions/runs/35620404949) at `0010246` passed the secret-free validator regression step, then failed safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` before AWS authentication; AWS identity and acceptance were skipped. The existing test-role trust still allows only the SSO administrator, not GitHub OIDC, so an approved IAM trust/environment change is required. Bounded publication, listing, quota/TTL, backing-file-aware staging cleanup, the explicit AWS client retry budget, and SDK diagnostic redaction have landed |
 
+The hosted workflow also records the exact source SHA, lockfile/template/script
+hashes, Rust toolchain metadata, and bounded acceptance log in a pinned
+14-day artifact. The latest run [`35622312798`](https://github.com/andymac4182/mount-rs/actions/runs/35622312798)
+at `4242c24` passed provenance capture and both synthetic contract suites,
+then safely refused the unconfigured protected environment with
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its non-expired artifact is
+`aws-s3-qualification-35622312798-1`. This artifact is available for a
+completed run or a safe preflight refusal; it does not substitute for
+successful AWS authentication, acceptance, or production deployment evidence.
+
+The current repository head `8004999` also passed formatting, the full locked
+offline workspace test gate, and strict workspace Clippy with `-D warnings`.
+Ignored native/service rows remain explicit prerequisites and are not treated
+as production acceptance.
+
 ## Deployment contract
 
 The production configuration must contain only non-secret provider identity:

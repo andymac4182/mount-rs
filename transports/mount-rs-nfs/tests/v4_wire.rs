@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use mount_rs_core::MemoryFs;
 use mount_rs_nfs::v4::{
-    CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_SHARE_DENIED, UNSTABLE4,
+    CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_BADSESSION, NFS4ERR_SHARE_DENIED,
+    UNSTABLE4,
 };
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
@@ -927,6 +928,99 @@ fn nfs_v4_session_survives_transport_reconnect() {
         .expect("spawn v4 reconnect test thread")
         .join()
         .expect("v4 reconnect test thread panicked");
+}
+
+#[test]
+fn nfs_v4_session_state_is_process_local_after_server_restart() {
+    std::thread::Builder::new()
+        .name("nfs-v4-restart-boundary-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 restart boundary test runtime")
+                .block_on(async {
+                    // Reuse the backend across server instances to isolate the
+                    // boundary: filesystem ownership can outlive the server,
+                    // but NFSv4 session/lease/replay state cannot.
+                    let driver = MemoryFs::empty();
+                    let server = NfsServer::new(driver.clone(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen first NFS server");
+                    let mut first = TcpStream::connect(address)
+                        .await
+                        .expect("connect first NFS server");
+                    let clientid = parse_exchange(
+                        rpc(&mut first, 301, compound("exchange", &[exchange_args()])).await,
+                    );
+                    let session = parse_create_session(
+                        rpc(
+                            &mut first,
+                            302,
+                            compound("create-session", &[create_session_args(clientid)]),
+                        )
+                        .await,
+                    );
+                    let mut client = Client {
+                        session,
+                        clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    parse_sequence_and_handle(
+                        rpc(
+                            &mut first,
+                            303,
+                            compound(
+                                "initial-root",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_GETFH, |_| {}),
+                                ],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    first.shutdown().await.expect("close first NFS transport");
+                    server.close().await.expect("close first NFS server");
+                    assert!(server.v4_session().destroyed());
+
+                    let restarted = NfsServer::new(driver, NfsServerOptions::default());
+                    let restarted_address = restarted
+                        .listen()
+                        .await
+                        .expect("listen restarted NFS server");
+                    let mut second = TcpStream::connect(restarted_address)
+                        .await
+                        .expect("connect restarted NFS server");
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut second,
+                        304,
+                        compound("stale-session", &[sequence(&client)]),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 0),
+                        NFS4ERR_BADSESSION,
+                        "a restarted server rejects the old session before dispatch"
+                    );
+                    response.end("stale session response").unwrap();
+
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close restarted NFS transport");
+                    restarted.close().await.expect("close restarted NFS server");
+                });
+        })
+        .expect("spawn v4 restart boundary test thread")
+        .join()
+        .expect("v4 restart boundary test thread panicked");
 }
 
 #[test]

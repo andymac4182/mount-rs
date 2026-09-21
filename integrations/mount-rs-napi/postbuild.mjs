@@ -119,7 +119,7 @@ types = types.replace(
   /export declare class P9Server \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
     if (!/\battach\(/.test(body)) {
-      body += '\n  attach(stream: Duplex, options?: { peer?: string; own?: boolean }): P9Connection'
+      body += '\n  attach(stream: Duplex, options?: P9AttachOptions): P9Connection'
     }
     return `export declare class P9Server {${body}\n}`
   },

@@ -484,7 +484,7 @@ export declare class P9Server {
   listen(): Promise<P9Server>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
-  attach(stream: Duplex, options?: { peer?: string; own?: boolean }): P9Connection
+  attach(stream: Duplex, options?: P9AttachOptions): P9Connection
 }
 
 export declare class P9Session {
@@ -981,6 +981,7 @@ export interface JsAutoMountOptions {
    * NFS. This does not enable WAL or distributed SQLite locking.
    */
   nfsSqliteSingleHost?: boolean
+  onTransportError?: (error: unknown, peer: string | undefined) => void
 }
 
 export interface JsAutoProbe {
@@ -2105,6 +2106,13 @@ export declare function nfsXdrAlign(length: number): number
 export declare function nfsXdrPad(length: number): number
 
 export declare function normalizePath(path: string): string
+
+export interface P9AttachOptions {
+  peer?: string
+  own?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+}
 
 export interface P9ServerOptions {
   port?: number

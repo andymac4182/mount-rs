@@ -31,6 +31,7 @@ CI job, installation-only evidence, or a local qualification report.
 | [Hosted attempt `35606084750`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606084750), job `106353392536`, revision `2d4ca9f`, Ubuntu 24.04 | **NO HOSTED PASS** — setup, config policy, prerequisites and N-API build passed; the RustFS harness stopped before provider execution because `tests/rustfs/Cargo.lock` did not include the `futures-util` dependency declared by `mount-rs-r2` | Reproducibility/lockfile failure, not provider acceptance. The lockfile correction is published in the follow-up revision; this run contributes no FoundationDB or RustFS runtime evidence. |
 | [Hosted run `35606741719`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719), job `106355562011`, revision `4aadbb1`, Ubuntu 24.04 | **PASS — guarded-authority hosted qualification** — policy positive/negative fixtures passed and failed closed; shared RustFS network and endpoint reachability (`403`); bounded workload marker `FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=11702 p95_us=26193 p99_us=26193 total_ms=120 throughput_ops_per_sec=91.24`; chunked composition; one soak round; live Node/N-API; Linux FUSE/native CLI; service-node restart; `FOUNDATIONDB_TEST_PASS`, `RUSTFS_COMBO_PASS` and RustFS integration pass | Terminal hosted Linux evidence for this revision only. This validates the bounded publisher guard and qualification path, not production identity/ACL/TLS, backup/restore, production load/capacity, multi-day soak, macOS, or release approval. |
 | [Hosted run `35608336345`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35608336345), job `106360895920`, revision `976725e`, Ubuntu 24.04 | **PASS — five-round guarded-authority hosted qualification** — policy positive/negative fixtures passed and failed closed; shared RustFS network and endpoint reachability (`403`); bounded workload marker `FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=9990 p95_us=85061 p99_us=85061 total_ms=167 throughput_ops_per_sec=65.76`; five isolated soak rounds; live Node/N-API; Linux FUSE/native CLI; service-node restart; `FOUNDATIONDB_TEST_PASS`, `RUSTFS_COMBO_PASS` and RustFS integration pass | Terminal hosted Linux evidence for this revision only. The five rounds strengthen bounded repeatability and cleanup evidence, but do not prove production identity/ACL/TLS, backup/restore, production load/capacity, multi-day duration, failover, macOS, or release approval. |
+| [Hosted run `35620006731`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731), job `106402140768`, revision `aa3dae3`, Ubuntu 24.04 | **PASS — corrected five-round hosted qualification** — policy fixtures passed with the expected positive/negative outcomes; durable three-server FoundationDB `double`/SSD topology; RustFS endpoint reachability (`403`); chunked composition; `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9593 p95_us=48162 p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`; five isolated soak rounds; live Node/N-API; native Linux CLI/FUSE mount and reopen; service restart; `FOUNDATIONDB_TEST_PASS`, `RUSTFS_COMBO_PASS` and RustFS integration pass. The retained artifact summary reports `qualification-pass`. | Terminal hosted Linux qualification for `aa3dae3` only. This confirms the corrected privileged `mount(2)` path in the production workflow, but does not prove production identity/ACL/TLS, backup/restore, production load/capacity, multi-day duration, failover, macOS, or release approval. |
 | Hosted attempt `35591729423`, revision `1ea183e`, Linux `foundationdb-rustfs` | **NO HOSTED PASS** — FoundationDB configured/readiness/image-match markers passed, then the client failed to reach the published RustFS endpoint at `host.docker.internal:32768`; the workflow was later superseded | Historical blocker that motivated the shared-network fix in `6d2a5d4`; the terminal rerun is recorded above. |
 
 The latest hosted pass above is retained as qualification evidence for the
@@ -39,6 +40,18 @@ included
 `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
 `FOUNDATIONDB_NAPI_PASS`, `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
 `FOUNDATIONDB_TEST_PASS topology=durable`.
+
+The current terminal hosted evidence is run
+[`35620006731`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731)
+(job `106402140768`, revision `aa3dae3`). Its retained artifact summary is
+`qualification-pass` and records `FOUNDATIONDB_CLI_PASS
+mode=foundationdb-rustfs-fuse`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
+`FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9593
+p95_us=48162 p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`,
+`FOUNDATIONDB_TEST_PASS ... platform=linux/amd64 service_restart=pass
+soak_rounds=5`, `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This closes
+the hosted Linux qualification checkpoint for the tested revision; it does not
+close the separate production gates.
 
 The follow-up network-cleanup run also emitted
 `FOUNDATIONDB_RUSTFS_NETWORK_READY`,
@@ -73,10 +86,10 @@ and cannot close the production gates below.
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification; local and hosted durable restart evidence | Secure multi-node tests covering stale writers, lease expiry/renewal, maybe-committed reconciliation, network delay/partition, authority loss, reviewed failover and no split-brain publication |
 | P6 — backup, restore and disaster recovery | Not started | Consistent metadata/authority/block backup definition, encrypted retention, clean-environment restore, hash/revision verification, measured RPO/RTO and provider/region-loss procedure |
 | P7 — observability, alerts and runbooks | Not started | Metrics and alerts for cluster health, authority publication age/errors, lease-fence/ESTALE, transaction retry/maybe-committed EIO, block errors, latency, capacity and cleanup/space pressure; tested on-call runbook |
-| P8 — load, capacity, soak and cost envelope | Harness + five-round local and hosted qualification; measured latency marker verified; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and emits p50/p95/p99 operation-latency and throughput markers; hosted run `35608336345` recorded five isolated durable composition rounds at revision `976725e` and `operations=11 p50_us=9990 p95_us=85061 p99_us=85061 total_ms=167 throughput_ops_per_sec=65.76`; production-shaped workload, concurrency, duration, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
+| P8 — load, capacity, soak and cost envelope | Harness + five-round local and hosted qualification; measured latency marker verified; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and emits p50/p95/p99 operation-latency and throughput markers; hosted run `35620006731` recorded five isolated durable composition rounds at revision `aa3dae3` and `operations=15 p50_us=9593 p95_us=48162 p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`; production-shaped workload, concurrency, duration, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
 | P9 — upgrade, rollback and compatibility | Not started | Forward/backward keyspace and configuration compatibility, rolling provider/client upgrade, failed-upgrade rollback, retained-data downgrade boundary, lockfile/image/artifact provenance |
 | P10 — security, privacy, tenancy and audit | Not started | Threat-model review, prefix/tenant isolation, data classification, encryption, audit retention, dependency/image review, abuse/rate limits, closed findings or approved exceptions |
-| P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI evidence | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
+| P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI/native FUSE evidence is green at `35620006731` | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
 | P12 — release packaging, CI promotion and canary | Qualification CI plus policy gate | Locked and signed artifacts, SBOM/provenance, protected environment approvals, production-like canary, holdback, promotion checks, rollback automation and retained evidence packet |
 | P13 — incident, failover and recovery rehearsal | Not started | Timed operator exercises for authority loss, cluster loss, stale client, storage exhaustion, bad deploy, credential expiry and restore; paging, runbook, integrity and RTO evidence |
 | P14 — final launch audit and go/no-go | Not started | One-revision audit of P0–P13, known-limitations record, release-owner decision, canary exit evidence and explicit GO or NO-GO |
@@ -132,6 +145,15 @@ at revision `976725e` recorded
 throughput_ops_per_sec=65.76`, passed five isolated soak rounds and the
 service-restart path. These are measured qualification results, not
 production-shaped load, capacity, retry/error-budget or scaling evidence.
+
+The corrected five-round hosted run
+[`35620006731`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731)
+at revision `aa3dae3` recorded `operations=15 p50_us=9593 p95_us=48162
+p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`, passed the native
+Linux FUSE/CLI lifecycle and retained a `qualification-pass` summary artifact.
+This supersedes the earlier native-mount blocker for the tested revision only;
+it remains bounded qualification, not production-shaped load or capacity
+evidence.
 
 The operational execution template is
 [`W07-operations-runbook.md`](W07-operations-runbook.md). It defines the

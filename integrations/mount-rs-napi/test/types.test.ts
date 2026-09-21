@@ -53,6 +53,7 @@ import {
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
+  type P9AttachOptions,
   type P9Connection,
   type P9Server,
   type P9ServerOptions,
@@ -101,6 +102,13 @@ function checkStructuralFactories(driver: FsDriver): void {
   createS3Server(driver)
   createS3Server({ buckets: { structural: driver, native: Filesystem.memory() } })
   void mount(driver, "/typecheck-only")
+  void mount(driver, "/typecheck-fuse-callback", {
+    transport: "fuse",
+    onTransportError(error, peer) {
+      void error
+      void peer
+    },
+  })
 }
 const nodeStructural: FsDriver = nodeFs
 void nodeStructural
@@ -298,6 +306,13 @@ function checkServerAndKvSubpaths(): void {
     socketMode: 0o600,
     readOnly: true,
   }
+  const p9AttachOptions: P9AttachOptions = {
+    peer: "attached-types",
+    own: false,
+    maxFrame: 8192,
+    maxInFlight: 2,
+  }
+  void p9AttachOptions
   const s3Options: S3ServerOptions = {
     host: "127.0.0.1",
     port: 0,
