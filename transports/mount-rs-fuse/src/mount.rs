@@ -867,7 +867,8 @@ async fn run_session_loop(
     let writer = Arc::new(tokio::sync::Mutex::new(()));
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_READS));
     let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
-    let mut in_flight = std::collections::HashMap::new();
+    let mut in_flight: std::collections::HashMap<u64, tokio::task::AbortHandle> =
+        std::collections::HashMap::new();
     loop {
         if state.stop.load(Ordering::Acquire) {
             break;
@@ -910,6 +911,31 @@ async fn run_session_loop(
         if state.stop.load(Ordering::Acquire) {
             break;
         }
+        let destroy = match session.is_destroy_frame(&frame) {
+            Ok(destroy) => destroy,
+            Err(error) => {
+                failure = Some(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Protocol,
+                    error.to_string(),
+                ));
+                break;
+            }
+        };
+        if destroy {
+            // FUSE_DESTROY is a terminal request with no reply. The kernel
+            // waits for the userspace device to close, so continuing through
+            // ordinary dispatch would leave fusermount blocked waiting for a
+            // frame that can never arrive. Abort and drain read workers here;
+            // run_session() performs the final session-owned cleanup.
+            for abort in in_flight.drain().map(|(_, abort)| abort) {
+                abort.abort();
+            }
+            if let Some(error) = drain_read_tasks(&mut read_tasks, &mut in_flight).await {
+                failure = Some(error);
+            }
+            state.request_stop();
+            break;
+        }
         match session.prepare_read(&frame) {
             Ok(Some(prepared)) => {
                 let unique = prepared.unique();
@@ -935,30 +961,13 @@ async fn run_session_loop(
                 continue;
             }
             Ok(None) => {
-                match session.is_destroy_frame(&frame) {
-                    Ok(true) => {
-                        // DESTROY is a lifecycle boundary rather than a
-                        // stateful operation. Do not wait for a backend read
-                        // that the kernel is already trying to tear down.
-                        for abort in in_flight.drain().map(|(_, abort)| abort) {
+                match session.interrupt_target(&frame) {
+                    Ok(Some(target)) => {
+                        if let Some(abort) = in_flight.remove(&target) {
                             abort.abort();
                         }
                     }
-                    Ok(false) => match session.interrupt_target(&frame) {
-                        Ok(Some(target)) => {
-                            if let Some(abort) = in_flight.remove(&target) {
-                                abort.abort();
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            failure = Some(FuseTransportError::from_message(
-                                FuseTransportErrorKind::Protocol,
-                                error.to_string(),
-                            ));
-                            break;
-                        }
-                    },
+                    Ok(None) => {}
                     Err(error) => {
                         failure = Some(FuseTransportError::from_message(
                             FuseTransportErrorKind::Protocol,
@@ -2623,16 +2632,9 @@ mod tests {
         peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 5, 0, &[]))
             .await
             .expect("send destroy");
-        let destroy = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
-            .await
-            .expect("destroy reply");
-        assert_eq!(i32::from_le_bytes(destroy[4..8].try_into().unwrap()), 0);
-        assert_eq!(u64::from_le_bytes(destroy[8..16].try_into().unwrap()), 5);
-
-        state.request_stop();
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
-            .expect("stop should close the destroyed session")
+            .expect("FUSE_DESTROY should close the session")
             .expect("destroyed session task should finish");
         assert!(state.closed.load(Ordering::Acquire));
         assert!(

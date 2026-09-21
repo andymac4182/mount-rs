@@ -704,8 +704,8 @@ impl FuseSession {
         Ok(Some(target))
     }
 
-    /// Whether the native request pump should abort asynchronous read workers
-    /// before dispatching this lifecycle request.
+    /// Whether the native request pump should treat this lifecycle request as
+    /// terminal before ordinary dispatch.
     #[cfg(target_os = "linux")]
     pub(crate) fn is_destroy_frame(
         &self,
