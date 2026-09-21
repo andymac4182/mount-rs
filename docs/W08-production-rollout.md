@@ -149,7 +149,11 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate
 workflow was later cancelled by main-branch concurrency and is not reported as
-an aggregate-green release result.
+an aggregate-green release result. The later current-main run
+`35595664981` likewise had terminal W08-relevant successes (`tidb`,
+`tidb-rustfs`, `tidb-tls-compile` and `native-fuse`) but ended with aggregate
+`failure` because unrelated FoundationDB, Windows Rust, Ozone and Node matrix
+jobs failed; it is not an aggregate-green release result either.
 
 ## Rollout sequence
 
