@@ -11,20 +11,20 @@ macOS/Linux gate required by W04.2.
 
 | Field | Current value |
 | --- | --- |
-| Snapshot base revision | `c5532e3` (`origin/main` before this production package/consumer-gate publication; W04 code fix remains `bdfcb11`) |
+| Snapshot base revision | `9de159a` (`origin/main` at this ledger refresh; the published W04 EPIPE fix remains `bdfcb11`) |
 | Ledger publication | This current ledger revision is published on `origin/main`; the exact commit is recorded in Git history |
-| Current-head local evidence revision | `bdfcb114033f77c3a454ecf84db7bffc52cef9d1` (the published EPIPE fixture-shutdown fix) |
+| Current-head local evidence revision | `900994a` (published Windows long-symlink fallback fix; local Windows-target check, formatting, diff, and host tests passed) |
 | Latest synced verification revision | `113724487e9efc172ab69254d995377cfcfab296` (workspace test and scoped Clippy evidence; unrelated W26/TiDB/CLI changes are included) |
 | Latest full W04 gate revision | `6d59d204af80c883bf47a59ffb5a4b77829f8ec8` (current `origin/main` after the chunked-shutdown fix; exact pinned oracle; full `scripts/test-pglite.sh` exited 0) |
-| Latest published repository revision | `c5532e3` (latest remote tip before this production package/consumer-gate publication; W04 code fix remains `bdfcb11`) |
-| Qualification evidence revision | `7fda354818cedf8857203ff17b9a29117dbaf121` on `andymac4182/c/w04-production-gate-artifacts-20260921`, based on accepted W04 base `e515036`; the Windows N-API `.cmd` fix is already published on main as `581833f` |
-| Snapshot time | 2026-09-21 21:58 AEST / 2026-09-21 11:58 UTC |
+| Latest published repository revision | `9de159a` (latest remote tip at this ledger refresh; W04 long-symlink fallback fix is included) |
+| Qualification evidence revision | `82745e3` on `andymac4182/c/w04-long-symlink-short-path-qualification-20260921`; isolated run `35602906005` exercised the corrected missing-path fallback, while the clean production source is published as `900994a` |
+| Snapshot time | 2026-09-21 23:33 AEST / 2026-09-21 23:33 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
 | Checklist completion | **100%**: 8 of 8 W04 checklist items are checked; W04.2 hosted acceptance is closed |
 | Implementation/local qualification | **Complete for the recorded packet**; the fresh post-fix oracle-enabled W04 gate passed at `6d59d20`, and synced workspace tests plus scoped W04 Clippy passed at `1137244` |
-| Hosted/native/provider acceptance | **W04.2 hosted acceptance complete**: isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864) passed the exact PGlite recovery step on Linux, macOS-latest, and macOS-15-intel. The isolated package qualification [35594536095](https://github.com/andymac4182/mount-rs/actions/runs/35594536095) also passed all four Node platform jobs, Windows Node packaging, and `aggregate-native`; provider credentials/services remain explicit gates |
+| Hosted/native/provider acceptance | **W04.2 hosted acceptance complete; follow-up qualification partial**: isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864) passed the exact PGlite recovery step on Linux, macOS-latest, and macOS-15-intel. The follow-up run [35602906005](https://github.com/andymac4182/mount-rs/actions/runs/35602906005) passed the corrected Windows Rust long-symlink test, but Windows Node failed cleanup with `EBUSY` and the four other Node jobs failed the earlier `NoSuchUpload` HTTP-parity lane; their PGlite steps were skipped. Provider credentials/services remain explicit gates |
 | Production rollout decision | **NO-GO**: the demo was successful, but production readiness still requires fresh hosted evidence plus artifact, durability, operational, and rollback gates |
-| Current external blocker | W04.2 and the native package qualification are evidenced, but the full qualification run still concluded failure because provider job [106316231929](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316231929) and Windows Rust job [106316232156](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316232156) failed. The short-name Windows long-symlink remediation is published in `9189d52` and is being verified in isolated run [35600696969](https://github.com/andymac4182/mount-rs/actions/runs/35600696969); that run is not yet evidence while jobs are queued or in progress. Production rollout remains NO-GO pending deployment-owner, provider-scope, rollback, observability, and release-approval evidence. |
+| Current external blocker | The corrected Windows fallback is published as `900994a`; isolated run [35602906005](https://github.com/andymac4182/mount-rs/actions/runs/35602906005) passed Windows Rust job [106343197217](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197217), including `windows_long_symlink_creation_uses_extended_path_fallback`. Windows Node job [106343197149](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197149) failed with `EBUSY` unlinking `blocks.sqlite` before package distribution; Linux, Linux ARM, macOS-latest, and macOS-15-intel Node jobs [106343197273](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197273), [106343197507](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197507), [106343197420](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197420), and [106343197472](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197472) failed the earlier `NoSuchUpload` HTTP-parity lane, so their exact PGlite recovery steps were skipped; aggregate-native job [106347074679](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106347074679) was skipped. Production rollout remains NO-GO pending the Windows Node remediation, a clean published-main package/consumer result, provider scope, persistence/rollback, observability, ownership, and release approval. |
 
 The 100% figure is a checklist ratio, not a production-readiness claim. W04.2
 hosted acceptance is closed; the remaining production matrix determines
@@ -92,6 +92,8 @@ item alone does not satisfy them.
 | Teardown-race fix and bounded close/reopen safety | Complete — implementation and local regression | 100% | Tracker records the PostgreSQL Terminate-frame cleanup path, I/O-turn barrier, listener restoration, and tracked cleanup barrier. Readiness passed 10/10; bounded close/reopen passed 5/5 in the recorded gate; focused current-tree runs also passed the bounded regression repeatedly. | None unless hosted macOS reproduces the historical `Eio` failure. | 0h remaining; 2–6h contingency if hosted failure reproduces |
 | W04.2 hosted macOS/Linux reconnect acceptance | **Complete — isolated external hosted gate** | **100%** | Isolated run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864) on `andymac4182/c/w04-production-gate` completed Linux Node job [106298858958](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298858958), macOS-latest Node job [106298859119](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859119), and macOS-15-intel Node job [106298859135](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859135) successfully. Direct logs and job metadata confirm the exact `Verify PGlite integration and restart recovery` step passed on all three platforms; fragmented early rejection also passed and the historical Intel EPIPE did not recur. | None for W04.2. Keep the production rollout matrix open: `aggregate-native` was skipped and production configuration, provider scope, rollback, observability, and ownership still need evidence. | 0h remaining; production gates remain 3–6h plus external/provider wait | Hosted acceptance |
 | W04 production native package and clean-consumer gate | **Complete — qualification; hosted enforcement added** | **100%** | Run [35594536095](https://github.com/andymac4182/mount-rs/actions/runs/35594536095) passed Windows Node distribution/export coverage in job [106316232053](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106316232053) and five-package `aggregate-native` validation in job [106320575411](https://github.com/andymac4182/mount-rs/actions/runs/35594536095/job/106320575411). The exact hosted artifacts were downloaded, staged, packed, installed into a clean pnpm consumer with local platform-package overrides, and exercised through a memory write/read/shutdown smoke: `mount-rs clean consumer install/smoke: PASS`. | Run and retain the new consumer-smoke step on a published-main CI result; production release remains NO-GO until persistence/rollback, provider scope, operations, and ownership gates close. | 0.25–0.5h hosted enforcement; 0h package implementation | Hosted/package gate |
+| W04 Windows hosted long-symlink gate | Complete — hosted qualification | 100% | Isolated run [35602906005](https://github.com/andymac4182/mount-rs/actions/runs/35602906005), Windows Rust job [106343197217](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197217), and exact test `windows_long_symlink_creation_uses_extended_path_fallback` passed after the missing-path trigger fix published as `900994a`. The local Windows-target check also passed. | None for this blocker; keep the broader native/package/Node gates open. | 0h remaining |
+| W04 Windows Node packaging cleanup under hosted parity | Blocked — hosted qualification regression | 50% | In run [35602906005](https://github.com/andymac4182/mount-rs/actions/runs/35602906005), Windows Node job [106343197149](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197149) failed before `Verify Windows package distribution` with `EBUSY: resource busy or locked, unlink ...\\blocks.sqlite`; the package step was skipped. | Reproduce the cleanup race, make Windows SQLite temporary-file teardown retryable/ownership-safe, run the focused N-API chunked test, then rerun Windows distribution and clean-consumer gates. | 1–3h engineering plus hosted rerun |
 | W04 production rollout runbook and controlled-drill packet | Template drafted — production gate open | 20% | [`W04-production-rollout.md`](W04-production-rollout.md) records the launch boundary, evidence record, admission/preflight, staged rollout, backup/restore, rollback, observability/limits, drill matrix, and role sign-off fields. It intentionally leaves the decision **NO-GO** until the named deployment and operators execute the gates. | Choose the actual launch scope, bind the persistent data directory and version policy, execute backup/restore and rollback drills, connect telemetry/pager routes, measure thresholds, and obtain named-owner/release approval. | 1.5–3h engineering plus deployment/operator wait | Production operations gate |
 | W04.3 versioning, mount-free VFS, and native SQLite-hosting tests | Complete — implementation and local qualification | 100% | Tracker records the rebased packet published through `90c33949`; durable PGlite version metadata, reconnect/version history, mount-free SQLite VFS, native SQLite-hosting tests, and the configuration-driven gate are present. Focused versioning/VFS, locked compilation, formatting, Clippy, and script checks passed in the recorded evidence. | None for W04.3; hosted reconnect remains W04.2's separate gate. | 0h remaining |
 
@@ -172,21 +174,32 @@ item alone does not satisfy them.
   fresh pnpm install and memory write/read/shutdown test reported
   `mount-rs clean consumer install/smoke: PASS`.
 - The overall `35594536095` run is not a release pass: unrelated
-  `foundationdb-rustfs` job `106316231929` failed its provider gate, and
-  `rust (windows-latest)` job `106316232156` still fails
+  `foundationdb-rustfs` job `106316231929` failed its provider gate, and the
+  historical `rust (windows-latest)` job `106316232156` failed
   `windows_long_symlink_creation_uses_extended_path_fallback` with
-  `FsError { code: Enoent, syscall: Some("symlink") }`. Those failures remain
-  visible blockers for broader production qualification and are not promoted
-  into the W04 package or PGlite acceptance result.
-- The follow-up Windows remediation `9189d52` tries the existing parent
-  directory's short aliases before the extended/reparse fallback, preserving
-  the unprivileged Win32 path used by Node/libuv. Isolated run
-  [35600696969](https://github.com/andymac4182/mount-rs/actions/runs/35600696969)
-  is the qualification source; its Linux Node jobs have already failed in the
-  unrelated `s3/multipart-upload-part-signed-chunks` HTTP-parity lane with
-  `NoSuchUpload`, so their PGlite steps were skipped. The Windows Rust and
-  macOS-15-intel results remain pending and no skipped/partial result closes a
-  W04 gate.
+  `FsError { code: Enoent, syscall: Some("symlink") }`. The failure was
+  reproduced and the corrected trigger was published; the terminal hosted
+  Windows Rust pass is recorded below rather than silently rewriting the
+  historical result.
+- The short-name Windows remediation `9189d52` was extended by published fix
+  `900994a` to enter the extended/reparse fallback for `ERROR_FILE_NOT_FOUND`
+  and `ERROR_PATH_NOT_FOUND` as well as `ERROR_FILENAME_EXCED_RANGE`. Isolated
+  run [35602906005](https://github.com/andymac4182/mount-rs/actions/runs/35602906005)
+  confirms the exact Windows Rust long-symlink test passed in job
+  [106343197217](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197217).
+- The same run does not close the Node/package gate: Windows Node job
+  [106343197149](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197149)
+  failed with a locked `blocks.sqlite` cleanup (`EBUSY`) before package
+  distribution, while Linux, Linux ARM, macOS-latest, and macOS-15-intel jobs
+  [106343197273](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197273),
+  [106343197507](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197507),
+  [106343197420](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197420),
+  and [106343197472](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106343197472)
+  failed the earlier `s3/multipart-upload-part-signed-chunks` HTTP-parity
+  lane with `NoSuchUpload`; their exact PGlite steps were skipped. The
+  dependent `aggregate-native` job [106347074679](https://github.com/andymac4182/mount-rs/actions/runs/35602906005/job/106347074679)
+  was also skipped, so no current run promotes partial evidence to a package
+  or W04 closure claim.
 - As a diagnostic only, newer run `35578377706` started its Ubuntu Node jobs
   while its `macos-latest` and `macos-15-intel` Node jobs remained queued. This
   corroborated the historical macOS runner-capacity/platform queue; it is not
@@ -207,8 +220,8 @@ item alone does not satisfy them.
 4. [x] Require the dependent native artifact aggregation/package checks and a
    clean supported-consumer smoke result before changing the production
    decision to GO; run `35594536095` and the local exact-artifact consumer
-   smoke satisfy this package gate, while the new CI step awaits a published
-   main result.
+   smoke satisfy the qualification package gate, while the new CI step still
+   awaits a published-main result.
 5. Confirm the actual launch configuration's persistence, versioning,
    backup/restore, rollback, observability, limits, and ownership gates; keep
    R2/TiDB/RustFS skips explicit unless those providers are in launch scope.
@@ -218,6 +231,12 @@ item alone does not satisfy them.
 7. If a hosted job fails, treat it as a new engineering chunk: capture the
    failure, patch the smallest evidence-backed root cause, run focused tests
    plus the relevant W04 gate, and commit/push before proceeding.
+8. [ ] Reproduce and fix the Windows Node `EBUSY` cleanup failure from
+   `35602906005`, then rerun Windows distribution, artifact aggregation, and
+   clean-consumer validation on a published revision.
+9. [ ] Obtain or explicitly exclude the provider scope behind the cross-
+   platform `NoSuchUpload` HTTP-parity failures, then rerun the Node jobs so
+   the exact PGlite recovery steps are exercised on the production candidate.
 
 ## Provisional remaining effort and blockers
 
@@ -229,15 +248,18 @@ item alone does not satisfy them.
 | GitHub Actions queue delay | Resolved for W04.2 by isolated qualification branch; future shared-main churn remains external | External blocker; not engineering time |
 | R2/TiDB local credential/service skips | Unknown | External provider prerequisites; not W04.2's macOS/Linux closure criterion |
 | Native artifact aggregation and clean consumer smoke | Complete for qualification; 0.25–0.5h hosted enforcement remains | Hosted/package gate |
+| Windows Node `EBUSY` cleanup remediation and hosted rerun | 1–3h | Engineering plus hosted/native gate |
+| Cross-platform `NoSuchUpload` HTTP-parity lane | External/provider or CI-harness investigation; unknown | External provider-scope gate; not converted to a W04 pass |
 | Production persistence/backup/rollback and version policy | 1–2h | Engineering plus deployment-owner decision |
 | Runbook, observability, limits, and operational ownership | 1–2h | Production operations gate; review/ownership dependent |
 
-Best-case remaining active engineering for W04.2 is approximately **0h**;
-the W04.2 hosted gate and package qualification are complete. Production
-rollout readiness still adds approximately **2.5–5h** for hosted consumer
+Best-case remaining active engineering for the already-closed W04.2 gate is
+approximately **0h**. Production rollout readiness still adds approximately
+**3.5–8h** for the Windows Node cleanup remediation, hosted consumer
 enforcement, persistence/rollback, and operational gates, excluding provider
 setup, release-owner decisions, and hosted runner time. The Windows Rust
-long-symlink and provider failures remain separate remediation tracks.
+long-symlink blocker is complete; the Node cleanup and provider-parity failures
+remain separate open tracks.
 
 ## Session time log
 
@@ -269,12 +291,14 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 | 2026-09-21 21:20–21:42 AEST | Diagnosed and corrected the Windows N-API artifact aggregator's `.cmd` executable handling, then requalified the package path on accepted W04 base `e515036`. | Windows Node, all four Node platform jobs, and `aggregate-native` passed in run `35594536095`; the overall run remained failed only on unrelated provider and Windows Rust gates. | Engineering/hosted verification, ~0.75h; provider/native failures remain external/remediation tracks |
 | 2026-09-21 21:43–21:58 AEST | Downloaded the exact hosted artifacts, assembled and packed the staged root plus five platform packages, added the reusable clean-consumer smoke script and CI step, and ran focused formatting/package checks. | Clean pnpm consumer install and memory write/read/shutdown smoke passed; `test:distribution:aggregate`, `node --check`, `git diff --check`, and shared Cargo formatting check passed. | Engineering/verification, ~0.5h; hosted enforcement will be rechecked after publication |
 | 2026-09-21 22:20–22:47 AEST | Diagnosed the hosted Windows long-symlink failure, added the short-parent-path fallback, ran rustfmt/diff checks, Windows-target compilation, and the local host suite, then published the fix. Added the W04-specific production rollout/runbook template and linked it from this ledger. | Local checks passed; published fix `9189d52`; isolated qualification run `35600696969` is still the only hosted source for the remediation, with Linux Node HTTP-parity failures and PGlite skips recorded explicitly. Production decision remains NO-GO. | Engineering/documentation/hosted verification, ~1h; Windows/macOS runner evidence remains external |
+| 2026-09-21 22:50–23:32 AEST | Added diagnostic instrumentation only on the isolated qualification branch, proved the first Windows symlink call returned `ERROR_PATH_NOT_FOUND` (`3`), corrected the fallback trigger, ran the hosted qualification, removed diagnostics, squashed the net source change, and rebased/pushed it as `900994a`. | Run `35602906005` passed Windows Rust job `106343197217` and the exact long-symlink test; Windows Node job `106343197149` failed `EBUSY` unlinking `blocks.sqlite`, and the four other Node jobs failed `NoSuchUpload` before their PGlite steps. Ledger remains NO-GO and records the next remediation chunks. | Engineering/hosted diagnosis, ~0.75h; Node/provider gates remain open |
 
 ## Publication note
 
-This ledger revision records the W04.2 closure and the qualified native
-artifact/consumer gate. It is reviewed with `git diff --check` and the
-relevant formatting check, then committed and pushed to `origin/main`. It
-does **not** approve production: persistence/rollback policy, provider scope,
-observability, runbook, ownership, hosted enforcement of the new consumer
-step, and release approval remain open.
+This ledger revision records the W04.2 closure, the terminal hosted Windows
+long-symlink pass, and the failed/partial boundaries from qualification run
+`35602906005`. It is reviewed with `git diff --check` and the relevant
+formatting check, then committed and pushed to `origin/main`. It does **not**
+approve production: the Windows Node cleanup regression, provider scope,
+persistence/rollback policy, observability, runbook execution, ownership,
+hosted enforcement of the new consumer step, and release approval remain open.
