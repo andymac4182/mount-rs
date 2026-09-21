@@ -32,6 +32,15 @@ Its canonical coverage is partial: the scan closed six W25 review rows against
 a 650-file inventory and explicitly deferred unrelated repository surfaces and
 live AWS/GitHub deployment state. Those deferred controls remain release gates.
 
+The latest sealed W25 Standard scan is `4ba52479-904a-41d2-82d2-9afc20a82931`
+at pushed source `aa529c58ce6801c69d3e6cc0ed8bb5ac7a8d9cf8` (2026-09-22). It
+reported zero reportable findings across the six W25 surfaces and recorded
+partial coverage of the 659-file repository inventory. The independent baseline
+and architecture reviewers did not return within the bounded review window and
+were not counted as completed coverage; unrelated repository surfaces and live
+AWS/GitHub state remain deferred. This is security review evidence, not a
+production approval.
+
 The hosted workflow also records the exact source SHA, root and standalone AWS
 test lockfiles, template,
 policy/preflight/CloudFormation/audit/acceptance harness hashes, Rust and Ruby

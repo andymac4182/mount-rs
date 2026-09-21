@@ -840,7 +840,18 @@ direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
 accepted while DTD/custom entities remain refused. W01 and production status
-remain **NO-GO**. A read-only status check for the published tip
+remain **NO-GO**. The pinned
+`CARGO=./scripts/cargo-shared MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node --experimental-strip-types scripts/check-http-parity.mjs`
+also passes all 40 paired TypeScript/Rust S3+WebDAV loopback cases, including
+16 authenticated WebDAV cases for streaming PUT, XML property updates,
+GET/HEAD/range/conditional behavior, PROPFIND, COPY/MOVE, refusal,
+missing-resource, and DELETE. This is local pinned-oracle HTTP evidence, not
+hosted/native acceptance. At exact scope-packet SHA
+`e13c52bea3485fada8be03ed62fba9a107255507`, CI run `35640746296` also reported
+successful `native-webdav (macos-latest)` job `106469172312` and
+`native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
+native WebDAV I/O for that packet only, not the overall CI run or production
+acceptance. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -850,9 +861,14 @@ cancelled, while [Live Cloudflare R2 run
 failed; no hosted WebDAV acceptance is claimable from that tip.
 The remaining N-API session member boundary is also explicit: scalar options,
 snapshot lock records, assertion readback, Map-shaped method counters, and
-request-level `onError(error, head)` are implemented, while the oracle's
-injectable `now`, `onAssertion`, and live `DavLockTable` methods remain OPEN
-rather than being treated as accepted scope.
+request-level `onError(error, head)` are implemented. The oracle's injectable
+`now`, `onAssertion`, and live `DavLockTable` methods are explicitly outside
+the supported N-API scope: the Rust transport retains deterministic clock
+injection, current Rust request paths have no externally triggerable assertion
+site, and the N-API lock view is intentionally expiry-aware but read-only so
+request token/ownership checks remain authoritative. Broader member parity,
+hosted/native lifecycle, provider, restart/durability, and concurrency remain
+open rather than being silently accepted.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run
@@ -1254,6 +1270,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
+- [x] The WebDAV N-API scope decision now records the oracle-only clock,
+  assertion-callback, and live-lock-table boundaries explicitly. The focused
+  Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
+  --locked injected_session_clock_controls_lock_expiry_deterministically`
+  passed 1/1 and proves the native injected clock expires a lock at the exact
+  millisecond boundary. N-API keeps serializable options, empty assertion
+  readback, and expiry-aware `WebdavLockView[]` snapshots; broader session/
+  server parity and the external W01 gates remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -1379,6 +1403,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   version-history coverage, mount-free SQLite VFS tests and the PGlite gate;
   it was published sequentially through remote `90c33949`. Hosted
   macOS/Linux reconnect reruns remain the separate W04.2 gate.
+- Production follow-up published at `113a1fbc` adds optional
+  `driver.storage.lease_ttl_ms` to the shared Rust/Node split-store config,
+  preserves the 30-second default, and validates the W04 policy value as a
+  positive safe integer no greater than 24 hours. Focused CLI/SDK/provider-
+  matrix tests and positive/negative credential-free policy fixtures pass;
+  the deployment-specific TTL, provider-scope, persistence/rollback,
+  observability, ownership, and release decision remain tracked as **NO-GO**
+  in [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
 
 ## W05 — Cloudflare R2
 
@@ -1821,6 +1853,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   HTTPS RustFS blocks and external credential references. This is static policy
   evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
   replication, recovery, capacity, telemetry or release approval.
+  The hosted workflow also runs `scripts/verify-w07-rollout-ledger.mjs`, which
+  fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
+  production gates or external-drill boundary. This is an internal tracking
+  invariant, not production acceptance.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
@@ -1864,16 +1900,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     revision and result. Failed, skipped, cancelled or unavailable evidence
     remains open.
 
-  The current-main source gate on 2026-09-22 tested revision `9d3a6e5` and
+  The current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
   Clippy with `-D warnings`, and the locked
   `./scripts/cargo-shared test --workspace --all-targets --locked` suite,
-  including the FUSE sync-barrier/session coverage. The suite's provider,
-  native-mount and external-service rows remained explicitly ignored where
-  their required harnesses were not present. This is current source
-  qualification only; it does not close the hosted platform matrix or any
-  production deployment gate. Earlier source checkpoints at `29365e9` and
-  `717a0ab` remain historical evidence in the rollout ledger.
+  including the current FUSE sync-barrier/session and NFS coverage. The
+  suite's provider, native-mount and external-service rows remained explicitly
+  ignored where their required harnesses were not present. This is current
+  source qualification only; it does not close the hosted platform matrix or
+  any production deployment gate. Earlier source checkpoints at `9d3a6e5`,
+  `29365e9` and `717a0ab` remain historical evidence in the rollout ledger.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
@@ -2220,6 +2256,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification; production release gates remain external.)* The evidence
   capture was committed as `ad45bf06` and published in merge tip
   `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`.
+
+- [x] W08.30 **Current public-tip source verification:** on source
+  `76c2b1a863c23afe71c0591d0a480433e1b9078d`,
+  `CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-final-cargo-target
+  ./scripts/cargo-shared test --workspace --all-targets --locked --offline`
+  completed successfully with all executed tests passing, and the matching
+  strict workspace Clippy command with `-D warnings` completed successfully
+  with no diagnostics. The bounded target stayed outside the worktree. Tests
+  that require TiDB/RustFS/PGlite/R2 credentials or FUSE/NFS/native services
+  remained explicit ignored prerequisites; this is source-level verification,
+  not live-provider or production-rollout evidence. *(Implementation
+  verification; provider, native and production gates remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -3227,6 +3275,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   and bounded acceptance log as a pinned 14-day artifact even when the
   preflight safely refuses to authenticate; a successful run is still
   required before this becomes release evidence.
+- [x] The sealed W25 Standard scan
+  `4ba52479-904a-41d2-82d2-9afc20a82931` at pushed source
+  `aa529c58ce6801c69d3e6cc0ed8bb5ac7a8d9cf8` on 2026-09-22 reported zero
+  reportable findings across six W25 surfaces with partial coverage of the
+  659-file repository inventory. Independent baseline/architecture coverage
+  did not complete within the bounded review window and is explicitly
+  deferred; non-W25 repository surfaces and live AWS/GitHub deployment state
+  remain open. This closes the source-review evidence item only; hosted
+  release, production identity, load/soak/fault/restore, canary, rollback, and
+  post-deploy smoke gates remain open.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.

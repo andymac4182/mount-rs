@@ -59,6 +59,7 @@ fn aws_s3_split_options(
         blocks: aws_s3_store_config(prefix),
         chunk_size_bytes,
         owner: owner.to_owned(),
+        lease_ttl: Duration::from_secs(30),
         uid: 0,
         gid: 0,
         umask: 0,

@@ -187,6 +187,7 @@ pub struct SplitOptions {
     pub blocks: StoreConfig,
     pub chunk_size_bytes: usize,
     pub owner: String,
+    pub lease_ttl: Duration,
     pub uid: u32,
     pub gid: u32,
     pub umask: u32,
@@ -200,10 +201,21 @@ impl SplitOptions {
             blocks: StoreConfig::Memory,
             chunk_size_bytes,
             owner: owner.into(),
+            lease_ttl: Duration::from_secs(30),
             uid: 0,
             gid: 0,
             umask: 0,
         }
+    }
+
+    /// Set the writer-lease TTL used by metadata providers.
+    ///
+    /// The default remains 30 seconds. Consumers with remote provider
+    /// latency should choose an explicit value that covers their observed
+    /// operation duration without making stale-writer recovery unbounded.
+    pub fn with_lease_ttl(mut self, lease_ttl: Duration) -> Self {
+        self.lease_ttl = lease_ttl;
+        self
     }
 
     pub fn with_identity(mut self, uid: u32, gid: u32, umask: u32) -> Self {
@@ -267,6 +279,7 @@ impl Filesystem {
                 .with_message("chunk_size_bytes must be greater than zero"));
         }
         let chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
+            .with_lease_ttl(options.lease_ttl)
             .with_identity(options.uid, options.gid, options.umask);
         let opened = open_storage(&options.metadata, &options.blocks).await?;
         let resources = opened.resources.clone();

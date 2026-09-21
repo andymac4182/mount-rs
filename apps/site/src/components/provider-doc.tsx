@@ -880,14 +880,19 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code> before AWS
         authentication; its retained artifact is
         <code>aws-s3-qualification-35629600687-1</code>. It does not close AWS
-        identity or production acceptance.
+        identity or production acceptance. A newer hosted safety-preflight run
+        <code>35635498647</code> at <code>24408f8</code> also stopped before
+        authentication with <code>AWS_S3_CI_CONFIG_BLOCKED
+        missing_bucket</code>; protected bucket, region, account, versioning,
+        and role inputs were blank. This is a current configuration refusal,
+        not a provider failure or acceptance result.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35629600687' },
+      { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635498647' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },
@@ -899,7 +904,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the retained W26 packet qualifies the documented Ozone/provider scope, while the customer topology, 1,000-IOPS/SLO, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, while the latest one-revision packet failed its hard 1,000-IOPS gate and customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -963,24 +968,21 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
     ),
     limitations: (
       <>
-        A hosted CI run on revision <code>35ffbfa</code> completed the base
-        <code>ozone</code> job and the dedicated
-        <code>ozone-compositions</code> job successfully, but the workflow was
-        canceled before the durable <code>ozone-tidb</code> result and is not a
-        full retained-head acceptance. The job now
-        builds the public N-API addon and can run the live Node provider matrix,
-        the Node CLI's <code>--sdk-self-test --reopen</code>, and the matching
-        Rust CLI self-test when <code>MOUNT_RS_OZONE_NODE_COMPOSITION=1</code>;
-        those consumer results are still pending. Durable FoundationDB/Ozone
-        composition is now covered locally, while the dedicated
-        <code>ozone-tidb</code> gate is wired and its hosted result remains
-        pending. The
-        non-secure all-in-one service is loopback-only and is not production
+        The latest revision-bound hosted packet
+        <code>35635486040</code> completed its base Ozone job, but all four
+        configured provider rows missed the hard 1,000-IOPS target: SQLite/R2
+        <code>61.97</code>, PGlite/R2 <code>63.56</code>, TiDB/R2
+        <code>14.14</code>, and FoundationDB/R2 <code>23.07</code>. Each row
+        still completed 1,200/1,200 lifecycle operations with zero timeouts and
+        cleanup failures; the aggregate correctly failed closed because no
+        provider emitted <code>OZONE_IOPS_PASS</code>. The failed packet is
+        diagnostic only, not a retained acceptance result. The non-secure
+        all-in-one service is loopback-only and is not production
         authentication or durability evidence; durable FoundationDB remains
         test-deployment evidence and does not imply production auth, TLS, or
-        power-loss durability. The standard composition job covers
-        SQLite/PGlite only; the durable TiDB/FoundationDB jobs are separate
-        revision-specific gates.
+        power-loss durability. W26.15 now requires a safe concurrency or
+        publication-path remediation, or production-like Ozone capacity
+        evidence, before a fresh one-revision packet.
       </>
     ),
     evidence: (
@@ -1007,16 +1009,18 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         hosted result is still pending and revision-specific. Durable
         multi-node TiDB, secure/replicated Ozone deployment, and the broader
         backend matrix are not yet accepted. The retained W26 packet on
-        <code>9c098e5</code> / hosted run <code>35585066458</code> passed the
-        documented Ozone, Ozone-compositions, Ozone-TiDB, and generic TiDB
-        qualification jobs within their stated scope. W26's credential-free
-        rollout contract fixes the Tier 1 99.99% availability objective,
-        1,000 IOPS per drive, five-minute RPO/RTO, TLS/SigV4, tenant-scoped
-        prefixes, and three-node/three-replica/three-domain topology; these are
+        <code>9c098e5</code> / hosted run <code>35585066458</code> remains the
+        last accepted scoped result. The newer hosted packet
+        <code>35635486040</code> completed all four configured provider
+        lifecycles but failed the 1,000-IOPS gate; aggregate job
+        <code>106458415293</code> rejected the missing pass marker, so its
+        artifacts are diagnostic only. W26's credential-free rollout contract
+        fixes the Tier 1 99.99% availability objective, 1,000 IOPS per drive,
+        five-minute RPO/RTO, TLS/SigV4, tenant-scoped prefixes, and
+        three-node/three-replica/three-domain topology; these are
         customer/Ozone requirements, not proof of a deployed environment.
-        Later current-tip pushes have no terminal all-provider packet, and
-        secure customer topology, backup/DR, measured SLO/capacity, and
-        release/canary/rollback remain open.
+        W26.15, secure customer topology, backup/DR, measured SLO/capacity,
+        and release/canary/rollback remain open.
       </>
     ),
     sources: [
@@ -1026,6 +1030,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Durable FoundationDB composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
+      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

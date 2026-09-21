@@ -226,6 +226,10 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
             blocks: sdk_store_config(&storage.blocks)?,
             chunk_size_bytes: storage.chunk_size_bytes,
             owner: storage.owner.clone().unwrap_or_else(unique_default_owner),
+            lease_ttl: storage
+                .lease_ttl_ms
+                .map(Duration::from_millis)
+                .unwrap_or_else(|| Duration::from_secs(30)),
             uid,
             gid,
             umask: 0,
@@ -253,6 +257,7 @@ fn split_options(options: &CliOptions, uid: u32, gid: u32) -> Result<SplitOption
         blocks,
         chunk_size_bytes: DEFAULT_CHUNK_SIZE_BYTES,
         owner: unique_default_owner(),
+        lease_ttl: Duration::from_secs(30),
         uid,
         gid,
         umask: 0,
@@ -1072,6 +1077,23 @@ mod tests {
     }
 
     #[test]
+    fn structured_storage_propagates_explicit_lease_ttl() {
+        let options = CliOptions {
+            driver: DriverChoice::SplitStore,
+            storage: Some(Box::new(SplitStorageConfig {
+                metadata: StorageProvider::Memory,
+                blocks: StorageProvider::Memory,
+                chunk_size_bytes: 4096,
+                lease_ttl_ms: Some(120_000),
+                owner: Some("runtime-ttl-test-owner".to_owned()),
+            })),
+            ..CliOptions::default()
+        };
+        let split = split_options(&options, 1000, 1000).unwrap();
+        assert_eq!(split.lease_ttl, Duration::from_millis(120_000));
+    }
+
+    #[test]
     fn probe_rendering_reports_each_transport_without_mounting() {
         let probe = mount_rs_auto::probe_transports_for("darwin");
         let rendered = render_probe(&probe, Color::disabled());
@@ -1158,6 +1180,7 @@ mod tests {
                 metadata: StorageProvider::Memory,
                 blocks: StorageProvider::Memory,
                 chunk_size_bytes: 4096,
+                lease_ttl_ms: Some(120_000),
                 owner: Some("runtime-test-owner".to_owned()),
             })),
             ..CliOptions::default()
@@ -1190,6 +1213,7 @@ mod tests {
                     path: blocks_path.clone(),
                 },
                 chunk_size_bytes: 4096,
+                lease_ttl_ms: None,
                 owner: None,
             })),
             ..CliOptions::default()

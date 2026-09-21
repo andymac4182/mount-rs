@@ -39,6 +39,9 @@ For a live run, use a config whose `driver.storage` has PGlite metadata and
 either PGlite or R2 blocks. The provider matrix generates this temporary
 config during its PGlite run. Credentials remain environment references in
 the JSON; the CLI passes their resolved values only to the public SDK factory.
+The optional `driver.storage.lease_ttl_ms` field selects the writer-lease TTL
+in milliseconds; it defaults to 30 seconds and should be chosen to cover the
+deployment's observed provider latency without delaying stale-writer recovery.
 Use `--check` to validate a config without loading native code or resolving
 credentials.
 

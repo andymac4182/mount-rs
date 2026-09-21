@@ -105,6 +105,7 @@ await writeFile(
         metadata: { kind: "sqlite", path: "./metadata.sqlite" },
         blocks: { kind: "sqlite", path: "./blocks.sqlite" },
         chunk_size_bytes: 7,
+        lease_ttl_ms: 120000,
         owner: `provider-matrix-rust-cli-${providerRunId}`,
       },
     },
