@@ -157,3 +157,196 @@ module.exports.P9_LOCK_ERROR = 2
 module.exports.P9_LOCK_GRACE = 3
 module.exports.P9_LOCK_FLAGS_BLOCK = 1
 module.exports.P9_LOCK_FLAGS_RECLAIM = 2
+
+module.exports.P9_TLERROR = 6
+module.exports.P9_RLERROR = 7
+module.exports.P9_TSTATFS = 8
+module.exports.P9_RSTATFS = 9
+module.exports.P9_TLOPEN = 12
+module.exports.P9_RLOPEN = 13
+module.exports.P9_TLCREATE = 14
+module.exports.P9_RLCREATE = 15
+module.exports.P9_TSYMLINK = 16
+module.exports.P9_RSYMLINK = 17
+module.exports.P9_TMKNOD = 18
+module.exports.P9_RMKNOD = 19
+module.exports.P9_TRENAME = 20
+module.exports.P9_RRENAME = 21
+module.exports.P9_TREADLINK = 22
+module.exports.P9_RREADLINK = 23
+module.exports.P9_TGETATTR = 24
+module.exports.P9_RGETATTR = 25
+module.exports.P9_TSETATTR = 26
+module.exports.P9_RSETATTR = 27
+module.exports.P9_TXATTRWALK = 30
+module.exports.P9_RXATTRWALK = 31
+module.exports.P9_TXATTRCREATE = 32
+module.exports.P9_RXATTRCREATE = 33
+module.exports.P9_TREADDIR = 40
+module.exports.P9_RREADDIR = 41
+module.exports.P9_TFSYNC = 50
+module.exports.P9_RFSYNC = 51
+module.exports.P9_TLOCK = 52
+module.exports.P9_RLOCK = 53
+module.exports.P9_TGETLOCK = 54
+module.exports.P9_RGETLOCK = 55
+module.exports.P9_TLINK = 70
+module.exports.P9_RLINK = 71
+module.exports.P9_TMKDIR = 72
+module.exports.P9_RMKDIR = 73
+module.exports.P9_TRENAMEAT = 74
+module.exports.P9_RRENAMEAT = 75
+module.exports.P9_TUNLINKAT = 76
+module.exports.P9_RUNLINKAT = 77
+module.exports.P9_TVERSION = 100
+module.exports.P9_RVERSION = 101
+module.exports.P9_TAUTH = 102
+module.exports.P9_RAUTH = 103
+module.exports.P9_TATTACH = 104
+module.exports.P9_RATTACH = 105
+module.exports.P9_TERROR = 106
+module.exports.P9_RERROR = 107
+module.exports.P9_TFLUSH = 108
+module.exports.P9_RFLUSH = 109
+module.exports.P9_TWALK = 110
+module.exports.P9_RWALK = 111
+module.exports.P9_TOPEN = 112
+module.exports.P9_ROPEN = 113
+module.exports.P9_TCREATE = 114
+module.exports.P9_RCREATE = 115
+module.exports.P9_TREAD = 116
+module.exports.P9_RREAD = 117
+module.exports.P9_TWRITE = 118
+module.exports.P9_RWRITE = 119
+module.exports.P9_TCLUNK = 120
+module.exports.P9_RCLUNK = 121
+module.exports.P9_TREMOVE = 122
+module.exports.P9_RREMOVE = 123
+module.exports.P9_TSTAT = 124
+module.exports.P9_RSTAT = 125
+module.exports.P9_TWSTAT = 126
+module.exports.P9_RWSTAT = 127
+
+module.exports.MESSAGE_NAMES = Object.freeze({
+  6: "Tlerror",
+  7: "Rlerror",
+  8: "Tstatfs",
+  9: "Rstatfs",
+  12: "Tlopen",
+  13: "Rlopen",
+  14: "Tlcreate",
+  15: "Rlcreate",
+  16: "Tsymlink",
+  17: "Rsymlink",
+  18: "Tmknod",
+  19: "Rmknod",
+  20: "Trename",
+  21: "Rrename",
+  22: "Treadlink",
+  23: "Rreadlink",
+  24: "Tgetattr",
+  25: "Rgetattr",
+  26: "Tsetattr",
+  27: "Rsetattr",
+  30: "Txattrwalk",
+  31: "Rxattrwalk",
+  32: "Txattrcreate",
+  33: "Rxattrcreate",
+  40: "Treaddir",
+  41: "Rreaddir",
+  50: "Tfsync",
+  51: "Rfsync",
+  52: "Tlock",
+  53: "Rlock",
+  54: "Tgetlock",
+  55: "Rgetlock",
+  70: "Tlink",
+  71: "Rlink",
+  72: "Tmkdir",
+  73: "Rmkdir",
+  74: "Trenameat",
+  75: "Rrenameat",
+  76: "Tunlinkat",
+  77: "Runlinkat",
+  100: "Tversion",
+  101: "Rversion",
+  102: "Tauth",
+  103: "Rauth",
+  104: "Tattach",
+  105: "Rattach",
+  106: "Terror",
+  107: "Rerror",
+  108: "Tflush",
+  109: "Rflush",
+  110: "Twalk",
+  111: "Rwalk",
+  112: "Topen",
+  113: "Ropen",
+  114: "Tcreate",
+  115: "Rcreate",
+  116: "Tread",
+  117: "Rread",
+  118: "Twrite",
+  119: "Rwrite",
+  120: "Tclunk",
+  121: "Rclunk",
+  122: "Tremove",
+  123: "Rremove",
+  124: "Tstat",
+  125: "Rstat",
+  126: "Twstat",
+  127: "Rwstat",
+})
+function p9MessageName(type) {
+  return module.exports.MESSAGE_NAMES[type] ?? `UNKNOWN(${type})`
+}
+module.exports.messageName = p9MessageName
+
+module.exports.P9_GETATTR_MODE = 0x00000001n
+module.exports.P9_GETATTR_NLINK = 0x00000002n
+module.exports.P9_GETATTR_UID = 0x00000004n
+module.exports.P9_GETATTR_GID = 0x00000008n
+module.exports.P9_GETATTR_RDEV = 0x00000010n
+module.exports.P9_GETATTR_ATIME = 0x00000020n
+module.exports.P9_GETATTR_MTIME = 0x00000040n
+module.exports.P9_GETATTR_CTIME = 0x00000080n
+module.exports.P9_GETATTR_INO = 0x00000100n
+module.exports.P9_GETATTR_SIZE = 0x00000200n
+module.exports.P9_GETATTR_BLOCKS = 0x00000400n
+module.exports.P9_GETATTR_BTIME = 0x00000800n
+module.exports.P9_GETATTR_GEN = 0x00001000n
+module.exports.P9_GETATTR_DATA_VERSION = 0x00002000n
+module.exports.P9_GETATTR_BASIC = 0x000007ffn
+module.exports.P9_GETATTR_ALL = 0x00003fffn
+
+module.exports.P9_SETATTR_MODE = 1 << 0
+module.exports.P9_SETATTR_UID = 1 << 1
+module.exports.P9_SETATTR_GID = 1 << 2
+module.exports.P9_SETATTR_SIZE = 1 << 3
+module.exports.P9_SETATTR_ATIME = 1 << 4
+module.exports.P9_SETATTR_MTIME = 1 << 5
+module.exports.P9_SETATTR_CTIME = 1 << 6
+module.exports.P9_SETATTR_ATIME_SET = 1 << 7
+module.exports.P9_SETATTR_MTIME_SET = 1 << 8
+
+module.exports.P9_QTDIR = 0x80
+module.exports.P9_QTAPPEND = 0x40
+module.exports.P9_QTEXCL = 0x20
+module.exports.P9_QTMOUNT = 0x10
+module.exports.P9_QTAUTH = 0x08
+module.exports.P9_QTTMP = 0x04
+module.exports.P9_QTSYMLINK = 0x02
+module.exports.P9_QTLINK = 0x01
+module.exports.P9_QTFILE = 0x00
+
+module.exports.P9_NOTAG = 0xffff
+module.exports.P9_NOFID = 0xffffffff
+module.exports.P9_MAXWELEM = 16
+module.exports.P9_HDRSZ = 7
+module.exports.P9_IOHDRSZ = 24
+module.exports.P9_READDIRHDRSZ = 24
+module.exports.P9_DOTL_AT_REMOVEDIR = 0x200
+module.exports.P9_VERSION_DOTL = "9P2000.L"
+module.exports.P9_VERSION_UNKNOWN = "unknown"
+module.exports.P9_MIN_MSIZE = 4096
+module.exports.V9FS_MAGIC = 0x01021997

@@ -97,8 +97,11 @@ transport/session parity:
   do not establish NFS v3/v4 mount/session/server parity.
 - [`p9.cjs`](../integrations/mount-rs-napi/p9.cjs) and
   [`9p-codec.mjs`](../integrations/mount-rs-napi/test/9p-codec.mjs#L132-L245)
-  do not establish the complete upstream 9P server object or all protocol
-  behavior.
+  cover the CJS-to-ESM codec aliases, wire primitives, and typed message
+  bodies; [`p9-constants.mjs`](../integrations/mount-rs-napi/test/p9-constants.mjs)
+  additionally differentially checks all 124 upstream 9P constants and
+  `messageName`. These are still codec/barrel boundaries, not the complete
+  upstream 9P server object or all protocol behavior.
 - The package now has a `./fuse` export. Its codec barrel covers the bound
   notify/record/protocol helpers, its `InodeTable` facade delegates to the Rust
   transport table, and its Rust-backed `FuseSession` exposes the mount-free
@@ -235,11 +238,14 @@ Current focused behavior:
   live session lock client and the standalone `P9LockTable`/`P9LockClient`
   inspection and mutation surface are now backed by the transport's shared
   lock state, including conflict, rename, release, and ownership evidence.
-  The upstream `driver`, `fids`, assertion/debug callbacks, full fid object
-  graph, and lock-table injection through session/server option bags remain
-  unresolved rather than being treated as intentionally out of scope. The
-  server's property-shaped `clients` contract and the 9P mount/barrel helpers
-  are also still open.
+  The `./9p` barrel now exposes the complete upstream constants surface,
+  including message names, masks, qid bits, wire sizes, version values, and
+  Linux open flags where applicable; all 124 upstream constants/functions are
+  differentially checked. The upstream `driver`, `fids`, assertion/debug
+  callbacks, full fid object graph, and lock-table injection through
+  session/server option bags remain unresolved rather than being treated as
+  intentionally out of scope. The server's property-shaped `clients`
+  contract and the 9P mount helpers are also still open.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the

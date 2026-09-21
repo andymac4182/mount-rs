@@ -55,6 +55,12 @@ import {
 } from "@mount-rs/core/nfs"
 import {
   createP9Server,
+  MESSAGE_NAMES,
+  P9_GETATTR_ALL,
+  P9_NOFID,
+  P9_TVERSION,
+  P9_VERSION_DOTL,
+  messageName,
   type P9AttachOptions,
   type P9Connection,
   type P9Lock,
@@ -350,6 +356,12 @@ function checkServerAndKvSubpaths(): void {
     maxInFlight: 2,
   }
   void p9AttachOptions
+  const p9MessageType: number = P9_TVERSION
+  const p9NoFid: number = P9_NOFID
+  const p9GetattrAll: bigint = P9_GETATTR_ALL
+  const p9Version: "9P2000.L" = P9_VERSION_DOTL
+  const p9MessageNames: Readonly<Record<number, string>> = MESSAGE_NAMES
+  const p9MessageName: string = messageName(p9MessageType)
   const s3Options: S3ServerOptions = {
     host: "127.0.0.1",
     port: 0,
@@ -511,6 +523,11 @@ function checkServerAndKvSubpaths(): void {
   void p9SessionOptions
   void p9SessionStats
   void p9User
+  void p9NoFid
+  void p9GetattrAll
+  void p9Version
+  void p9MessageNames
+  void p9MessageName
 }
 
 function checkFuseInodeSubpath(): void {

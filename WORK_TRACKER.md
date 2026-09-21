@@ -18,8 +18,10 @@ coverage. It now also exposes the effective scalar server/session policy and
 the public `P9LockTable`/`P9LockClient` surface, with generated declarations and
 attach/runtime lock checks; the upstream driver/fid/assertion/debug graphs,
 full fid graph, lock-table option injection, property-shaped `clients` contract,
-and 9P mount/barrel helpers remain open rather than being silently narrowed
-away. The transport now also broadcasts shutdown safely
+and 9P mount helpers remain open rather than being silently narrowed away. The
+`./9p` constants/message-name barrel is now complete against the pinned
+upstream surface, with all 124 exports differentially checked. The transport
+now also broadcasts shutdown safely
 across the accept loop and all connections, closes the active-connection
 accept-loop race, and
 reaps completed request tasks while reporting task failures; its in-flight
