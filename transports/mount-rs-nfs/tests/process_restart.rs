@@ -11,6 +11,7 @@ use std::io::{self, Write as _};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mount_rs_host::HostFs;
@@ -36,6 +37,7 @@ const CHILD_ENV: &str = "MOUNT_RS_NFS_PROCESS_CHILD";
 const ROOT_ENV: &str = "MOUNT_RS_NFS_PROCESS_ROOT";
 const TEST_NAME: &str = "nfs_v3_host_backend_survives_process_crash_and_restart";
 const V4_TEST_NAME: &str = "nfs_v4_session_and_handles_are_process_local_after_process_crash";
+static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
 
 const OP_GETFH: u32 = 10;
 const OP_PUTFH: u32 = 22;
@@ -52,12 +54,18 @@ impl TestRoot {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "mount-rs-nfs-process-restart-{}-{nonce}",
-            std::process::id()
-        ));
-        std::fs::create_dir(&path).expect("create process-restart backend root");
-        Self(path)
+        loop {
+            let serial = NEXT_ROOT_ID.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "mount-rs-nfs-process-restart-{}-{nonce}-{serial}",
+                std::process::id()
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Self(path),
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("create process-restart backend root: {error}"),
+            }
+        }
     }
 }
 
