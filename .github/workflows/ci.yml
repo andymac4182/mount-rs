@@ -544,6 +544,19 @@ jobs:
           node-version: '24'
       - name: Verify W08 release identity and provenance policy
         run: |
+          node scripts/write-w08-release-manifest.mjs \
+            --artifact README.md \
+            --output "$RUNNER_TEMP/w08-release-manifest.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$GITHUB_SHA" \
+            --version 0.1.0 \
+            --tag v0.1.0-ci-policy \
+            --target x86_64-unknown-linux-gnu \
+            --workflow "$GITHUB_WORKFLOW" \
+            --workflow-run-id "$GITHUB_RUN_ID"
+          node scripts/verify-w08-release-manifest.mjs \
+            "$RUNNER_TEMP/w08-release-manifest.json" \
+            README.md
           node scripts/verify-w08-release-manifest.mjs \
             tests/tidb/release-manifest-policy.json
           node scripts/verify-w08-release-manifest.mjs \

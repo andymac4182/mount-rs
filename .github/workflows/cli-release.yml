@@ -24,6 +24,10 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
 
       - name: Test and package the CLI
@@ -70,7 +74,22 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" -C "$release_dir" mount-rs
           (cd "$release_dir" && shasum -a 256 "$artifact" > SHA256SUMS)
 
+          node scripts/write-w08-release-manifest.mjs \
+            --artifact "$release_dir/$artifact" \
+            --output "$release_dir/release-manifest.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --version "$package_version" \
+            --tag "$release_tag" \
+            --target "$target" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --workflow-run-id "$GITHUB_RUN_ID"
+          node scripts/verify-w08-release-manifest.mjs \
+            "$release_dir/release-manifest.json" \
+            "$release_dir/$artifact"
+
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
+          echo "manifest=release-manifest.json" >> "$GITHUB_OUTPUT"
           echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
           echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
           echo "target=$target" >> "$GITHUB_OUTPUT"
@@ -85,6 +104,7 @@ jobs:
           release_tag="${GITHUB_REF_NAME}"
           release_dir="$RUNNER_TEMP/mount-rs-cli-release"
           artifact="${{ steps.package.outputs.artifact }}"
+          manifest="${{ steps.package.outputs.manifest }}"
           package_version="${{ steps.package.outputs.package_version }}"
           release_commit="${{ steps.package.outputs.release_commit }}"
           target="${{ steps.package.outputs.target }}"
@@ -100,12 +120,14 @@ jobs:
             gh release upload "$release_tag" \
               "$release_dir/$artifact" \
               "$release_dir/SHA256SUMS" \
+              "$release_dir/$manifest" \
               --clobber \
               --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$release_tag" \
               "$release_dir/$artifact" \
               "$release_dir/SHA256SUMS" \
+              "$release_dir/$manifest" \
               --repo "$GITHUB_REPOSITORY" \
               --title "mount-rs $package_version CLI preview" \
               --notes "$notes" \
@@ -119,7 +141,11 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --pattern "$artifact" \
             --pattern SHA256SUMS \
+            --pattern "$manifest" \
             --dir "$verification_dir" \
             --clobber
           (cd "$verification_dir" && shasum -a 256 -c SHA256SUMS)
+          node scripts/verify-w08-release-manifest.mjs \
+            "$verification_dir/$manifest" \
+            "$verification_dir/$artifact"
           tar -tzf "$verification_dir/$artifact" | grep -qx 'mount-rs'
