@@ -44,14 +44,19 @@ function DownloadsPage() {
           <strong>Build-matrix qualification is ahead of publication.</strong>
           <p>
             Hosted W08 target run{' '}
-            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35638433010" {...externalProps()}>
-              35638433010
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35641555767" {...externalProps()}>
+              35641555767
             </a>{' '}
-            qualified the Linux x86_64 and macOS arm64 build, download,
-            checksum, CycloneDX SBOM, and Sigstore-attestation checks for the
-            target assets. It did not execute the approved tag-triggered
-            publication flow, so this page still lists only the release assets
-            that are actually present below.
+            from source <code>2bbd0266</code> qualified the Linux x86_64 and
+            macOS arm64 build, download, checksum, CycloneDX SBOM, and
+            Sigstore-attestation checks. The Linux archive measured 8,373,376
+            bytes with SHA-256
+            <code>6a3de0a607ffafcedf6bd3385c3849a30208df0345120061061821109a09ac79</code>;
+            the macOS arm64 archive measured 6,958,388 bytes with SHA-256
+            <code>75a031c4e439ede07f0fa1a09db050b15c45f6d802a703d90b67cde52b4a941d</code>.
+            It did not execute the approved tag-triggered publication flow, so
+            this page still lists only the release assets that are actually
+            present below.
           </p>
         </div>
 
