@@ -816,9 +816,12 @@ transport tracker together.
 
 Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
 `listen()`/`close()` lifecycle transitions and guards the accept loop against
-an immediate-close shutdown lost wakeup; focused WebDAV tests pass 17/17.
-N-API network/hosted concurrency, crash/power-loss restart, provider
-durability, and broader hosted session/member lifecycle remain open.
+an immediate-close shutdown lost wakeup; the N-API WebDAV wrapper serializes
+its closed-state check with the transport lifecycle, and the focused wrapper
+race test passes 40 alternating real-loopback iterations. N-API
+network/hosted concurrency, crash/power-loss restart, provider durability,
+and broader hosted session/member lifecycle remain open; the package-wide
+server harness is still blocked in its unrelated NFS phase before WebDAV.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
@@ -2421,6 +2424,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   run `35646848615` was cancelled before creating jobs (`jobs=[]`) and is not
   evidence. *(Implementation/static qualification; production evidence and
   approval remain external.)*
+- [x] W08.33 **Production-candidate GO admission guard:** extended
+  `scripts/verify-w08-rollout-ledger.mjs` with `--require-go`, added the
+  NO-GO admission-negative and simulated-complete-GO cases to
+  `scripts/test-w08-rollout-ledger.mjs`, and placed the fail-closed check in
+  the `admission` job of `.github/workflows/w08-production-release.yml` before
+  either target can build. A production-candidate tag therefore cannot reach
+  artifact generation or publication while the authoritative tracker remains
+  NO-GO or any P01–P09 checkbox is open. This is a release safety control only;
+  it does not create topology, provider, secret, canary, rollback or owner
+  approval evidence. *(Implementation/static qualification; production
+  evidence and approval remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -3970,6 +3984,7 @@ cross-drive isolation.
 | --- | --- | --- |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
 | `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
+| `2026-09-22 FUSE forced-unmount deadline packet` (published as `987c593bc08adfb161a55a7a9eee27ff82606310`) | Share the forced `umount`/lazy-detach deadline with final session-task draining so bounded teardown does not add a third full timeout | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35648821996` and Fault injection run `35648821873` are pending, while the Linux-gated timing test and hosted `/dev/fuse` forced-unmount and broader lifecycle gates remain open |
 | `2026-09-22 FUSE native mount-object packet` (published as `4fd3e25e`) | Restore root N-API `Mounted[Symbol.asyncDispose]()` and record the supported-scope decision for transport-specific FUSE `session`, device `fd`, and invalidation members | Runtime/type coverage and the source audit are local PASS; final remote verification is `HEAD=origin/main=4fd3e25e`; exact-SHA CI run `35646646162` is pending and Fault injection run `35646646113` is in progress, so hosted Linux mount/callback/lifecycle evidence remains open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |

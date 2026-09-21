@@ -3977,6 +3977,7 @@ pub struct WebdavServer {
     inner: Arc<TransportWebdavServer>,
     host: String,
     closed: AtomicBool,
+    lifecycle: tokio::sync::Mutex<()>,
     transport_error: Option<Arc<TransportErrorCallback>>,
     session_error: Option<Arc<WebdavErrorCallback>>,
 }
@@ -4012,6 +4013,7 @@ impl WebdavServer {
 
     #[napi]
     pub async fn listen(&self) -> napi::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         if self.closed.load(Ordering::Acquire) {
             return Err(transport_error("WebDAV listen", "server is closed"));
         }
@@ -4023,6 +4025,7 @@ impl WebdavServer {
 
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
+        let _lifecycle = self.lifecycle.lock().await;
         self.closed.store(true, Ordering::Release);
         if let Some(callback) = &self.transport_error {
             callback.release();
@@ -4058,6 +4061,7 @@ pub fn create_webdav_server(
         inner: Arc::new(inner),
         host,
         closed: AtomicBool::new(false),
+        lifecycle: tokio::sync::Mutex::new(()),
         transport_error: transport_error_callback,
         session_error: session_error_callback,
     })

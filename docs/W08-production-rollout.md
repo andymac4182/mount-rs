@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, the W08 rollout-ledger consistency verifier/test, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -98,6 +98,14 @@ policy step also passed. The earlier run `35646848615` was cancelled before
 job creation (`jobs=[]`) and is not evidence. This is hosted tracking-control
 qualification only; it does not close P01–P09 or establish candidate release,
 registry, canary, rollback or release-owner approval.
+
+W08.33 puts `node scripts/verify-w08-rollout-ledger.mjs --require-go` in a
+required `admission` job before the protected production-candidate build
+matrix. The current repository decision is NO-GO, so the guard must refuse a
+candidate before artifact generation; its simulated complete-GO case is covered
+by the local transition suite. This is a repository release-safety control only:
+it does not supply the missing topology, provider, secret, registry, canary,
+rollback or release-owner evidence.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

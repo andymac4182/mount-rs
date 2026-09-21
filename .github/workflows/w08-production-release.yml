@@ -13,8 +13,27 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  admission:
+    name: Verify W08 production GO admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Require W08 production GO ledger
+        run: node scripts/verify-w08-rollout-ledger.mjs --require-go
+
   build:
     name: Build ${{ matrix.label }} production candidate
+    needs: admission
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
