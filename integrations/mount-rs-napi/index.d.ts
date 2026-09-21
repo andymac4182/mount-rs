@@ -475,6 +475,13 @@ export declare class P9Server {
    * making N-API own a JavaScript stream from a Tokio task.
    */
   _createAttachedSession(): P9Session
+  /**
+   * The configured server policy, including the session settings applied to
+   * both native-listener and attached-stream connections. The callback is
+   * intentionally not reflected because its native lifetime is owned by the
+   * transport hook rather than exposed as a reusable N-API function.
+   */
+  get options(): P9ServerOptions
   get host(): string
   get path(): string | null
   get port(): number
@@ -496,6 +503,10 @@ export declare class P9Session {
   handleCall(bytes: Buffer): Promise<Buffer | null>
   /** Tear down the session and release every driver handle it owns. */
   destroy(): Promise<void>
+  /** The scalar policy used when this session was created. */
+  get options(): P9SessionOptions
+  /** The attach identity recorded for a live fid, if any. */
+  userFor(fid: number): P9User | null
   get msize(): number | null
   get version(): string | null
   get generation(): number
@@ -2186,6 +2197,17 @@ export interface P9ServerOptions {
   onTransportError?: (error: unknown, peer: string | undefined) => void
 }
 
+/**
+ * Read-only scalar session policy exposed to Node callers. The transport's
+ * driver and shared lock table remain owned by the server.
+ */
+export interface P9SessionOptions {
+  msize?: number
+  useDriverIno: boolean
+  readOnly: boolean
+  claimOwnership: boolean
+}
+
 export interface P9SessionStats {
   requests: number
   replies: number
@@ -2193,6 +2215,12 @@ export interface P9SessionStats {
   dropped: number
   flushed: number
   messages: Record<string, number>
+}
+
+export interface P9User {
+  uname: string
+  uid?: number
+  aname: string
 }
 
 /**

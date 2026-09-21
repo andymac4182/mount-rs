@@ -13,8 +13,13 @@ Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
 attached connection identity/peer/stream/closed state (including the native
 `null` versus attached-stream `undefined` peer boundary), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
-coverage. The transport now also broadcasts shutdown safely across the accept
-loop and all connections, closes the active-connection accept-loop race, and
+coverage. It now also exposes the effective scalar server/session policy and
+`P9Session.userFor(fid)`, with generated declarations and an attach-only runtime
+check; the upstream driver/fid/lock/assertion/debug graphs, property-shaped
+`clients` contract, and 9P mount/barrel helpers remain open rather than being
+silently narrowed away. The transport now also broadcasts shutdown safely
+across the accept loop and all connections, closes the active-connection
+accept-loop race, and
 reaps completed request tasks while reporting task failures; its in-flight
 permit acquisition now also observes connection/server shutdown instead of
 wedging close behind a slow request. An ignored native
@@ -39,7 +44,7 @@ Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Crash/reset/half-close recovery is supervisor-owned
 and not a library guarantee; overall production remains NO-GO for the remaining
-W01 gates and intentionally partial public parity.
+W01 gates and unresolved public parity.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
@@ -1866,6 +1871,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   registry acceptance, canary, rollback or owner approval. *(Hosted/provider
   qualification; release approval and production deployment are external
   gates.)*
+- [x] W08.23 **Current shared-main workspace verification:** on source
+  `5aae52bc776e17f1ee56b164ee161f01692b3e83`, the locked workspace command
+  `./scripts/cargo-shared test --workspace --all-targets --locked` and strict
+  workspace Clippy command
+  `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings`
+  both exited successfully. All non-ignored tests passed; provider/native rows
+  requiring TiDB, RustFS, PGlite, R2, FUSE, NFS or other host capabilities
+  remained explicit skips/ignores. This is current source-health evidence only;
+  it does not close live provider, native-kernel or W08-P01–P09 production
+  gates. *(Implementation verification; provider, native and production
+  environments remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

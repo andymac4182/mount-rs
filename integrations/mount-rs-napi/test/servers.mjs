@@ -452,6 +452,13 @@ async function exerciseP9() {
   let connection;
   let listening;
   try {
+    assert.equal(server.options.host, "127.0.0.1");
+    assert.equal(server.options.port, 0);
+    assert.equal(server.options.maxFrame, 1024 * 1024);
+    assert.equal(server.options.maxInFlight, 16);
+    assert.equal(server.options.useDriverIno, true);
+    assert.equal(server.options.readOnly, false);
+    assert.equal(server.options.claimOwnership, true);
     listening = (await listenLifecycle(server, "9P")).listening;
     assert.ok(server.port > 0);
     assert.match(server.address(), /^127\.0\.0\.1:\d+$/);
@@ -473,6 +480,10 @@ async function exerciseP9() {
     assert.equal(connection.stream, undefined);
     const session = connection.session;
     assert.strictEqual(connection.session, session);
+    assert.equal(session.options.msize, undefined);
+    assert.equal(session.options.useDriverIno, true);
+    assert.equal(session.options.readOnly, false);
+    assert.equal(session.options.claimOwnership, true);
     assert.equal(session.msize, 65_536);
     assert.equal(session.version, "9P2000.L");
     assert.equal(session.destroyed, false);
@@ -495,6 +506,10 @@ async function exerciseP9() {
       Buffer.concat([attachBody.subarray(0, 8), p9String("node"), p9String(""), attachBody.subarray(8)]),
       105,
     );
+    assert.deepEqual(session.userFor(1), {
+      uname: "node",
+      aname: "",
+    });
     assert.ok(server.connections >= 1);
 
     const walkBody = Buffer.alloc(10);

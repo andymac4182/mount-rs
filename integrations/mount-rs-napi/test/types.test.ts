@@ -59,6 +59,10 @@ import {
   type P9Connection,
   type P9Server,
   type P9ServerOptions,
+  type P9Session,
+  type P9SessionOptions,
+  type P9SessionStats,
+  type P9User,
 } from "@mount-rs/core/9p"
 import {
   createS3Server,
@@ -392,6 +396,7 @@ function checkServerAndKvSubpaths(): void {
   const nfsConnectionWaitClosed: Promise<void> = nfsConnection.waitClosed()
   const p9Address: string | null = p9Server.address()
   const p9Connections: Array<P9Connection> = p9Server.clients()
+  const p9Configured: P9ServerOptions = p9Server.options
   const p9Path: string | null = p9Server.path
   const p9Listen: Promise<P9Server> = p9Server.listen()
   const p9Close: Promise<void> = p9Server.close()
@@ -417,6 +422,10 @@ function checkServerAndKvSubpaths(): void {
   const webdavClose: Promise<void> = webdavServer.close()
 
   const p9Connection: P9Connection = p9Connections[0]
+  const p9Session: P9Session = p9Connection.session
+  const p9SessionOptions: P9SessionOptions = p9Session.options
+  const p9SessionStats: P9SessionStats = p9Session.stats
+  const p9User: P9User | null = p9Session.userFor(1)
   const connectionId: number = p9Connection.id
   const connectionPeer: string | null | undefined = p9Connection.peer
   const connectionClosed: boolean = p9Connection.isClosed
@@ -458,6 +467,7 @@ function checkServerAndKvSubpaths(): void {
   void nfsConnectionClose
   void nfsConnectionWaitClosed
   void p9Address
+  void p9Configured
   void p9Path
   void p9Listen
   void p9Close
@@ -474,6 +484,10 @@ function checkServerAndKvSubpaths(): void {
   void connectionClosed
   void connectionClose
   void connectionWaitClosed
+  void p9Session
+  void p9SessionOptions
+  void p9SessionStats
+  void p9User
 }
 
 function checkFuseInodeSubpath(): void {
