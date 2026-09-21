@@ -12,12 +12,12 @@ for engineering planning, not a commitment.
 | Workstream | W26 — Apache Ozone S3 backend |
 | Ledger snapshot | 2026-09-21, Australia/Brisbane |
 | Repository | `mount-rs` |
-| Snapshot base | `2159976` (the scoped block-reconciliation implementation `ab7c63e` is published over concurrent mainline changes; hosted qualification is pending) |
+| Snapshot base | `69dd740` (the scoped block-reconciliation implementation `ab7c63e` and safety follow-up `502ba35` are published over concurrent mainline changes; hosted qualification is pending) |
 | Checklist completion | 4 of 4 W26 tracker rows checked: 100% |
 | Provisional execution completion | W26 qualification: 100%; production-rollout readiness: 22% (scope, benchmark matrix, lifecycle-safety implementation and CI acceptance baseline captured; no terminal production gates yet). Customer deployment, native, provider-durability and release-stream gates remain separately bounded |
 | Current acceptance state | Local Ozone, SQLite/PGlite, single-node TiDB/Ozone, durable three-node FoundationDB/Ozone, hosted Ozone, hosted SQLite/PGlite, Ozone-backed durable TiDB, generic durable TiDB, Node SDK, and CLI evidence passed; W26 is complete within its documented provider/platform boundaries |
 | Latest hosted workflow | GitHub Actions run `35585066458` on `9c098e5`; W26 jobs `ozone` `106286459564`, `ozone-compositions` `106286459622`, and `ozone-tidb` `106286459540` completed successfully, with generic `tidb` job `106286459436` also green. Unrelated provider/native jobs are tracked separately and are not required to close W26. |
-| Current-head CI attempt | The provider-matrix chunk was published at `a0b2fae`; the scoped block-reconciliation chunk is published at `2159976` and has no hosted result yet. Earlier runs for `b997696` remain non-terminal evidence; the retained W26 packet above remains the last accepted hosted result. |
+| Current-head CI attempt | The provider-matrix chunk was published at `a0b2fae`; the scoped block-reconciliation chunk and streamed-listing/zero-grace follow-up are published at `69dd740` and have no hosted result yet. Earlier runs for `b997696` remain non-terminal evidence; the retained W26 packet above remains the last accepted hosted result. |
 | Local Docker boundary | Docker Desktop capacity was about 5 CPUs and 8.2 GiB; this is sufficient for the durable FoundationDB proof but below the TiDB harness's 10 GiB durable-topology minimum |
 | Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 15% figure reflects scope decisions and an acceptance baseline, not deployable readiness |
 | W26 production target | Customer-deployed Ozone integration; W26 owns provider/client correctness and CI qualification, not customer deployment, backup/DR or release promotion |
@@ -315,7 +315,8 @@ concurrent mainline changes, and pushed as `a0b2fae`. Its local evidence is
 recorded above; the hosted workflow created from `a0b2fae` must reach terminal
 success before the provider or 1,000-IOPS gates move beyond pending.
 
-The scoped block-reconciliation chunk was implemented in `ab7c63e`, merged with
-concurrent mainline changes, and pushed at `2159976`. Its local evidence is
-recorded above; a fresh hosted workflow and provider/retention/security review
-are required before the lifecycle production gates move beyond pending.
+The scoped block-reconciliation chunk was implemented in `ab7c63e`, with the
+zero-grace and streamed-listing safety follow-up in `502ba35`; both were merged
+with concurrent mainline changes and pushed at `69dd740`. Their local evidence
+is recorded above; a fresh hosted workflow and provider/retention/security
+review are required before the lifecycle production gates move beyond pending.
