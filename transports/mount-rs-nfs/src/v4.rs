@@ -649,6 +649,7 @@ struct SessionState {
 
 #[derive(Debug, Default)]
 struct V4State {
+    seed: u32,
     next_clientid: u64,
     next_session: u64,
     clients: HashMap<u64, ClientState>,
@@ -1636,6 +1637,7 @@ impl Nfs4Session {
             stats: shared.stats.clone(),
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
             state: Arc::new(Mutex::new(V4State {
+                seed: options.nfs4.seed,
                 next_clientid: 1,
                 next_session: 1,
                 ..V4State::default()
@@ -2152,7 +2154,7 @@ impl Nfs4Session {
             {
                 (existing, client.confirmed)
             } else {
-                let id = state.next_clientid;
+                let id = seeded_counter(state.seed, state.next_clientid);
                 state.next_clientid = state.next_clientid.saturating_add(1).max(1);
                 if let Some(previous) = state.owners.insert(owner.clone(), id) {
                     state.clients.remove(&previous);
@@ -2261,9 +2263,7 @@ impl Nfs4Session {
             client.sequence = client.sequence.wrapping_add(1);
             let counter = state.next_session;
             state.next_session = state.next_session.saturating_add(1).max(1);
-            let mut id = [0_u8; NFS4_SESSIONID_SIZE];
-            id[..8].copy_from_slice(&self.write_verifier);
-            id[8..].copy_from_slice(&counter.to_be_bytes());
+            let id = session_id(self.options.nfs4.seed, &self.write_verifier, counter);
             let max_fore_slots = self.options.nfs4.max_fore_slots.clamp(1, DEFAULT_MAX_SLOTS);
             let slots = usize::try_from(fore.maxrequests)
                 .unwrap_or(max_fore_slots)
@@ -4440,6 +4440,22 @@ fn make_stateid(seqid: u32, clientid: u64, fileid: u64) -> Stateid4 {
     other[..8].copy_from_slice(&clientid.to_be_bytes());
     other[8..].copy_from_slice(&(fileid as u32).to_be_bytes());
     Stateid4 { seqid, other }
+}
+
+/// Fold the configured boot seed into the high half of an identity while
+/// retaining a monotonic counter in the low half.
+fn seeded_counter(seed: u32, counter: u64) -> u64 {
+    (u64::from(seed) << 32) | (counter & u64::from(u32::MAX))
+}
+
+/// Build a session identity that carries the configured seed and write
+/// verifier, with the session counter in the remaining bytes.
+fn session_id(seed: u32, write_verifier: &[u8; 8], counter: u64) -> [u8; NFS4_SESSIONID_SIZE] {
+    let mut id = [0_u8; NFS4_SESSIONID_SIZE];
+    id[..4].copy_from_slice(&seed.to_be_bytes());
+    id[4..8].copy_from_slice(&write_verifier[..4]);
+    id[8..].copy_from_slice(&counter.to_be_bytes());
+    id
 }
 
 fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {

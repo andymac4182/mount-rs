@@ -69,8 +69,9 @@ open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
 options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
 an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
 refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
-`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Upstream ID-map, deterministic clock/seed,
-and session `onError` parity remain explicit gaps.
+`NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Upstream
+callback ID-map, injectable clock/lease, and session `onError` parity remain
+explicit gaps; deterministic seeded identities are now covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -1170,8 +1171,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
   `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
   release addon/typecheck, live N-API server integration, and strict affected
-  Clippy pass. Callback-based maps, deterministic clock/seed controls, and
-  session `onError` remain explicit parity gaps.
+  Clippy pass. Callback-based maps, injectable clock/lease controls, and
+  session `onError` remain explicit parity gaps; deterministic seeded
+  identities are covered by the rootless wire test.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

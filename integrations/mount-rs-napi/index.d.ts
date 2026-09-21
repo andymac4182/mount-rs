@@ -2036,6 +2036,7 @@ export interface Nfs4IdMap {
 export interface Nfs4StateKnobs {
   idmap?: Nfs4IdMap
   leaseSeconds?: number
+  seed?: number
   maxSessions?: number
   maxForeSlots?: number
   maxOperations?: number

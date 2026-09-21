@@ -307,6 +307,8 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                 .expect("build v4 wire test runtime")
                 .block_on(async {
                     let mut options = NfsServerOptions::default();
+                    const SEED: u32 = 0x1020_3040;
+                    options.session.nfs4.seed = SEED;
                     options.session.nfs4.max_locks_per_file = 1;
                     options.session.nfs4.idmap = Some(
                         Nfs4IdMap::new(Some("example.test".to_owned()))
@@ -330,6 +332,8 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                         )
                         .await,
                     );
+                    assert_eq!(clientid >> 32, u64::from(SEED));
+                    assert_eq!(u32::from_be_bytes(session[..4].try_into().unwrap()), SEED);
                     let mut client = Client {
                         session,
                         clientid,

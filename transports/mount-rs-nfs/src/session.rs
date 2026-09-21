@@ -130,6 +130,12 @@ impl Nfs4IdMap {
 pub struct Nfs4StateOptions {
     /// Lease length reported by FATTR4_LEASE_TIME.
     pub lease_seconds: u32,
+    /// Upper 32 bits folded into NFSv4 client and session identities.
+    ///
+    /// A stable non-zero value keeps identities from separate process
+    /// instances distinguishable. The default is zero for deterministic
+    /// compatibility with the original process-local sequence.
+    pub seed: u32,
     /// Maximum number of sessions one client may create.
     pub max_sessions: usize,
     /// Fore-channel slot ceiling advertised by CREATE_SESSION.
@@ -154,6 +160,7 @@ impl Default for Nfs4StateOptions {
     fn default() -> Self {
         Self {
             lease_seconds: DEFAULT_NFS4_LEASE_SECONDS,
+            seed: 0,
             max_sessions: DEFAULT_NFS4_MAX_SESSIONS,
             max_fore_slots: DEFAULT_NFS4_MAX_FORE_SLOTS,
             max_operations: DEFAULT_NFS4_MAX_OPERATIONS,

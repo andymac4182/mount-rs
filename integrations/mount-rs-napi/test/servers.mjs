@@ -266,6 +266,7 @@ async function exerciseNfs() {
         users: { root: 0 },
         groups: { root: 0 },
       },
+      seed: 0x10203040,
       leaseSeconds: 7,
       maxSessions: 1,
       maxForeSlots: 1,

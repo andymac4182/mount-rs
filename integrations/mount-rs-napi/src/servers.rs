@@ -414,6 +414,7 @@ pub struct Nfs4IdMap {
 pub struct Nfs4StateKnobs {
     pub idmap: Option<Nfs4IdMap>,
     pub lease_seconds: Option<f64>,
+    pub seed: Option<f64>,
     pub max_sessions: Option<f64>,
     pub max_fore_slots: Option<f64>,
     pub max_operations: Option<f64>,
@@ -508,6 +509,7 @@ fn nfs_options(
             nfs4.lease_seconds,
             output.session.nfs4.lease_seconds,
         )?;
+        output.session.nfs4.seed = u32_number("nfs4.seed", nfs4.seed, output.session.nfs4.seed)?;
         output.session.nfs4.max_sessions = positive_number(
             "nfs4.maxSessions",
             nfs4.max_sessions,

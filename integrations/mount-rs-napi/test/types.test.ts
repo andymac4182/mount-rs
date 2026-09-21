@@ -332,6 +332,7 @@ function checkServerAndKvSubpaths(): void {
   }
   const nfs4Options: Nfs4StateKnobs = {
     idmap: nfs4IdMap,
+    seed: 0x10203040,
     leaseSeconds: 90,
     maxSessions: 4,
     maxForeSlots: 64,

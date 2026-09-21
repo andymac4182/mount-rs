@@ -41,7 +41,7 @@ released; with no value, the table remains uncapped for compatibility.
 NFSv4.1 channel and state ceilings are available through
 `NfsSessionOptions.nfs4` and the nested N-API `nfs4`/`Nfs4StateKnobs` option:
 `idmap`, `leaseSeconds`, `maxSessions`, `maxForeSlots`, `maxOperations`,
-`maxRequestSize`, `maxCachedResponseSize`, `maxOpensPerFile`,
+`maxRequestSize`, `maxCachedResponseSize`, `maxOpensPerFile`, `seed`,
 `maxLocksPerFile`, and `requireReclaimComplete`. The channel-size and count
 values are clamped during `CREATE_SESSION`; operation, session, open-state,
 and lock-range limits are enforced by the v4 state machine. When enabled,
@@ -141,7 +141,7 @@ process-local. Backend crash recovery and durability behavior remains outside
 the supported local scope until a separate qualification lane is accepted.
 
 The pinned upstream API still exposes `onError`, dynamic NFSv4 ID-map
-callbacks, and deterministic `now`/`seed` state controls. Static ID maps are
-supported as described above; callback maps and the other controls are not
-silently mapped to Rust defaults and remain explicit parity work until their
-behavior has dedicated wire tests and supported N-API plumbing.
+callbacks, and deterministic `now` state control. Static ID maps and the
+`nfs4.seed` identity control are supported as described above; callback maps,
+injectable clocks, and session `onError` remain explicit parity work until
+their behavior has dedicated wire tests and supported N-API plumbing.
