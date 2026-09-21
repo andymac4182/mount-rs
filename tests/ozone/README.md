@@ -82,12 +82,13 @@ independent metadata providers:
 - a real disk-backed PGlite PostgreSQL-wire metadata service from
   `tests/pglite/server.mjs`.
 
-The tests use seven-byte chunks and exercise multi-chunk writes, partial
-writes, shrink and extend truncation, range reads, provider CAS conflicts,
-expired-writer fencing, fresh `ChunkedFs` reopen, and deletion of every test
-block object. The composition harness also removes its PGlite data directory
-and SQLite file. It never replaces Ozone or PGlite with an in-memory or mock
-service.
+The seed and mutation phases use seven-byte chunks and exercise multi-chunk
+writes, partial writes, shrink and extend truncation, range reads, provider
+CAS conflicts, expired-writer fencing, and deletion of every test block
+object. A fresh `ChunkedFs` reopen then reads the persisted file with a
+4096-byte chunk configuration. The composition harness also removes its
+PGlite data directory and SQLite file. It never replaces Ozone or PGlite with
+an in-memory or mock service.
 
 Install the existing PGlite service dependencies once, then run the exact
 opt-in gate from the repository root:
@@ -127,7 +128,7 @@ ChunkedFs composition uses Ozone through the Docker host gateway and deletes
 only its scoped object prefix. That explicit mode publishes the Ozone port on
 the local Docker bridge so the disposable client container can reach it; the
 default contract remains loopback-only. These distributed-provider modes are
-manual opt-ins; the base CI job does not claim their live acceptance. Both
+manual opt-ins; neither Ozone CI job claims their live acceptance. Both
 modes retain explicit CAS, stale-writer
 fencing, partial-write/truncation, binary multi-chunk, reopen, and cleanup
 assertions. TiDB replication and FoundationDB durability remain deployment
@@ -153,4 +154,9 @@ node examples/node-cli/index.mjs \
 The base Ubuntu CI Ozone job runs the real gateway contract plus these
 mount-free Rust/Node configuration checks. A live Node SDK Ozone run still
 requires the normal N-API build and PGlite service prerequisites, so it is
-not reported as covered by the static configuration gate.
+not reported as covered by the static configuration gate. CI also has a
+separate `ozone-compositions` job that installs the locked PGlite service and
+runs this SQLite/PGlite mixed-metadata gate against the real Ozone gateway;
+that hosted result is the acceptance evidence for the job, while TiDB and
+FoundationDB remain explicit manual modes and are not implied to be covered
+by this job.

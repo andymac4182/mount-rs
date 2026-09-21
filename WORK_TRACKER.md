@@ -346,8 +346,11 @@ TiDB/RustFS hardening (rebased local tip `6327857`, published through
 `bbe8ebb`), W07 FoundationDB/RustFS restart-gate hardening (rebased local tip
 `629c2f6`, published through `ffd06bf`) and W30 observability (published at
 `6ce8228`). W26's nine-file Ozone packet remains byte-for-byte present in the
-current branch at its verified `a936eba` content. W08 and W07 service runs
-remain explicitly blocked by unavailable Docker/libfdb runtime prerequisites;
+current branch at its verified `a936eba` content. The W26 follow-up now adds a
+dedicated hosted `ozone-compositions` CI job for the real SQLite/PGlite mixed
+metadata gate; its hosted result remains pending until that job runs. W08 and
+W07 service runs remain explicitly blocked by unavailable Docker/libfdb runtime
+prerequisites;
 W30 external collector reachability and Linux/Windows qualification remain
 open; the W30.5 local loopback collector, exporter-failure/shutdown tests,
 macOS qualification packet, and no-exporter facade benchmark are now verified
@@ -489,7 +492,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
-| W26 | Apache Ozone S3 backend | Local block/restart gate passed; mixed stores pending | Main |
+| W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite CI gate added, hosted result pending; TiDB/FoundationDB mixed stores pending | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
