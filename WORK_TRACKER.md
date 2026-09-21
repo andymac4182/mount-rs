@@ -2843,9 +2843,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Latest public source `2d459e15` was freshly reverified after the concurrent
-  9P/N-API, chunked and Ozone updates with the full locked workspace test suite
-  (exit 0) and strict workspace Clippy with `-D warnings` (exit 0).
+  Latest public source `b27dd2bb` was freshly reverified after the concurrent
+  FUSE teardown and session-lifecycle fixes with the full locked workspace test
+  suite (exit 0) and strict workspace Clippy with `-D warnings` (exit 0).
   Provider/native tests requiring TiDB, RustFS, PGlite, R2, FUSE or NFS
   remained explicit opt-in skips; this is source-health evidence only and does
   not close W08-P01–P09.
