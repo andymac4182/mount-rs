@@ -63,8 +63,8 @@ use mount_rs_webdav::{
     WebdavTransportErrorHook as TransportWebdavErrorHook, XmlNode as TransportWebdavXmlNode,
 };
 use napi::bindgen_prelude::{
-    BigInt, Buffer, Either, Env, FnArgs, Function, JsObjectValue, Object, ReadableStream, Reader,
-    Reference, Unknown,
+    BigInt, Buffer, Either, Env, FnArgs, FromNapiValue, Function, JsObjectValue, Object,
+    ReadableStream, Reader, Reference, Unknown,
 };
 use napi::futures_core::Stream as FuturesStream;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -1379,6 +1379,16 @@ pub struct P9LockTable {
     inner: TransportP9LockTable,
 }
 
+impl FromNapiValue for P9LockTable {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> napi::Result<Self> {
+        let reference = unsafe { Reference::<Self>::from_napi_value(env, value)? };
+        Ok((*reference).clone())
+    }
+}
+
 #[napi]
 impl P9LockTable {
     #[napi(constructor)]
@@ -2202,6 +2212,7 @@ pub struct P9ServerOptions {
     pub read_only: Option<bool>,
     pub claim_ownership: Option<bool>,
     pub debug: Option<bool>,
+    pub locks: Option<P9LockTable>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
     #[napi(ts_type = "(error: unknown, header: NativeP9Header | undefined) => void")]
@@ -2210,8 +2221,9 @@ pub struct P9ServerOptions {
     pub on_assertion: Option<JsP9AssertionCallback>,
 }
 
-/// Read-only scalar session policy exposed to Node callers. The transport's
-/// driver and shared lock table remain owned by the server.
+/// Read-only session policy exposed to Node callers. The transport's driver
+/// remains owned by the server; the shared lock table can be injected through
+/// the server options and is exposed here as a live inspection handle.
 #[napi(object)]
 pub struct P9SessionOptions {
     pub msize: Option<f64>,
@@ -2219,6 +2231,7 @@ pub struct P9SessionOptions {
     pub read_only: bool,
     pub claim_ownership: bool,
     pub debug: bool,
+    pub locks: Option<P9LockTable>,
 }
 
 type P9OptionValues = (
@@ -2245,6 +2258,7 @@ fn p9_options(options: Option<P9ServerOptions>) -> Result<P9OptionValues, Error>
         read_only: None,
         claim_ownership: None,
         debug: None,
+        locks: None,
         on_transport_error: None,
         on_error: None,
         on_assertion: None,
@@ -2265,6 +2279,7 @@ fn p9_options(options: Option<P9ServerOptions>) -> Result<P9OptionValues, Error>
         path: options.path.map(Into::into),
         ..TransportP9ServerOptions::default()
     };
+    output.locks = options.locks.map(|locks| locks.inner);
     output.allow_remote = options.allow_remote.unwrap_or(false);
     output.socket_mode = u32_number("socketMode", options.socket_mode, output.socket_mode)?;
     output.allow_shared_directory = options.allow_shared_directory.unwrap_or(false);
@@ -2313,6 +2328,9 @@ fn p9_session_options(options: &TransportP9ServerOptions) -> P9SessionOptions {
         read_only: options.read_only,
         claim_ownership: options.claim_ownership,
         debug: options.debug,
+        locks: options.locks.as_ref().map(|inner| P9LockTable {
+            inner: inner.clone(),
+        }),
     }
 }
 
@@ -2395,6 +2413,7 @@ impl P9Session {
             read_only: self.options.read_only,
             claim_ownership: self.options.claim_ownership,
             debug: self.options.debug,
+            locks: self.options.locks.clone(),
         }
     }
 
@@ -2474,6 +2493,7 @@ impl P9Connection {
                 read_only: self.options.read_only,
                 claim_ownership: self.options.claim_ownership,
                 debug: self.options.debug,
+                locks: self.options.locks.clone(),
             },
         }
     }
@@ -2567,6 +2587,9 @@ impl P9Server {
             on_transport_error: None,
             on_error: None,
             on_assertion: None,
+            locks: self.options.locks.as_ref().map(|inner| P9LockTable {
+                inner: inner.clone(),
+            }),
         }
     }
 
