@@ -161,6 +161,84 @@ mod linux {
         }
     }
 
+    struct BlockingReadHandle {
+        inner: Arc<dyn FileHandle>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl FileHandle for BlockingReadHandle {
+        async fn read(
+            &self,
+            _buffer: &mut [u8],
+            _position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.entered.notify_one();
+            std::future::pending::<mount_rs_core::Result<usize>>().await
+        }
+
+        async fn write(
+            &self,
+            buffer: &[u8],
+            position: Option<u64>,
+        ) -> mount_rs_core::Result<usize> {
+            self.inner.write(buffer, position).await
+        }
+
+        async fn stat(&self) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat().await
+        }
+
+        async fn truncate(&self, length: u64) -> mount_rs_core::Result<()> {
+            self.inner.truncate(length).await
+        }
+
+        async fn sync(&self) -> mount_rs_core::Result<()> {
+            self.inner.sync().await
+        }
+
+        async fn datasync(&self) -> mount_rs_core::Result<()> {
+            self.inner.datasync().await
+        }
+
+        async fn close(&self) -> mount_rs_core::Result<()> {
+            self.inner.close().await
+        }
+    }
+
+    struct BlockingReadDriver {
+        inner: Arc<MemoryFs>,
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl FsDriver for BlockingReadDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            self.inner.stat(path).await
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn FileHandle>> {
+            let inner = self.inner.open(path, flags, mode).await?;
+            Ok(Arc::new(BlockingReadHandle {
+                inner,
+                entered: Arc::clone(&self.entered),
+            }))
+        }
+    }
+
     async fn client_round_trip(path: PathBuf) -> Result<(), String> {
         let mut workers = Vec::new();
         for index in 0..8_u32 {
@@ -248,6 +326,82 @@ mod linux {
         assert!(unmounted.is_ok(), "native unmount timed out: {unmounted:?}");
         assert!(unmounted.as_ref().is_ok_and(Result::is_ok), "{unmounted:?}");
         assert!(removed.is_ok(), "remove native mountpoint: {removed:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore = "requires an explicitly enabled Linux FUSE kernel harness"]
+    async fn native_unmount_interrupts_a_blocked_read() {
+        assert_native_prerequisites();
+
+        let mountpoint = unique_mountpoint();
+        std::fs::create_dir(&mountpoint).expect("create native blocked-read mountpoint");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let driver = Arc::new(BlockingReadDriver {
+            inner: Arc::new(MemoryFs::empty()),
+            entered: Arc::clone(&entered),
+        });
+        let mounted = match tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            mount(driver, &mountpoint, native_mount_options()),
+        )
+        .await
+        {
+            Ok(Ok(mounted)) => mounted,
+            Ok(Err(error)) => {
+                let _ = std::fs::remove_dir(&mountpoint);
+                panic!("opted-in native blocked-read FUSE mount failed: {error}");
+            }
+            Err(_) => {
+                let _ = std::fs::remove_dir(&mountpoint);
+                panic!("native blocked-read FUSE mount did not complete within 15 seconds");
+            }
+        };
+
+        let file = mountpoint.join("blocked.txt");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            tokio::task::spawn_blocking({
+                let file = file.clone();
+                move || std::fs::write(file, b"blocked")
+            }),
+        )
+        .await
+        .expect("native blocked-read file write timed out")
+        .expect("native blocked-read file write task failed")
+        .expect("native blocked-read file write failed");
+
+        let read_task = tokio::task::spawn_blocking(move || std::fs::read(file));
+        tokio::time::timeout(std::time::Duration::from_secs(15), entered.notified())
+            .await
+            .expect("native blocked read did not reach the backend");
+
+        let unmounted =
+            tokio::time::timeout(std::time::Duration::from_secs(15), mounted.unmount()).await;
+        let read_result = tokio::time::timeout(std::time::Duration::from_secs(15), read_task).await;
+        let removed = std::fs::remove_dir(&mountpoint);
+        assert!(
+            unmounted.is_ok(),
+            "native blocked-read unmount timed out: {unmounted:?}"
+        );
+        assert!(
+            unmounted.as_ref().is_ok_and(Result::is_ok),
+            "native blocked-read unmount failed: {unmounted:?}"
+        );
+        assert!(
+            read_result.is_ok(),
+            "native blocked read did not finish: {read_result:?}"
+        );
+        let read_result = read_result
+            .expect("checked native blocked read completion")
+            .expect("native blocked read task failed");
+        assert!(
+            read_result.is_err(),
+            "kernel read must fail when unmount interrupts the backend read"
+        );
+        assert!(
+            removed.is_ok(),
+            "remove native blocked-read mountpoint: {removed:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

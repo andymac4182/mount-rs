@@ -300,6 +300,13 @@ reply and bounded close while a read is blocked. Host all-target tests, host and
 Linux-target strict Clippy, formatting, and diff checks pass; hosted kernel
 unmount/close-race and crash/restart execution remain external, so W01 remains
 NO-GO.
+The ignored Linux FUSE harness now adds the corresponding kernel close-race
+case: a backend read is held pending until the request is observed, then the
+test calls bounded unmount and requires the blocked filesystem read to finish
+with an error before removing the mountpoint. The harness compiles on the host
+and passes Linux-target strict Clippy, but only the hosted `/dev/fuse` job can
+qualify the runtime interruption and unmount behavior; crash/restart and the
+remaining lifecycle gates stay external, so W01 remains NO-GO.
 The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
 non-Linux mount regression returns `UnsupportedPlatform` without touching its
 requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
