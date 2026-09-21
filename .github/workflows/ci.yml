@@ -89,6 +89,36 @@ jobs:
       - name: Verify real RustFS block contract and restart persistence
         run: ./scripts/test-rustfs.sh
 
+  foundationdb-rustfs:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: Swatinem/rust-cache@v2
+      - name: Install real PGlite and Node factory prerequisites
+        run: |
+          pnpm --dir tests/pglite install --frozen-lockfile
+          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - name: Build the default N-API addon with the locked Rust graph
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
+      - name: Verify FoundationDB metadata, RustFS chunks, and service restart
+        env:
+          RUSTFS_COMBO_NAME: foundationdb-metadata-rustfs-chunks
+          RUSTFS_COMBO_TIMEOUT_SECONDS: '900'
+          RUSTFS_COMBO_COMMAND: ./scripts/test-foundationdb.sh
+        run: ./scripts/test-rustfs.sh
+
   tidb:
     # The durable topology requires at least 10 GiB and four CPUs. Use the
     # larger stable Ubuntu image so a capacity pass is meaningful rather than
@@ -340,8 +370,11 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-      - run: cargo test --workspace --all-targets --all-features --locked
+      # Native optional providers have separate client/runtime gates. Keeping
+      # this matrix feature-off prevents a client-free macOS/Linux runner from
+      # attempting to link libfdb_c while still checking every workspace target.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --all-targets --locked
 
   windows-node:
     runs-on: windows-latest

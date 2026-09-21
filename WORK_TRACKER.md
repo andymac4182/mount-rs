@@ -910,8 +910,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
-  FoundationDB service-restart evidence. FDB service restart and hosted
-  composition coverage remain open; no emulated acceptance.
+  FoundationDB service-restart evidence. The hosted CI lane and Docker harness
+  now run the consumer feature checks plus owned FoundationDB service restart
+  and fresh-client RustFS reopen; hosted result remains pending until CI runs.
+  No emulated acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-

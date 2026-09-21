@@ -176,7 +176,7 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
   # The first composed client proves the split ChunkedFs path and the provider
   # contract against the same real cluster. A second client runs after the
   # owned FoundationDB container is restarted below.
-  test_command="cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
+  test_command="cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
   test_prefix=${RUSTFS_COMBO_PREFIX:?RUSTFS_COMBO_PREFIX must be set for the composed gate}
   : "${R2_BUCKET:?R2_BUCKET must be set for the composed gate}"
   : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID must be set for the composed gate}"
@@ -184,7 +184,7 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
 else
   rustfs_endpoint=""
   test_manifest=integrations/mount-rs-foundationdb/Cargo.toml
-  test_command="cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
+  test_command="cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
   if [ "$external_mode" -eq 1 ]; then
     test_prefix=${MOUNT_RS_FOUNDATIONDB_TEST_PREFIX:-mount-rs/foundationdb-external/$run_id}
   else
