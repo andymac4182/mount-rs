@@ -87,5 +87,7 @@ the namespace because the core driver does not expose those semantics.
 The native session still returns `ENOSYS` for the other codec-covered
 operations, including `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
 `GETLK`, `SETLK`, `SETLKW`, `INTERRUPT`, `BMAP`, `POLL`,
-`FALLOCATE`, `LSEEK`, and `COPY_FILE_RANGE`. Native device/mount behavior and the
-N-API `./fuse` boundary are outside this scoped slice.
+`FALLOCATE`, `LSEEK`, and `COPY_FILE_RANGE`. The N-API `./fuse` codec/session
+boundary is covered by the Rust-backed facade; hosted native device/mount,
+callback, crash/restart, and durability qualification remain outside this
+scoped slice.

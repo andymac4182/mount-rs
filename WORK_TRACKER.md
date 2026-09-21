@@ -75,9 +75,12 @@ an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
 refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
 `NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Rust
 `Nfs4Clock` now drives automatic and explicit lease expiry sweeps with a
-rootless wire test covering both paths; N-API clock injection, callback ID-map,
-and session `onError` parity remain explicit gaps. Deterministic seeded
-identities are covered.
+rootless wire test covering both paths; N-API clock injection and dynamic
+callback ID-map parity remain explicit gaps. Rust `NfsSessionHooks` and N-API
+`NfsServerOptions.onError` now report decoded request failures with panic
+isolation; the malformed-v4 callback test, complete NFS target, release
+addon/typecheck, live N-API harness, and strict affected Clippy pass.
+Deterministic seeded identities are covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -263,6 +266,14 @@ pinned mountx oracle still classifies `SYNCFS` as unimplemented, so no oracle
 differential is claimed for this operation; hosted kernel syncfs behavior and
 the remaining native lifecycle, callback, crash/restart and durability gates
 remain open, and W01 stays NO-GO.
+The latest FUSE teardown packet makes forced session-task cancellation a
+terminal lifecycle transition: bounded unmount-timeout and post-runtime
+destructor fallbacks now mark the mount inactive/closed and wake
+`wait_closed()` observers. A Linux-gated regression covers the lifecycle
+contract; host FUSE tests, host/Linux-target strict Clippy, Linux-target test
+check, formatting and diff checks pass, while actual Linux `/dev/fuse`
+forced-unmount, callback, crash/restart and durability execution remain
+external, so W01 stays NO-GO.
 The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
 session destroy in unwind isolation. A backend or cleanup panic now becomes
 one owned `Task` transport error, still closes the session, marks the mount
@@ -715,7 +726,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest exact-current-main Linux Node/CLI/native-FUSE qualification is green at `35638932960`/`3817efc9` after the FUSE sync-barrier and blocked-read changes; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest mainline Linux Node/CLI/native-FUSE qualification is green at `35641662353`/`31e122bc` with the rollout-ledger NO-GO guard; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -846,7 +857,16 @@ also passes all 40 paired TypeScript/Rust S3+WebDAV loopback cases, including
 16 authenticated WebDAV cases for streaming PUT, XML property updates,
 GET/HEAD/range/conditional behavior, PROPFIND, COPY/MOVE, refusal,
 missing-resource, and DELETE. This is local pinned-oracle HTTP evidence, not
-hosted/native acceptance. A read-only status check for the published tip
+hosted/native acceptance. At exact scope-packet SHA
+`e13c52bea3485fada8be03ed62fba9a107255507`, CI run `35640746296` also reported
+successful `native-webdav (macos-latest)` job `106469172312` and
+`native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
+native WebDAV I/O for that packet only, not the overall CI run or production
+acceptance. The focused N-API SQLite provider/reopen probe now also preserves
+exact file bytes across orderly provider/server recreation and observes zero
+replacement-session locks, classifying bytes as durable and locks as
+process-local for that provider; it does not qualify crash/power-loss or live
+remote-provider durability. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -1207,15 +1227,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
   `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
   release addon/typecheck, live N-API server integration, and strict affected
-  Clippy pass. Callback-based maps, N-API clock injection, and session
-  `onError` remain explicit parity gaps; deterministic seeded identities are
-  covered by the rootless wire test.
+  Clippy pass. Callback-based maps and N-API clock injection remain explicit
+  parity gaps; deterministic seeded identities are covered by the rootless wire
+  test.
 - [x] The NFSv4 lease packet adds deterministic Rust `Nfs4Clock` control,
   automatic expiry before COMPOUND dispatch, explicit `sweep_expired`, and
   release of expired sessions, locks, open states, and pinned backend handles;
   the v4 wire test covers automatic and explicit expiry. N-API clock injection,
-  callback maps, `onError`, native Linux/hosted lifecycle, and crash/durability
-  gates remain open.
+  callback maps, native Linux/hosted lifecycle, and crash/durability gates
+  remain open.
+- [x] NFS request-level error reporting now follows the upstream callback
+  boundary: Rust `NfsSessionHooks` and N-API `NfsServerOptions.onError` report
+  status failures without a call and decoded XDR/dispatch failures with the
+  `NfsRpcCall`, while callback panics are isolated. The focused Rust callback
+  test, complete NFS target (37 unit, rootless wire 1, transport concurrency 1,
+  transport errors 4, v4 barrier 1, v4 wire 6), release addon/typecheck, live
+  N-API harness, and strict affected Clippy pass. Dynamic callback maps, N-API
+  clock injection, native Linux/hosted lifecycle, and crash/durability remain
+  open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1246,7 +1275,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The S3 structural-factory packet now differentially covers empty maps,
   valid structural-driver maps, and empty/dot/dot-dot/slash/backslash/control/
   overlong bucket-name refusal at construction time against the pinned oracle;
+  the N-API facade preserves the oracle's `TypeError` class/message and the
+  native preflight matches its UTF-16 length/control-character boundary;
   hosted/native lifecycle and complete S3 session parity remain separate.
+- [x] The S3 multipart lifecycle packet now proves staged state survives a
+  replacement session, close sweeps every bucket idempotently while the
+  session remains usable, and Complete/Abort has one terminal winner across
+  concurrent session calls; the filesystem-visible exclusive finalization
+  marker returns `NoSuchUpload` to the loser and late part writes.
+- [x] The same multipart replacement flow is exercised through the generated
+  N-API S3 facade: release build/declarations, direct session create/part/list/
+  complete/GET, streamed traffic, cancellation, bucket isolation, connection
+  cleanup, and a typed peer-fault callback all pass in the host-enabled server
+  integration; this remains non-native and non-provider evidence.
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
@@ -1273,6 +1314,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   millisecond boundary. N-API keeps serializable options, empty assertion
   readback, and expiry-aware `WebdavLockView[]` snapshots; broader session/
   server parity and the external W01 gates remain open.
+- [x] The focused N-API SQLite WebDAV provider/reopen probe is now part of the
+  package test sequence: `node test/typecheck.mjs && node
+  test/webdav-sqlite.mjs` passed exact PUT-byte readback after orderly
+  server/provider shutdown and a replacement-session zero-lock check. This
+  classifies local SQLite byte persistence and process-local WebDAV locks only;
+  crash/power-loss and live-provider durability remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -1398,6 +1445,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   version-history coverage, mount-free SQLite VFS tests and the PGlite gate;
   it was published sequentially through remote `90c33949`. Hosted
   macOS/Linux reconnect reruns remain the separate W04.2 gate.
+- Production follow-up published at `68c087d1` (building on `113a1fbc`) adds
+  optional `driver.storage.lease_ttl_ms` to the shared Rust/Node split-store
+  config, preserves the 30-second runtime default, and requires an explicit
+  positive safe-integer value no greater than 24 hours in an approved W04
+  production config. Focused CLI/SDK/provider-matrix tests and positive/four
+  negative credential-free policy fixtures pass. The manually dispatched
+  current-main policy run `35642541696`, job `106475151000`, passed the
+  explicit-TTL positive fixture and all four expected rejection markers;
+  push-triggered run `35642363293` was cancelled before any job materialized
+  and is excluded. The deployment-specific TTL, provider-scope,
+  persistence/rollback, observability, ownership, and release decision remain
+  tracked as **NO-GO** in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
 
 ## W05 — Cloudflare R2
 
@@ -1800,7 +1860,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
-  The latest exact-current-main hosted run
+  The previous exact-current-main hosted run
   [35638932960](https://github.com/andymac4182/mount-rs/actions/runs/35638932960)
   (job
   [106463213777](https://github.com/andymac4182/mount-rs/actions/runs/35638932960/job/106463213777))
@@ -1817,6 +1877,27 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   revision `3817efc9999cc9d77e2c597873193d56206adb08`, run `35638932960`,
   attempt `1` and runner `GitHub Actions 1000021113`; the artifact SHA-256 is
   `c474b5ef9275ef88daf73e7fe90e36bd25eba8d149ac6849edfc672217ef4bd0`.
+  This is terminal hosted Linux qualification for the tested revision only;
+  production identity/ACL/TLS, backup/recovery, capacity, observability,
+  macOS and release-owner gates remain open.
+  The latest mainline hosted run
+  [35641662353](https://github.com/andymacclenaghan/mount-rs/actions/runs/35641662353)
+  (job
+  [106472188828](https://github.com/andymacclenaghan/mount-rs/actions/runs/35641662353/job/106472188828))
+  tested revision `31e122bc` on `ubuntu-24.04` and completed green in 11m37s.
+  Its retained artifact `foundationdb-production-qualification-35641662353-1`
+  reported `qualification-pass`, `FOUNDATIONDB_CLI_PASS
+  mode=foundationdb-rustfs-fuse`, five soak rounds,
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9861
+  p95_us=29367 p99_us=29367 total_ms=163 throughput_ops_per_sec=91.81`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. The rollout-ledger guard also emitted
+  `W07_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO w07_7=open nested_gates=7`.
+  The schema-2 provenance summary records source revision
+  `31e122bc2e5790bb3568c01aaea4b236d89dce96`, run `35641662353`, attempt `1`
+  and runner `GitHub Actions 1000021349`; the artifact SHA-256 is
+  `5f744788bd82fd52fd7e59f1201885dc79f80af2b0558eef917187abce222b50`.
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
@@ -1840,6 +1921,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   HTTPS RustFS blocks and external credential references. This is static policy
   evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
   replication, recovery, capacity, telemetry or release approval.
+  The hosted workflow also runs `scripts/verify-w07-rollout-ledger.mjs`, which
+  fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
+  production gates or external-drill boundary. This is an internal tracking
+  invariant, not production acceptance.
+  `scripts/test-w07-rollout-ledger.mjs` runs six regression cases for the
+  current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
+  complete-GO states; these cases validate the tracking control only.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
@@ -1860,9 +1948,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35638932960` recorded
-    `operations=15 p50_us=9751 p95_us=28824 p99_us=28824 total_ms=151
-    throughput_ops_per_sec=99.31` at revision `3817efc9`. This remains bounded
+    latency and throughput; latest hosted run `35641662353` recorded
+    `operations=15 p50_us=9861 p95_us=29367 p99_us=29367 total_ms=163
+    throughput_ops_per_sec=91.81` at revision `31e122bc`. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -1875,8 +1963,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `3817efc9` in run
-    `35638932960` on `ubuntu-24.04`, with the retained schema-2
+    Node, CLI/native Linux checkpoint is green for revision `31e122bc` in run
+    `35641662353` on `ubuntu-24.04`, with the retained schema-2
     `qualification-pass` artifact and provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
@@ -2911,6 +2999,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted;
   this remains qualification-account and local-metadata evidence only, not
   production deployment acceptance.
+- [x] The current shared-mainline qualification at pushed source
+  `0d017f09453af530517a2dfef5dc251c1a827932` passed on 2026-09-22 under
+  `myroot` and the dedicated test role. The scoped packet passed sibling-prefix
+  denial, public SDK/CLI self-test, composed AWS S3 filesystem, process reopen,
+  independent PGlite metadata, writer fencing, PGlite backup/restore,
+  fresh-server reopen, and exact owned-prefix cleanup under
+  `mount-rs-tests/aws-s3/20260921T190207Z-39577-3e389412508fea6c7c806b9477ffaf8f`.
+  Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+  current qualification-account and local-metadata evidence only; production
+  resource, metadata, DR, hosted release, and operational gates remain open.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -3054,6 +3152,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   bounded block-store diagnostics test, the 18-case S3 gateway suite, and all
   other non-ignored workspace rows. Explicitly ignored native/service rows
   remain separate prerequisites and are not production acceptance.
+- [x] The current shared `origin/main` boundary at
+  `31e122bc2e5790bb3568c01aaea4b236d89dce96` passed on 2026-09-22 after the
+  security-evidence rebase: `./scripts/cargo-shared fmt --all -- --check`,
+  the full locked offline workspace/all-target test gate with the required
+  local loopback permission, and strict workspace Clippy with `-D warnings`
+  on the isolated Cargo target `/private/tmp/mount-rs-w25-current-main-gate`.
+  The credential-free template, bucket-policy, CI-config, and CI-environment
+  contract fixtures also passed. Explicitly ignored native/service rows and
+  all production deployment gates remain separate prerequisites.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -3142,6 +3249,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   controls. It made no AWS changes and remains qualification-account evidence
   only; the production bucket, policy, roles, and approved change set remain
   open.
+- [x] The current shared-mainline read-only qualification-bucket audit at
+  pushed source `a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22
+  passed account/region binding, all four public-access blocks,
+  BucketOwnerEnforced ownership, AES256 encryption, `None` versioning,
+  seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
+  abort checks. It made no AWS changes; this remains qualification-account
+  evidence only and the production bucket, policy, roles, and approved change
+  set remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -3282,6 +3397,23 @@ listing a source does not mean it has been reviewed or its code can be reused.
   and bounded acceptance log as a pinned 14-day artifact even when the
   preflight safely refuses to authenticate; a successful run is still
   required before this becomes release evidence.
+- [x] The sealed W25 Standard scan
+  `4ba52479-904a-41d2-82d2-9afc20a82931` at pushed source
+  `aa529c58ce6801c69d3e6cc0ed8bb5ac7a8d9cf8` on 2026-09-22 reported zero
+  reportable findings across six W25 surfaces with partial coverage of the
+  659-file repository inventory. Independent baseline/architecture coverage
+  did not complete within the bounded review window and is explicitly
+  deferred; non-W25 repository surfaces and live AWS/GitHub deployment state
+  remain open. This closes the source-review evidence item only; hosted
+  release, production identity, load/soak/fault/restore, canary, rollback, and
+  post-deploy smoke gates remain open.
+- [x] The current shared-mainline read-only OIDC audit at pushed source
+  `a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22 returned
+  `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rule,
+  protected-branch policy, non-self-approvable reviewer, four protected
+  environment inputs/secret, GitHub OIDC provider, and immutable-subject role
+  trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
+  until the deployment owner configures and approves those controls.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
@@ -3497,15 +3629,25 @@ listing a source does not mean it has been reviewed or its code can be reused.
   qualification, customer secure-runtime evidence and measured SLO/RPO/RTO
   remain open.
 - [ ] W26.15 Resolve the terminal per-drive IOPS qualification blocker. The
-  hosted packet exposed that `ChunkedFs` holds its volume-wide async gate across
+  hosted packet exposed that `ChunkedFs` held its volume-wide async gate across
   remote block I/O and full namespace publication, yielding 61.97/63.56/14.14/
-  23.07 IOPS in the fixed 4 KiB/400-iteration/concurrency-64 profile. Design,
-  implement and test a correctness-preserving concurrency/publication path, or
-  obtain a production-like Ozone capacity/topology qualification that
-  demonstrates the fixture is not representative. Preserve fencing, revision
-  CAS, immutable-block ordering, POSIX semantics, cleanup and fail-closed
-  artifact verification; do not lower the 1,000 target or convert failed rows
-  into skips.
+  23.07 IOPS in the fixed 4 KiB/400-iteration/concurrency-64 profile. The first
+  W26-owned remediation is implemented and published: commit `a2075af0` added
+  optimistic immutable-block writes with revision/base checks and serialized
+  conflict fallback; commit `c4378dc1` extends the same safe overlap to remote
+  reads, adds orphan-atime handling and a lifecycle read barrier for shutdown,
+  and adds blocked-read gate-release/shutdown plus stale-read-versus-concurrent-
+  write regressions. The 8-test
+  concurrency suite, 14 chunked unit tests, full locked workspace tests and
+  strict workspace Clippy pass. Fresh hosted qualification run
+  `35641941218` on merged `origin/main` tip `88b707ba` is active and is not yet
+  evidence. If any provider remains below 1,000 IOPS, continue the
+  correctness-preserving concurrency/publication work or obtain a
+  production-like Ozone capacity/topology qualification that demonstrates the
+  fixture is not representative. Preserve fencing, revision CAS,
+  immutable-block ordering, POSIX semantics, cleanup and fail-closed artifact
+  verification; do not lower the 1,000 target or convert failed rows into
+  skips.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
@@ -3752,6 +3894,7 @@ cross-drive isolation.
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
+| `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |
 | `a31880d` (published as `1e45692`) | Seeded Rust SDK, Node SDK and CLI provider lifecycle matrix | Positional write, truncate, flush and reopen passed across 5 Rust SDK, 4 Node SDK and 9 CLI rows; PGlite/R2 remain explicit skips |

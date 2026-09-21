@@ -28,7 +28,8 @@ use crate::rpc::{
     encode_accept_error, encode_accepted_reply, encode_auth_error, encode_rpc_mismatch,
 };
 use crate::session::{
-    NfsRequestContext, NfsSessionOptions, NfsSessionStats, SharedNfsState, SharedStats,
+    NfsRequestContext, NfsSessionError, NfsSessionHooks, NfsSessionOptions, NfsSessionStats,
+    SharedNfsState, SharedStats,
 };
 use crate::xdr::{XdrError, XdrReader, XdrWriter};
 
@@ -1605,6 +1606,7 @@ pub struct Nfs4Session {
     state: Arc<Mutex<V4State>>,
     destroyed: Arc<Mutex<bool>>,
     path_lock: Arc<tokio::sync::RwLock<()>>,
+    hooks: NfsSessionHooks,
 }
 
 impl Nfs4Session {
@@ -1613,6 +1615,14 @@ impl Nfs4Session {
         D: FsDriver + 'static,
     {
         Self::from_loopback(Loopback::new(driver), options)
+    }
+
+    /// Construct a session with a request-level error hook.
+    pub fn new_with_hooks<D>(driver: D, options: NfsSessionOptions, hooks: NfsSessionHooks) -> Self
+    where
+        D: FsDriver + 'static,
+    {
+        Self::from_loopback_with_hooks(Loopback::new(driver), options, hooks)
     }
 
     pub fn from_arc(driver: Arc<dyn FsDriver>, options: NfsSessionOptions) -> Self {
@@ -1624,10 +1634,29 @@ impl Nfs4Session {
         Self::from_loopback_shared(driver, options, &shared)
     }
 
+    /// Construct a loopback session with a request-level error hook.
+    pub fn from_loopback_with_hooks(
+        driver: Loopback,
+        options: NfsSessionOptions,
+        hooks: NfsSessionHooks,
+    ) -> Self {
+        let shared = SharedNfsState::new(&options);
+        Self::from_loopback_shared_with_hooks(driver, options, &shared, hooks)
+    }
+
     pub(crate) fn from_loopback_shared(
         driver: Loopback,
         options: NfsSessionOptions,
         shared: &SharedNfsState,
+    ) -> Self {
+        Self::from_loopback_shared_with_hooks(driver, options, shared, NfsSessionHooks::default())
+    }
+
+    pub(crate) fn from_loopback_shared_with_hooks(
+        driver: Loopback,
+        options: NfsSessionOptions,
+        shared: &SharedNfsState,
+        hooks: NfsSessionHooks,
     ) -> Self {
         let handles = shared.handles.clone();
         let write_verifier = handles.verifier();
@@ -1646,6 +1675,7 @@ impl Nfs4Session {
             })),
             destroyed: Arc::new(Mutex::new(false)),
             path_lock: Arc::clone(&shared.path_lock),
+            hooks,
         }
     }
 
@@ -1655,6 +1685,28 @@ impl Nfs4Session {
 
     pub fn destroyed(&self) -> bool {
         *self.destroyed.lock().expect("NFSv4 destroyed lock")
+    }
+
+    fn report_error(&self, error: NfsSessionError, call: Option<crate::rpc::RpcCall>) {
+        self.hooks.report(error, call);
+    }
+
+    fn record_stat_error(&self) {
+        let mut stats = self.stats.0.lock().expect("NFS stats lock");
+        stats.errors = stats.errors.saturating_add(1);
+    }
+
+    fn record_status_error(&self, status: u32) {
+        if status == NFS4_OK {
+            return;
+        }
+        self.record_stat_error();
+        self.report_error(NfsSessionError::status(status), None);
+    }
+
+    fn compound_error_body(&self, status: u32, tag: &str, results: &[V4OpResult]) -> Vec<u8> {
+        self.record_status_error(status);
+        compound_body(status, tag, results)
     }
 
     fn now(&self) -> Instant {
@@ -1882,6 +1934,8 @@ impl Nfs4Session {
                     call.xid,
                     format_args!("status=rpc-garbage-args offset={}", error.offset),
                 );
+                self.record_stat_error();
+                self.report_error(error.clone().into(), Some(call.clone()));
                 Some(encode_accept_error(call.xid, RPC_GARBAGE_ARGS, None))
             }
         }
@@ -1905,7 +1959,7 @@ impl Nfs4Session {
         );
         if count > NFS4_MAX_COMPOUND_OPS {
             v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
-            return Ok(compound_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
+            return Ok(self.compound_error_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
         }
         let mut operations = Vec::with_capacity(count);
         for _ in 0..count {
@@ -1953,7 +2007,7 @@ impl Nfs4Session {
         );
         if minor != NFS4_MINOR_VERSION_1 {
             v4_trace_compound_reply(peer, xid, NFS4ERR_MINOR_VERS_MISMATCH, 0, false);
-            return Ok(compound_body(NFS4ERR_MINOR_VERS_MISMATCH, &tag, &[]));
+            return Ok(self.compound_error_body(NFS4ERR_MINOR_VERS_MISMATCH, &tag, &[]));
         }
         if operations.is_empty() {
             v4_trace_compound_reply(peer, xid, NFS4_OK, 0, false);
@@ -1964,16 +2018,17 @@ impl Nfs4Session {
         if !first_is_sequence {
             if operations.len() != 1 {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_NOT_ONLY_OP, 0, false);
-                return Ok(compound_body(NFS4ERR_NOT_ONLY_OP, &tag, &[]));
+                return Ok(self.compound_error_body(NFS4ERR_NOT_ONLY_OP, &tag, &[]));
             }
             if !is_sessionless(&operations[0]) {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_OP_NOT_IN_SESSION, 0, false);
-                return Ok(compound_body(NFS4ERR_OP_NOT_IN_SESSION, &tag, &[]));
+                return Ok(self.compound_error_body(NFS4ERR_OP_NOT_IN_SESSION, &tag, &[]));
             }
             let result = self
                 .execute_op(&operations[0], &mut Cursor::default(), credentials)
                 .await;
             let status = result.status;
+            self.record_status_error(status);
             v4_trace_compound_reply(peer, xid, status, 1, false);
             return Ok(compound_body(status, &tag, &[result]));
         }
@@ -1992,12 +2047,14 @@ impl Nfs4Session {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(session) = state.sessions.get(sessionid) else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_BADSESSION, 0, false);
-                return Ok(compound_body(NFS4ERR_BADSESSION, &tag, &[]));
+                drop(state);
+                return Ok(self.compound_error_body(NFS4ERR_BADSESSION, &tag, &[]));
             };
             let slot_index = usize::try_from(*slot).unwrap_or(usize::MAX);
             if slot_index >= session.next_sequence.len() {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
-                return Ok(compound_body(NFS4ERR_BADSLOT, &tag, &[]));
+                drop(state);
+                return Ok(self.compound_error_body(NFS4ERR_BADSLOT, &tag, &[]));
             }
             let expected = session.next_sequence[slot_index];
             let clientid = session.clientid;
@@ -2029,16 +2086,17 @@ impl Nfs4Session {
                 return Ok(body);
             } else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_MISORDERED, 0, false);
-                return Ok(compound_body(NFS4ERR_SEQ_MISORDERED, &tag, &[]));
+                drop(state);
+                return Ok(self.compound_error_body(NFS4ERR_SEQ_MISORDERED, &tag, &[]));
             }
         };
         if *highest >= session.next_sequence.len() as u32 && *highest != 0 {
             v4_trace_compound_reply(peer, xid, NFS4ERR_BADSLOT, 0, false);
-            return Ok(compound_body(NFS4ERR_BADSLOT, &tag, &[]));
+            return Ok(self.compound_error_body(NFS4ERR_BADSLOT, &tag, &[]));
         }
         if operations.len() > session.max_operations as usize {
             v4_trace_compound_reply(peer, xid, NFS4ERR_TOO_MANY_OPS, 0, false);
-            return Ok(compound_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
+            return Ok(self.compound_error_body(NFS4ERR_TOO_MANY_OPS, &tag, &[]));
         }
         debug_assert_eq!(session.id, *sessionid);
         let mut cursor = Cursor {
@@ -2063,6 +2121,7 @@ impl Nfs4Session {
             status = result.status;
             results.push(result);
             if status != NFS4_OK {
+                self.record_status_error(status);
                 v4_trace(
                     "compound-op-status",
                     peer,
@@ -4583,10 +4642,15 @@ fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use mount_rs_core::MemoryFs;
 
     use super::{Nfs4Session, SeqidOrdering, bump_stateid_seq, compare_stateid_seqid};
-    use crate::{Nfs4IdMap, NfsSessionOptions};
+    use crate::{
+        NFS_V4, NFS4_PROGRAM, Nfs4IdMap, NfsSessionError, NfsSessionHooks, NfsSessionOptions,
+        decode_reply, encode_call,
+    };
 
     #[test]
     fn id_map_uses_numeric_fallback_and_separate_user_group_namespaces() {
@@ -4638,5 +4702,42 @@ mod tests {
             "the half-range boundary is treated as older"
         );
         assert_eq!(compare_stateid_seqid(17, 17), SeqidOrdering::Equal);
+    }
+
+    #[tokio::test]
+    async fn request_errors_report_decoded_call_and_survive_hook_panics() {
+        let observed = Arc::new(Mutex::new(Vec::<(String, Option<u32>)>::new()));
+        let callback_observed = Arc::clone(&observed);
+        let hooks = NfsSessionHooks {
+            on_error: Some(Arc::new(move |error: NfsSessionError, call| {
+                callback_observed
+                    .lock()
+                    .expect("NFS session error lock")
+                    .push((error.message, call.map(|call| call.xid)));
+                panic!("request-level hook must not take down the session");
+            })),
+        };
+        let session =
+            Nfs4Session::new_with_hooks(MemoryFs::empty(), NfsSessionOptions::default(), hooks);
+        let request = encode_call(
+            45,
+            NFS4_PROGRAM,
+            NFS_V4,
+            super::NFSPROC4_COMPOUND,
+            None,
+            None,
+            &[],
+        );
+        let reply = session
+            .handle_call(&request, crate::NfsRequestContext::default())
+            .await
+            .expect("decoded malformed request still receives a reply");
+        let (reply, _) = decode_reply(&reply).expect("decode RPC error reply");
+        assert_eq!(reply.accept_stat, Some(crate::rpc::RPC_GARBAGE_ARGS));
+        assert_eq!(session.stats().errors, 1);
+        let observed = observed.lock().expect("NFS session error lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].1, Some(45));
+        assert!(observed[0].0.contains("COMPOUND.tag"));
     }
 }

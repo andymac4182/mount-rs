@@ -32,6 +32,15 @@ Its canonical coverage is partial: the scan closed six W25 review rows against
 a 650-file inventory and explicitly deferred unrelated repository surfaces and
 live AWS/GitHub deployment state. Those deferred controls remain release gates.
 
+The latest sealed W25 Standard scan is `4ba52479-904a-41d2-82d2-9afc20a82931`
+at pushed source `aa529c58ce6801c69d3e6cc0ed8bb5ac7a8d9cf8` (2026-09-22). It
+reported zero reportable findings across the six W25 surfaces and recorded
+partial coverage of the 659-file repository inventory. The independent baseline
+and architecture reviewers did not return within the bounded review window and
+were not counted as completed coverage; unrelated repository surfaces and live
+AWS/GitHub state remain deferred. This is security review evidence, not a
+production approval.
+
 The hosted workflow also records the exact source SHA, root and standalone AWS
 test lockfiles, template,
 policy/preflight/CloudFormation/audit/acceptance harness hashes, Rust and Ruby
@@ -63,6 +72,16 @@ concurrent worktrees share the normal Cargo target and can expose cross-
 worktree artifact races; this gate therefore binds to the checked-out source
 rather than another thread's compiled metadata. Ignored native/service rows
 remain explicit prerequisites and are not treated as production acceptance.
+
+The current shared `origin/main` boundary at
+`31e122bc2e5790bb3568c01aaea4b236d89dce96` passed on 2026-09-22 after the
+security-evidence rebase: formatting, the full locked offline workspace/all-
+target test gate with the required local loopback permission, and strict
+workspace Clippy with `-D warnings` on the isolated Cargo target
+`/private/tmp/mount-rs-w25-current-main-gate`. The credential-free template,
+bucket-policy, CI-config, and CI-environment contract fixtures also passed.
+Explicitly ignored native/service rows and all production deployment gates
+remain separate prerequisites.
 
 ## Deployment contract
 
@@ -161,6 +180,16 @@ recovery, DR, and operational sign-off remain open.
   passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted.
   This remains qualification-account and local-metadata evidence only, not
   production deployment acceptance.
+The current shared-mainline qualification at pushed source
+`0d017f09453af530517a2dfef5dc251c1a827932` passed on 2026-09-22 under `myroot`
+and the dedicated test role. The scoped packet passed sibling-prefix denial,
+public SDK/CLI self-test, composed AWS S3 filesystem, process reopen,
+independent PGlite metadata, writer fencing, PGlite backup/restore,
+fresh-server reopen, and exact owned-prefix cleanup under
+`mount-rs-tests/aws-s3/20260921T190207Z-39577-3e389412508fea6c7c806b9477ffaf8f`.
+Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+current qualification-account and local-metadata evidence only; production
+resource, metadata, DR, hosted release, and operational gates remain open.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
@@ -301,6 +330,14 @@ fail-closed blocker set and made no GitHub or AWS changes; hosted OIDC evidence
 remains blocked until the deployment owner configures and approves those
 controls.
 
+The current shared-mainline read-only OIDC audit at pushed source
+`a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22 returned
+`AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rule,
+protected-branch policy, non-self-approvable reviewer, four protected
+environment inputs/secret, GitHub OIDC provider, and immutable-subject role
+trust. It made no GitHub or AWS changes; hosted OIDC evidence remains blocked
+until the deployment owner configures and approves those controls.
+
 ## Rollout sequence
 
 1. Review the resource and identity change, including region, bucket, prefix,
@@ -388,6 +425,12 @@ account/region, public-access, ownership, AES256 encryption, `None` versioning,
 seven-day lifecycle, and one-day incomplete-multipart abort controls without
 mutating AWS. It remains qualification-account evidence only; the production
 bucket, policy, roles, and approved change set remain open.
+The current shared-mainline read-only qualification-bucket audit at pushed
+source `a03edef8bbdbebb20626b5fd7e62267f34ebb720` on 2026-09-22 passed the
+same account/region, public-access, ownership, AES256 encryption, `None`
+versioning, seven-day lifecycle, and one-day incomplete-multipart abort checks.
+It made no AWS changes; this remains qualification-account evidence only and
+the production bucket, policy, roles, and approved change set remain open.
 The latest full integrated qualification is the current shared-source
 `2101e555` run recorded above. This is qualification-account evidence only;
 production

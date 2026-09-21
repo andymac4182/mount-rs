@@ -120,6 +120,66 @@ for (const [scenario, expectedStatus] of [
 }
 console.log("WebDAV DELETE oracle parity: PASS (8 single-resource/collection cases)")
 
+const { createS3Server: oracleS3 } = await load("s3/server")
+const expectedS3SourceError =
+  "mountx: createS3Server() takes an FsDriver (with `stat`, `readdir` and `open`) " +
+  "or `{ buckets: { name: driver } }`, and was given neither."
+const invalidS3BucketError = (name) =>
+  `mountx: ${JSON.stringify(name)} cannot be a bucket name — a path-style S3 URL ` +
+  "carries it as one path segment, so it cannot be empty, `.`, `..`, longer than " +
+  "255 characters, or contain a slash, a backslash or a control character."
+
+for (const name of ["", ".", "..", "a/b", "a\\b", "a\u0000b", "x".repeat(256)]) {
+  const source = { buckets: { [name]: createMemoryDriver() } }
+  for (const [label, factory] of [["native", native.createS3Server], ["oracle", oracleS3]]) {
+    assert.throws(() => factory(source), (error) => {
+      assert.equal(error.constructor, TypeError, `${label} invalid bucket error class`)
+      assert.equal(error.message, invalidS3BucketError(name), `${label} invalid bucket error message`)
+      return true
+    }, `${label} invalid bucket ${JSON.stringify(name)}`)
+  }
+  const driver = createMemoryDriver()
+  for (const [label, factory] of [["native", native.createS3Server], ["oracle", oracleS3]]) {
+    assert.throws(() => factory(driver, { bucket: name }), (error) => {
+      assert.equal(error.constructor, TypeError, `${label} invalid single bucket error class`)
+      assert.equal(error.message, invalidS3BucketError(name), `${label} invalid single bucket error message`)
+      return true
+    }, `${label} invalid single bucket ${JSON.stringify(name)}`)
+  }
+}
+
+for (const [label, factory] of [["native", native.createS3Server], ["oracle", oracleS3]]) {
+  assert.throws(() => factory({}), (error) => {
+    assert.equal(error.constructor, TypeError, `${label} invalid S3 source error class`)
+    assert.equal(error.message, expectedS3SourceError, `${label} invalid S3 source error message`)
+    return true
+  }, `${label} invalid S3 source`)
+}
+
+const structuralS3 = createMemoryDriver()
+const unicodeBoundaryBucket = "😀".repeat(127)
+const structuralS3Results = []
+for (const [label, factory] of [["native", native.createS3Server], ["oracle", oracleS3]]) {
+  const empty = factory({ buckets: {} })
+  const mapped = factory({ buckets: {
+    photos: structuralS3,
+    notes: createMemoryDriver(),
+    [unicodeBoundaryBucket]: createMemoryDriver(),
+  } }, { bucket: "ignored" })
+  const single = factory(structuralS3, { bucket: "photos" })
+  try {
+    structuralS3Results.push({
+      empty: [empty.buckets, empty.session.bucketNames],
+      mapped: [mapped.buckets, mapped.session.bucketNames],
+      single: [single.buckets, single.session.bucketNames],
+    })
+  } finally {
+    await Promise.all([empty.close(), mapped.close(), single.close()])
+  }
+}
+assert.deepEqual(structuralS3Results[0], structuralS3Results[1], "S3 structural source oracle parity")
+console.log("S3 structural source oracle parity: PASS (empty map, mixed map, single bucket, and 14 refusal cases)")
+
 // Closing one server must not invalidate another adapter over the same driver.
 const first = native.createWebdavServer(base, { host: "127.0.0.1", port: 0 })
 const second = native.createWebdavServer(base, { host: "127.0.0.1", port: 0 })

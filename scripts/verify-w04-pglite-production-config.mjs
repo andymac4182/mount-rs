@@ -170,11 +170,13 @@ if (
     "config.driver.storage.chunk_size_bytes-must-be-positive-safe-integer-at-most-64MiB",
   );
 }
+if (storage.lease_ttl_ms === undefined) {
+  fail("config.driver.storage.lease_ttl_ms-is-required-for-production");
+}
 if (
-  storage.lease_ttl_ms !== undefined &&
-  (!Number.isSafeInteger(storage.lease_ttl_ms) ||
-    storage.lease_ttl_ms <= 0 ||
-    storage.lease_ttl_ms > MAX_LEASE_TTL_MS)
+  !Number.isSafeInteger(storage.lease_ttl_ms) ||
+  storage.lease_ttl_ms <= 0 ||
+  storage.lease_ttl_ms > MAX_LEASE_TTL_MS
 ) {
   fail(
     "config.driver.storage.lease_ttl_ms-must-be-positive-safe-integer-at-most-24h",
@@ -186,5 +188,5 @@ console.log(
   "W04_PGLITE_PRODUCTION_CONFIG_POLICY_PASS " +
     "scope=pglite-only metadata=pglite blocks=pglite " +
     "durable_metadata=true durable_blocks=true secrets=external " +
-    "mountpoint=absolute chunk_size=bounded lease_ttl=bounded",
+    "mountpoint=absolute chunk_size=bounded lease_ttl=explicit-bounded",
 );

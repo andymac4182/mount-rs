@@ -192,7 +192,7 @@ sqlite3 blocks.sqlite \
     name: 'PGlite',
     eyebrow: 'Provider / PostgreSQL wire',
     maturity: 'Preview',
-    maturityNote: 'Real socket-server, fencing, reconnect/restart, split-store, and Rust/Node/CLI matrix evidence; deployment durability remains caller-owned.',
+    maturityNote: 'Real socket-server, fencing, reconnect/restart, split-store, and Rust/Node/CLI matrix evidence, plus hosted cross-platform recovery checks; production persistence, backup, observability, and ownership remain open.',
     summary: (
       <>
         PGlite provides SQL-backed metadata and blocks through PostgreSQL wire
@@ -274,9 +274,9 @@ SQL`,
     limitations: (
       <>
         The adapter does not make a host-safe-mount claim about the PGlite data
-        directory. Server restart, connection-slot lifecycle, platform support,
-        and production crash durability remain separate from SQL round-trip
-        success.
+        directory. Production persistence, connection-slot lifecycle,
+        backup/restore, observability, platform support, and crash durability
+        remain separate from SQL round-trip success.
       </>
     ),
     evidence: (
@@ -296,7 +296,19 @@ SQL`,
         acceptance remain separate. The current provider initializes and
         validates durable version metadata on reconnect, including head,
         sequence, volume identity, and pin invariants; a newer stored schema or
-        cross-volume version record fails closed.
+        cross-volume version record fails closed. The current hosted W04
+        packet also passed the exact PGlite/restart check on Linux, Linux ARM,
+        macOS-latest, and macOS Intel, plus the package and clean-consumer
+        gates; current-tip policy run <code>35641832862</code> passed the
+        positive bounded-TTL and fail-closed configuration fixtures. A local
+        disk-backed rehearsal emitted
+        <code>PGLITE_BACKUP_RESTORE_ROLLBACK_PASS</code>, but that is
+        supporting evidence rather than production backup or rollback
+        approval. Hosted qualification run <code>35635114595</code> at
+        <code>d2db74dd</code> is the recorded source for the cross-platform
+        packet. The provider remains a Preview/NO-GO deployment boundary until
+        persistent production storage, restore RPO/RTO, observability,
+        ownership, and release approval are recorded.
       </>
     ),
     sources: [
@@ -304,6 +316,8 @@ SQL`,
       { label: 'Node split-store example', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
       { label: 'Provider matrix and Node CLI', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/cli.mjs' },
       { label: 'PGlite progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w04-progress-ledger.md' },
+      { label: 'Hosted W04 qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635114595' },
+      { label: 'PGlite production rollout', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W04-production-rollout.md' },
     ],
   },
   r2: {
@@ -632,7 +646,7 @@ LIMIT 20;`,
     name: 'FoundationDB',
     eyebrow: 'Provider / transactional key-value store',
     maturity: 'Experimental',
-    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, shared-provider consumer selection, and a durable three-node Ozone composition now exist locally; hosted runtime and production deployment evidence remain open.',
+    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, shared-provider consumer selection, and bounded hosted Linux qualification now exist; production identity, recovery, capacity, platform, and release evidence remain open.',
     summary: (
       <>
         FoundationDB stores the split filesystem in a volume-scoped keyspace.
@@ -717,7 +731,9 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         unverified, development, and single-authority clocks. Hosted runtime,
         deployment-enforced read-only authority credentials,
         multi-host clock-skew/recovery controls beyond the tested topology,
-        hosted root integration, and broader platform coverage remain open;
+        production identity/ACL/TLS, backup/restore, capacity, multi-day soak,
+        failover rehearsal, hosted root integration, and broader platform
+        coverage remain open;
         commit versions are not wall-clock expiry. The shared-provider Rust
         SDK/CLI and Node selection paths are opt-in native features, not
         portable-default support, and the authority service must enforce the
@@ -752,10 +768,25 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS</code>, followed by
         <code>FOUNDATIONDB_TEST_PASS topology=durable</code> and owned cleanup.
         This is real multi-node restart evidence, not production auth/TLS or
-        power-loss proof. The latest hosted
-        <code>foundationdb-rustfs</code> job was canceled before its evidence
-        step, so the Ozone-specific durable result remains local
-        test-deployment evidence rather than hosted acceptance.
+        power-loss proof. Hosted run <code>35636591071</code> at revision
+        <code>97b63aed</code> then passed a bounded five-round Linux
+        FoundationDB/RustFS qualification with live Node/N-API, native Linux
+        CLI/FUSE mount and reopen, service restart, and schema-2/provenance
+        evidence; its artifact is
+        <code>foundationdb-production-qualification-35636591071-1</code>
+        (SHA-256
+        <code>123c2c5ece757fda141342d2b8e415e34269fff4246f5c3a8c147902415c137d</code>).
+        The exact-current-main run <code>35638932960</code> at revision
+        <code>3817efc9</code> passed the same bounded packet with
+        <code>p50_us=9751</code>, <code>p95_us=28824</code>,
+        <code>p99_us=28824</code>, and
+        <code>throughput_ops_per_sec=99.31</code>; its artifact is
+        <code>foundationdb-production-qualification-35638932960-1</code>
+        (SHA-256
+        <code>c474b5ef9275ef88daf73e7fe90e36bd25eba8d149ac6849edfc672217ef4bd0</code>).
+        These hosted results do not establish production identity/ACL/TLS,
+        backup/restore, production capacity, multi-day operation, failover,
+        macOS acceptance, or release approval.
       </>
     ),
     sources: [
@@ -764,6 +795,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35638932960' },
     ],
   },
   'aws-s3': {
@@ -885,7 +917,25 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         authentication with <code>AWS_S3_CI_CONFIG_BLOCKED
         missing_bucket</code>; protected bucket, region, account, versioning,
         and role inputs were blank. This is a current configuration refusal,
-        not a provider failure or acceptance result.
+        not a provider failure or acceptance result. The latest authorized
+        qualification at pushed source <code>870348184b5a047faea01f584a68cb961b34f810</code>
+        passed sibling-prefix denial, the public SDK/CLI self-test, composed
+        AWS S3 filesystem, process reopen, independent PGlite metadata,
+        writer fencing, PGlite backup/restore, fresh-server reopen, and exact
+        owned-prefix cleanup, emitting <code>AWS_S3_TEST_PASS</code> and
+        <code>AWS_S3_PGLITE_TEST_PASS</code>. This refreshes qualification-
+        account evidence only; production metadata ownership, identity,
+        recovery, and operational sign-off remain open. The current sealed
+        W25 source scan reported zero reportable findings across its six
+        scoped surfaces, with the rest of the repository and live AWS/GitHub
+        state explicitly deferred. The latest read-only OIDC audit at source
+        <code>9b5acfbac3d88d5f17a969defd447f5d44ee3023</code> remained
+        fail-closed for missing environment protection, protected inputs,
+        GitHub OIDC provider, and immutable-subject role trust; it made no
+        changes. The latest qualification-bucket audit repeated the account,
+        region, public-access, ownership, encryption, versioning, lifecycle,
+        and multipart-abort controls without mutating AWS. These are useful
+        rollout controls, not production resource or identity approval.
       </>
     ),
     sources: [
@@ -893,6 +943,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
       { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635498647' },
+      { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },
@@ -904,7 +955,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, while the latest one-revision packet failed its hard 1,000-IOPS gate and customer topology, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, the latest terminal packet failed its hard 1,000-IOPS gate, and a replacement packet is active after concurrency remediation. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -982,7 +1033,10 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         test-deployment evidence and does not imply production auth, TLS, or
         power-loss durability. W26.15 now requires a safe concurrency or
         publication-path remediation, or production-like Ozone capacity
-        evidence, before a fresh one-revision packet.
+        evidence, before a fresh one-revision packet. Replacement run
+        <code>35641941218</code> at <code>88b707ba</code> is active after the
+        published read/write-overlap and shutdown-ordering remediation; its
+        producer and aggregate results are not yet terminal acceptance.
       </>
     ),
     evidence: (
@@ -999,8 +1053,8 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         configuration, transaction readiness across a replicated-node restart,
         fresh-client reopen, and owned cleanup. A dedicated
         <code>ozone-tidb</code> hosted job is wired for durable v8.5.7 TiDB with
-        Node 24 against the real Ozone gateway, but its latest job was canceled
-        before evidence. A
+        Node 24 against the real Ozone gateway, but the current replacement job
+        is queued and has no result yet. A
         dedicated hosted
         <code>ozone-compositions</code> job now installs PGlite, builds the
         public Node addon, and runs the real SQLite/PGlite mixed-metadata gate.
@@ -1019,8 +1073,12 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         five-minute RPO/RTO, TLS/SigV4, tenant-scoped prefixes, and
         three-node/three-replica/three-domain topology; these are
         customer/Ozone requirements, not proof of a deployed environment.
-        W26.15, secure customer topology, backup/DR, measured SLO/capacity,
-        and release/canary/rollback remain open.
+        Fresh replacement run <code>35641941218</code> is now active on the
+        merged remediation tip, with Ozone, compositions, and FoundationDB
+        producers in progress and TiDB queued at the latest inspection; no
+        queued or in-progress result is promoted. W26.15, secure customer
+        topology, backup/DR, measured SLO/capacity, and release/canary/rollback
+        remain open.
       </>
     ),
     sources: [
@@ -1031,6 +1089,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
+      { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

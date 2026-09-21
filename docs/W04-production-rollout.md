@@ -50,8 +50,15 @@ node scripts/verify-w04-pglite-production-config.mjs \
 The policy requires an absolute normalized mountpoint, a `splitstore` driver
 whose metadata and blocks are both PGlite, durable metadata and blocks,
 distinct scoped volume keys, an external `MOUNT_RS_PGLITE_URL` reference,
-bounded chunking, and an owner field. It rejects inline secret values and
-unknown fields. The checked fixture under
+bounded chunking, an owner field, and an explicit positive safe-integer
+`driver.storage.lease_ttl_ms` no greater than 24 hours. The checked fixture
+uses `120000` ms as a provisional example. The general CLI runtime defaults to
+30 seconds for
+backward compatibility, but a production configuration that omits the field
+is rejected. The selected value must cover observed provider latency without
+making stale-writer recovery unacceptably slow. The policy rejects inline
+secret values and unknown fields.
+The checked fixture under
 `tests/pglite/production-config-policy.json` is a shape test, not an approved
 deployment configuration. Its negative fixtures prove fail-closed behavior.
 The policy does not connect to PGlite, inspect the server's persistent data
@@ -87,7 +94,8 @@ The release owner must hold the rollout if any required row is queued, skipped,
 credential-free, ambiguous, or only locally validated.
 
 1. Pin the Git revision, root package, platform packages, native artifact
-   digests, lockfile, PGlite version, and approved configuration digest.
+   digests, lockfile, PGlite version, selected lease TTL, and approved
+   configuration digest.
 2. Confirm that the production data directory is a durable, backed-up volume,
    survives process/container replacement, is not an ephemeral workspace, and
    has the expected ownership, capacity, filesystem, and encryption controls.
@@ -176,6 +184,7 @@ evidence that the signals are currently emitted.
 | Restart recovery | Recovery exceeds the approved RTO or fresh-client readback differs | Stop writers; quarantine the canary and follow restore procedure |
 | Metadata/data integrity | Hash, manifest, size, truncation, or ownership mismatch | Stop publication; preserve both metadata and data evidence; do not guess-repair |
 | Fencing/ownership | Unexpected stale-owner, lease, or concurrent-writer signal | Fence the suspect process and require a fresh owner/read-only check |
+| Lease configuration | Selected `lease_ttl_ms` is missing, outside the approved bound, or shorter than measured provider operation latency | Hold promotion; review the configuration digest and recovery objective before admitting writers |
 | Latency/error budget | Approved p95/p99 or error-budget threshold is breached | Hold promotion and inspect runtime, filesystem, provider and capacity |
 | Disk/capacity | Volume, inode, quota, or backup headroom below the approved limit | Stop promotion; apply capacity/backup procedure before admitting writers |
 | Backup/restore | Backup freshness, integrity, or restore drill is missing/failed | Keep NO-GO; do not treat a live volume as a backup |

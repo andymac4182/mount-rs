@@ -550,6 +550,52 @@ impl BlockingBlockStore {
     }
 }
 
+#[derive(Clone)]
+struct BlockingReadBlockStore {
+    inner: MemoryBlockStore,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    blocked: Arc<AtomicBool>,
+}
+
+impl BlockingReadBlockStore {
+    fn new() -> Self {
+        Self {
+            inner: MemoryBlockStore::new(),
+            entered: Arc::new(Notify::new()),
+            release: Arc::new(Notify::new()),
+            blocked: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+#[async_trait]
+impl BlockStore for BlockingReadBlockStore {
+    async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<BlockId> {
+        self.inner.put(bytes).await
+    }
+
+    async fn get(&self, id: &BlockId) -> mount_rs_core::Result<Vec<u8>> {
+        if !self.blocked.swap(true, Ordering::SeqCst) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+        self.inner.get(id).await
+    }
+
+    async fn delete(&self, id: &BlockId) -> mount_rs_core::Result<()> {
+        self.inner.delete(id).await
+    }
+
+    async fn flush(&self) -> mount_rs_core::Result<()> {
+        self.inner.flush().await
+    }
+
+    fn durable(&self) -> bool {
+        self.inner.durable()
+    }
+}
+
 #[async_trait]
 impl BlockStore for BlockingBlockStore {
     async fn put(&self, bytes: &[u8]) -> mount_rs_core::Result<BlockId> {
@@ -656,4 +702,86 @@ async fn cancelling_a_pending_operation_releases_the_filesystem_gate() {
     })
     .await
     .expect("cancellation gate test timed out");
+}
+
+#[tokio::test]
+async fn blocked_remote_read_releases_the_metadata_gate_but_shutdown_waits_for_it() {
+    timeout(OP_TIMEOUT, async {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = BlockingReadBlockStore::new();
+        let entered = blocks.entered.notified();
+        let fs = ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            ChunkedOptions::fixed("read-concurrency-owner", 8).unwrap(),
+        )
+        .await
+        .unwrap();
+        let writer = fs.open("/file", "w+", 0o600).await.unwrap();
+        writer.write(b"blocked-read", Some(0)).await.unwrap();
+        writer.close().await.unwrap();
+
+        let reader = fs.open("/file", "r", 0o600).await.unwrap();
+        let read_task = tokio::spawn(async move {
+            let mut bytes = vec![0; 12];
+            let count = reader.read(&mut bytes, Some(0)).await?;
+            reader.close().await?;
+            Ok::<_, mount_rs_core::FsError>((count, bytes))
+        });
+        timeout(OP_TIMEOUT, entered)
+            .await
+            .expect("read did not reach the blocking block store");
+
+        let stat_task = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.stat("/").await }
+        });
+        timeout(Duration::from_millis(250), stat_task)
+            .await
+            .expect("metadata gate remained held by the blocked read")
+            .expect("stat task panicked")
+            .expect("stat failed while the remote read was blocked");
+
+        let writer = fs.open("/file", "r+", 0o600).await.unwrap();
+        writer.write(b"updated-read", Some(0)).await.unwrap();
+        writer.close().await.unwrap();
+
+        let shutdown_task = tokio::spawn({
+            let fs = fs.clone();
+            async move { fs.shutdown().await }
+        });
+        tokio::task::yield_now().await;
+        blocks.release.notify_one();
+
+        let (count, bytes) = timeout(OP_TIMEOUT, read_task)
+            .await
+            .expect("blocked read timed out")
+            .expect("blocked read panicked")
+            .unwrap();
+        assert_eq!(count, 12);
+        assert_eq!(&bytes, b"blocked-read");
+        timeout(OP_TIMEOUT, shutdown_task)
+            .await
+            .expect("shutdown timed out behind the blocked read")
+            .expect("shutdown panicked")
+            .unwrap();
+
+        let reopened = ChunkedFs::open(
+            metadata,
+            blocks,
+            ChunkedOptions::fixed("read-concurrency-verifier", 8).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mount_rs_core::Loopback::new(reopened.clone())
+                .read_file("/file")
+                .await
+                .unwrap(),
+            b"updated-read"
+        );
+        reopened.shutdown().await.unwrap();
+    })
+    .await
+    .expect("read concurrency/shutdown test timed out");
 }

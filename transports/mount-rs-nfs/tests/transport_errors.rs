@@ -26,6 +26,7 @@ impl Events {
                 callback_values.lock().expect("NFS event lock").push(error);
                 callback_notify.notify_waiters();
             })),
+            on_error: None,
         };
         (Self { values, notify }, hooks)
     }

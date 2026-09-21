@@ -145,9 +145,12 @@ the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. Backend crash recovery and durability behavior remains outside
 the supported local scope until a separate qualification lane is accepted.
 
-The pinned upstream API still exposes `onError`, dynamic NFSv4 ID-map
-callbacks, and a JavaScript `now` callback. Static ID maps, Rust
-`Nfs4Clock`, lease enforcement, and the `nfs4.seed` identity control are
-supported as described above; callback maps, N-API clock injection, and
-session `onError` remain explicit parity work until their behavior has
-dedicated wire tests and supported N-API plumbing.
+The pinned upstream API still exposes dynamic NFSv4 ID-map callbacks and a
+JavaScript `now` callback. Static ID maps, Rust `Nfs4Clock`, lease enforcement,
+the `nfs4.seed` identity control, and request-level `onError` reporting are
+supported as described above. Rust callers can install `NfsSessionHooks`; the
+N-API `NfsServerOptions.onError` callback receives an `Error` plus the decoded
+`NfsRpcCall` for XDR/dispatch failures, or `undefined` for ordinary NFS status
+failures. Callback panics are isolated. Dynamic callback maps and N-API clock
+injection remain explicit parity work until they have dedicated wire tests and
+supported N-API plumbing.
