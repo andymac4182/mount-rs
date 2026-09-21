@@ -1,13 +1,13 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 07:12 AEST**
+Status snapshot: **2026-09-22 07:15 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.35 implementation commit `c4d1f8bd` was reconciled
 with concurrent mainline work and pushed in merge tip `22f82dca`. The W08.35
 implementation is an ancestor of hosted source `4efec58c`; the latest fetched
-public `origin/main` is `c45f3931` (verified at **07:12 AEST**). The tracker
-and ledger update for this hosted result is included in this documentation
-chunk and will be reconciled with the next public push.
+public `origin/main` is now `fb058af4` (verified at **07:15 AEST**), including
+the hosted-result ledger commit `05c0803d` after concurrent mainline
+reconciliation.
 W08.34 implementation commit `59149b95`, hosted-boundary documentation commit
 `25ff75c1` and hosted-success documentation commit `aec7fbdd` remain in the
 same public ancestry.
