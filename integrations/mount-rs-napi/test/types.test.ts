@@ -451,8 +451,10 @@ function checkServerAndKvSubpaths(): void {
   const s3Close: Promise<void> = s3Server.close()
   const webdavUrl: string = webdavServer.url
   const webdavConnections: number = webdavServer.connections
+  const webdavMethodCounts: Map<string, number> = webdavServer.session.stats.methods
   const webdavListen: Promise<WebdavServer> = webdavServer.listen()
   const webdavClose: Promise<void> = webdavServer.close()
+  void webdavMethodCounts
 
   const p9Connection: P9Connection = p9Connections[0]
   const p9Session: P9Session = p9Connection.session

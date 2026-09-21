@@ -269,4 +269,8 @@ types = types.replace(
   "handleRequestStream(head: WebdavRequestHead, body: WebdavRequestStreamBody): Promise<WebdavStreamResponse>",
 )
 if (!types.includes("export type WebdavRequestStreamBody =")) types += webdavRequestStreamTypes
+types = types.replace(
+  /(export interface WebdavSessionStats \{[\s\S]*?methods: )Record<string, number>/,
+  "$1Map<string, number>",
+)
 await writeFile(declarations, types)

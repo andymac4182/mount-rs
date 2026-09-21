@@ -1058,6 +1058,8 @@ async function exerciseWebdav() {
     assert.ok(server.session instanceof WebdavSession);
     assert.ok(server.session.driver instanceof Filesystem);
     assert.deepEqual(server.session.assertions, []);
+    assert.ok(server.session.stats.methods instanceof Map);
+    assert.equal(server.session.stats.methods.size, 0);
     assert.deepEqual(server.session.options, {
       realm: "mount-rs-integration",
       readChunkBytes: 16 * 1024,
@@ -1078,6 +1080,7 @@ async function exerciseWebdav() {
     );
     assert.ok([200, 201, 204].includes(direct.status));
     assert.equal(direct.body ?? null, null);
+    assert.equal(server.session.stats.methods.get("PUT"), 1);
 
     const lock = await server.session.handleRequest(
       {

@@ -695,6 +695,7 @@ function wrapWebdavSession(WebdavSession) {
   }
   const prototype = WebdavSession.prototype
   const nativeHandleRequestStream = prototype.handleRequestStream
+  const nativeStats = Object.getOwnPropertyDescriptor(prototype, "stats")
   if (typeof nativeHandleRequestStream !== "function") return
   Object.defineProperty(prototype, "handleRequestStream", {
     configurable: true,
@@ -714,6 +715,20 @@ function wrapWebdavSession(WebdavSession) {
       }
     },
   })
+  if (nativeStats && typeof nativeStats.get === "function") {
+    Object.defineProperty(prototype, "stats", {
+      configurable: true,
+      enumerable: false,
+      get() {
+        const stats = nativeStats.get.call(this)
+        const methods = stats && stats.methods
+        return {
+          ...stats,
+          methods: methods instanceof Map ? methods : new Map(Object.entries(methods ?? {})),
+        }
+      },
+    })
+  }
   Object.defineProperty(prototype, WEBDAV_STREAM_WRAPPED, { value: true })
 }
 

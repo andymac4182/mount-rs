@@ -829,10 +829,10 @@ cancelled, while [Live Cloudflare R2 run
 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
 failed; no hosted WebDAV acceptance is claimable from that tip.
 The remaining N-API session member boundary is also explicit: scalar options,
-snapshot lock records, assertion readback and record-shaped counters are
+snapshot lock records, assertion readback and Map-shaped method counters are
 implemented, while the oracle's injectable `now`, `onError`, `onAssertion`,
-live `DavLockTable` methods and `Map`-shaped method counters remain OPEN rather
-than being treated as accepted scope.
+and live `DavLockTable` methods remain OPEN rather than being treated as
+accepted scope.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run

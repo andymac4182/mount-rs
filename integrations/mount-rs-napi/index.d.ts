@@ -2478,7 +2478,7 @@ export interface WebdavSessionStats {
   requests: number
   replies: number
   errors: number
-  methods: Record<string, number>
+  methods: Map<string, number>
   assertions: number
 }
 
