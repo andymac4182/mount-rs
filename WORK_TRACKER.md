@@ -1519,8 +1519,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   pinned-oracle N-API package suite passes locally, and fixed-tip hosted
   requalification `35651055621`, Windows job `106503290630`, now passes the
   repaired server, restart, structural, package-distribution, clean-consumer,
-  and artifact-aggregation checks. The overall qualification remains open with
-  separate Linux/ARM/native-FUSE/provider gates, so production remains NO-GO.
+  and artifact-aggregation checks. The overall qualification ended terminal
+  failure because the ARM/Linux/macOS Node jobs hit the same
+  `s3/multipart-complete-signed-trailer` ETag mismatch from the newer W01/S3
+  finalization-marker path, and Ubuntu Rust/native-FUSE/provider gates also
+  failed. This is recorded as a mixed-scope blocker; production remains
+  NO-GO.
 
 ## W05 — Cloudflare R2
 
