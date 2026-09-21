@@ -815,7 +815,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the fresh mainline Linux Node/CLI/native-FUSE qualification is green at `35665547966`/`1b98ed04` with six hosted rollout-ledger and four qualification-log regression cases plus the NO-GO guard; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 321,373µs p95/p99 at 11.78 ops/s and five-round soak p95/p99 ranged 16,527–34,188µs with throughput 53.87–136.00 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the current mainline Linux Node/CLI/native-FUSE qualification is green at `35666991514`/`5b9af323` with six hosted rollout-ledger and four qualification-log regression cases plus the NO-GO guard; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 35,120µs p95/p99 at 105.73 ops/s and five-round soak p95/p99 ranged 20,100–21,587µs with throughput 107.93–119.84 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1903,6 +1903,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   authority/consumer, service-restart and fresh-client paths. Deployment-level
   authority credentials, monitored clock/cadence telemetry and failover
   evidence remain pending, so this item is not yet marked complete.
+  Current-tip requalification
+  [35666991514](https://github.com/andymac4182/mount-rs/actions/runs/35666991514)
+  (job `106554849953`, revision `5b9af323`) completed green in 11m23s after
+  concurrent mainline reintegration and re-ran the lease-publication policy,
+  authority/consumer, service-restart and fresh-client paths. Deployment-level
+  authority credentials, monitored clock/cadence telemetry and failover
+  evidence remain pending, so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -1953,6 +1960,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Its retained artifact is
   `foundationdb-production-qualification-35665547966-1` with SHA-256
   `f37951fa1e20ce86bdc031d9529c1ace3506b03a9f2027b72b7186118eccbd02`.
+  Live macOS service/cluster acceptance, the complete advertised
+  platform/package matrix and production owner gates remain open.
+  Current-tip requalification
+  [35666991514](https://github.com/andymac4182/mount-rs/actions/runs/35666991514)
+  (job `106554849953`, revision `5b9af323`) completed green in 11m23s and
+  passed the live Node/N-API, Linux CLI/FUSE mount and reopen, FoundationDB
+  service restart/authority republish and RustFS restart/fault-recovery paths.
+  Its retained artifact is
+  `foundationdb-production-qualification-35666991514-1` with SHA-256
+  `7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12`.
   Live macOS service/cluster acceptance, the complete advertised
   platform/package matrix and production owner gates remain open.
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
@@ -2413,6 +2430,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provenance records runner `GitHub Actions 1000023256`; this remains
   bounded hosted Linux qualification, not production capacity or rollout
   acceptance.
+  Current-tip requalification
+  [35666991514](https://github.com/andymac4182/mount-rs/actions/runs/35666991514)
+  (job `106554849953`, revision `5b9af323`) completed green in 11m23s. It
+  emitted `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_NAPI_PASS`, `FOUNDATIONDB_CLI_PASS`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; base latency was
+  `operations=15 p50_us=8101 p95_us=35120 p99_us=35120 total_ms=141
+  throughput_ops_per_sec=105.73`, with five soak-round p95/p99 values from
+  20,100µs to 21,587µs and throughput from 107.93 to 119.84 ops/s. The
+  artifact digest is
+  `7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12` and
+  provenance records runner `GitHub Actions 1000023347`; this remains
+  bounded hosted Linux qualification, not production capacity or rollout
+  acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -2470,11 +2502,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35665547966` recorded base
-    `operations=15 p50_us=26199 p95_us=321373 p99_us=321373 total_ms=1273
-    throughput_ops_per_sec=11.78` at revision `1b98ed04`; its five soak-round
-    p95/p99 values ranged from 16,527µs to 34,188µs and throughput ranged
-    from 53.87 to 136.00 ops/s. This remains bounded
+    latency and throughput; latest hosted run `35666991514` recorded base
+    `operations=15 p50_us=8101 p95_us=35120 p99_us=35120 total_ms=141
+    throughput_ops_per_sec=105.73` at revision `5b9af323`; its five soak-round
+    p95/p99 values ranged from 20,100µs to 21,587µs and throughput ranged
+    from 107.93 to 119.84 ops/s. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -2487,9 +2519,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `1b98ed04` in run
-    `35665547966` on `ubuntu-24.04`, with the retained
-    `foundationdb-production-qualification-35665547966-1` artifact and
+    Node, CLI/native Linux checkpoint is green for revision `5b9af323` in run
+    `35666991514` on `ubuntu-24.04`, with the retained
+    `foundationdb-production-qualification-35666991514-1` artifact and
     provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
