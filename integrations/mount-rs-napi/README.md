@@ -85,7 +85,9 @@ If R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY are
 present, the gate composes FoundationDB metadata with R2-compatible blocks;
 otherwise it exercises the FoundationDB metadata path with in-memory blocks.
 The native feature build requires the host FoundationDB client library for
-linking, and a live cluster is required for the runtime gate.
+linking, and a live cluster is required for the runtime gate. The repository
+CI lane builds that artifact from the pinned FoundationDB client image and
+runs this test in a Node 24 container on the same Docker network.
 
 ## Optional observability
 

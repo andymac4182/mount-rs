@@ -8,6 +8,11 @@ set -eu
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 fdb_image=${MOUNT_RS_FOUNDATIONDB_IMAGE:-foundationdb/foundationdb:7.4.7@sha256:7f1ce47f7f636351540423144a583141c255a4b314147972855e5388060f7677}
 rust_image=${MOUNT_RS_FOUNDATIONDB_RUST_IMAGE:-rust:1.95-bookworm}
+node_image=${MOUNT_RS_FOUNDATIONDB_NODE_IMAGE:-node:24-bookworm}
+run_napi=0
+if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
+  run_napi=1
+fi
 run_id="$(date +%s)-$$"
 network="mount-rs-foundationdb-net-$run_id"
 server="mount-rs-foundationdb-server-$run_id"
@@ -99,6 +104,9 @@ fi
 
 docker pull --platform "$docker_platform" "$fdb_image" >/dev/null
 docker pull --platform "$docker_platform" "$rust_image" >/dev/null
+if [ "$run_napi" -eq 1 ]; then
+  docker pull --platform "$docker_platform" "$node_image" >/dev/null
+fi
 expected_fdb_image_id=$(docker image inspect --format '{{.Id}}' "$fdb_image")
 if [ "$external_mode" -eq 1 ]; then
   external_fdb_image_id=$(docker inspect --format '{{.Image}}' "$server")
@@ -192,6 +200,19 @@ else
   fi
 fi
 
+napi_build_prefix=""
+if [ "$run_napi" -eq 1 ]; then
+  # Build the feature-enabled N-API artifact in the same pinned client image
+  # that supplied libfdb_c. The source remains read-only; only the explicitly
+  # owned run directory receives the temporary .node copy.
+  napi_build_prefix='cargo build --locked --release -p mount-rs-napi --features foundationdb && test -f /tmp/mount-rs-foundationdb-target/release/libmount_rs_napi.so && cp /tmp/mount-rs-foundationdb-target/release/libmount_rs_napi.so /fdb/mount-rs.linux-x64-gnu.node && '
+  test_command="${napi_build_prefix}${test_command}"
+fi
+client_fdb_volume="$run_dir:/fdb:ro"
+if [ "$run_napi" -eq 1 ]; then
+  client_fdb_volume="$run_dir:/fdb"
+fi
+
 # The Rust image is the disposable client/build environment. clang/libclang
 # are installed inside it for bindgen; no host package or native client is
 # changed. The source tree is read-only and the target directory is ephemeral.
@@ -207,7 +228,7 @@ if [ -n "$rustfs_endpoint" ]; then
     --network "$network" \
     --add-host host.docker.internal:host-gateway \
     --volume "$repo_dir:/workspace:ro" \
-    --volume "$run_dir:/fdb:ro" \
+    --volume "$client_fdb_volume" \
     --workdir /workspace \
     --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
     --env LIBRARY_PATH=/fdb \
@@ -240,7 +261,7 @@ else
     --network "$network" \
     --add-host host.docker.internal:host-gateway \
     --volume "$repo_dir:/workspace:ro" \
-    --volume "$run_dir:/fdb:ro" \
+    --volume "$client_fdb_volume" \
     --workdir /workspace \
     --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
     --env LIBRARY_PATH=/fdb \
@@ -254,6 +275,40 @@ else
      apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
      exec sh -c "$1"' \
     mount-rs-foundationdb-client "$test_command"
+fi
+
+if [ "$run_napi" -eq 1 ]; then
+  if [ -n "$rustfs_endpoint" ]; then
+    docker run --rm \
+      --platform "$docker_platform" \
+      --network "$network" \
+      --add-host host.docker.internal:host-gateway \
+      --volume "$repo_dir:/workspace:ro" \
+      --volume "$run_dir:/fdb:ro" \
+      --workdir /workspace \
+      --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
+      --env LD_LIBRARY_PATH=/fdb \
+      --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
+      --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
+      --env "R2_ENDPOINT=$rustfs_endpoint" \
+      --env R2_BUCKET \
+      --env R2_ACCESS_KEY_ID \
+      --env R2_SECRET_ACCESS_KEY \
+      "$node_image" node integrations/mount-rs-napi/test/foundationdb.mjs
+  else
+    docker run --rm \
+      --platform "$docker_platform" \
+      --network "$network" \
+      --volume "$repo_dir:/workspace:ro" \
+      --volume "$run_dir:/fdb:ro" \
+      --workdir /workspace \
+      --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
+      --env LD_LIBRARY_PATH=/fdb \
+      --env NAPI_RS_NATIVE_LIBRARY_PATH=/fdb/mount-rs.linux-x64-gnu.node \
+      --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
+      "$node_image" node integrations/mount-rs-napi/test/foundationdb.mjs
+  fi
+  echo "FOUNDATIONDB_NAPI_PASS image=$node_image"
 fi
 
 if [ -n "$rustfs_endpoint" ]; then

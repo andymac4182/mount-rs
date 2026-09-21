@@ -117,6 +117,7 @@ jobs:
           RUSTFS_COMBO_NAME: foundationdb-metadata-rustfs-chunks
           RUSTFS_COMBO_TIMEOUT_SECONDS: '900'
           RUSTFS_COMBO_COMMAND: ./scripts/test-foundationdb.sh
+          MOUNT_RS_FOUNDATIONDB_NAPI: '1'
         run: ./scripts/test-rustfs.sh
 
   tidb:
