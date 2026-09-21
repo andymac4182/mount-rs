@@ -104,10 +104,23 @@ jobs:
         env:
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
           MOUNT_RS_TIDB_NAPI: '1'
+          MOUNT_RS_TIDB_IOPS: '1'
+          MOUNT_RS_TIDB_IOPS_OUTPUT: artifacts/ozone-tidb-iops.json
+          MOUNT_RS_TIDB_IOPS_MIN: '1000'
+          MOUNT_RS_TIDB_IOPS_ITERATIONS: '400'
+          MOUNT_RS_TIDB_IOPS_CONCURRENCY: '64'
+          MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES: '4096'
           MOUNT_RS_TIDB_TOPOLOGY: durable
           MOUNT_RS_TIDB_VERSION: v8.5.7
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: sh scripts/test-ozone.sh
+      - name: Preserve Ozone TiDB IOPS evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ozone-tidb-iops
+          path: artifacts/ozone-tidb-iops.json
+          if-no-files-found: warn
 
   ozone-foundationdb:
     # W26 requires a provider-specific Ozone packet for every feasible
@@ -129,8 +142,21 @@ jobs:
           MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
+          MOUNT_RS_FOUNDATIONDB_IOPS: '1'
+          MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT: artifacts/ozone-foundationdb-iops.json
+          MOUNT_RS_FOUNDATIONDB_IOPS_MIN: '1000'
+          MOUNT_RS_FOUNDATIONDB_IOPS_ITERATIONS: '400'
+          MOUNT_RS_FOUNDATIONDB_IOPS_CONCURRENCY: '64'
+          MOUNT_RS_FOUNDATIONDB_IOPS_PAYLOAD_BYTES: '4096'
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: sh scripts/test-ozone.sh
+      - name: Preserve Ozone FoundationDB IOPS evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ozone-foundationdb-iops
+          path: artifacts/ozone-foundationdb-iops.json
+          if-no-files-found: warn
 
   rustfs:
     runs-on: ubuntu-latest

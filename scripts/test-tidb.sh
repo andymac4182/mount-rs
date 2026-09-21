@@ -93,6 +93,27 @@ if [ "${MOUNT_RS_TIDB_NAPI:-0}" = "1" ]; then
     exit 2
   fi
 fi
+run_iops=0
+if [ "${MOUNT_RS_TIDB_IOPS:-0}" = "1" ]; then
+  run_iops=1
+  if [ "$run_napi" -ne 1 ]; then
+    echo "test-tidb.sh: MOUNT_RS_TIDB_IOPS=1 requires MOUNT_RS_TIDB_NAPI=1" >&2
+    exit 2
+  fi
+  for iops_value in \
+    "${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}" \
+    "${MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES:-4096}" \
+    "${MOUNT_RS_TIDB_IOPS_ITERATIONS:-400}" \
+    "${MOUNT_RS_TIDB_IOPS_CONCURRENCY:-64}" \
+    "${MOUNT_RS_TIDB_IOPS_MIN:-1000}"; do
+    case "$iops_value" in
+      ''|*[!0-9]*|0)
+        echo "test-tidb.sh: IOPS settings must be positive integers" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
 case "$docker_platform" in
   linux/arm64|linux/amd64) ;;
   *)
@@ -645,6 +666,27 @@ run_node_provider_test() {
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_NODE_PREFIX="$node_prefix" \
     node "$repo_dir/integrations/mount-rs-napi/test/tidb.mjs"
+  if [ "$run_iops" -eq 1 ]; then
+    iops_output=${MOUNT_RS_TIDB_IOPS_OUTPUT:-$run_dir/tidb-ozone-iops.json}
+    iops_size_mib=${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}
+    iops_payload_bytes=${MOUNT_RS_TIDB_IOPS_PAYLOAD_BYTES:-4096}
+    iops_iterations=${MOUNT_RS_TIDB_IOPS_ITERATIONS:-400}
+    iops_concurrency=${MOUNT_RS_TIDB_IOPS_CONCURRENCY:-64}
+    iops_minimum=${MOUNT_RS_TIDB_IOPS_MIN:-1000}
+    MOUNT_RS_TIDB_NAPI=1 \
+    MOUNT_RS_TIDB_DURABLE=1 \
+    MOUNT_RS_TIDB_URL="$tidb_url" \
+      node "$repo_dir/benchmarks/storage/runner.mjs" \
+        --providers mount-rs-split-tidb-r2 \
+        --sizes "$iops_size_mib" \
+        --payload-bytes "$iops_payload_bytes" \
+        --iterations "$iops_iterations" \
+        --concurrency "$iops_concurrency" \
+        --min-iops "$iops_minimum" \
+        --network-context "ozone-ci" \
+        --output "$iops_output"
+    echo "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=$iops_minimum output=$iops_output"
+  fi
 }
 
 run_ambiguous_commit_test() {
