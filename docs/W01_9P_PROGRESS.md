@@ -92,10 +92,18 @@ upstream stream/attach contract or hosted native mount behavior.
   is not a library guarantee; a deployment claiming those properties needs a
   supervisor-level test and cleanup policy.
 
+The dedicated hosted `Native 9P` workflow now also contains an N-API Linux job
+that loads the kernel client, builds the public addon, and runs automatic,
+direct `./9p`, and structural-driver mounted-I/O/cleanup checks as root. The
+direct native check is opt-in outside that job and deliberately preserves its
+mountpoint and driver root when teardown is not proven safe. An exact-SHA
+hosted result for this new N-API boundary is still required.
+
 ## Evidence ledger
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | Hosted N-API 9P lifecycle gate wiring | Added `test/p9-native.mjs` for direct `./9p` probe, mounted I/O, mounted transport/server/connection views, and cleanup; the package suite runs it as an explicit opt-in, and the dedicated `Native 9P` workflow now builds the public addon and runs automatic, direct, and structural-driver Linux 9P mounts after loading `9p`/`9pnet_fd` | The workflow has not yet produced an exact-SHA N-API result; crash/reset/half-close recovery remains supervisor-owned and broader W01 acceptance remains open |
 | 2026-09-22 | Attached Node Duplex and session contract | `./scripts/cargo-shared test -p mount-rs-9p --all-targets --locked` passed 24 focused tests; `./scripts/cargo-shared check -p mount-rs-napi --locked` passed; `./scripts/cargo-shared clippy -p mount-rs-9p -p mount-rs-napi --all-targets --locked -- -D warnings` passed; `pnpm build:debug`, `node test/typecheck.mjs`, and host-enabled `node test/servers.mjs` passed; `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 pnpm test` passed, including the pinned 44-case 9P codec differential and artifact aggregation | PGlite/R2/native-mount opt-ins are explicit skips; current-revision hosted Linux native 9P, native mount fault/race/crash, and broader W01 acceptance remain open |
 | 2026-09-22 | Hosted Linux native lifecycle and shutdown/reaping packet | Prior revision-matched run `35616832528` / `native-9p` job `106389895603` passed kernel-module probing plus privileged native mount/read/write/unmount; the new packet adds broadcast shutdown, active-connection close-race coverage, task-failure reporting and completed-task reaping, with `transport_lifecycle` 5/5, `transport_errors` 8/8, strict 9P Clippy and formatting passing locally | A fresh hosted run for the new packet is required; native reset/half-close/concurrency/crash evidence and broader W01 acceptance remain open |
 | 2026-09-22 | Native concurrent mounted I/O harness | Added an ignored Linux-native test that launches eight bounded blocking workers for independent mounted write/read/rename/read round trips, then performs bounded unmount and refuses recursive cleanup after a failed lifecycle; the focused 9P target and strict 9P Clippy pass locally | Hosted execution on a revision containing this harness is required; native reset/half-close/crash evidence and broader W01 acceptance remain open |
