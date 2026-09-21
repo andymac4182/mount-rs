@@ -2996,8 +2996,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   maps those signals to alerts, identity/expiry checks, retention/cost review,
   failure drills, and canary/rollback evidence. The AWS provider now pins a
   five-retry, 30-second internal retry budget below the temporary-credential
-  safety boundary. These are implementation and runbook surfaces only.
-  Exporter wiring, object-store retry measurement,
+  safety boundary. The AWS/R2 immutable block adapter now also exposes a
+  bounded `R2BlockStore::stats()` snapshot shared across clones, covering
+  logical operation counts, latency, bytes, conditional ID-collision counts,
+  terminal retry-exhaustion markers, and bounded not-found,
+  authentication/permission, throttling, client, server, and conditional
+  error classes. Authentication and terminal retry counters are implementation
+  diagnostics only; successful internal retry-attempt measurement is not
+  inferred from a terminal error string. These are implementation and runbook
+  surfaces only. Exporter wiring, object-store retry measurement,
   credential-expiry detection, cost/retention alerts, approved SLO thresholds,
   and exercised staging procedures remain deployment gates.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,

@@ -33,16 +33,19 @@ or backend error messages as metric labels.
 
 | Signal | Source | Required production use |
 | --- | --- | --- |
-| Provider block latency, success, error, read/write bytes | `mount_rs.operations`, `mount_rs.errors`, `mount_rs.operation.duration_ms`, `mount_rs.bytes.*` with `boundary=provider.blocks` | Dashboard p50/p95/p99 and an error-budget alert for the approved workload SLO |
+| Provider block latency, success, error, read/write bytes | `R2BlockStore::stats()` when the immutable block adapter is directly owned, plus `mount_rs.operations`, `mount_rs.errors`, `mount_rs.operation.duration_ms`, `mount_rs.bytes.*` with `boundary=provider.blocks` | Dashboard p50/p95/p99 and an error-budget alert for the approved workload SLO; use the bounded adapter error classes for authentication, permission, throttling, conditional, client, server, and not-found breakdowns |
 | Orphan scan/protection/recent/delete counts | `mount_rs.blocks.reconcile.*` and `mount_rs.blocks.reconciled` | Alert on failed reconciliation, unexpected growth in recent/unprotected objects, and delete volume outside the approved window |
 | S3 gateway request/error/latency classes | bounded `S3Session::stats()` when the gateway is deployed, including consumed streaming request/response bytes | Alert separately on authentication, conditional conflict, throttling, client, and server classes; never alert on raw object paths |
 | Credential expiry and identity | workload identity health check plus AWS identity/audit logs | Page before expiry/rotation failure; verify the account, role, region, and bucket without printing tokens |
 | Capacity, retention, and cost | S3 storage/request metrics, lifecycle reports, version inventory, and an approved budget | Alert on retained bytes/versions, incomplete multipart uploads, request-rate anomalies, and budget/headroom thresholds |
 
-The SDK's provider metrics are instrumentation, not a deployed collector or
-alert. The underlying object-store client's internal retry behavior must be
-measured in the selected deployment or exposed by an approved adapter before
-retry SLOs are claimed.
+The SDK's provider metrics and `R2BlockStore::stats()` snapshot are
+instrumentation, not a deployed collector or alert. The block-store snapshot
+is shared across clones, keeps labels bounded, and reports only logical
+operations plus terminal retry-exhaustion markers; it does not measure each
+successful internal retry attempt. The underlying object-store client's
+internal retry behavior must be measured in the selected deployment or exposed
+by an approved adapter before retry SLOs are claimed.
 
 ## Required drills
 
