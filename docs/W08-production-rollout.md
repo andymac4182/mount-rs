@@ -106,6 +106,9 @@ candidate before artifact generation; its simulated complete-GO case is covered
 by the local transition suite. This is a repository release-safety control only:
 it does not supply the missing topology, provider, secret, registry, canary,
 rollback or release-owner evidence.
+The post-publication push run `35648755697` (source `86a87ed0`) and the
+credential-free manual dispatch `35648898876` (resolved source `987c593b`) both
+cancelled before creating jobs, so neither is hosted admission evidence.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

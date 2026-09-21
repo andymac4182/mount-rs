@@ -2433,8 +2433,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   artifact generation or publication while the authoritative tracker remains
   NO-GO or any P01–P09 checkbox is open. This is a release safety control only;
   it does not create topology, provider, secret, canary, rollback or owner
-  approval evidence. *(Implementation/static qualification; production
-  evidence and approval remain external.)*
+  approval evidence. The post-push policy run `35648755697` and credential-free
+  manual dispatch `35648898876` both cancelled before creating jobs, so hosted
+  W08.33 admission qualification remains unexecuted. *(Implementation/static
+  qualification; production evidence and approval remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
