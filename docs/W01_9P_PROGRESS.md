@@ -18,14 +18,15 @@ upstream stream/attach contract or hosted native mount behavior.
 | Session and connection objects | Local PASS for exposed scope | `P9Session.handleCall`/`destroy`, stats/lifecycle, clients, peer, `closed`, attached stream exposure, and identity tests |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)`, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
-| Linux native 9P | Hosted lifecycle PASS; current packet rerun pending | CI run `35616832528`, job `106389895603`, at `e168315c246061926a36e795f7332831cb1ab62f` passed `modprobe 9p`, `modprobe 9pnet_fd`, and both privileged ignored native mount/read/write/unmount lifecycle tests; the shutdown/reaping packet and the new bounded concurrent file-I/O harness still need fresh revision-matched execution |
+| Linux native 9P | Hosted lifecycle PASS; current packet rerun pending | CI run `35616832528`, job `106389895603`, at `e168315c246061926a36e795f7332831cb1ab62f` passed `modprobe 9p`, `modprobe 9pnet_fd`, and both privileged ignored native mount/read/write/unmount lifecycle tests; the shutdown/reaping packet, bounded concurrent file-I/O harness, and server-close harness still need fresh revision-matched execution |
 | Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; native fault/crash evidence open | Focused Rust/N-API lifecycle and fault tests now cover broadcast shutdown, accept-loop close races, bounded task reaping, transport faults, and session destruction that wakes and drains `Tflush` waiters; ignored native harnesses cover eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, and bounded-unmount cleanup, while hosted/native reset, half-close, and process-crash evidence remains |
 
 ## Current queue
 
 - Rerun and retain the hosted Linux `native-9p` job on the current packet,
   including kernel `9p`/`9pnet_fd` module checks, the privileged lifecycle
-  test, and the bounded concurrent file-I/O/unmount test.
+  test, the bounded concurrent file-I/O/unmount test, and the server-close
+  kernel-connection/unmount test.
 - Qualify cross-process mount I/O, cancellation/close, restart, reset,
   half-close, concurrency, and crash behavior on the supported Linux runtime;
   the local `Tflush` teardown regression and the new server-close harness do
