@@ -1444,16 +1444,26 @@ listing a source does not mean it has been reviewed or its code can be reused.
   on 2026-09-21
   through the real Ozone gateway with seven-byte ChunkedFs chunks, partial
   writes, shrink/extend truncation, ranges, revision CAS, stale-writer
-  fencing, fresh reopen and scoped block/metadata cleanup. Real TiDB and
-  FoundationDB compositions remain explicit manual gates and are not implied
-  by this result.
+  fencing, fresh reopen and scoped block/metadata cleanup. A separate
+  single-node TiDB/Ozone run also passed the direct TiDB contract, the
+  ChunkedFs partial/truncate/CAS/stale-fencing/reopen path, ambiguous-commit
+  handling and cleanup; it is explicitly not replicated-durability evidence.
+- W26.3 FoundationDB remains an explicit manual gate. The 2026-09-21 arm64
+  attempt reached the Ozone restart/reopen window, then Docker Desktop failed
+  while registering the pinned FoundationDB image layer and dropped its daemon
+  socket; no FoundationDB acceptance is claimed.
 - [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
-  revision CAS and stale-writer fencing. SQLite and PGlite are covered above;
-  the distributed-provider runs remain explicit manual gates.
-- [ ] W26.4 Cover Node factories and CLI configuration; add required CI gates
-  and document verified versions, limitations and platform evidence. Ozone is
-  requested support, not yet a verified supported backend.
+  revision CAS and stale-writer fencing. SQLite, PGlite and single-node TiDB
+  are covered above; durable multi-node TiDB and FoundationDB remain open.
+- [x] W26.4 Cover Node factories and CLI configuration; add required CI gates
+  and document verified versions, limitations and platform evidence. The
+  2026-09-21 arm64 live Ozone run passed the Node provider matrix (including
+  PGlite-to-S3 partial/truncate/reopen), Node CLI self-test/reopen, matching
+  Rust CLI self-test/reopen and owned cleanup; the summary was `pass=7
+  skip=1 fail=0`. The CI job now builds the NAPI addon and installs PGlite;
+  hosted results remain revision-specific. Ozone remains loopback-only,
+  non-secure and not production replicated-durability acceptance.
 
 ## W27 — Native Windows support and CI
 
