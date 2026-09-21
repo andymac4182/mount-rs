@@ -365,6 +365,17 @@ export declare class Nfs4Session {
   get destroyed(): boolean
 }
 
+/** Read-only N-API view of one accepted NFS client connection. */
+export declare class NfsConnection {
+  get session(): NfsSession
+  get id(): number
+  get peer(): string | null
+  get isClosed(): boolean
+  close(): Promise<void>
+  waitClosed(): Promise<void>
+  readonly closed: Promise<void>
+}
+
 export declare class NfsRecordAssembler {
   constructor(limit?: number | undefined | null)
   get pending(): number
@@ -376,6 +387,7 @@ export declare class NfsServer {
   get host(): string
   get port(): number
   get connections(): number
+  clients(): Array<NfsConnection>
   listen(): Promise<NfsServer>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>

@@ -28,12 +28,13 @@ rerun, native reset/half-close/concurrency/crash evidence, and the remaining
 W01 gates.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
-shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
-connection teardown and awaited server close. The focused Rust/N-API checks
-pass, and the opt-in macOS native NFSv3 loopback mount gate passed 1/1 in
-0.09s. Production remains NO-GO pending the privileged Linux v4.1 lane, the
-full v3/v4 stateful and connection-object surface, hosted/native lifecycle
-evidence, and crash/concurrency/durability qualification.
+shared BigInt handle snapshots, live accepted-socket counts, and stable live
+client objects with peer/shared-session views plus abort-safe close/wait state.
+The focused Rust/N-API checks pass, and the opt-in macOS native NFSv3 loopback
+mount gate passed 1/1 in 0.09s. Production remains NO-GO pending the
+privileged Linux v4.1 lane, the full v3/v4 stateful/member surface,
+hosted/native lifecycle evidence, and crash/concurrency/durability
+qualification.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
