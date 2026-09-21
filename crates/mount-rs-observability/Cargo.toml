@@ -28,10 +28,17 @@ tracing = "0.1"
 
 opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"], optional = true }
 opentelemetry-appender-tracing = { version = "0.32", optional = true }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-client", "trace", "metrics", "logs"], optional = true }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs"], optional = true }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"], optional = true }
 tracing-opentelemetry = { version = "0.33", optional = true }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "json", "registry", "std"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio = {
+    version = "1",
+    features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"],
+}
+
+[[bench]]
+name = "facade_overhead"
+harness = false

@@ -341,8 +341,10 @@ TiDB/RustFS hardening (rebased local tip `6327857`, published through
 `6ce8228`). W26's nine-file Ozone packet remains byte-for-byte present in the
 current branch at its verified `a936eba` content. W08 and W07 service runs
 remain explicitly blocked by unavailable Docker/libfdb runtime prerequisites;
-W30 collector-backed export, overhead benchmarking and cross-platform
-qualification remain open.
+W30 external collector reachability and Linux/Windows qualification remain
+open; the W30.5 local loopback collector, exporter-failure/shutdown tests,
+macOS qualification packet, and no-exporter facade benchmark are now verified
+on the current macOS arm64 host.
 
 ## How to read and maintain this tracker
 
@@ -484,7 +486,7 @@ complete.
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
-| W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade and application boundary wiring landed; collector/benchmark/platform qualification pending | Main |
+| W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade, boundary wiring, local collector/failure tests, benchmark and macOS qualification packet landed; external collector/Linux/Windows evidence pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
 ## Decisions and external prerequisites
@@ -1464,9 +1466,32 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 Implementation note (2026-09-21): the separate `mount-rs-observability` crate,
 feature-gated HTTP/SDK/Node/CLI integration, bounded redaction contract, W3C
-carrier helpers, OTLP/HTTP provider setup, and deterministic tests are in the
-current implementation. Collector-backed export, overhead benchmarking, and
-cross-platform qualification remain explicitly unverified.
+carrier helpers, signal-specific OTLP/HTTP paths, blocking-client exporter
+setup, and deterministic tests are in the current implementation. W30.5
+evidence on macOS arm64 (macOS 26.5.1, Darwin 25.5.0, Rust/Cargo 1.95.0)
+against the then-current `origin/main` base `af31ba7`:
+
+- `cargo fmt --all -- --check`: PASS.
+- `cargo check --workspace --locked --offline`: PASS.
+- `cargo test -p mount-rs-observability --all-features --locked --offline`:
+  5 unit tests, one loopback collector test, and one exporter-failure/shutdown
+  test PASS. The collector received non-empty `/v1/traces`, `/v1/metrics`,
+  and `/v1/logs` payloads and the test found no raw secret path bytes.
+- `cargo test -p mount-rs-sdk --features observability --locked --offline`:
+  3 PASS; `cargo test -p mount-rs-http --features observability-otlp
+  --test http_integration --locked --offline`: 7 PASS with loopback access;
+  `cargo test -p mount-rs-cli --features observability --locked --offline`:
+  39 unit + 9 CLI + 2 HTTP subprocess + 1 native artifact test PASS, with 3
+  documented native/remote tests ignored; N-API observability check PASS.
+- `cargo clippy -p mount-rs-observability --all-features --all-targets
+  --locked --offline -- -D warnings`: PASS. The optimized no-exporter facade
+  benchmark ran 20,000 operations and recorded baseline 2 ns/op, disabled
+  9 ns/op, enabled 59 ns/op on this host; these are comparative observations,
+  not a cross-platform SLO.
+
+The local collector and failure tests do not prove reachability of an external
+collector. Linux and Windows remain explicitly unverified, and the platform
+runbook is `docs/w30.5-platform-qualification.md`.
 
 ## W31 — Per-drive mounts from one backing datastore (future)
 
