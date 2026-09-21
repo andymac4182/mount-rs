@@ -1457,7 +1457,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - W26.3 FoundationDB remains an explicit manual gate. The 2026-09-21 arm64
   attempt reached the Ozone restart/reopen window, then Docker Desktop failed
   while registering the pinned FoundationDB image layer and dropped its daemon
-  socket; no FoundationDB acceptance is claimed.
+  socket. A retry pulled the official arm64 platform manifest successfully,
+  but the daemon dropped again while creating the FoundationDB server
+  container; Docker's VM log reported an overlapping overlay lowerdir and
+  layer-registration corruption. No FoundationDB acceptance is claimed.
 - [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
   revision CAS and stale-writer fencing. SQLite, PGlite and single-node TiDB
