@@ -489,10 +489,11 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             continue;
         }
         if std::ptr::eq(link_path, &link)
-            && error.raw_os_error() == Some(206)
+            && matches!(error.raw_os_error(), Some(2) | Some(3) | Some(206))
             && extended_link != link
         {
-            // ERROR_FILENAME_EXCED_RANGE: first try the short aliases of the
+            // ERROR_FILENAME_EXCED_RANGE, ERROR_FILE_NOT_FOUND, and
+            // ERROR_PATH_NOT_FOUND: first try the short aliases of the
             // existing parent components. This keeps creation in the normal
             // unprivileged Win32 namespace on runners where 8.3 names are
             // available, while still supporting long-path-aware filesystems.
