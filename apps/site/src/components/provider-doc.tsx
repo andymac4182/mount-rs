@@ -808,6 +808,18 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35657842924-1</code>
         with SHA-256
         <code>dc37b10f82ecd1c4c4513f4cf3ecc9a95e2ef37ccdadf0f4d69e56d30620846b</code>.
+        The latest requalified mainline run <code>35663914822</code> at
+        revision <code>147c53a8</code> passed the same bounded policy,
+        authority/consumer, restart, native Linux CLI/FUSE, and RustFS
+        recovery packet after a lockfile repair. Its base marker recorded
+        <code>p50_us=9564</code>, <code>p95_us=39516</code>,
+        <code>p99_us=39516</code>, and
+        <code>throughput_ops_per_sec=91.71</code>; soak p95/p99 ranged from
+        21,487µs to 24,210µs and throughput from 91.97 to 106.58 ops/s.
+        The retained artifact is
+        <code>foundationdb-production-qualification-35663914822-1</code>
+        with SHA-256
+        <code>098ab3a4bb1fd6ae84971cebbb67baf2e50d9cb271accdaa9351ec28e49c3042</code>.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -819,7 +831,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35657842924' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35663914822' },
     ],
   },
   'aws-s3': {
