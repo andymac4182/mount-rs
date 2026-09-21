@@ -16,6 +16,7 @@ export function SiteFooter() {
             License
           </a>
           <Link to="/downloads">Downloads</Link>
+          <Link to="/brand-lab">Brand Lab</Link>
           <a href="https://github.com/andymac4182/mount-rs/blob/main/README.md">
             README
           </a>

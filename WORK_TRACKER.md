@@ -934,10 +934,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   runtime evidence now also exercises the process-owned authority, reader and
   storage `connect` paths. The hosted native CLI lane now publishes a current
   authority sample in a separate process before running the consumer with the
-  shared-provider/read-only configuration. Deployment-level authority
-  credential/clock-skew controls are now documented as an explicit deployment
-  contract, but their enforcement and hosted runtime evidence remain pending,
-  so this item is not yet marked complete.
+  shared-provider/read-only configuration. The authority publisher now also
+  exposes an explicit bounded-forward-jump API that fails closed before an
+  unsafe wall-clock sample is written; unit coverage and the real-cluster
+  authority/composition paths use that guard. Deployment-level authority
+  credentials, clock monitoring/cadence and hosted evidence for the new guard
+  remain pending, so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -1018,6 +1020,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `RUSTFS_INTEGRATION_PASS`. This is terminal hosted Linux qualification for
   the tested revision; it does not close the production identity/TLS,
   backup/recovery, capacity, observability, macOS or release-owner gates.
+A follow-up hosted run
+[`35601357569`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35601357569)
+(job
+[`106337982523`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35601357569/job/106337982523))
+at revision `622d0d1` also completed green on `ubuntu-24.04` in 11m38s. Both
+production-config policy fixtures passed their expected positive/negative
+outcomes, and the run emitted
+`FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=9893
+p95_us=28865 p99_us=28865 total_ms=124 throughput_ops_per_sec=88.62`, followed
+by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
+`RUSTFS_COMBO_PASS` and RustFS integration markers. This is terminal hosted
+Linux qualification and bounded workload measurement for the tested revision;
+it does not close production identity/ACL/TLS, backup/recovery, capacity,
+observability, macOS or release-owner gates.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1058,8 +1074,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput for future retained runs; this does not convert
-    the prior one-round qualification into production capacity evidence.
+    latency and throughput; hosted run `35601357569` recorded the marker at
+    revision `622d0d1`. This is bounded qualification evidence and does not
+    convert the one-round result into production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -1194,10 +1211,11 @@ reproducible in a production-like environment.
   `X-Content-Type-Options: nosniff`, with local regression assertions passing
   on reconciled source `2159976`.
   Hosted CI run `35599817215`, source `b26819e`, job `106333141914` also
-  reached terminal success for the pre-hardening all-features gate. The
-  header-hardening hosted requalification is still open because successive
-  current-main candidates were cancelled before the job ran. This is
-  process/configuration and local/hosted exporter-path evidence only:
+  reached terminal success for the pre-hardening all-features gate. Terminal
+  hosted CI run `35601990956`, source `f09fbe9`, job `106340034907` also
+  passed the hardening-bearing all-features gate, with `2f7919a` in its
+  ancestry. This is process/configuration and local/hosted exporter-path
+  evidence only:
   provider-aware readiness, collector, SLO, paging, redaction and end-to-end
   alert evidence remain open. *(Implementation + hosted/provider; collector
   and on-call route are not configured.)*
@@ -1749,10 +1767,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
-  role are test resources, so
-  production resource review remains open. The audit now fails closed on
-  inherited endpoint/service-profile overrides, requires an expected caller
-  account, and verifies the bucket location before reporting controls.
+  role are test resources, so production resource review remains open. The
+  reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
+  contract now expresses retained state, versioning, encryption choice,
+  lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
+  access, and separately governed maintenance access. AWS CloudFormation
+  syntax validation passed on 2026-09-21 without creating a stack or change
+  set. The audit still fails closed on inherited endpoint/service-profile
+  overrides, requires an expected caller account, and verifies bucket
+  location before reporting controls; approved production parameters, role
+  trust, change-set review, and live production audit remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.

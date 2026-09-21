@@ -46,6 +46,9 @@ export function SiteHeader() {
           <Link to="/downloads" activeOptions={{ exact: true }}>
             Downloads
           </Link>
+          <Link to="/brand-lab" activeOptions={{ exact: true }}>
+            Brand Lab
+          </Link>
           <a href="https://github.com/andymac4182/mount-rs">GitHub</a>
           <button
             className="theme-toggle"

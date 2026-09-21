@@ -21,19 +21,20 @@ function HomePage() {
       <section className="hero-section business-hero">
         <div className="page-frame hero-grid">
           <div className="hero-copy">
-            <p className="eyebrow eyebrow-light">The file boundary for modern applications</p>
+            <p className="eyebrow eyebrow-light">File infrastructure for modern applications</p>
             <h1>
-              Files are simple.
-              <span> Storage boundaries are not.</span>
+              Build file features.
+              <span> Keep the storage boundary changeable.</span>
             </h1>
             <p className="hero-lede">
-              When your application needs file semantics, mount-rs gives you
-              one filesystem-shaped contract without forcing your product to
-              depend on a kernel mount, a single database, or one object store.
+              When your product needs paths, handles, directories, and sync
+              semantics, mount-rs gives it a stable Rust and Node contract
+              while namespace metadata, immutable blocks, and edge transports
+              stay explicit—and replaceable.
             </p>
             <div className="button-row">
-              <a className="button button-warm" href="#how-it-works">See how it works</a>
-              <Link className="button button-ghost" to="/docs">Read the technical guide</Link>
+              <a className="button button-warm" href="#storage-model">See the storage model</a>
+              <a className="button button-ghost" href="#use-mount-rs">Start with the workflow</a>
             </div>
             <p className="hero-footnote">Open source · Apache-2.0 · prerelease · evidence-led</p>
           </div>
@@ -94,6 +95,88 @@ function HomePage() {
         </div>
       </section>
 
+      <section className="page-frame storage-model-section" id="storage-model">
+        <div className="section-heading split-heading">
+          <div>
+            <p className="eyebrow">The storage model</p>
+            <h2>See what happens to one file.</h2>
+          </div>
+          <p>
+            The same file operation crosses a namespace plane and an immutable
+            block plane. This conceptual view makes the ordering visible
+            without pretending every provider uses the same physical schema.
+          </p>
+        </div>
+        <div className="storage-model-grid">
+          <div className="storage-model-record">
+            <div className="storage-model-record-header">
+              <div>
+                <p className="storage-model-record-kicker">Illustrative provider view</p>
+                <strong><code>/reports/q3.pdf</code></strong>
+              </div>
+              <span className="storage-model-badge">schemas vary by provider</span>
+            </div>
+            <CodeBlock label="Conceptual file record">{`namespace:
+  path: /reports/q3.pdf
+  revision: 7
+  size_bytes: 131072
+  blocks: [block_01, block_02]
+
+block_01:
+  key: files/7/block_01
+  bytes: 65536
+  immutable: true`}</CodeBlock>
+            <p className="storage-model-note">
+              Metadata carries inode attributes, directory entries, and block
+              references. It does not carry the file bytes.
+            </p>
+          </div>
+          <ol className="storage-model-timeline">
+            <li className="storage-model-step">
+              <span className="storage-model-step-index">01</span>
+              <div>
+                <p className="storage-model-step-meta">Namespace / metadata</p>
+                <h3>Describe the file before publishing it.</h3>
+                <p>
+                  Keep inode attributes, directory entries, and block
+                  references in the metadata contract. The namespace points to
+                  bytes; it does not become the byte store.
+                </p>
+              </div>
+            </li>
+            <li className="storage-model-step">
+              <span className="storage-model-step-index">02</span>
+              <div>
+                <p className="storage-model-step-meta">Immutable blocks</p>
+                <h3>Write fixed-size chunks and finish the block barrier.</h3>
+                <p>
+                  Chunk the file according to its layout, write immutable
+                  blocks, and wait for the block-store barrier before metadata
+                  can refer to them.
+                </p>
+              </div>
+            </li>
+            <li className="storage-model-step">
+              <span className="storage-model-step-index">03</span>
+              <div>
+                <p className="storage-model-step-meta">Publish</p>
+                <h3>Commit the reference with a fence.</h3>
+                <p>
+                  Publish with <code>revision CAS</code> and a monotonic writer
+                  fence, then complete the metadata barrier before the write is
+                  acknowledged.
+                </p>
+              </div>
+            </li>
+          </ol>
+        </div>
+        <p className="storage-model-warning">
+          Operational boundary: ownership loss fails closed. An uncertain
+          commit can leave unreferenced blocks; automatic GC and copy-on-write
+          are not implemented yet.
+        </p>
+      </section>
+
       <section className="page-frame use-section" id="use-mount-rs">
         <div className="section-heading split-heading">
           <div><p className="eyebrow">How to use it</p><h2>Start local. Keep the boundary when the deployment changes.</h2></div>
@@ -116,6 +199,52 @@ let bytes = fs.read_file("/hello").await?;`}</CodeBlock>
 await fs.writeFile('/hello', Buffer.from('hello'));`}</CodeBlock>
         </div>
         <div className="use-links"><Link className="button button-primary" to="/docs/rust">Start with Rust</Link><Link className="button button-secondary" to="/docs/node">Use Node</Link><Link className="text-link" to="/downloads">Download the CLI preview <span aria-hidden="true">↗</span></Link></div>
+      </section>
+
+      <section className="page-frame fit-section" id="fit">
+        <div className="section-heading split-heading">
+          <div>
+            <p className="eyebrow">Choose the boundary</p>
+            <h2>Use the storage model that fits the workload.</h2>
+          </div>
+          <p>
+            mount-rs is a choice for teams that want file semantics without
+            making a platform mount or one storage service the product API.
+            It is not the right abstraction for every workload.
+          </p>
+        </div>
+        <div className="fit-grid">
+          <article className="fit-card fit-card-primary">
+            <span className="fit-card-label">Choose mount-rs when</span>
+            <h3>Your product needs files, but infrastructure still needs to move.</h3>
+            <ul>
+              <li>Paths, handles, directory operations, and sync semantics belong in the product.</li>
+              <li>Metadata and immutable blocks need separate operational roles.</li>
+              <li>Rust, Node, and edge transports should share one contract.</li>
+            </ul>
+            <Link to="/docs">Read the adoption guide <span aria-hidden="true">→</span></Link>
+          </article>
+          <article className="fit-card">
+            <span className="fit-card-label">Use direct object APIs when</span>
+            <h3>The application is object-native.</h3>
+            <p>
+              If callers already work in buckets, keys, immutable objects, and
+              provider-native lifecycle rules, adding filesystem semantics may
+              create more surface area than it removes.
+            </p>
+            <a href="https://github.com/andymac4182/mount-rs/blob/main/ARCHITECTURE.md">Review the storage roles <span aria-hidden="true">↗</span></a>
+          </article>
+          <article className="fit-card">
+            <span className="fit-card-label">Use a native mount when</span>
+            <h3>The host owns the privileged lifecycle.</h3>
+            <p>
+              A native mount can be the right boundary when platform support,
+              permissions, daemon lifecycle, and qualification are already
+              part of the environment you control.
+            </p>
+            <Link to="/docs/transports">Compare transports <span aria-hidden="true">→</span></Link>
+          </article>
+        </div>
       </section>
 
       <section className="page-frame value-section">

@@ -17,6 +17,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const AUTHORITY_MAX_FORWARD_JUMP: Duration = Duration::from_secs(300);
+
 fn configured_cluster_file() -> Option<String> {
     match env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE") {
         Ok(path) if !path.trim().is_empty() => Some(path),
@@ -159,7 +161,12 @@ async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()>
         .expect_err("a reader must fail closed before authority recovery");
     assert_eq!(unavailable.code, ErrorCode::Enotsup);
 
-    assert_eq!(authority.publish_now_ms(2_000_000).await?, 2_000_000);
+    assert_eq!(
+        authority
+            .publish_now_ms_with_max_forward_jump(2_000_000, AUTHORITY_MAX_FORWARD_JUMP)
+            .await?,
+        2_000_000
+    );
     assert_eq!(reader_a.now_ms().await?, 2_000_000);
     assert_eq!(reader_b.now_ms().await?, 2_000_000);
 
@@ -190,9 +197,19 @@ async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()>
     // A backward authority sample is clamped by the durable record. Advancing
     // the authority then expires the old lease for both readers, and the old
     // writer's renewal remains fenced after replacement.
-    assert_eq!(authority.publish_now_ms(1).await?, 2_000_000);
+    assert_eq!(
+        authority
+            .publish_now_ms_with_max_forward_jump(1, AUTHORITY_MAX_FORWARD_JUMP)
+            .await?,
+        2_000_000
+    );
     assert_eq!(reader_b.now_ms().await?, 2_000_000);
-    assert_eq!(authority.publish_now_ms(2_030_001).await?, 2_030_001);
+    assert_eq!(
+        authority
+            .publish_now_ms_with_max_forward_jump(2_030_001, AUTHORITY_MAX_FORWARD_JUMP)
+            .await?,
+        2_030_001
+    );
     assert_eq!(reader_a.now_ms().await?, 2_030_001);
     let replacement = second
         .metadata()
@@ -219,7 +236,10 @@ async fn publish_authority_with_bounded_retry(
 
     let mut last_error = None;
     for attempt in 0..MAX_ATTEMPTS {
-        match authority.publish_system_now_ms().await {
+        match authority
+            .publish_system_now_ms_with_max_forward_jump(AUTHORITY_MAX_FORWARD_JUMP)
+            .await
+        {
             Ok(published) => return Ok(published),
             Err(error) => {
                 last_error = Some(error);
