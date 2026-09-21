@@ -166,8 +166,11 @@ The FUSE mount-source parity packet also maps the configured native `fsname`
 through the automatic facade's shared `source` property, while unsupported
 platform FUSE objects return no source. The Linux-gated Rust regression,
 host/Linux-target FUSE and automatic-facade checks, and strict Clippy pass;
-hosted native source/lifecycle execution remains external, so W01 stays
-NO-GO.
+hosted native source/lifecycle execution remains external. This packet is
+published as `2a979191d1ef5db37be3a9a3a4bbb2c3efe44457`; exact-SHA Fault
+injection run `35652258903`, CI run `35652258837`, and W08 release targets run
+`35652258840` are pending, while W04 production policy run `35652258913`
+succeeded but is unrelated. W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
