@@ -275,6 +275,13 @@ dispatch, or `SETXATTR_EXT` without an explicit caller override; the generated
 N-API session test asserts those flags remain clear. This closes a capability-
 honesty gap but does not qualify hosted Linux negotiation, native callback
 delivery, cancellation/concurrency, crash/restart, durability, or FSKit.
+The current pinned FUSE oracle refresh then passed both focused commands from
+`integrations/mount-rs-napi`: `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921
+node test/fuse-codec.mjs` passed every listed FUSE protocol differential family,
+and `node test/fuse-inodes.mjs` passed inode parity. This closes focused
+mount-free codec/inode evidence only; the full package matrix, hosted Linux
+`/dev/fuse`, native callback/lifecycle, remaining session parity, FSKit,
+cancellation/concurrency, crash/restart, and durability remain open.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 

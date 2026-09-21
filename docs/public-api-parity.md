@@ -659,6 +659,20 @@ This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
 hosted/live boundaries stay open below.
 
+### W01 current FUSE oracle refresh (2026-09-22)
+
+- **PASS** — from `integrations/mount-rs-napi`,
+  `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node
+  test/fuse-codec.mjs` passed all listed FUSE protocol differential families,
+  including READDIR/READDIRPLUS, read/write, metadata, lookup/create, links,
+  statfs, forget/interrupt/poll, BMAP/IOCTL, locking, xattrs, and release/
+  flush/fsync request/status boundaries.
+- **PASS** — with the same pinned source,
+  `node test/fuse-inodes.mjs` passed Rust-backed FUSE inode parity.
+- This refresh is focused mount-free oracle evidence; it does not claim the
+  full N-API package matrix, privileged Linux FUSE, native callback/lifecycle,
+  FSKit, cancellation/concurrency, crash/restart, or durability acceptance.
+
 ### W01 lock-codec packet evidence (2026-09-21)
 
 - **PASS** — the N-API FUSE barrel now exports typed `GETLK`, `SETLK` and
