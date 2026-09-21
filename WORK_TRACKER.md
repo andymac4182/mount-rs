@@ -1767,8 +1767,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `bb69ddae-798a-4387-bb87-f3e7acd496cb`, which reports zero reportable
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
-  versioning-status input, and the deployment evidence remain open. The latest
-  hosted run `35598843178` stopped before AWS authentication with
+  versioning-status input, and the deployment evidence remain open. Latest
+  hosted run `35601403560` at head `2159976` stopped before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a successful safety
   refusal, not acceptance evidence. The existing test
   role trust policy allows only the selected SSO administrator role and does
