@@ -499,10 +499,14 @@ fn cli_foundationdb_rustfs_config_binary_mounts_and_reopens() {
     };
     let mountpoint = unique_mountpoint();
     let config_path = mountpoint.with_extension("foundationdb.json");
+    let mountpoint_name = mountpoint
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("UTF-8 unique FoundationDB native mountpoint name");
     let volume_key = format!(
         "mount-rs/cli-foundationdb/{}/{}",
         std::process::id(),
-        unique_mountpoint().display()
+        mountpoint_name
     );
     let block_prefix = format!("{volume_key}/blocks");
     let mut artifacts = NativeArtifacts::new(mountpoint.clone(), transport);
