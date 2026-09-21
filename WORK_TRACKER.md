@@ -3119,6 +3119,12 @@ reproducible in a production-like environment.
   the protected workflow file is present on remote mainline (blob
   `9cacf0f19c8fc475df508684cf0ffcc591c96625`). This is an external hosted
   environment/tag/execution blocker, not missing repository implementation.
+  A repeat read-only audit at 09:25 AEST returned the same repository,
+  environment and secret-surface HTTP 404s; release/workflow API queries were
+  still unavailable, no production-candidate tag was found, and the workflow
+  file remained present on public `origin/main`. The last successful release
+  observation remains the 08:38 AEST preview-only result. This is still an
+  external hosted boundary, not a W08 implementation pass.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
