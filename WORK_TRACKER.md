@@ -2752,6 +2752,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
   abort. It did not mutate the bucket or rerun service acceptance; this is
   qualification-account evidence only.
+- [x] A current-source read-only resource audit at pushed source
+  `313fb2f2a6bd6e68305a86bc55036d77c563ca8c` on 2026-09-22 passed the same
+  qualification-bucket account/region binding, all four public-access blocks,
+  `BucketOwnerEnforced` ownership, AES256 default encryption, `None`
+  versioning, seven-day `mount-rs-tests/` lifecycle, and one-day
+  incomplete-multipart abort checks. It made no AWS changes and remains
+  qualification-account evidence only; the production bucket, policy, roles,
+  and approved change set remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.

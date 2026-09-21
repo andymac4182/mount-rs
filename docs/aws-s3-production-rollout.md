@@ -319,11 +319,13 @@ closed when the bucket policy is absent or differs from that contract.
 The latest read-only qualification-bucket audit at pushed source `56ef9ab`
 passed in account `922978963556` with the expected versioning status `None`,
 alongside the existing public-access, ownership, encryption, lifecycle, and
-multipart-abort checks. It did not mutate the bucket or rerun the full service
-qualification. The latest full integrated qualification is the separate
-`56ef9ab` run recorded above. This is qualification-account evidence only;
-production resource, metadata, identity, hosted release, and deployment
-operations gates remain open.
+multipart-abort checks. A current-source audit at pushed source
+`313fb2f2a6bd6e68305a86bc55036d77c563ca8c` repeated those controls on
+2026-09-22 without mutating AWS or rerunning the full service qualification.
+The latest full integrated qualification is the separate `860492d` run
+recorded above. This is qualification-account evidence only; production
+resource, metadata, identity, hosted release, and deployment operations gates
+remain open.
 
 The live acceptance harness reads bucket versioning before it assumes the
 prefix-scoped runtime role. Hosted jobs that use a separate audit identity must
