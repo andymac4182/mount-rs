@@ -140,6 +140,12 @@ These packets reduce the W01 queue but do not close W01.1-W01.4: the complete
 parity ledger, all classified skips, cross-backend seeded evidence, live R2,
 hosted Windows/macOS and privileged native transport gates remain required.
 
+The FUSE session follow-up `1cf0350` corrects the support matrix: plain
+`RENAME2` is dispatched as a normal rename, while exchange/whiteout flag
+variants return `ENOSYS` without mutation. The README now states that boundary
+and the focused session test covers all three nonzero flag variants. The
+16-test session suite, strict Clippy, formatting and diff checks passed.
+
 Final integrated local gate after `192749e`: `cargo test --workspace
 --all-targets --all-features --locked --offline` exited 0, and the
 oracle-enabled `pnpm test` in `integrations/mount-rs-napi` exited 0 with the
