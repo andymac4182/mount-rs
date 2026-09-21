@@ -8,6 +8,18 @@ This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
 retain detailed results. A passing component test is not end-to-end acceptance.
 
+Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
+Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
+attached connection identity/peer/stream/closed state, duplicate-attach and
+ownership teardown, shared byte-range lock state, and backpressure/write-fault
+coverage. The focused Rust 9P tests, strict affected-crate checks, rebuilt
+declarations, host-enabled N-API server phases, and pinned-oracle package gate
+pass. Native accepted connections deliberately expose no Node stream because
+their Tokio stream is not transferable across the N-API boundary; `attach` is
+the supported Node Duplex seam. Production remains NO-GO pending a fresh
+revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
+native fault/race/crash evidence, and the remaining W01 gates.
+
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
 credentials held outside the repository. The run passed the complete Rust and
@@ -1914,10 +1926,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
   role are test resources, so production resource review remains open. The
-  fresh read-only resource audit at the current source also passed the
-  account/region binding, all four public-access blocks, BucketOwnerEnforced
-  ownership, AES256 encryption, seven-day lifecycle, and one-day incomplete-
-  multipart abort checks for that qualification bucket. The
+  A fresh read-only resource audit rerun on 2026-09-22 at current pushed head
+  `2f13354` also passed the account/region binding, all four public-access
+  blocks, BucketOwnerEnforced ownership, AES256 encryption, seven-day
+  lifecycle, and one-day incomplete-multipart abort checks for that
+  qualification bucket. The
   reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
   contract now expresses retained state, versioning, encryption choice,
   lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
@@ -1988,7 +2001,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `5116ded`; it therefore cannot be used as current-head release
+  current head `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
   `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
   and partial 606-file inventory; the issue is remediated on current pushed

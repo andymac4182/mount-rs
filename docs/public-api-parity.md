@@ -213,9 +213,13 @@ Current focused behavior:
   loopback TCP tests for malformed records/frames and orderly EOF handling;
   see [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L297-L452)
   and [`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L198-L445).
-- P9 exposes native clients, connection session access, and the added closed
-  promise, but not the oracle connection `stream` or server `attach(stream,
-  options)` contract.
+- P9 exposes native clients, connection session access, and the closed promise.
+  The Node facade now implements `server.attach(stream, options)` with actual
+  stream-backed connections, direct `session.handleCall`/`destroy`, ownership,
+  duplicate-attach rejection, bounded frame dispatch, and close tracking. A
+  connection accepted by the native Tokio listener intentionally reports
+  `stream: undefined`: the listener owns a Tokio stream rather than a Node
+  `Duplex`; the supported Node stream-injection boundary is `attach`.
 - NFS and S3 do not expose the oracle's session/connections members at the
   N-API object boundary. WebDAV exposes `connections` but not the oracle
   session member. S3 lacks the oracle's `drainTimeout` and

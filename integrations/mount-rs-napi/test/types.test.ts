@@ -66,6 +66,7 @@ import {
   type WebdavServer,
   type WebdavServerOptions,
 } from "@mount-rs/core/webdav"
+import type { Duplex } from "node:stream"
 import {
   decodeLkIn,
   decodeLkOut,
@@ -333,6 +334,10 @@ function checkServerAndKvSubpaths(): void {
   const connectionPeer: string | null = p9Connection.peer
   const connectionClosed: boolean = p9Connection.isClosed
   const connectionCompletion: Promise<void> = p9Connection.closed
+  const attachedP9: P9Connection = p9Server.attach({} as Duplex)
+  const attachedP9Stream: Duplex | undefined = attachedP9.stream
+  const attachedP9Call = attachedP9.session.handleCall(Buffer.alloc(0))
+  const attachedP9Destroy: Promise<void> = attachedP9.session.destroy()
   const disposal: Promise<void>[] = [
     nfsServer[Symbol.asyncDispose](),
     p9Server[Symbol.asyncDispose](),
@@ -340,6 +345,10 @@ function checkServerAndKvSubpaths(): void {
     webdavServer[Symbol.asyncDispose](),
   ]
   void connectionCompletion
+  void attachedP9
+  void attachedP9Stream
+  void attachedP9Call
+  void attachedP9Destroy
   void disposal
   const connectionClose: Promise<void> = p9Connection.close()
   const connectionWaitClosed: Promise<void> = p9Connection.waitClosed()

@@ -65,6 +65,10 @@ const bufferType = 'import type { Buffer } from "node:buffer"'
 if (/\bBuffer\b/.test(types) && !types.includes(bufferType)) {
   types = `${bufferType}\n${types}`
 }
+const duplexType = 'import type { Duplex } from "node:stream"'
+if (!types.includes(duplexType)) {
+  types = `${duplexType}\n${types}`
+}
 const disposableLib = '/// <reference lib="esnext.disposable" />'
 const nodeTypes = '/// <reference types="node" />'
 // Triple-slash directives must precede imports; repeat generation safely.
@@ -90,7 +94,27 @@ types = types.replace(
   /export declare class P9Connection \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
     if (!/\bclosed\s*:/.test(body)) body += "\n  readonly closed: Promise<void>"
+    if (!/\bstream\s*:/.test(body)) body += "\n  readonly stream: Duplex | undefined"
     return `export declare class P9Connection {${body}\n}`
+  },
+)
+types = types.replace(
+  /export declare class P9Session \{([\s\S]*?)\n\}/g,
+  (declaration, body) => {
+    if (!/\bhandleCall\(/.test(body)) {
+      body = `\n  handleCall(bytes: Uint8Array): Promise<Buffer | null>${body}`
+    }
+    if (!/\bdestroy\(/.test(body)) body = `\n  destroy(): Promise<void>${body}`
+    return `export declare class P9Session {${body}\n}`
+  },
+)
+types = types.replace(
+  /export declare class P9Server \{([\s\S]*?)\n\}/g,
+  (declaration, body) => {
+    if (!/\battach\(/.test(body)) {
+      body += '\n  attach(stream: Duplex, options?: { peer?: string; own?: boolean }): P9Connection'
+    }
+    return `export declare class P9Server {${body}\n}`
   },
 )
 const utilityTypes = 'import type { FsError, FsErrorOptions } from "./types/root.js"'

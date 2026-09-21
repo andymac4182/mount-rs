@@ -21,9 +21,9 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::constants::{P9_IOHDRSZ, P9_MIN_MSIZE};
-use crate::server::P9Server;
 #[cfg(target_os = "linux")]
 use crate::server::P9ServerOptions;
+use crate::server::{P9Server, P9ServerHooks};
 
 pub const P9_DEFAULT_MOUNT_MSIZE: u32 = 128 * 1024 + P9_IOHDRSZ;
 pub const P9_MAX_MOUNT_MSIZE: u32 = 1024 * 1024;
@@ -109,6 +109,9 @@ pub struct P9MountOptions {
     /// Reuse a previously bound server. Its accept loop is started if it is
     /// not already running, and it is closed when this mount tears down.
     pub server: Option<Arc<P9Server>>,
+    /// Hooks used only when this mount creates its own in-process server. A
+    /// supplied shared server keeps the hooks it was created with.
+    pub server_hooks: P9ServerHooks,
     pub transport: P9MountTransport,
     pub host: String,
     pub port: Option<u16>,
@@ -119,6 +122,8 @@ pub struct P9MountOptions {
     pub uname: String,
     pub aname: String,
     pub read_only: bool,
+    /// Report the driver's inode numbers where available.
+    pub use_driver_ino: bool,
     pub mount_options: Vec<String>,
     /// `Some` bounds each mount/umount command; `None` waits without a timer.
     pub unmount_timeout: Option<Duration>,
@@ -128,6 +133,7 @@ impl Default for P9MountOptions {
     fn default() -> Self {
         Self {
             server: None,
+            server_hooks: P9ServerHooks::default(),
             transport: P9MountTransport::Unix,
             host: "127.0.0.1".to_owned(),
             port: None,
@@ -138,6 +144,7 @@ impl Default for P9MountOptions {
             uname: "nobody".to_owned(),
             aname: "/".to_owned(),
             read_only: false,
+            use_driver_ino: true,
             mount_options: Vec::new(),
             unmount_timeout: Some(Duration::from_secs(10)),
         }
@@ -455,9 +462,17 @@ where
                 let server_options = P9ServerOptions {
                     msize: Some(mount_msize(options.mount_msize)),
                     read_only: options.read_only,
+                    use_driver_ino: options.use_driver_ino,
                     ..P9ServerOptions::default()
                 };
-                let server = match P9Server::bind_unix(driver, &socket, server_options).await {
+                let server = match P9Server::bind_unix_with_hooks(
+                    driver,
+                    &socket,
+                    server_options,
+                    options.server_hooks.clone(),
+                )
+                .await
+                {
                     Ok(server) => server,
                     Err(error) => {
                         cleanup_socket_directory(directory.as_deref());
@@ -484,9 +499,12 @@ where
                     port: options.port.unwrap_or(0),
                     msize: Some(mount_msize(options.mount_msize)),
                     read_only: options.read_only,
+                    use_driver_ino: options.use_driver_ino,
                     ..P9ServerOptions::default()
                 };
-                let server = P9Server::bind(driver, server_options).await?;
+                let server =
+                    P9Server::bind_with_hooks(driver, server_options, options.server_hooks.clone())
+                        .await?;
                 let port = server.local_addr()?.port();
                 (
                     Arc::new(server),
