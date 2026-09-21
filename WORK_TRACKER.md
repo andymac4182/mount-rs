@@ -1634,6 +1634,23 @@ Evidence landed without closing the remaining W01 acceptance gates:
   provider gates; it confirms the production NO-GO boundary on a terminal
   non-cancellable run.
 
+- Current published production-candidate requalification: commit `d955042b`
+  replaces the macOS-sensitive fragmented HTTP `ClientRequest` writer with an
+  explicit TCP/HTTP writer and response parser, plus a narrowly scoped
+  post-response EPIPE/reset guard. The focused regression passed 30 fail-fast
+  local repetitions and the pinned-oracle HTTP differential passed 40/40 S3
+  and WebDAV cases; `node --check`, shared Cargo formatting, and
+  `git diff --check` passed. Full qualification run
+  `35664315098` was dispatched from published head `27c96424`; ARM Node has
+  already passed HTTP parity, early rejection, and exact PGlite/restart
+  recovery, while macOS-15-intel is still building and macOS-latest has not
+  started. This active run is not yet a current-tip W04 or production pass;
+  queued, skipped, partial, or provider-failed evidence remains non-acceptance.
+  The production rollout decision remains **NO-GO** pending the full current
+  Node matrix, artifact/package provenance, deployment persistence and
+  backup/rollback, provider scope/performance, observability, runbook,
+  ownership, and release approval gates.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
