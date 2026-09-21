@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "foundationdb",
+        "cluster_file": "relative/fdb.cluster",
+        "volume_key": "<placeholder>",
+        "durable": false,
+        "lease_authority": "persisted-single-authority",
+        "authority_prefix": "not-valid-for-persisted-mode"
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "http://rustfs-policy.invalid",
+        "bucket": "mount-rs-production-w07",
+        "prefix": "volumes/w07",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": "inline-secret",
+        "durable": false
+      },
+      "chunk_size_bytes": 4194304,
+      "owner": "mount-rs-production-w07"
+    }
+  }
+}

@@ -30,7 +30,9 @@ pub use constants::{
 };
 pub use protocol::S3Response;
 pub use server::{S3BindError, S3Server, S3ServerOptions, create_s3_server};
-pub use session::{S3Request, S3RequestHead, S3Session, S3SessionOptions, S3SessionStats};
+pub use session::{
+    S3ErrorClass, S3Request, S3RequestHead, S3Session, S3SessionOptions, S3SessionStats,
+};
 pub use sigv4::{
     AuthorizationHeader, CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HEADER_AUTHORIZATION,
     HEADER_CONTENT_SHA256, HEADER_DATE, HeaderEntry, MAX_CLOCK_SKEW_MS, MAX_PRESIGNED_EXPIRES,
