@@ -356,6 +356,15 @@ fn remove_created_symlink_entry(path: &[u16], directory: bool) {
     }
 }
 
+fn debug_symlink_error(stage: &str, path: &Path, error: &io::Error) {
+    eprintln!(
+        "mount-rs windows symlink stage={stage} raw={:?} kind={:?} path_units={}",
+        error.raw_os_error(),
+        error.kind(),
+        path.as_os_str().encode_wide().count()
+    );
+}
+
 fn create_long_symlink(path: &Path, target: &str, directory: bool) -> io::Result<()> {
     let link = wide_host_path(path)?;
     let target = reparse_link_target(target)?;
@@ -398,7 +407,9 @@ fn create_long_symlink(path: &Path, target: &str, directory: bool) -> io::Result
         // SAFETY: `link` is a live NUL-terminated UTF-16 path. The null
         // security descriptor requests the default directory security.
         if unsafe { CreateDirectoryW(link.as_ptr(), std::ptr::null()) } == 0 {
-            return Err(io::Error::last_os_error());
+            let error = io::Error::last_os_error();
+            debug_symlink_error("create-directory", path, &error);
+            return Err(error);
         }
         created_directory = true;
     }
@@ -424,6 +435,7 @@ fn create_long_symlink(path: &Path, target: &str, directory: bool) -> io::Result
     };
     if handle == -1_isize as Handle {
         let error = io::Error::last_os_error();
+        debug_symlink_error("create-file", path, &error);
         if created_directory {
             remove_created_symlink_entry(&link, true);
         }
@@ -447,6 +459,7 @@ fn create_long_symlink(path: &Path, target: &str, directory: bool) -> io::Result
     } == 0
     {
         let error = io::Error::last_os_error();
+        debug_symlink_error("set-reparse-point", path, &error);
         drop(file);
         remove_created_symlink_entry(&link, directory);
         return Err(error);
@@ -482,6 +495,7 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             return Ok(());
         }
         let error = io::Error::last_os_error();
+        debug_symlink_error("create-symbolic-link", path, &error);
         if flags & SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE != 0
             && error.raw_os_error() == Some(87)
         {
