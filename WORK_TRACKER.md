@@ -20,6 +20,14 @@ the supported Node Duplex seam. Production remains NO-GO pending a fresh
 revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
 native fault/race/crash evidence, and the remaining W01 gates.
 
+Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
+shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
+connection teardown and awaited server close. The focused Rust/N-API checks
+pass, and the opt-in macOS native NFSv3 loopback mount gate passed 1/1 in
+0.09s. Production remains NO-GO pending the privileged Linux v4.1 lane, the
+full v3/v4 stateful and connection-object surface, hosted/native lifecycle
+evidence, and crash/concurrency/durability qualification.
+
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
 credentials held outside the repository. The run passed the complete Rust and
