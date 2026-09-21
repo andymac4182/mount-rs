@@ -3,9 +3,9 @@
 use crate::{
     Request,
     constants::{
-        FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET, FUSE_INTERRUPT,
-        FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION, FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL,
-        FUSE_READLINK, FUSE_RENAME2, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE,
+        FUSE_FORGET, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION, FUSE_LSEEK,
+        FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_RENAME2, FUSE_SETXATTR_EXT, FUSE_STATFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -44,7 +44,61 @@ pub struct FuseSession {
     next_handle: u64,
     pub max_request: usize,
     pub negotiated: Option<crate::init::InitReply>,
+    session_options: FuseSessionOptions,
     destroyed: bool,
+    last_error: Option<FsError>,
+}
+
+/// Construction-time controls for the mount-free FUSE dispatcher.
+///
+/// The options are owned by the Rust session so callers can qualify the
+/// protocol boundary without opening a native device. Native mount adapters
+/// may choose a subset of these values, while embedding facades can expose
+/// the complete structured policy.
+#[derive(Debug, Clone)]
+pub struct FuseSessionOptions {
+    pub max_request: usize,
+    pub use_driver_ino: bool,
+    pub init: crate::init::Preferences,
+    pub attr_timeout: std::time::Duration,
+    pub entry_timeout: std::time::Duration,
+    pub negative_timeout: std::time::Duration,
+    pub keep_cache: bool,
+    pub flush_mechanism: FuseFlushMechanism,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FuseFlushMechanism {
+    /// Synchronize durable handles, preserving the established dispatcher
+    /// contract.
+    Sync,
+    /// Return `ENOSYS` for durable-handle `FLUSH`.
+    Enosys,
+    /// Advertise `FOPEN_NOFLUSH` for durable drivers and treat `FLUSH` as a
+    /// protocol-level no-op after validating the handle.
+    Noflush,
+}
+
+impl Default for FuseSessionOptions {
+    fn default() -> Self {
+        // Keep the default advertisement aligned with the dispatcher. In
+        // particular, do not claim POSIX locks, xattrs, or other operations
+        // that still have an explicit ENOSYS session boundary.
+        let init = crate::init::Preferences {
+            flags: (1 << 0) | (1 << 3) | (1 << 5) | (1 << 12) | (1 << 13) | (1 << 14) | (1 << 22),
+            ..crate::init::Preferences::default()
+        };
+        Self {
+            max_request: 1024 * 1024,
+            use_driver_ino: true,
+            init,
+            attr_timeout: std::time::Duration::from_secs(10),
+            entry_timeout: std::time::Duration::from_secs(10),
+            negative_timeout: std::time::Duration::ZERO,
+            keep_cache: true,
+            flush_mechanism: FuseFlushMechanism::Sync,
+        }
+    }
 }
 fn u32_at(b: &[u8], offset: usize) -> Result<u32> {
     b.get(offset..offset + 4)
@@ -223,6 +277,45 @@ impl FuseSession {
         }
     }
 
+    fn write_attr_timeout(body: &mut [u8], timeout: std::time::Duration) {
+        body[..8].copy_from_slice(&timeout.as_secs().to_le_bytes());
+        body[8..12].copy_from_slice(&timeout.subsec_nanos().to_le_bytes());
+    }
+
+    fn write_entry_timeouts(
+        body: &mut [u8],
+        entry_timeout: std::time::Duration,
+        attr_timeout: std::time::Duration,
+    ) {
+        body[16..24].copy_from_slice(&entry_timeout.as_secs().to_le_bytes());
+        body[24..32].copy_from_slice(&attr_timeout.as_secs().to_le_bytes());
+        body[32..36].copy_from_slice(&entry_timeout.subsec_nanos().to_le_bytes());
+        body[36..40].copy_from_slice(&attr_timeout.subsec_nanos().to_le_bytes());
+    }
+
+    fn write_negative_timeout(body: &mut [u8], timeout: std::time::Duration) {
+        body[16..24].copy_from_slice(&timeout.as_secs().to_le_bytes());
+        body[32..36].copy_from_slice(&timeout.subsec_nanos().to_le_bytes());
+    }
+
+    fn open_flags(&self) -> u32 {
+        let mut flags = if self.session_options.keep_cache {
+            FOPEN_KEEP_CACHE
+        } else {
+            0
+        };
+        if self.session_options.flush_mechanism == FuseFlushMechanism::Noflush
+            && self.driver.capabilities().durable_writes
+            && self
+                .negotiated
+                .as_ref()
+                .is_some_and(|reply| reply.minor >= 35)
+        {
+            flags |= FOPEN_NOFLUSH;
+        }
+        flags
+    }
+
     async fn created_entry(
         &mut self,
         path: &str,
@@ -283,24 +376,55 @@ impl FuseSession {
         self.inodes.acquire(id)?;
         let mut body = vec![0; 40];
         body[..8].copy_from_slice(&id.to_le_bytes());
-        body[16..24].copy_from_slice(&10u64.to_le_bytes());
-        body[24..32].copy_from_slice(&10u64.to_le_bytes());
+        Self::write_entry_timeouts(
+            &mut body,
+            self.session_options.entry_timeout,
+            self.session_options.attr_timeout,
+        );
         body.extend(attr(id, &stats));
         Ok(body)
     }
     pub fn new(driver: Arc<dyn FsDriver>) -> Self {
+        Self::with_options(driver, FuseSessionOptions::default())
+    }
+
+    pub fn with_options(driver: Arc<dyn FsDriver>, options: FuseSessionOptions) -> Self {
         Self {
             driver,
-            inodes: InodeTable::default(),
+            inodes: InodeTable::new(options.use_driver_ino),
             handles: HashMap::new(),
             handle_nodes: HashMap::new(),
             inode_handles: HashMap::new(),
             directories: HashMap::new(),
             next_handle: 1,
-            max_request: 1024 * 1024,
+            max_request: options.max_request,
             negotiated: None,
+            session_options: options,
             destroyed: false,
+            last_error: None,
         }
+    }
+
+    /// Return the immutable policy used by this session.
+    pub fn options(&self) -> &FuseSessionOptions {
+        &self.session_options
+    }
+
+    /// Take the structured error that produced the most recent negative
+    /// reply, if any. The wire reply only carries a POSIX errno; this view
+    /// preserves the driver-owned path/syscall context for embeddings.
+    pub fn take_last_error(&mut self) -> Option<FsError> {
+        self.last_error.take()
+    }
+
+    /// Whether the session has been torn down by `DESTROY` or its owner.
+    pub fn is_destroyed(&self) -> bool {
+        self.destroyed
+    }
+
+    /// Number of live file and directory handles owned by this session.
+    pub fn open_handles(&self) -> usize {
+        self.handles.len() + self.directories.len()
     }
     /// Returns no frame for FORGET and BATCH_FORGET. Malformed FORGET bodies
     /// are ignored to match the pinned no-reply oracle; malformed
@@ -309,6 +433,7 @@ impl FuseSession {
         &mut self,
         bytes: &[u8],
     ) -> std::result::Result<Option<Vec<u8>>, crate::ProtocolError> {
+        self.last_error = None;
         let request = Request::decode(bytes, self.max_request)?;
         if request.header.opcode == FUSE_FORGET {
             // FORGET has no reply, and the pinned mountx session ignores a
@@ -343,6 +468,7 @@ impl FuseSession {
             return Ok(None);
         }
         if let Err(error) = validate_body(request.header.opcode, request.body) {
+            self.last_error = Some(error.clone());
             return Ok(Some(
                 error_reply(request.header.unique, error.code).to_vec(),
             ));
@@ -357,7 +483,10 @@ impl FuseSession {
                 reply.extend(body);
                 Ok(Some(reply))
             }
-            Err(error) => Ok(Some(error_reply(unique, error.code).to_vec())),
+            Err(error) => {
+                self.last_error = Some(error.clone());
+                Ok(Some(error_reply(unique, error.code).to_vec()))
+            }
         }
     }
     async fn dispatch(&mut self, r: Request<'_>) -> Result<Vec<u8>> {
@@ -381,18 +510,10 @@ impl FuseSession {
             if kernel.major == 7 && kernel.minor < 12 {
                 return Err(FsError::new(ErrorCode::Eproto));
             }
-            let preferences = crate::init::Preferences {
-                // Advertise only operations the dispatcher currently supports.
-                flags: (1 << 0)
-                    | (1 << 3)
-                    | (1 << 5)
-                    | (1 << 12)
-                    | (1 << 13)
-                    | (1 << 14)
-                    | (1 << 22),
-                max_write: self.max_request.saturating_sub(80).min(u32::MAX as usize) as u32,
-                ..Default::default()
-            };
+            let mut preferences = self.session_options.init.clone();
+            preferences.max_write = preferences
+                .max_write
+                .min(self.max_request.saturating_sub(80).min(u32::MAX as usize) as u32);
             return match crate::init::negotiate(kernel, &preferences) {
                 crate::init::Negotiation::UnsupportedMajor => Err(FsError::new(ErrorCode::Eproto)),
                 crate::init::Negotiation::Retry(reply) => Ok(reply.encode()),
@@ -436,12 +557,11 @@ impl FuseSession {
                     .get(&u64_at(r.body, 0)?)
                     .ok_or_else(|| FsError::new(ErrorCode::Ebadf))?;
                 if self.driver.capabilities().durable_writes {
-                    // FUSE_FLUSH is a per-open-handle close/flush point. It
-                    // is intentionally distinct from FSYNC: durable drivers
-                    // must make the handle's pending writes observable before
-                    // acknowledging it, while volatile drivers may complete
-                    // the protocol operation without backend work.
-                    handle.sync().await?;
+                    match self.session_options.flush_mechanism {
+                        FuseFlushMechanism::Sync => handle.sync().await?,
+                        FuseFlushMechanism::Enosys => return Err(FsError::enosys("flush")),
+                        FuseFlushMechanism::Noflush => {}
+                    }
                 }
                 Ok(vec![])
             }
@@ -558,7 +678,7 @@ impl FuseSession {
                     .await?
                 };
                 let mut body = vec![0; 16];
-                body[..8].copy_from_slice(&10u64.to_le_bytes());
+                Self::write_attr_timeout(&mut body, self.session_options.attr_timeout);
                 body.extend(attr(r.header.nodeid, &stats));
                 Ok(body)
             }
@@ -588,6 +708,8 @@ impl FuseSession {
                 let start = usize::try_from(u64_at(r.body, 8)?)
                     .map_err(|_| FsError::new(ErrorCode::Einval))?;
                 let budget = (u32_at(r.body, 16)? as usize).min(self.max_request);
+                let entry_timeout = self.session_options.entry_timeout;
+                let attr_timeout = self.session_options.attr_timeout;
                 let (inode, snapshot) = self
                     .directories
                     .get_mut(&fh)
@@ -623,8 +745,11 @@ impl FuseSession {
                                 if plus {
                                     let id = self.inodes.bind(&child, &stats);
                                     entry[..8].copy_from_slice(&id.to_le_bytes());
-                                    entry[16..24].copy_from_slice(&10u64.to_le_bytes());
-                                    entry[24..32].copy_from_slice(&10u64.to_le_bytes());
+                                    Self::write_entry_timeouts(
+                                        &mut entry,
+                                        entry_timeout,
+                                        attr_timeout,
+                                    );
                                     entry[40..].copy_from_slice(&attr(id, &stats));
                                     self.inodes.acquire(id)?;
                                 }
@@ -751,7 +876,7 @@ impl FuseSession {
                 self.next_handle += 1;
                 self.register_handle(id, u64_at(&body, 0)?, handle);
                 body.extend(id.to_le_bytes());
-                body.extend(2u32.to_le_bytes()); // FOPEN_KEEP_CACHE
+                body.extend(self.open_flags().to_le_bytes());
                 body.extend([0; 4]);
                 Ok(body)
             }
@@ -831,7 +956,21 @@ impl FuseSession {
             1 => {
                 let (name, _) = string(r.body)?;
                 let path = self.child(r.header.nodeid, name)?;
-                self.entry(&path).await
+                match self.entry(&path).await {
+                    Ok(body) => Ok(body),
+                    Err(error)
+                        if error.code == ErrorCode::Enoent
+                            && !self.session_options.negative_timeout.is_zero() =>
+                    {
+                        let mut body = vec![0; 128];
+                        Self::write_negative_timeout(
+                            &mut body,
+                            self.session_options.negative_timeout,
+                        );
+                        Ok(body)
+                    }
+                    Err(error) => Err(error),
+                }
             }
             3 => {
                 let handle = self.metadata_handle(
@@ -852,7 +991,7 @@ impl FuseSession {
                     .await?
                 };
                 let mut body = vec![0; 16];
-                body[..8].copy_from_slice(&10u64.to_le_bytes());
+                Self::write_attr_timeout(&mut body, self.session_options.attr_timeout);
                 body.extend(attr(r.header.nodeid, &stats));
                 Ok(body)
             }
@@ -867,7 +1006,7 @@ impl FuseSession {
                 self.register_handle(id, r.header.nodeid, handle);
                 let mut body = vec![0; 16];
                 body[..8].copy_from_slice(&id.to_le_bytes());
-                body[8..12].copy_from_slice(&2u32.to_le_bytes()); // FOPEN_KEEP_CACHE
+                body[8..12].copy_from_slice(&self.open_flags().to_le_bytes());
                 Ok(body)
             }
             15 | 16 => {
@@ -931,6 +1070,6 @@ impl FuseSession {
         for (_, handle) in self.handles.drain() {
             let _ = handle.close().await;
         }
-        self.inodes = InodeTable::default();
+        self.inodes = InodeTable::new(self.session_options.use_driver_ino);
     }
 }

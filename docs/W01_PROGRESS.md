@@ -5,7 +5,7 @@ parity**. It is intentionally separate from `WORK_TRACKER.md`: the tracker
 records milestone acceptance, while this file records the remaining work in a
 form that can be updated after every implementation or evidence run.
 
-Last refreshed: **2026-09-21** (Australia/Brisbane)
+Last refreshed: **2026-09-22** (Australia/Brisbane)
 
 ## How to read the numbers
 
@@ -41,6 +41,31 @@ percentages, weighted 25% / 20% / 20% / 25% / 10% for W01.1–W01.5. It must not
 be read as “65% of release acceptance”; W01 remains open until every required
 gate below is either passed or explicitly accepted as outside the supported
 scope.
+
+## Transport-owned W01 tracks
+
+W01 remains one production gate, while implementation and evidence are split
+into transport-owned tracks so a local pass in one transport cannot mask a
+blocker in another. Each track keeps its own focused tests and updates this
+ledger in the same commit as an implementation/evidence chunk.
+
+| Track | Scope | Current boundary | Production-ready gate |
+| --- | --- | --- | --- |
+| W01-FUSE | FUSE protocol, mount-free session, native mount, callbacks and lifecycle | Focused Rust/N-API protocol/session evidence exists; native Linux, callback events, remaining session parity and lifecycle races remain | Hosted Linux native mount/read/write/unmount, callback-event and lifecycle evidence, plus the supported macOS/FSKit decision |
+| W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Focused raw-frame evidence exists; hosted/native lifecycle remains | Hosted Linux 9P lifecycle and stream/attach/connection evidence |
+| W01-NFS | NFSv3/v4 router, sessions, handles, native mount and lifecycle | Direct routing and local lifecycle evidence exist; complete state and hosted/native qualification remain | Shared v3/v4 state, native macOS/Linux lifecycle and crash/close evidence |
+| W01-S3 | S3 protocol, session, streaming, providers and lifecycle | Local protocol and structural-driver evidence exists; live provider and complete member parity remain | Applicable API ledger, live AWS/R2, fault/restart and concurrency evidence |
+| W01-WebDAV | WebDAV protocol, locks, session, streaming and lifecycle | Local protocol/session evidence exists; provider/native lifecycle remains | Applicable API ledger, auth/lock durability and restart evidence |
+| W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
+| W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
+
+The canonical detailed FUSE ledger is
+[docs/W01_FUSE_PROGRESS.md](./W01_FUSE_PROGRESS.md). Its 2026-09-22
+session-controls chunk adds public construction options and lifecycle/error
+observability while preserving the established durable `FLUSH` sync default.
+The package tests and strict scoped Clippy pass, but native Linux FUSE,
+macOS/FSKit activation, callbacks, cancellation, concurrency, crash/restart
+and durability remain open.
 
 ## Detailed work items
 
@@ -210,6 +235,7 @@ spent waiting for a hosted job or credential approval.
 
 | Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
 | --- | --- | --- | ---: | ---: | --- |
+| 2026-09-22 | W01-FUSE | Added public Rust `FuseSessionOptions`/`FuseFlushMechanism`, configured inode identity, INIT preferences, cache/timeout policy, error readback, handle counts and destroy-state observability; the complete locked FUSE target (14 unit, 6 INIT, 6 notify/record, 11 protocol, 18 session, 3 sync-barrier tests), strict scoped Clippy, formatting and diff checks passed | — | 66% planning view | Native Linux/FSKit, callbacks, hosted platform, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-21 | Baseline | Created this ledger from the current W01 tracker and evidence | — | 61% planning view | Hosted/native/live-provider gates remain open |
 | 2026-09-21 | W01.1 / W01.4 | Added shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source`, package-level signal teardown, `Mounted.port` readback, and `Mounted[Symbol.asyncDispose]()` to the N-API auto facade; 16 N-API unit tests, affected Rust crates, strict Clippy, Linux-target transport check, build/typecheck, authorized macOS NFS lifecycle, and the opt-in child-process signal lane passed | — | 65% planning view | Automatic error/transport callbacks, shared-server handles, remaining option/session members, hosted Linux native lanes, FSKit, PGlite, and live R2 remain open |
 | 2026-09-21 | W01.2 / W01.3 | Refreshed the pinned PGlite-enabled upstream suite (4 files, 1,200 passed, 82 skipped), the bounded PGlite provider/CLI packet (Rust SDK 6/6, Node SDK 5/5, CLI 11/11 with R2 skips), and all 40 seeded trace lanes across eight local backends at the pinned oracle revision | — | 65% planning view | Root-only skip rows, live R2, hosted platforms, and native transport acceptance remain open |

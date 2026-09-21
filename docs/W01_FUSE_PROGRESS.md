@@ -1,0 +1,47 @@
+# W01-FUSE progress tracker
+
+Parent roll-up: [W01 progress ledger](./W01_PROGRESS.md)
+
+Owner: delegated W01-FUSE task `01a0c45c-4283-7473-9588-59c41cd1def0`  
+Worktree: `/Users/andrewmcclenaghan/.codex/worktrees/a0af/mount-rs`  
+Branch: `andymac4182/c/w01-fuse-main-20260922`
+
+Last refreshed: **2026-09-22** (Australia/Brisbane)
+
+Status: **In progress — production NO-GO**
+
+This tracker owns the FUSE protocol, mount-free session, native mount,
+callback, and lifecycle boundary. A focused codec or session pass does not
+close native Linux mount, hosted CI, FSKit, or root-callback acceptance.
+
+| Gate | State | Required evidence |
+| --- | --- | --- |
+| Public FUSE exports and typed/raw protocol behavior | In progress | Pinned-oracle body/whole-message differentials and generated declarations |
+| Rust-backed mount-free session | In progress | INIT, options, cache, lookup, flush, errors, handles, callbacks, and lifecycle coverage |
+| Linux native FUSE | External gate | Hosted `/dev/fuse`/`fuse3` mount, read/write, unmount, fault and callback-event result |
+| macOS/FSKit boundary | External gate | Supported/unsupported decision backed by an actual host result |
+| Errors, cancellation, concurrency, crash, restart and cleanup | Open | Deterministic and native lifecycle evidence with explicit failure classification |
+
+## Current queue
+
+- Complete the remaining applicable FUSE session, callback, and mount members.
+- Run hosted Linux native mount and transport-error event qualification.
+- Qualify cancellation, close, crash/restart, concurrency, and durability
+  behavior on every supported native runtime.
+- Keep unsupported FSKit/platform results explicit; never convert skips into
+  production passes.
+
+## Evidence ledger
+
+| Date | Chunk | Result | Remaining blocker |
+| --- | --- | --- | --- |
+| 2026-09-22 | Inherited W01 baseline | Current `origin/main` FUSE codec/session packets and existing root evidence remain available; privileged/native results are separate | Native Linux/FSKit, root callback events, remaining session parity, and lifecycle/race gates |
+| 2026-09-22 | Rust session controls | Added public `FuseSessionOptions`, configurable inode identity, INIT preferences, cache/timeout policy, explicit flush modes, lifecycle/error observability, and regression tests; focused package tests and strict Clippy remain required before publication | Native mount/callback, hosted Linux, cancellation/concurrency, crash/restart and durability evidence |
+
+## Completion rule
+
+The owning task may mark W01-FUSE production-ready only when every applicable
+gate above is PASS or explicitly accepted outside supported scope, the exact
+commands and host prerequisites are recorded here, and this file is committed
+with the implementation/test chunk. Until then the decision remains
+**NO-GO**.

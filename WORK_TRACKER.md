@@ -142,6 +142,14 @@ boundaries. The release N-API build, oracle-enabled package suite and focused
 locked `mount-rs-fuse` tests passed. This is mount-free wire evidence only;
 native FUSE lock/session semantics remain an explicit boundary.
 
+The delegated W01-FUSE owner now has a canonical working ledger in
+`docs/W01_FUSE_PROGRESS.md`, with the parent roll-up in `docs/W01_PROGRESS.md`.
+The first refreshed-tree Rust session-controls chunk adds public construction
+options and lifecycle/error observability while preserving the established
+durable `FLUSH` sync default. Its focused package evidence is mount-free only;
+native Linux FUSE, callback events, hosted platform gates, FSKit activation,
+cancellation, concurrency, crash/restart and durability remain open.
+
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
 - `ccaf8f5` + `4cdeb58` correct the Windows SQLite WAL shared-memory access mask
