@@ -90,14 +90,33 @@ async function responseBody(response) {
   return Buffer.from(response.body)
 }
 
+function normalizeXmlBody(body, headers) {
+  if (!Buffer.isBuffer(body) || !headers["content-type"]?.toLowerCase().includes("xml")) {
+    return body
+  }
+  return Buffer.from(
+    body
+      .toString("utf8")
+      .replace(
+        /\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT\b/g,
+        "<dynamic-http-date>",
+      )
+      .replace(
+        /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g,
+        "<dynamic-iso-date>",
+      ),
+  )
+}
+
 async function staticResponse(response, headers) {
+  const body = await responseBody(response)
   return {
     status: response.status,
     contentType: headers["content-type"],
     contentLength: headers["content-length"],
     allow: headers.allow,
     dav: headers.dav,
-    body: await responseBody(response),
+    body: normalizeXmlBody(body, headers),
   }
 }
 
@@ -143,6 +162,52 @@ try {
   const head = await pair("HEAD", "HEAD", "/member-parity.txt")
   assert.equal(await responseBody(head.nativeResponse), null, "native HEAD body")
   assert.equal(await responseBody(head.oracleResponse), null, "oracle HEAD body")
+
+  await pair("MKCOL", "MKCOL", "/method-parity")
+  await pair(
+    "method PUT",
+    "PUT",
+    "/method-parity/source.txt",
+    [],
+    Buffer.from("method differential"),
+  )
+  await pair(
+    "PROPFIND",
+    "PROPFIND",
+    "/method-parity",
+    [["depth", "1"]],
+    Buffer.from('<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>'),
+  )
+  await pair(
+    "PROPPATCH",
+    "PROPPATCH",
+    "/method-parity/source.txt",
+    [],
+    Buffer.from(
+      '<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop>' +
+        "<D:getlastmodified>2026-09-21T00:00:00.000Z</D:getlastmodified>" +
+        "</D:prop></D:set></D:propertyupdate>",
+    ),
+  )
+  await pair(
+    "COPY",
+    "COPY",
+    "/method-parity/source.txt",
+    [["destination", "/method-parity/copy.txt"]],
+  )
+  const copied = await pair("COPY destination", "GET", "/method-parity/copy.txt")
+  assert.deepEqual(await responseBody(copied.nativeResponse), Buffer.from("method differential"))
+  await pair(
+    "MOVE",
+    "MOVE",
+    "/method-parity/copy.txt",
+    [["destination", "/method-parity/moved.txt"]],
+  )
+  const moved = await pair("MOVE destination", "GET", "/method-parity/moved.txt")
+  assert.deepEqual(await responseBody(moved.nativeResponse), Buffer.from("method differential"))
+  await pair("DELETE", "DELETE", "/method-parity/moved.txt")
+  const deleted = await pair("DELETE destination", "GET", "/method-parity/moved.txt")
+  assert.equal(deleted.nativeResponse.status, 404)
 
   const lockBody = Buffer.from(
     '<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope>' +
