@@ -259,6 +259,57 @@ async fn observability_records_success_and_bounded_http_errors() {
     server.close().await.expect("server close");
 }
 
+#[cfg(feature = "observability")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn observability_records_request_timeout_as_http_error() {
+    let write_started = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicUsize::new(0));
+    let close_notified = Arc::new(Notify::new());
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new(
+                "memory",
+                Arc::new(BlockingWriteFs {
+                    write_started,
+                    closed: Arc::clone(&closed),
+                    close_notified,
+                }),
+                MEMORY_TOKEN,
+            )
+            .expect("drive config"),
+        )
+        .expect("drive registration");
+    let telemetry = Telemetry::new(TelemetryConfig::enabled("mount-rs-http-timeout-test"));
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            request_timeout: Duration::from_millis(50),
+            ..HttpServerOptions::default()
+        }
+        .with_telemetry(telemetry.clone()),
+    )
+    .await
+    .expect("HTTP server");
+
+    let response = reqwest::Client::new()
+        .put(format!("{}/v1/drives/memory/fs/slow", server.url()))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .body("payload")
+        .send()
+        .await
+        .expect("timed-out PUT response");
+    assert_eq!(response.status(), reqwest::StatusCode::REQUEST_TIMEOUT);
+
+    let snapshot = telemetry.snapshot();
+    assert_eq!(snapshot.operations, 1);
+    assert_eq!(snapshot.successes, 0);
+    assert_eq!(snapshot.errors, 1);
+
+    server.close().await.expect("server close");
+    assert_eq!(closed.load(Ordering::Acquire), 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_and_readiness_are_unauthenticated_and_bounded() {
     let server = test_server().await;
