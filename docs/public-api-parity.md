@@ -203,11 +203,13 @@ defines that shared shape. The direct `./9p` facade additionally exposes
 `p9MountOptions`, `mount9p`, `live9pMounts`, and `unmountAll9p`. The supported
 9P bag covers transport, host/port/path, scalar server policy (including
 remote admission, socket mode/shared-directory policy, frame/in-flight bounds,
-negotiated `msize`, inode/read-only/ownership/debug policy, and lock-table
-injection), access/cache/uname/aname, mount msize, mount options, unmount
-timeout, transport-error callback, and configured shared-server injection. It
-does not claim the oracle's signals, direct session `onError`/`onAssertion`
-callback fields, or remaining mount controls. The
+negotiated `msize`, inode/read-only/ownership/debug policy, lock-table
+injection, and direct session `onError`/`onAssertion` callbacks), access/cache/
+uname/aname, mount msize, mount options, unmount timeout, transport-error
+callback, and configured shared-server injection. The direct session callbacks
+apply when the mount creates its own listener; an injected shared server retains
+its configured hooks. It does not claim the oracle's signals or remaining mount
+controls. The
 callback is retained by the `Mounted` lifecycle and is wired to the selected
 native FUSE, 9P, or NFS transport hook; a hosted native fault event and a
 hosted N-API native-mount run are still required before this boundary can be
@@ -271,9 +273,9 @@ Current focused behavior:
   also accepts a configured `P9Server` and adopts its already-bound transport,
   policy, lock table, callbacks, and client set rather than creating a second
   listener. Mount-created listeners now receive the scalar server-policy
-  fields and lock table from the same option bag. This is not full oracle mount
-  parity: signals, direct session `onError`/`onAssertion` callback fields, and
-  the remaining mount controls are explicitly unsupported in this packet, and
+  fields, lock table, and direct session `onError`/`onAssertion` callbacks from
+  the same option bag. This is not full oracle mount parity: signals and the
+  remaining mount controls are explicitly unsupported in this packet, and
   hosted N-API native mount lifecycle evidence remains unverified.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
