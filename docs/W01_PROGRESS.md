@@ -88,6 +88,12 @@ harness checks that all eight entries are visible through the mounted root.
 The host harness compiles and Linux-target strict Clippy passes, but only the
 hosted `native-fuse` execution can qualify this as native runtime evidence;
 W01 remains NO-GO until that result and the other lifecycle gates are green.
+The same ignored Linux harness now includes a driver that panics only when a
+mounted file is read. It requires the kernel read to fail, waits for the
+session to close, asserts exactly one owned `Task` transport callback, and
+completes bounded unmount and mountpoint cleanup. Local focused tests and
+Linux-target strict Clippy pass; hosted execution is still required for native
+callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,

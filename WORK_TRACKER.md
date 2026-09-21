@@ -278,6 +278,12 @@ harness checks that all eight entries are visible through the mounted root.
 The host harness compiles and Linux-target strict Clippy passes, but only the
 hosted `native-fuse` execution can qualify this as native runtime evidence;
 W01 remains NO-GO until that result and the other lifecycle gates are green.
+The same ignored Linux harness now includes a driver that panics only when a
+mounted file is read. It requires the kernel read to fail, waits for the
+session to close, asserts exactly one owned `Task` transport callback, and
+completes bounded unmount and mountpoint cleanup. Local focused tests and
+Linux-target strict Clippy pass; hosted execution is still required for native
+callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
