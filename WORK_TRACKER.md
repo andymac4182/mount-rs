@@ -1539,6 +1539,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   repository asset-integrity slice only; tag publication, downloaded-release
   inspection, signing/attestation, target-platform parity, canary, rollback
   and approval remain W08-P09 gates.
+- [x] W08.16 **Linux x86_64 and macOS arm64 target-package matrix:**
+  `.github/workflows/w08-release-targets.yml` builds/tests the CLI on
+  `ubuntu-latest` (`x86_64-unknown-linux-gnu`) and `macos-14`
+  (`aarch64-apple-darwin`), generates/verifies each manifest and
+  288-component SBOM, creates three-entry checksums, runs direct/extracted
+  version checks, uploads each four-file asset set and verifies each set after
+  download. Hosted run `35617415427`, source `b0ca8a9`, passed build jobs
+  `106391572292` and `106391572540` plus downloaded-asset jobs
+  `106393402528` and `106393402680`. This closes target-package and hosted
+  artifact-boundary implementation evidence only; tag publication,
+  signing/attestation, release-registry acceptance, canary, rollback and
+  approval remain W08-P09 gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1640,11 +1652,12 @@ reproducible in a production-like environment.
   non-cancelling hosted job `106372777281` from run `35611883547`, source
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
-  not create cryptographic signing/attestation evidence or run a real tag
-  release, and W08.15's hosted three-asset checksum pass does not close the
-  downloaded-release, canary, rollback or approval gates. *(Release
-  implementation + hosted; registry, signing/attestation, deployment
-  controller and approvers are external.)*
+  include W08.15's three-asset checksum pass and W08.16's Linux/macOS
+  target/download matrix, but they do not create cryptographic
+  signing/attestation evidence or run a real tag release, and do not close
+  the canary, rollback or approval gates. *(Release implementation + hosted;
+  registry, signing/attestation, deployment controller and approvers are
+  external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
