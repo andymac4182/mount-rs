@@ -1007,6 +1007,14 @@ request token/ownership checks remain authoritative. The injectable `now`,
 `onAssertion`, and live `DavLockTable` remain explicit outside-scope controls.
 Hosted/native lifecycle, provider, restart/durability, and broader concurrency
 remain open rather than being silently accepted.
+At the exact published tip `5b9af323f1e6bf03725842f1b696d1ff02028fb9`, read-only
+status showed [CI run 35666922957](https://github.com/andymac4182/mount-rs/actions/runs/35666922957)
+and [W08 release targets run 35666922962](https://github.com/andymac4182/mount-rs/actions/runs/35666922962)
+pending, with [W08 release policy run 35666922862](https://github.com/andymac4182/mount-rs/actions/runs/35666922862),
+[Fault injection run 35666922905](https://github.com/andymac4182/mount-rs/actions/runs/35666922905),
+[Live Cloudflare R2 run 35666923030](https://github.com/andymac4182/mount-rs/actions/runs/35666923030),
+and [W04 production policy run 35666922969](https://github.com/andymac4182/mount-rs/actions/runs/35666922969)
+queued; no hosted WebDAV PASS is claimable from this tip.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run
