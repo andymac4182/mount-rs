@@ -35,7 +35,7 @@ client objects with peer/shared-session views plus abort-safe close/wait state.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch. The opt-in macOS native NFSv3
-loopback mount gate passed 1/1 in 0.14s on the exact published tree. Production
+loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
 remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
 stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
 and crash/durable-restart qualification.
