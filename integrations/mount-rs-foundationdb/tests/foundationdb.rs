@@ -444,6 +444,12 @@ fn authority_publication_policy_matches_the_production_contract() {
         )
         .is_err()
     );
+    println!(
+        "FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS lease_ttl_ms={} publication_interval_ms={} max_forward_jump_ms={}",
+        policy.lease_ttl.as_millis(),
+        policy.publication_interval.as_millis(),
+        policy.max_forward_jump.as_millis(),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
