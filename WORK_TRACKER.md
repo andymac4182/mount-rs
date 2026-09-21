@@ -81,10 +81,13 @@ refused-`CREATE_SESSION` replay followed by a next-sequence retry, and
 `NFS4ERR_GRACE` gating of `OPEN`/`LOCK` before `RECLAIM_COMPLETE`. Rust
 `Nfs4Clock` now drives automatic and explicit lease expiry sweeps with a
 rootless wire test covering both paths; N-API clock injection and dynamic
-callback ID-map parity remain explicit gaps. Rust `NfsSessionHooks` and N-API
-`NfsServerOptions.onError` now report decoded request failures with panic
-isolation; the malformed-v4 callback test, complete NFS target, release
-addon/typecheck, live N-API harness, and strict affected Clippy pass.
+callback ID-map parity now also pass through synchronous, panic/invalid-result-
+safe N-API bridges, with a live v4.1 owner/clock sequence. Rust
+`NfsSessionHooks` and N-API `NfsServerOptions.onError` now report decoded
+request failures with panic isolation; the malformed-v4 callback test,
+complete NFS target, release addon/typecheck, live N-API harness, and strict
+affected Clippy pass. Native Linux/hosted lifecycle and crash/durability gates
+remain open.
 Deterministic seeded identities are covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -818,10 +821,13 @@ transport tracker together.
 | W01-WebDAV | [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 
 Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
-`listen()`/`close()` lifecycle transitions and guards the accept loop against
-an immediate-close shutdown lost wakeup; the N-API WebDAV wrapper serializes
-its closed-state check with the transport lifecycle, and the focused wrapper
-race test passes 40 alternating real-loopback iterations. The opt-in
+`listen()`/`close()` lifecycle transitions, guards the accept loop against an
+immediate-close shutdown lost wakeup, and retains a timed-out drain state so a
+second `close()` cannot report false success or rebind while a stalled
+connection remains active. The focused Rust target passes 18/18 with strict
+Clippy and formatting. The N-API WebDAV wrapper serializes its closed-state
+check with the transport lifecycle, and the focused wrapper race test passes
+40 alternating real-loopback iterations. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
@@ -1243,27 +1249,30 @@ Evidence landed without closing the remaining W01 acceptance gates:
   establishment with `NFS4ERR_GRACE` until `RECLAIM_COMPLETE`; the affected
   rootless v4.1 round-trip and same-owner/cross-client share tests pass.
 - [x] The NFSv4 owner translation boundary now supports deterministic static
-  Rust/N-API maps with domain-qualified user/group names, numeric fallback, and
-  `NFS4ERR_BADOWNER` rejection for other domains; the full locked NFS target,
-  release addon/typecheck, live N-API server integration, and strict affected
-  Clippy pass. Callback-based maps and N-API clock injection remain explicit
-  parity gaps; deterministic seeded identities are covered by the rootless wire
-  test.
+  Rust/N-API maps plus synchronous panic-isolated Rust/N-API `nameOf`/`idOf`
+  callbacks with domain-qualified user/group names, numeric fallback, and
+  `NFS4ERR_BADOWNER` rejection for other domains. The live N-API v4.1 sequence
+  exercises owner `GETATTR` and reverse owner `SETATTR` translation; the
+  complete locked NFS target (38 unit, rootless wire 1, transport concurrency
+  1, transport errors 4, v4 barrier 1, v4 wire 6), release addon/typecheck,
+  live server integration, pinned codec differential, and strict affected
+  Clippy pass. Deterministic seeded identities are covered by the rootless
+  wire test.
 - [x] The NFSv4 lease packet adds deterministic Rust `Nfs4Clock` control,
   automatic expiry before COMPOUND dispatch, explicit `sweep_expired`, and
   release of expired sessions, locks, open states, and pinned backend handles;
-  the v4 wire test covers automatic and explicit expiry. N-API clock injection,
-  callback maps, native Linux/hosted lifecycle, and crash/durability gates
-  remain open.
+  the v4 wire test covers automatic and explicit expiry. N-API `now` bridges
+  JavaScript millisecond callbacks onto a monotonic Rust clock and are covered
+  by the live v4.1 sequence; native Linux/hosted lifecycle and crash/durability
+  gates remain open.
 - [x] NFS request-level error reporting now follows the upstream callback
   boundary: Rust `NfsSessionHooks` and N-API `NfsServerOptions.onError` report
   status failures without a call and decoded XDR/dispatch failures with the
   `NfsRpcCall`, while callback panics are isolated. The focused Rust callback
-  test, complete NFS target (37 unit, rootless wire 1, transport concurrency 1,
+  test, complete NFS target (38 unit, rootless wire 1, transport concurrency 1,
   transport errors 4, v4 barrier 1, v4 wire 6), release addon/typecheck, live
-  N-API harness, and strict affected Clippy pass. Dynamic callback maps, N-API
-  clock injection, native Linux/hosted lifecycle, and crash/durability remain
-  open.
+  N-API harness, and strict affected Clippy pass. Native Linux/hosted lifecycle
+  and crash/durability remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -4036,7 +4045,7 @@ cross-drive isolation.
 | `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
 | `2026-09-22 FUSE forced-unmount deadline packet` (published as `987c593bc08adfb161a55a7a9eee27ff82606310`) | Share the forced `umount`/lazy-detach deadline with final session-task draining so bounded teardown does not add a third full timeout | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35648821996` and Fault injection run `35648821873` are pending, while the Linux-gated timing test and hosted `/dev/fuse` forced-unmount and broader lifecycle gates remain open |
 | `2026-09-22 FUSE active-state packet` (published as `8ddf48febaedbd78dc22d889e8f3c822a4e6ad45`) | Publish `active == false` at the start of teardown and restore it only for a retryable helper failure that leaves the kernel mount live | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35649715601` is pending and Fault injection run `35649715727` is queued, so the Linux-gated runtime regression and hosted native close-race/callback, crash/restart and durability gates remain open |
-| `2026-09-22 FUSE forced-teardown callback packet` | Report a forced graceful-unmount timeout once through the owned `Task` transport-error hook, preserving callback-panic isolation and existing terminal-state semantics | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; the Linux-gated callback assertion compiles but hosted forced-unmount/fault, crash/restart and durability execution remain open |
+| `2026-09-22 FUSE forced-teardown callback packet` (published as `0d06abb10899f307ce83cd5fa198bab9c5f156a9`) | Report a forced graceful-unmount timeout once through the owned `Task` transport-error hook, preserving callback-panic isolation and existing terminal-state semantics | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI workflow-dispatch run `35650347479` is queued, push CI run `35650323951` was cancelled, and Fault injection run `35650324040` is in progress, so the Linux-gated callback assertion and hosted forced-unmount/fault, crash/restart and durability execution remain open |
 | `2026-09-22 FUSE native mount-object packet` (published as `4fd3e25e`) | Restore root N-API `Mounted[Symbol.asyncDispose]()` and record the supported-scope decision for transport-specific FUSE `session`, device `fd`, and invalidation members | Runtime/type coverage and the source audit are local PASS; final remote verification is `HEAD=origin/main=4fd3e25e`; exact-SHA CI run `35646646162` is pending and Fault injection run `35646646113` is in progress, so hosted Linux mount/callback/lifecycle evidence remains open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |

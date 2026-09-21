@@ -47,19 +47,41 @@ pub const EXCLUSIVE_CREATE_WINDOW: Duration = Duration::from_secs(120);
 const S_ISGID: u32 = 0o2000;
 const S_IXGRP: u32 = 0o0010;
 
-/// A deterministic NFSv4 owner-name translation table.
+/// A synchronous NFSv4 owner-name callback.
+pub type Nfs4NameCallback = Arc<dyn Fn(u32, bool) -> Option<String> + Send + Sync + 'static>;
+
+/// A synchronous NFSv4 owner-id callback.
+pub type Nfs4IdCallback = Arc<dyn Fn(&str, bool) -> Option<u32> + Send + Sync + 'static>;
+
+/// An NFSv4 owner-name translation table.
 ///
 /// RFC 8881 carries owners as strings rather than numeric uids/gids.  The
-/// default wire representation remains the numeric form; this table lets an
-/// embedding server opt into stable local names without making the transport
-/// depend on a platform user database or an asynchronous callback.
-#[derive(Debug, Clone, Default)]
+/// default wire representation remains the numeric form; this map lets an
+/// embedding server opt into stable local names. The callback forms mirror
+/// the upstream synchronous `nameOf`/`idOf` contract and are invoked only
+/// while translating one request's attributes.
+#[derive(Clone, Default)]
 pub struct Nfs4IdMap {
     domain: Option<String>,
     users: HashMap<String, u32>,
     groups: HashMap<String, u32>,
     users_by_id: HashMap<u32, String>,
     groups_by_id: HashMap<u32, String>,
+    name_callback: Option<Nfs4NameCallback>,
+    id_callback: Option<Nfs4IdCallback>,
+}
+
+impl fmt::Debug for Nfs4IdMap {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Nfs4IdMap")
+            .field("domain", &self.domain)
+            .field("users", &self.users)
+            .field("groups", &self.groups)
+            .field("name_callback", &self.name_callback.is_some())
+            .field("id_callback", &self.id_callback.is_some())
+            .finish()
+    }
 }
 
 impl Nfs4IdMap {
@@ -104,6 +126,33 @@ impl Nfs4IdMap {
         self
     }
 
+    /// Install the synchronous uid/gid-to-owner callback.
+    ///
+    /// The `group` flag distinguishes `owner_group` from `owner`. Returning
+    /// `None` uses the numeric wire form. A callback takes precedence over the
+    /// static reverse table when both are configured.
+    pub fn with_name_of<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(u32, bool) -> Option<String> + Send + Sync + 'static,
+    {
+        self.name_callback = Some(Arc::new(callback));
+        self
+    }
+
+    /// Install the synchronous owner-to-uid/gid callback.
+    ///
+    /// The `group` flag distinguishes an `owner_group` from an `owner`.
+    /// Returning `None` produces `NFS4ERR_BADOWNER` for a non-numeric owner.
+    /// A callback takes precedence over the static forward table when both are
+    /// configured.
+    pub fn with_id_of<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&str, bool) -> Option<u32> + Send + Sync + 'static,
+    {
+        self.id_callback = Some(Arc::new(callback));
+        self
+    }
+
     /// The configured DNS domain, if any.
     pub fn domain(&self) -> Option<&str> {
         self.domain.as_deref()
@@ -126,14 +175,37 @@ impl Nfs4IdMap {
             self.users.get(name).copied()
         }
     }
+
+    /// Resolve a uid/gid using the configured callback or static table.
+    /// Callback panics are treated as an unavailable translation so a mapping
+    /// failure cannot take down the NFS request task.
+    pub(crate) fn resolve_name(&self, id: u32, group: bool) -> Option<String> {
+        if let Some(callback) = &self.name_callback {
+            return catch_unwind(AssertUnwindSafe(|| callback(id, group)))
+                .ok()
+                .flatten();
+        }
+        self.name_of(id, group).map(str::to_owned)
+    }
+
+    /// Resolve an owner name using the configured callback or static table.
+    /// Callback panics are treated as an unavailable translation.
+    pub(crate) fn resolve_id(&self, name: &str, group: bool) -> Option<u32> {
+        if let Some(callback) = &self.id_callback {
+            return catch_unwind(AssertUnwindSafe(|| callback(name, group)))
+                .ok()
+                .flatten();
+        }
+        self.id_of(name, group)
+    }
 }
 
 /// Clock used by the NFSv4 lease table.
 ///
 /// The default uses the process monotonic clock. Rust callers can inject a
 /// deterministic clock for lease and expiry tests without making the wire
-/// session depend on wall-clock time; the N-API boundary always uses the
-/// default monotonic clock.
+/// session depend on wall-clock time. The N-API adapter retains this default
+/// unless its synchronous JavaScript `now` callback is configured.
 #[derive(Clone)]
 pub struct Nfs4Clock(Arc<dyn Fn() -> Instant + Send + Sync + 'static>);
 
@@ -196,7 +268,7 @@ pub struct Nfs4StateOptions {
     pub max_locks_per_file: usize,
     /// Require RECLAIM_COMPLETE before granting a new byte-range lock.
     pub require_reclaim_complete: bool,
-    /// Optional static uid/gid to NFSv4 owner-name translation.
+    /// Optional static or callback-backed uid/gid to NFSv4 owner translation.
     pub idmap: Option<Nfs4IdMap>,
 }
 

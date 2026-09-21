@@ -26,7 +26,8 @@ semantics.
   session/member parity; the local live-client object/close boundary, bounded
   `maxHandles`/NFSv4 pinning policy, bounded v4 channel/state knobs, and
   deterministic static NFSv4 owner map, lease expiry enforcement, and
-  request-level `onError` callback now pass.
+  request-level `onError` callback now pass. Dynamic owner callbacks and the
+  N-API `now` bridge now also pass their Rust and live N-API evidence.
 - Exercise the full v3/v4 behavior matrix, including stateful v4 operations,
   malformed records, reconnects, and version negotiation.
 - Keep the macOS v3 native result current; execute the separate privileged
@@ -52,11 +53,12 @@ semantics.
 | 2026-09-22 | NFSv4 seeded identity parity | `nfs4.seed` now folds a configured uint32 into the client-id high half and session-id prefix; the rootless v4 wire test asserts both identities and N-API parsing/type coverage passes | N-API clock injection, callback-based maps, session `onError`, native Linux v4.1, hosted lifecycle, and crash/durability remain open |
 | 2026-09-22 | NFSv4 lease expiry enforcement | `Nfs4Clock` enables deterministic Rust monotonic-time tests; expired clients are swept automatically before COMPOUND dispatch or explicitly through `Nfs4Session::sweep_expired`, releasing sessions, locks, open states, and pinned backend handles; the v4 wire test covers both paths and passes 6/6 | N-API clock injection, callback-based maps, session `onError`, native Linux v4.1, hosted lifecycle, and crash/durability remain open |
 | 2026-09-22 | NFS request error callback parity | Rust `NfsSessionHooks` and N-API `NfsServerOptions.onError` now report ordinary status failures and decoded XDR/dispatch failures; decoded calls, panic isolation, generated typing, and live N-API delivery are covered; complete NFS target passes 37 unit, rootless wire 1, transport concurrency 1, transport errors 4, v4 barrier 1, and v4 wire 6, with release build/typecheck and live server integration green | Dynamic ID-map callbacks, N-API clock injection, native Linux v4.1, hosted lifecycle, and crash/durability remain external gates |
+| 2026-09-22 | NFSv4 dynamic owner and clock callbacks | Rust `Nfs4IdMap` now supports panic-isolated synchronous name/id callbacks, and the N-API `nfs4.idmap.nameOf`/`idOf` plus `nfs4.now` callbacks are retained and released with the server; a live N-API v4.1 `EXCHANGE_ID`/`CREATE_SESSION`/`GETATTR`/`SETATTR` sequence observed owner and group callback arguments, translated names, reverse translations, and injected clock calls. The complete locked NFS target passes 38 unit, rootless wire 1, transport concurrency 1, transport errors 4, v4 barrier 1, and v4 wire 6; release build, generated typecheck, live server integration, pinned NFS codec differential, and strict affected Clippy pass | Full upstream state/member matrix, native Linux v4.1, hosted lifecycle, and cross-process crash/cancellation/concurrency/durability remain external gates |
 
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
-  37 unit tests, rootless wire 1, transport concurrency 1, transport errors 4,
+  38 unit tests, rootless wire 1, transport concurrency 1, transport errors 4,
   v4 commit barrier 1, and v4 wire 6; the native mount target remains 1
   explicitly ignored test. The reconnect and pipelining rows are rootless
   userspace evidence, not native or hosted-client acceptance.
@@ -65,9 +67,11 @@ semantics.
   generated declarations rebuilt.
 - `(cd integrations/mount-rs-napi && node test/typecheck.mjs)` — PASS.
 - `(cd integrations/mount-rs-napi && node test/servers.mjs)` — PASS: live NFS
-  v3/v4 routing, shared handle snapshots, active connection count, live client
-  identity/peer/session views, connection close/wait, malformed record
-  reporting, request-level NFS `onError` delivery, and destroyed-state cleanup.
+  v3/v4 routing, callback-backed v4.1 `EXCHANGE_ID`/`CREATE_SESSION`, owner
+  `GETATTR`/`SETATTR`, injected clock calls, shared handle snapshots, active
+  connection count, live client identity/peer/session views, connection
+  close/wait, malformed record reporting, request-level NFS `onError` delivery,
+  and destroyed-state cleanup.
 - `(cd integrations/mount-rs-napi && node test/nfs-codec.mjs)` — PASS for the
   root/`./nfs` export identity checks and the complete pinned byte differential
   against `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, including

@@ -10,9 +10,10 @@ use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::sync_channel;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use mount_rs_9p::{
@@ -34,11 +35,11 @@ use mount_rs_fuse::{
 };
 use mount_rs_nfs::{
     FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
-    Nfs3Session as TransportNfsSession, Nfs4IdMap as TransportNfs4IdMap,
-    Nfs4Session as TransportNfs4Session, NfsConnection as TransportNfsConnection,
-    NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
-    NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
-    NfsSessionError as TransportNfsSessionError,
+    Nfs3Session as TransportNfsSession, Nfs4Clock as TransportNfs4Clock,
+    Nfs4IdMap as TransportNfs4IdMap, Nfs4Session as TransportNfs4Session,
+    NfsConnection as TransportNfsConnection, NfsRequestContext as TransportNfsRequestContext,
+    NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
+    NfsServerOptions as TransportNfsServerOptions, NfsSessionError as TransportNfsSessionError,
     NfsSessionErrorHook as TransportNfsSessionErrorHook, NfsTransportError as TransportNfsError,
     NfsTransportErrorHook as TransportNfsErrorHook, RpcCall as TransportNfsRpcCall,
 };
@@ -68,7 +69,7 @@ use napi::bindgen_prelude::{
 };
 use napi::futures_core::Stream as FuturesStream;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
-use napi::{Error, Status, sys};
+use napi::{Error, JsValue, Status, ValueType, sys};
 use napi_derive::napi;
 
 use super::nfs_codec::{NfsRpcCall, from_call as from_nfs_call};
@@ -407,6 +408,363 @@ impl NfsErrorCallback {
 impl Drop for NfsErrorCallback {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+pub(crate) type JsNfsIdMapNameCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+pub(crate) type JsNfsIdMapIdCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+pub(crate) type JsNfsClockCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+
+type NfsIdMapNameCall = FnArgs<(f64, bool)>;
+type NfsIdMapNameTsfn =
+    ThreadsafeFunction<NfsIdMapNameEvent, Unknown<'static>, NfsIdMapNameCall, Status, false, false>;
+type NfsIdMapIdCall = FnArgs<(String, bool)>;
+type NfsIdMapIdTsfn =
+    ThreadsafeFunction<NfsIdMapIdEvent, Unknown<'static>, NfsIdMapIdCall, Status, false, false>;
+type NfsClockTsfn = ThreadsafeFunction<(), Unknown<'static>, (), Status, false, false>;
+
+#[derive(Clone)]
+struct NfsIdMapNameEvent {
+    id: f64,
+    group: bool,
+}
+
+#[derive(Clone)]
+struct NfsIdMapIdEvent {
+    name: String,
+    group: bool,
+}
+
+fn parse_nfs_name(value: Unknown<'static>) -> Option<String> {
+    if value.get_type().ok()? != ValueType::String {
+        return None;
+    }
+    // SAFETY: the value type was checked above and the conversion copies it.
+    unsafe { String::from_napi_value(value.value().env, value.raw()) }.ok()
+}
+
+fn parse_nfs_id(value: Unknown<'static>) -> Option<u32> {
+    if value.get_type().ok()? != ValueType::Number {
+        return None;
+    }
+    // SAFETY: the value type was checked above.
+    let value = unsafe { f64::from_napi_value(value.value().env, value.raw()) }.ok()?;
+    if !value.is_finite() || value.fract() != 0.0 || !(0.0..=u32::MAX as f64).contains(&value) {
+        return None;
+    }
+    Some(value as u32)
+}
+
+fn parse_nfs_clock(value: Unknown<'static>) -> Option<f64> {
+    if value.get_type().ok()? != ValueType::Number {
+        return None;
+    }
+    // SAFETY: the value type was checked above.
+    let value = unsafe { f64::from_napi_value(value.value().env, value.raw()) }.ok()?;
+    value.is_finite().then_some(value)
+}
+
+pub(crate) struct NfsIdMapNameCallback {
+    callback: Mutex<Option<Arc<NfsIdMapNameTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl NfsIdMapNameCallback {
+    fn new(function: JsNfsIdMapNameCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<NfsIdMapNameEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| Ok(FnArgs::from((context.value.id, context.value.group))))?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn call(&self, id: u32, group: bool) -> Option<String> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        }?;
+        let (sender, receiver) = sync_channel(1);
+        let status = callback.call_with_return_value(
+            NfsIdMapNameEvent {
+                id: id as f64,
+                group,
+            },
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |result, _env| {
+                let _ = sender.send(result.ok().and_then(parse_nfs_name));
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            return None;
+        }
+        receiver.recv().ok().flatten()
+    }
+
+    fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for NfsIdMapNameCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub(crate) struct NfsIdMapIdCallback {
+    callback: Mutex<Option<Arc<NfsIdMapIdTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl NfsIdMapIdCallback {
+    fn new(function: JsNfsIdMapIdCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<NfsIdMapIdEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| {
+                Ok(FnArgs::from((context.value.name, context.value.group)))
+            })?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn call(&self, name: &str, group: bool) -> Option<u32> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        }?;
+        let (sender, receiver) = sync_channel(1);
+        let status = callback.call_with_return_value(
+            NfsIdMapIdEvent {
+                name: name.to_owned(),
+                group,
+            },
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |result, _env| {
+                let _ = sender.send(result.ok().and_then(parse_nfs_id));
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            return None;
+        }
+        receiver.recv().ok().flatten()
+    }
+
+    fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for NfsIdMapIdCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub(crate) struct NfsClockCallback {
+    callback: Mutex<Option<Arc<NfsClockTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl NfsClockCallback {
+    fn new(function: JsNfsClockCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<()>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|_| Ok(()))?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn call(&self) -> Option<f64> {
+        if self.closed.load(Ordering::Acquire) {
+            return None;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        }?;
+        let (sender, receiver) = sync_channel(1);
+        let status = callback.call_with_return_value(
+            (),
+            ThreadsafeFunctionCallMode::NonBlocking,
+            move |result, _env| {
+                let _ = sender.send(result.ok().and_then(parse_nfs_clock));
+                Ok(())
+            },
+        );
+        if status != Status::Ok {
+            return None;
+        }
+        receiver.recv().ok().flatten()
+    }
+
+    fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for NfsClockCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+struct NfsJsClock {
+    callback: Arc<NfsClockCallback>,
+    state: Mutex<NfsJsClockState>,
+}
+
+struct NfsJsClockState {
+    epoch_ms: Option<f64>,
+    anchor: Instant,
+    last: Instant,
+}
+
+impl NfsJsClock {
+    fn new(callback: Arc<NfsClockCallback>) -> Arc<Self> {
+        let anchor = Instant::now();
+        Arc::new(Self {
+            callback,
+            state: Mutex::new(NfsJsClockState {
+                epoch_ms: None,
+                anchor,
+                last: anchor,
+            }),
+        })
+    }
+
+    fn now(&self) -> Instant {
+        let value = self.callback.call();
+        let mut state = match self.state.lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        let Some(value) = value else {
+            // A callback throw, Promise, invalid number, or a callback that
+            // has already been released must not make a monotonic lease clock
+            // jump backwards to a fresh process instant.
+            return state.last;
+        };
+        let Some(epoch_ms) = state.epoch_ms else {
+            state.epoch_ms = Some(value);
+            return state.last;
+        };
+        let delta_ms = value - epoch_ms;
+        if delta_ms.is_finite() && delta_ms > 0.0 && delta_ms < u64::MAX as f64 {
+            let duration = Duration::from_millis(delta_ms as u64);
+            if let Some(candidate) = state.anchor.checked_add(duration)
+                && candidate > state.last
+            {
+                state.last = candidate;
+            }
+        }
+        state.last
+    }
+}
+
+#[derive(Default)]
+struct NfsCallbackKeepalive {
+    idmap_name: Option<Arc<NfsIdMapNameCallback>>,
+    idmap_id: Option<Arc<NfsIdMapIdCallback>>,
+    clock: Option<Arc<NfsClockCallback>>,
+}
+
+impl NfsCallbackKeepalive {
+    fn release(&self) {
+        if let Some(callback) = &self.idmap_name {
+            callback.release();
+        }
+        if let Some(callback) = &self.idmap_id {
+            callback.release();
+        }
+        if let Some(callback) = &self.clock {
+            callback.release();
+        }
     }
 }
 
@@ -806,10 +1164,24 @@ fn verifier(value: Option<Buffer>) -> Result<Option<[u8; 8]>, Error> {
     Ok(Some(array))
 }
 
-fn nfs4_idmap(options: Nfs4IdMap) -> Result<TransportNfs4IdMap, Error> {
-    let mut output = TransportNfs4IdMap::new(options.domain);
+struct Nfs4IdMapCallbacks {
+    name: Option<Arc<NfsIdMapNameCallback>>,
+    id: Option<Arc<NfsIdMapIdCallback>>,
+}
+
+fn nfs4_idmap(options: Nfs4IdMap) -> Result<(TransportNfs4IdMap, Nfs4IdMapCallbacks), Error> {
+    let Nfs4IdMap {
+        domain,
+        users,
+        groups,
+        name_of,
+        id_of,
+    } = options;
+    let name = name_of.map(NfsIdMapNameCallback::new).transpose()?;
+    let id = id_of.map(NfsIdMapIdCallback::new).transpose()?;
+    let mut output = TransportNfs4IdMap::new(domain);
     let mut user_ids = HashMap::<u32, String>::new();
-    for (name, value) in options.users.unwrap_or_default() {
+    for (name, value) in users.unwrap_or_default() {
         let id = u32_number(&format!("nfs4.idmap.users.{name}"), Some(value), 0)?;
         if let Some(previous) = user_ids.insert(id, name.clone()) {
             return Err(config_error(format!(
@@ -819,7 +1191,7 @@ fn nfs4_idmap(options: Nfs4IdMap) -> Result<TransportNfs4IdMap, Error> {
         output = output.with_user(name, id);
     }
     let mut group_ids = HashMap::<u32, String>::new();
-    for (name, value) in options.groups.unwrap_or_default() {
+    for (name, value) in groups.unwrap_or_default() {
         let id = u32_number(&format!("nfs4.idmap.groups.{name}"), Some(value), 0)?;
         if let Some(previous) = group_ids.insert(id, name.clone()) {
             return Err(config_error(format!(
@@ -828,7 +1200,15 @@ fn nfs4_idmap(options: Nfs4IdMap) -> Result<TransportNfs4IdMap, Error> {
         }
         output = output.with_group(name, id);
     }
-    Ok(output)
+    if let Some(callback) = &name {
+        let callback = Arc::clone(callback);
+        output = output.with_name_of(move |id, group| callback.call(id, group));
+    }
+    if let Some(callback) = &id {
+        let callback = Arc::clone(callback);
+        output = output.with_id_of(move |name, group| callback.call(name, group));
+    }
+    Ok((output, Nfs4IdMapCallbacks { name, id }))
 }
 
 #[napi(object)]
@@ -839,11 +1219,17 @@ pub struct Nfs4IdMap {
     pub users: Option<HashMap<String, f64>>,
     /// Name-to-gid entries. Unmapped ids retain numeric wire form.
     pub groups: Option<HashMap<String, f64>>,
+    #[napi(ts_type = "(id: number, group: boolean) => string | undefined")]
+    pub name_of: Option<JsNfsIdMapNameCallback>,
+    #[napi(ts_type = "(name: string, group: boolean) => number | undefined")]
+    pub id_of: Option<JsNfsIdMapIdCallback>,
 }
 
 #[napi(object)]
 pub struct Nfs4StateKnobs {
     pub idmap: Option<Nfs4IdMap>,
+    #[napi(ts_type = "() => number")]
+    pub now: Option<JsNfsClockCallback>,
     pub lease_seconds: Option<f64>,
     pub seed: Option<f64>,
     pub max_sessions: Option<f64>,
@@ -885,6 +1271,7 @@ type ParsedNfsOptions = (
     TransportNfsServerOptions,
     Option<JsTransportErrorCallback>,
     Option<JsNfsErrorCallback>,
+    NfsCallbackKeepalive,
 );
 
 fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Error> {
@@ -908,6 +1295,7 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
     });
     let on_transport_error = options.on_transport_error;
     let on_error = options.on_error;
+    let mut callback_keepalive = NfsCallbackKeepalive::default();
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
     let mut output = TransportNfsServerOptions {
@@ -935,7 +1323,16 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
     output.session.claim_ownership = options.claim_ownership.unwrap_or(true);
     if let Some(nfs4) = options.nfs4 {
         if let Some(idmap) = nfs4.idmap {
-            output.session.nfs4.idmap = Some(nfs4_idmap(idmap)?);
+            let (idmap, callbacks) = nfs4_idmap(idmap)?;
+            output.session.nfs4.idmap = Some(idmap);
+            callback_keepalive.idmap_name = callbacks.name;
+            callback_keepalive.idmap_id = callbacks.id;
+        }
+        if let Some(now) = nfs4.now {
+            let callback = NfsClockCallback::new(now)?;
+            let clock = NfsJsClock::new(Arc::clone(&callback));
+            output.session.nfs4.clock = TransportNfs4Clock::from_fn(move || clock.now());
+            callback_keepalive.clock = Some(callback);
         }
         output.session.nfs4.lease_seconds = u32_number(
             "nfs4.leaseSeconds",
@@ -981,7 +1378,14 @@ fn nfs_options(options: Option<NfsServerOptions>) -> Result<ParsedNfsOptions, Er
         output.session.nfs4.require_reclaim_complete =
             nfs4.require_reclaim_complete.unwrap_or(true);
     }
-    Ok((host, port, output, on_transport_error, on_error))
+    Ok((
+        host,
+        port,
+        output,
+        on_transport_error,
+        on_error,
+        callback_keepalive,
+    ))
 }
 
 #[napi]
@@ -1197,6 +1601,7 @@ pub struct NfsServer {
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
     session_error: Option<Arc<NfsErrorCallback>>,
+    callback_keepalive: NfsCallbackKeepalive,
 }
 
 #[napi]
@@ -1258,6 +1663,7 @@ impl NfsServer {
         if let Some(callback) = &self.session_error {
             callback.release();
         }
+        self.callback_keepalive.release();
         self.inner
             .close()
             .await
@@ -1270,7 +1676,8 @@ pub fn create_nfs_server(
     driver: &Filesystem,
     options: Option<NfsServerOptions>,
 ) -> napi::Result<NfsServer> {
-    let (host, requested_port, options, on_transport_error, on_error) = nfs_options(options)?;
+    let (host, requested_port, options, on_transport_error, on_error, callback_keepalive) =
+        nfs_options(options)?;
     let transport_error = on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;
@@ -1287,6 +1694,7 @@ pub fn create_nfs_server(
         closed: AtomicBool::new(false),
         transport_error,
         session_error,
+        callback_keepalive,
     })
 }
 

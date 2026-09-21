@@ -229,13 +229,24 @@ impl WebdavServer {
 
     pub async fn listen(&self) -> Result<(), WebdavServerError> {
         let _lifecycle = self.lifecycle.lock().await;
-        if self
+        let running = self
             .state
             .lock()
             .map(|state| state.task.is_some())
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        let closing = self.closing.load(Ordering::Acquire) != 0;
+        if running && closing {
+            return Err(WebdavServerError::Io(std::io::Error::other(
+                "WebDAV server is closing",
+            )));
+        }
+        if running {
             return Ok(());
+        }
+        if closing && self.connections.load(Ordering::Acquire) != 0 {
+            return Err(WebdavServerError::Io(std::io::Error::other(
+                "WebDAV server is still draining connections",
+            )));
         }
         let address = socket_address(&self.host, self.requested_port)
             .await
@@ -338,13 +349,20 @@ impl WebdavServer {
             .lock()
             .ok()
             .and_then(|mut state| state.task.take());
-        let Some(task) = task else { return Ok(()) };
+        if task.is_none() && self.closing.load(Ordering::Acquire) == 0 {
+            return Ok(());
+        }
         self.closing.store(1, Ordering::Release);
         self.shutdown.notify_waiters();
         let connections = Arc::clone(&self.connections);
         let drained = Arc::clone(&self.drained);
-        tokio::time::timeout(self.drain_timeout, async move {
-            task.await.map_err(WebdavServerError::Join)?;
+        let mut task = task;
+        let result = tokio::time::timeout(self.drain_timeout, async {
+            if let Some(task_handle) = task.as_mut() {
+                let join_result = task_handle.await;
+                task = None;
+                join_result.map_err(WebdavServerError::Join)?;
+            }
             while connections.load(Ordering::Acquire) != 0 {
                 let notified = drained.notified();
                 tokio::pin!(notified);
@@ -356,13 +374,22 @@ impl WebdavServer {
             }
             Ok(())
         })
-        .await
-        .map_err(|_| {
-            WebdavServerError::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "WebDAV server close timed out",
-            ))
-        })?
+        .await;
+        match result {
+            Ok(result) => result,
+            Err(_) => {
+                if let Some(task) = task.take()
+                    && !task.is_finished()
+                    && let Ok(mut state) = self.state.lock()
+                {
+                    state.task = Some(task);
+                }
+                Err(WebdavServerError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "WebDAV server close timed out",
+                )))
+            }
+        }
     }
 }
 

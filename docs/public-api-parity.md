@@ -363,11 +363,16 @@ Rust clock boundary is covered by
 These are accepted supported-scope decisions for N-API; broader session/server
 differential, listener, provider/native, restart, and hosted gates remain open.
 The Rust listener lifecycle itself is locally qualified by concurrent
-`listen()` serialization and an immediate `listen()`/`close()` shutdown-wakeup
-regression. The N-API WebDAV wrapper also serializes its closed-state check
-with the transport lifecycle; a rebuilt 40-iteration real-loopback race test
-passes. The opt-in `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase
-also passes the host-enabled WebDAV network/fault/restart matrix; N-API
+`listen()` serialization, an immediate `listen()`/`close()` shutdown-wakeup
+regression, and a bounded-drain regression: a stalled partial request keeps a
+timed-out server in a draining state, repeated `close()` calls continue to
+report the timeout, and `listen()` is rejected until the peer exits. The
+focused host-enabled WebDAV target passes 18/18 with strict warning-denied
+Clippy and formatting. The N-API WebDAV wrapper also serializes its
+closed-state check with the transport lifecycle; a rebuilt 40-iteration
+real-loopback race test passes. The opt-in
+`MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
+host-enabled WebDAV network/fault/restart matrix; N-API close-timeout,
 network/hosted concurrency and hosted lifecycle remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
