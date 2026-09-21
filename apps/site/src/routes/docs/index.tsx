@@ -20,9 +20,9 @@ function DocsOverview() {
         <strong>Start with the smallest working boundary</strong>
         <p>
           Begin with the direct contract in Rust or Node. Then choose the
-          metadata and immutable block roles, add the edge your environment
-          needs, and read the acceptance requirements before making a
-          production claim.
+          metadata and immutable block roles, create a real FUSE, NFS, 9P, or
+          FSKit mount—or choose HTTP/WebDAV at the edge—and read the acceptance
+          requirements before making a production claim.
         </p>
       </div>
 
@@ -41,7 +41,7 @@ function DocsOverview() {
         <Link className="decision-card" to="/docs/transports">
           <span className="decision-card-number">03</span>
           <h3>Choose the edge</h3>
-          <p>Reach the process through a binding, transport, or native mount.</p>
+          <p>Use Rust/Node directly, create a FUSE/NFS/9P/FSKit mount, or add HTTP/WebDAV at the edge.</p>
         </Link>
         <a className="decision-card" href="https://github.com/andymac4182/mount-rs/blob/main/REQUIREMENTS.md">
           <span className="decision-card-number">04</span>
