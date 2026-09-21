@@ -1421,16 +1421,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   version-history coverage, mount-free SQLite VFS tests and the PGlite gate;
   it was published sequentially through remote `90c33949`. Hosted
   macOS/Linux reconnect reruns remain the separate W04.2 gate.
-- Production follow-up published at `113a1fbc` adds optional
-  `driver.storage.lease_ttl_ms` to the shared Rust/Node split-store config,
-  preserves the 30-second default, and validates the W04 policy value as a
-  positive safe integer no greater than 24 hours. Focused CLI/SDK/provider-
-  matrix tests and positive/negative credential-free policy fixtures pass;
-  current-tip hosted policy run `35641832862`, job `106472745045`, also passed
-  the bounded-TTL positive fixture and all three expected rejection markers;
-  the deployment-specific TTL, provider-scope, persistence/rollback,
-  observability, ownership, and release decision remain tracked as **NO-GO**
-  in [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
+- Production follow-up published at `68c087d1` (building on `113a1fbc`) adds
+  optional `driver.storage.lease_ttl_ms` to the shared Rust/Node split-store
+  config, preserves the 30-second runtime default, and requires an explicit
+  positive safe-integer value no greater than 24 hours in an approved W04
+  production config. Focused CLI/SDK/provider-matrix tests and positive/four
+  negative credential-free policy fixtures pass. The manually dispatched
+  current-main policy run `35642541696`, job `106475151000`, passed the
+  explicit-TTL positive fixture and all four expected rejection markers;
+  push-triggered run `35642363293` was cancelled before any job materialized
+  and is excluded. The deployment-specific TTL, provider-scope,
+  persistence/rollback, observability, ownership, and release decision remain
+  tracked as **NO-GO** in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
 
 ## W05 — Cloudflare R2
 
