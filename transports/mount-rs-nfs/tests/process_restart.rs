@@ -24,7 +24,7 @@ use mount_rs_nfs::protocol::{
     write_dir_op, write_read_args, write_write_args,
 };
 use mount_rs_nfs::rpc::{RPC_SUCCESS, RecordAssembler, decode_reply, encode_call, frame_record};
-use mount_rs_nfs::v4::{CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_BADSESSION};
+use mount_rs_nfs::v4::{CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_BADSESSION, NFS4ERR_STALE};
 use mount_rs_nfs::xdr::{XdrReader, XdrWriter, encode_xdr};
 use mount_rs_nfs::{NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader as AsyncBufReader};
@@ -35,9 +35,10 @@ use tokio::time::timeout;
 const CHILD_ENV: &str = "MOUNT_RS_NFS_PROCESS_CHILD";
 const ROOT_ENV: &str = "MOUNT_RS_NFS_PROCESS_ROOT";
 const TEST_NAME: &str = "nfs_v3_host_backend_survives_process_crash_and_restart";
-const V4_TEST_NAME: &str = "nfs_v4_session_is_process_local_after_process_crash";
+const V4_TEST_NAME: &str = "nfs_v4_session_and_handles_are_process_local_after_process_crash";
 
 const OP_GETFH: u32 = 10;
+const OP_PUTFH: u32 = 22;
 const OP_PUTROOTFH: u32 = 24;
 const OP_EXCHANGE_ID: u32 = 42;
 const OP_CREATE_SESSION: u32 = 43;
@@ -260,7 +261,11 @@ fn v4_create_session_args(clientid: u64) -> Vec<u8> {
     })
 }
 
-async fn establish_v4_session(stream: &mut TcpStream, xid: u32) -> [u8; 16] {
+async fn establish_v4_session(
+    stream: &mut TcpStream,
+    xid: u32,
+    owner: &[u8],
+) -> ([u8; 16], Vec<u8>) {
     let exchange_record = exchange(
         stream,
         encode_call(
@@ -270,7 +275,7 @@ async fn establish_v4_session(stream: &mut TcpStream, xid: u32) -> [u8; 16] {
             1,
             None,
             None,
-            &v4_compound("crash-exchange", &[v4_exchange_args(b"crash-client")]),
+            &v4_compound("crash-exchange", &[v4_exchange_args(owner)]),
         ),
     )
     .await;
@@ -352,9 +357,9 @@ async fn establish_v4_session(stream: &mut TcpStream, xid: u32) -> [u8; 16] {
     v4_consume_sequence(&mut response);
     assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
     assert_eq!(v4_result_status(&mut response, OP_GETFH), 0);
-    let _ = response.var_opaque(128, "NFSv4 root handle").unwrap();
+    let root_handle = response.var_opaque(128, "NFSv4 root handle").unwrap();
     response.end("NFSv4 root response").unwrap();
-    session
+    (session, root_handle)
 }
 
 async fn mount_root(stream: &mut TcpStream, xid: u32) -> Vec<u8> {
@@ -549,7 +554,7 @@ async fn nfs_v3_host_backend_survives_process_crash_and_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nfs_v4_session_is_process_local_after_process_crash() {
+async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
     if std::env::var_os(CHILD_ENV).is_some() {
         child_server().await;
         return;
@@ -560,7 +565,7 @@ async fn nfs_v4_session_is_process_local_after_process_crash() {
     let mut first = TcpStream::connect(seed.address)
         .await
         .expect("connect seed NFSv4 server");
-    let session = establish_v4_session(&mut first, 101).await;
+    let (session, root_handle) = establish_v4_session(&mut first, 101, b"crash-client-seed").await;
     first.shutdown().await.expect("close seed NFSv4 connection");
     drop(first);
     seed.crash().await;
@@ -569,6 +574,8 @@ async fn nfs_v4_session_is_process_local_after_process_crash() {
     let mut second = TcpStream::connect(replacement.address)
         .await
         .expect("connect replacement NFSv4 server");
+    let (replacement_session, _) =
+        establish_v4_session(&mut second, 201, b"crash-client-replacement").await;
     let stale_record = exchange(
         &mut second,
         encode_call(
@@ -589,6 +596,35 @@ async fn nfs_v4_session_is_process_local_after_process_crash() {
         "a replacement process must reject the old NFSv4 session before dispatch"
     );
     response.end("stale NFSv4 session response").unwrap();
+
+    let stale_handle_record = exchange(
+        &mut second,
+        encode_call(
+            212,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "stale-handle",
+                &[
+                    v4_sequence(&replacement_session, 2),
+                    v4_op(OP_PUTFH, |writer| writer.var_opaque(&root_handle)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&stale_handle_record);
+    assert_eq!(
+        v4_compound_status(&mut response, 2),
+        NFS4ERR_STALE,
+        "a replacement process must reject the old NFSv4 file handle"
+    );
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTFH), NFS4ERR_STALE);
+    response.end("stale NFSv4 handle response").unwrap();
     second
         .shutdown()
         .await

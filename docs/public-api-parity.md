@@ -297,7 +297,9 @@ Current focused behavior:
   the host-backed NFSv3 process-crash/restart test rejects the old file handle
   with `NFS3ERR_STALE` and then recovers a `FILE_SYNC` payload through a
   replacement server. A forced-crash NFSv4.1 child-process test also rejects
-  the old session with `NFS4ERR_BADSESSION` before dispatch. Rootless NFSv4.1
+  the old session with `NFS4ERR_BADSESSION` before dispatch and the old root
+  handle with `NFS4ERR_STALE`; session IDs fold both halves of the write
+  verifier to avoid the observed rapid-replacement alias. Rootless NFSv4.1
   wire coverage also drives two
   independent sessions through concurrent distinct-file OPEN/WRITE/READ
   round trips. NFSv4 lease/replay/file-handle recovery, cross-process/native

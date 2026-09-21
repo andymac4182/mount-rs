@@ -2676,6 +2676,9 @@ impl Nfs4Session {
                 cursor.stateid = Stateid4::zero();
                 V4OpResult::new(OP_PUTFH, NFS4_OK)
             }
+            Err(error) if error.code == ErrorCode::Estale => {
+                V4OpResult::new(OP_PUTFH, NFS4ERR_STALE)
+            }
             Err(_) => V4OpResult::new(OP_PUTFH, NFS4ERR_BADHANDLE),
         }
     }
@@ -4596,12 +4599,22 @@ fn seeded_counter(seed: u32, counter: u64) -> u64 {
     (u64::from(seed) << 32) | (counter & u64::from(u32::MAX))
 }
 
-/// Build a session identity that carries the configured seed and write
-/// verifier, with the session counter in the remaining bytes.
+/// Build a session identity from the configured seed and both halves of the
+/// write verifier, with the session counter in the remaining bytes.
 fn session_id(seed: u32, write_verifier: &[u8; 8], counter: u64) -> [u8; NFS4_SESSIONID_SIZE] {
     let mut id = [0_u8; NFS4_SESSIONID_SIZE];
     id[..4].copy_from_slice(&seed.to_be_bytes());
-    id[4..8].copy_from_slice(&write_verifier[..4]);
+    let verifier_tag = u32::from_be_bytes(
+        write_verifier[..4]
+            .try_into()
+            .expect("the write verifier has an upper half"),
+    ) ^ u32::from_be_bytes(
+        write_verifier[4..]
+            .try_into()
+            .expect("the write verifier has a lower half"),
+    )
+    .rotate_left(13);
+    id[4..8].copy_from_slice(&verifier_tag.to_be_bytes());
     id[8..].copy_from_slice(&counter.to_be_bytes());
     id
 }
@@ -4646,7 +4659,7 @@ mod tests {
 
     use mount_rs_core::MemoryFs;
 
-    use super::{Nfs4Session, SeqidOrdering, bump_stateid_seq, compare_stateid_seqid};
+    use super::{Nfs4Session, SeqidOrdering, bump_stateid_seq, compare_stateid_seqid, session_id};
     use crate::{
         NFS_V4, NFS4_PROGRAM, Nfs4IdMap, NfsSessionError, NfsSessionHooks, NfsSessionOptions,
         decode_reply, encode_call,
@@ -4737,6 +4750,16 @@ mod tests {
             "the half-range boundary is treated as older"
         );
         assert_eq!(compare_stateid_seqid(17, 17), SeqidOrdering::Equal);
+    }
+
+    #[test]
+    fn session_ids_include_both_write_verifier_halves() {
+        let first = session_id(7, &[0x12, 0x34, 0x56, 0x78, 0, 0, 0, 1], 9);
+        let second = session_id(7, &[0x12, 0x34, 0x56, 0x78, 0, 0, 0, 2], 9);
+
+        assert_eq!(&first[..4], &second[..4]);
+        assert_eq!(&first[8..], &second[8..]);
+        assert_ne!(&first[4..8], &second[4..8]);
     }
 
     #[tokio::test]
