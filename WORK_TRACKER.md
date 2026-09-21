@@ -2251,6 +2251,26 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   remained explicit ignored prerequisites; this is source-level verification,
   not live-provider or production-rollout evidence. *(Implementation
   verification; provider, native and production gates remain external.)*
+- [x] W08.31 **Latest hosted target, artifact and attestation qualification:**
+  manual `workflow_dispatch` with `attest=true` run `35641555767` completed
+  successfully from current-main-at-dispatch source
+  `2bbd0266a094b06bf97d51baafe0d3a8800bfec5`. Linux build job
+  `106471833712`, macOS arm64 build job `106471833967`, downloaded-asset jobs
+  `106473358964` and `106473359006`, and attestation jobs `106475107803` and
+  `106475108148` all passed. Linux SHA-256 is
+  `6a3de0a607ffafcedf6bd3385c3849a30208df0345120061061821109a09ac79`
+  (8,373,376 bytes); macOS arm64 SHA-256 is
+  `75a031c4e439ede07f0fa1a09db050b15c45f6d802a703d90b67cde52b4a941d`
+  (6,958,388 bytes). Both hosted target/download/attestation markers passed;
+  downloaded checksums, manifests, 288-component SBOMs, archive contents and
+  the extracted macOS `mount-rs 0.1.0` runtime were independently rechecked,
+  and exact-identity SLSA/CycloneDX attestation verification passed with the
+  `main` source ref and `--deny-self-hosted-runners`. The production-config
+  positive policy fixture passed and the insecure fixture failed closed with
+  `secret_access_key-must-not-be-inline`; this is policy evidence only. No
+  production-candidate tag, protected-environment approval, registry
+  publication, canary, rollback or GO evidence is claimed. *(Hosted/provider
+  qualification and implementation policy; production gates remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -2357,7 +2377,11 @@ reproducible in a production-like environment.
   dispatch isolation, full-pin correction, verifier identity fix and terminal
   target qualification. W08.29's current published-main run `35638433010`,
   source `9d3a6e5`, passed both target builds/downloads and both final
-  provenance/SBOM attestation verifiers. W08.28 adds the protected
+  provenance/SBOM attestation verifiers. W08.31's current-main-at-dispatch
+  run `35641555767`, source `2bbd0266`, passed both target builds/downloads
+  and both final provenance/SBOM attestation verifiers; the downloaded assets,
+  checksums, manifests, 288-component SBOMs and macOS runtime were independently
+  rechecked. W08.28 adds the protected
   `v*-cli-production-candidate*` workflow, which builds both targets, verifies
   final release assets and attestations, and requires the `w08-production`
   environment before publishing a prerelease. It has not been run from an
