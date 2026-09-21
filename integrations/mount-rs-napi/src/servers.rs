@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use mount_rs_9p::{
-    P9Server as TransportP9Server, P9ServerHooks as TransportP9ServerHooks,
+    P9LockTable, P9Server as TransportP9Server, P9ServerHooks as TransportP9ServerHooks,
     P9ServerOptions as TransportP9ServerOptions, P9TransportError as TransportP9Error,
     P9TransportErrorHook as TransportP9ErrorHook,
 };
@@ -548,6 +548,23 @@ impl From<mount_rs_9p::P9SessionStats> for P9SessionStats {
 
 #[napi]
 impl P9Session {
+    /// Handle one complete 9P frame without a socket. Malformed framing
+    /// returns `null`; protocol and driver failures remain encoded as an
+    /// `Rlerror`, matching the transport session contract.
+    #[napi]
+    pub async fn handle_call(&self, bytes: Buffer) -> Option<Buffer> {
+        self.inner
+            .handle_call(bytes.as_ref())
+            .await
+            .map(Buffer::from)
+    }
+
+    /// Tear down the session and release every driver handle it owns.
+    #[napi]
+    pub async fn destroy(&self) {
+        self.inner.destroy().await;
+    }
+
     #[napi(getter)]
     pub fn msize(&self) -> Option<u32> {
         self.inner.msize()
@@ -637,6 +654,20 @@ pub struct P9Server {
 
 #[napi]
 impl P9Server {
+    /// Create a session for the JavaScript duplex-stream adapter. The method
+    /// is intentionally internal: the public Node contract is `attach`, while
+    /// this native seam supplies the same shared driver/lock state without
+    /// making N-API own a JavaScript stream from a Tokio task.
+    #[napi(js_name = "_createAttachedSession")]
+    pub fn create_attached_session(&self) -> P9Session {
+        P9Session {
+            inner: mount_rs_9p::P9Session::with_options(
+                Arc::clone(&self.driver),
+                self.options.session_options(),
+            ),
+        }
+    }
+
     #[napi(getter)]
     pub fn host(&self) -> String {
         self.host.clone()
@@ -794,7 +825,12 @@ pub fn create_p9_server(
     driver: &Filesystem,
     options: Option<P9ServerOptions>,
 ) -> napi::Result<P9Server> {
-    let (host, requested_port, options, on_transport_error) = p9_options(options)?;
+    let (host, requested_port, mut options, on_transport_error) = p9_options(options)?;
+    // The native listener and the JavaScript attach seam must share byte-range
+    // lock ownership when they are used on the same public server object.
+    if options.locks.is_none() {
+        options.locks = Some(P9LockTable::new(Default::default()));
+    }
     let transport_error = on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;

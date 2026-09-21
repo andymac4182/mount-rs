@@ -8,6 +8,18 @@ This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
 retain detailed results. A passing component test is not end-to-end acceptance.
 
+Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
+Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
+attached connection identity/peer/stream/closed state, duplicate-attach and
+ownership teardown, shared byte-range lock state, and backpressure/write-fault
+coverage. The focused Rust 9P tests, strict affected-crate checks, rebuilt
+declarations, host-enabled N-API server phases, and pinned-oracle package gate
+pass. Native accepted connections deliberately expose no Node stream because
+their Tokio stream is not transferable across the N-API boundary; `attach` is
+the supported Node Duplex seam. Production remains NO-GO pending a fresh
+revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
+native fault/race/crash evidence, and the remaining W01 gates.
+
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
 credentials held outside the repository. The run passed the complete Rust and

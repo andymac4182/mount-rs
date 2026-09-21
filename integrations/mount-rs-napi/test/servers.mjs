@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import * as net from "node:net";
+import { Duplex } from "node:stream";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -78,6 +79,37 @@ async function waitForTransportError(reports, label) {
     await new Promise((resolve) => setTimeout(resolve, Math.min(remaining, 10)));
   }
   return reports[0];
+}
+
+async function waitUntil(predicate, label) {
+  const deadline = Date.now() + IO_TIMEOUT_MS;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`${label} timed out`);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
+function duplexPair(highWaterMark = 16 * 1024) {
+  let left;
+  let right;
+  const make = () => new Duplex({
+    readableHighWaterMark: highWaterMark,
+    writableHighWaterMark: highWaterMark,
+    read() {},
+    write(chunk, _encoding, callback) {
+      const peer = this === left ? right : left;
+      peer.push(Buffer.from(chunk));
+      callback();
+    },
+    final(callback) {
+      const peer = this === left ? right : left;
+      peer.push(null);
+      callback();
+    },
+  });
+  left = make();
+  right = make();
+  return [left, right];
 }
 
 function writeSocket(socket, bytes, label) {
@@ -363,6 +395,7 @@ async function exerciseP9() {
 
     [connection] = server.clients();
     assert.ok(connection);
+    assert.equal(connection.stream, undefined);
     const session = connection.session;
     assert.strictEqual(connection.session, session);
     assert.equal(session.msize, 65_536);
@@ -478,6 +511,162 @@ async function exerciseP9() {
   }
 }
 
+async function exerciseP9AttachedStream() {
+  const filesystem = memoryFilesystem();
+  const server = createP9Server(filesystem, { host: "127.0.0.1", port: 0 });
+  const listener = net.createServer();
+  await new Promise((resolve, reject) => {
+    listener.once("error", reject);
+    listener.listen(0, "127.0.0.1", resolve);
+  });
+  const address = listener.address();
+  assert.ok(address && typeof address === "object");
+  const acceptedPromise = new Promise((resolve, reject) => {
+    listener.once("connection", resolve);
+    listener.once("error", reject);
+  });
+  const client = net.createConnection({ host: "127.0.0.1", port: address.port });
+  await new Promise((resolve, reject) => {
+    client.once("connect", resolve);
+    client.once("error", reject);
+  });
+  const accepted = await acceptedPromise;
+  const connection = server.attach(accepted, { peer: "attached-test", own: true });
+  assert.strictEqual(connection.stream, accepted);
+  assert.equal(connection.peer, "attached-test");
+  assert.equal(server.connections, 1);
+  assert.strictEqual(server.clients()[0], connection);
+  assert.throws(
+    () => server.attach(accepted),
+    /already attached/,
+  );
+
+  const reader = new BufferedSocket(client);
+  const version = await p9Request(
+    client,
+    reader,
+    100,
+    0xffff,
+    Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+    101,
+  );
+  assert.equal(version.readUInt32LE(0), 65_536);
+  const direct = await connection.session.handleCall(
+    p9Frame(
+      100,
+      0xfffe,
+      Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+    ),
+  );
+  assert.ok(Buffer.isBuffer(direct));
+  assert.equal(direct[4], 101);
+  assert.equal(direct.readUInt16LE(5), 0xfffe);
+  assert.equal(await connection.session.handleCall(Buffer.from([1, 2, 3])), null);
+
+  await connection.close();
+  await within(connection.closed, "attached 9P connection close");
+  assert.equal(connection.isClosed, true);
+  assert.equal(server.connections, 0);
+  await server.close();
+  await new Promise((resolve) => listener.close(resolve));
+  if (!client.destroyed) client.destroy();
+}
+
+async function exerciseP9AttachedDuplex() {
+  const server = createP9Server(memoryFilesystem(), { maxInFlight: 2 });
+  const [serverSide, clientSide] = duplexPair();
+  const connection = server.attach(serverSide, { peer: "duplex-test" });
+  const reader = new BufferedSocket(clientSide);
+  await p9Request(
+    clientSide,
+    reader,
+    100,
+    0xffff,
+    Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+    101,
+  );
+  assert.strictEqual(connection.stream, serverSide);
+  assert.equal(connection.peer, "duplex-test");
+  const peerEof = new Promise((resolve) => clientSide.once("end", resolve));
+  await server.close();
+  await within(connection.closed, "attached duplex server close");
+  await within(peerEof, "attached duplex peer EOF");
+  assert.equal(connection.session.destroyed, true);
+  assert.equal(connection.isClosed, true);
+  assert.equal(server.connections, 0);
+  assert.equal(serverSide.destroyed, false);
+  clientSide.destroy();
+  serverSide.destroy();
+}
+
+async function exerciseP9AttachedBackpressure() {
+  const pending = [];
+  const stream = new Duplex({
+    readableHighWaterMark: 1,
+    writableHighWaterMark: 1,
+    read() {},
+    write(chunk, _encoding, callback) {
+      pending.push({ chunk: Buffer.from(chunk), callback });
+    },
+  });
+  const server = createP9Server(memoryFilesystem(), { maxInFlight: 1 });
+  const connection = server.attach(stream, { peer: "backpressure-test", own: false });
+  const version = p9Frame(
+    100,
+    0xffff,
+    Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+  );
+  stream.push(Buffer.concat([version, p9Frame(250, 1)]));
+  await waitUntil(() => pending.length === 1, "attached backpressure first reply");
+  assert.equal(connection.session.stats.requests, 1);
+  assert.equal(stream.isPaused(), true);
+  pending.shift().callback();
+  await waitUntil(
+    () => pending.length === 1 && connection.session.stats.requests === 2,
+    "attached backpressure second reply",
+  );
+  assert.equal(stream.isPaused(), true);
+  pending.shift().callback();
+  await waitUntil(() => connection.session.stats.replies >= 2, "attached backpressure drain");
+  await connection.close();
+  await within(connection.closed, "attached backpressure close");
+  await server.close();
+  assert.equal(connection.session.destroyed, true);
+  stream.destroy();
+}
+
+async function exerciseP9AttachedWriteFailure() {
+  const reports = [];
+  const stream = new Duplex({
+    read() {},
+    write() {
+      throw new Error("attached stream refuses to carry a reply");
+    },
+  });
+  const server = createP9Server(memoryFilesystem(), {
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+    },
+  });
+  const connection = server.attach(stream, { peer: "hostile-test", own: false });
+  stream.push(
+    p9Frame(
+      100,
+      0xffff,
+      Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
+    ),
+  );
+  await within(connection.closed, "attached hostile stream close");
+  assert.equal(reports.length, 1);
+  assert.match(reports[0].error.message, /refuses to carry/);
+  assert.equal(reports[0].peer, "hostile-test");
+  assert.equal(connection.session.destroyed, true);
+  assert.equal(server.connections, 0);
+  await server.close();
+  assert.equal(stream.destroyed, false);
+  stream.destroy();
+}
+
 async function fetchBody(url, init, label) {
   const response = await within(
     fetch(url, { ...init, signal: AbortSignal.timeout(IO_TIMEOUT_MS) }),
@@ -568,6 +757,10 @@ await within(
   (async () => {
     await runPhase("NFS exercise", exerciseNfs);
     await runPhase("9P exercise", exerciseP9);
+    await runPhase("9P attached stream", exerciseP9AttachedStream);
+    await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
+    await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);
+    await runPhase("9P attached write failure", exerciseP9AttachedWriteFailure);
     await runPhase("S3 exercise", exerciseS3);
     await runPhase("WebDAV exercise", exerciseWebdav);
   })(),
