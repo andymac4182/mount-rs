@@ -450,11 +450,17 @@ async function stopRust(fixture) {
   if (!child) return;
 
   const stdinErrors = [];
-  const onStdinError = (error) => stdinErrors.push(error);
+  const onStdinError = (error) => {
+    // Node can report more than one expected pipe error while an already
+    // closed child stdin is being torn down, especially on macOS. Keep the
+    // listener installed for the whole child lifetime so a second EPIPE does
+    // not become an uncaught exception; unexpected errors remain diagnostic.
+    if (!expectedShutdownError(error)) stdinErrors.push(error);
+  };
   let forced = false;
   let killError;
   if (!childHasExited(child)) {
-    child.stdin?.once("error", onStdinError);
+    child.stdin?.on("error", onStdinError);
     try {
       if (child.stdin && !child.stdin.destroyed) child.stdin.end();
     } catch (error) {
@@ -478,7 +484,6 @@ async function stopRust(fixture) {
       kill("SIGKILL");
       exited = await waitForChildExit(child, FIXTURE_STOP_TIMEOUT_MS);
     }
-    child.stdin?.off("error", onStdinError);
     if (!exited) {
       throw new Error(
         `Rust fixture did not stop within ${FIXTURE_STOP_TIMEOUT_MS * 3}ms${
