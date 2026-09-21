@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "service": {
+    "tier": "tier-1",
+    "availabilityPercent": 99.99,
+    "rpoMinutes": 5,
+    "rtoMinutes": 5
+  },
+  "ozone": {
+    "gatewayVersion": "2.2.1",
+    "endpointRef": {
+      "env": "MOUNT_RS_OZONE_ENDPOINT"
+    },
+    "tls": {
+      "required": true,
+      "verifyPeer": true,
+      "verifyIdentity": true,
+      "caBundleRef": {
+        "env": "MOUNT_RS_OZONE_CA_BUNDLE"
+      }
+    },
+    "auth": {
+      "mode": "sigv4",
+      "accessKeyRef": {
+        "env": "R2_ACCESS_KEY_ID"
+      },
+      "secretKeyRef": {
+        "env": "R2_SECRET_ACCESS_KEY"
+      }
+    },
+    "topology": {
+      "minimumDataNodes": 3,
+      "minimumReplicationFactor": 3,
+      "failureDomains": 3,
+      "powerLossDurable": true
+    },
+    "bucketRef": {
+      "env": "MOUNT_RS_OZONE_BUCKET"
+    },
+    "prefixTemplate": "tenant/{tenant}/mount-rs"
+  },
+  "metadataProviders": ["sqlite", "pglite", "tidb", "foundationdb"],
+  "operations": {
+    "healthProbe": true,
+    "metrics": true,
+    "auditLogging": true,
+    "leastPrivilege": true,
+    "tenantIsolation": true
+  },
+  "recovery": {
+    "backupOwner": "customer-ozone",
+    "restoreOwner": "customer-ozone",
+    "restoreDrillRequired": true,
+    "restoreDrillIntervalDays": 30,
+    "runbookRef": {
+      "env": "MOUNT_RS_OZONE_RECOVERY_RUNBOOK_REF"
+    },
+    "rpoRtoEvidenceRequired": true
+  }
+}

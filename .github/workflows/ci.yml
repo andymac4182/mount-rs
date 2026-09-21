@@ -77,6 +77,22 @@ jobs:
             exit 1
           fi
           echo 'W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=tidb-tls-weak'
+          node scripts/verify-w26-ozone-rollout-contract.mjs \
+            tests/ozone/production-rollout-contract.json
+          if node scripts/verify-w26-ozone-rollout-contract.mjs \
+            tests/ozone/production-rollout-contract-slo.invalid.json
+          then
+            echo 'W26 Ozone rollout contract accepted an RTO above five minutes' >&2
+            exit 1
+          fi
+          echo 'W26_OZONE_PRODUCTION_ROLLOUT_CONTRACT_NEGATIVE_PASS case=slo'
+          if node scripts/verify-w26-ozone-rollout-contract.mjs \
+            tests/ozone/production-rollout-contract-inline-secret.invalid.json
+          then
+            echo 'W26 Ozone rollout contract accepted an inline secret' >&2
+            exit 1
+          fi
+          echo 'W26_OZONE_PRODUCTION_ROLLOUT_CONTRACT_NEGATIVE_PASS case=inline-secret'
           } 2>&1 | tee artifacts/ozone-policy.log
       - name: Verify W04 PGlite production config policy without credentials or network
         run: |
