@@ -98,7 +98,9 @@ For the protected GitHub OIDC workflow, the trust policy should restrict the
 `aws-s3-ci` environment, require the `sts.amazonaws.com` audience, and grant
 only the test bucket/prefix actions. The workflow intentionally references an
 environment role rather than embedding a long-lived AWS secret; configure and
-review that role before enabling hosted evidence.
+review that role before enabling hosted evidence. The workflow runs
+`scripts/validate-aws-s3-ci-config.sh` before the credential action, so missing
+or malformed protected inputs fail without making an AWS call.
 
 ## Rollout sequence
 

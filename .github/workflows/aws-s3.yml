@@ -13,6 +13,7 @@ on:
       - 'integrations/mount-rs-r2/**'
       - 'scripts/cargo-shared*'
       - 'scripts/test-aws-s3.sh'
+      - 'scripts/validate-aws-s3-ci-config.sh'
       - 'tests/aws/**'
   workflow_dispatch:
 
@@ -47,6 +48,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - name: Validate protected AWS S3 CI configuration
+        env:
+          AWS_S3_CI_ROLE_ARN: ${{ secrets.MOUNT_RS_AWS_S3_CI_ROLE_ARN }}
+        run: ./scripts/validate-aws-s3-ci-config.sh
 
       - name: Configure short-lived AWS workload credentials
         uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
