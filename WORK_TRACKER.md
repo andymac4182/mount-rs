@@ -286,6 +286,12 @@ session to close, asserts exactly one owned `Task` transport callback, and
 completes bounded unmount and mountpoint cleanup. Local focused tests and
 Linux-target strict Clippy pass; hosted execution is still required for native
 callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
+The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
+non-Linux mount regression returns `UnsupportedPlatform` without touching its
+requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
+macOS native path remains NFS, with no FSKit or macFUSE FUSE-protocol claim.
+This closes the macOS platform-scope decision but does not qualify any Linux
+hosted or lifecycle gate, so W01 remains NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
