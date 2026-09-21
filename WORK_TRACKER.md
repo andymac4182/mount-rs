@@ -1380,6 +1380,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   expired before the harness can claim a prefix, so no Rust `ChunkedFs`,
   SQLite+S3, or fresh-process reopen acceptance is claimed.
 - [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The harness now emits the secret-free `AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` and exits 3 when local credentials cannot be exported, making the AWS MCP/OAuth-to-local-Cargo boundary explicit. The W25 worker verified the AWS-crate compile and ordinary ignored-test gate; the two actual AWS-service tests remain blocked until the local `myroot` SSO session is renewed. No live Rust acceptance is claimed yet.
+- [x] The harness now accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that caller-provided role with a one-hour session, and uses the resulting temporary credentials for all S3 requests and cleanup. It does not create IAM resources or access keys; W25.2 still requires explicit role provisioning and W25.3 still requires a live local Rust run.
 
 ## W26 — Apache Ozone S3 backend
 
