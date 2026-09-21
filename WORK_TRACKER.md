@@ -2924,6 +2924,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Terminal hosted provider/aggregate results and customer security/capacity
   evidence remain open; current CI `35630094815` is pending and no result is
   promoted from it.
+- [x] W26.12 Make the IOPS artifact verifier reject incomplete performance
+  evidence. It now requires the fixed payload-size mapping, 100% lifecycle
+  success, finite elapsed/operation statistics, zero timeout and cleanup
+  failures, and exact operation/statistic sample counts. Local positive and
+  negative benchmark/evidence tests, Node/shell syntax, YAML parsing and diff
+  checks pass. Commit `e875ba6` was merged with concurrent mainline changes
+  and published at `1775895`; security scan
+  `04c7ba9d-ad9f-40aa-a5b2-d28b9a46a564` found zero reportable findings.
+  Hosted provider performance, artifact review and customer capacity remain
+  open; no current-tip hosted result is promoted.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
