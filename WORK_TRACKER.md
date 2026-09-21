@@ -2972,6 +2972,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   identity, and acceptance were skipped. Its non-expired artifact is
   `aws-s3-qualification-35629600687-1` (7,649 bytes). This is a successful
   safety refusal and provenance-contract result, not hosted AWS acceptance.
+  The newer observed hosted run `35635498647` at `24408f8` also stopped before
+  AWS authentication at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its protected
+  bucket, region, account, versioning, and role inputs were blank. This is a
+  current safety refusal rather than an implementation failure or AWS
+  acceptance result.
   The provenance-hash expansion now binds the
   policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
   PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs

@@ -45,6 +45,12 @@ artifact is `aws-s3-qualification-35629600687-1` (7,649 bytes). This artifact
 is available for a completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
+The newer observed hosted run [`35635498647`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35635498647)
+at `24408f8` also stopped before AWS authentication at
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; its protected bucket, region,
+account, versioning, and role inputs were blank. This is a current safety
+refusal rather than an implementation failure or AWS acceptance result.
+
 The latest tested integrated repository boundary
 `eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed formatting, the full locked
 offline workspace/all-target test gate, and strict workspace Clippy with
