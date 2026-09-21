@@ -16,7 +16,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use mount_rs_9p::{
-    P9LockTable, P9Server as TransportP9Server, P9ServerHooks as TransportP9ServerHooks,
+    P9Lock as TransportP9Lock, P9LockClient as TransportP9LockClient,
+    P9LockHolder as TransportP9LockHolder, P9LockRequest as TransportP9LockRequest,
+    P9LockTable as TransportP9LockTable, P9LockTableOptions as TransportP9LockTableOptions,
+    P9Server as TransportP9Server, P9ServerHooks as TransportP9ServerHooks,
     P9ServerOptions as TransportP9ServerOptions, P9TransportError as TransportP9Error,
     P9TransportErrorHook as TransportP9ErrorHook,
 };
@@ -783,6 +786,210 @@ pub fn create_nfs_server(
     })
 }
 
+fn p9_u64(value: BigInt, name: &str) -> napi::Result<u64> {
+    let (negative, magnitude, _) = value.get_u128();
+    if negative || magnitude > u128::from(u64::MAX) {
+        return Err(config_error(format!(
+            "{name} must be a non-negative integer that fits in uint64"
+        )));
+    }
+    Ok(magnitude as u64)
+}
+
+#[napi(object)]
+pub struct P9LockTableOptions {
+    pub max_locks_per_file: Option<f64>,
+}
+
+#[napi(object)]
+pub struct P9LockRequest {
+    pub path: String,
+    pub fid: u32,
+    #[napi(js_name = "type")]
+    pub type_: u8,
+    pub start: BigInt,
+    pub length: BigInt,
+    pub proc_id: u32,
+    pub client_id: String,
+}
+
+fn p9_lock_request(value: P9LockRequest) -> napi::Result<TransportP9LockRequest> {
+    Ok(TransportP9LockRequest {
+        path: value.path,
+        fid: value.fid,
+        type_: value.type_,
+        start: p9_u64(value.start, "start")?,
+        length: p9_u64(value.length, "length")?,
+        proc_id: value.proc_id,
+        client_id: value.client_id,
+    })
+}
+
+#[napi(object)]
+pub struct P9LockHolder {
+    #[napi(js_name = "type")]
+    pub type_: u8,
+    pub start: BigInt,
+    pub length: BigInt,
+    pub proc_id: u32,
+    pub client_id: String,
+}
+
+fn p9_lock_holder(value: TransportP9LockHolder) -> P9LockHolder {
+    P9LockHolder {
+        type_: value.type_,
+        start: BigInt::from(value.start),
+        length: BigInt::from(value.length),
+        proc_id: value.proc_id,
+        client_id: value.client_id,
+    }
+}
+
+#[napi(object)]
+pub struct P9Lock {
+    #[napi(js_name = "type")]
+    pub type_: u8,
+    pub start: BigInt,
+    pub length: BigInt,
+    pub proc_id: u32,
+    pub client_id: String,
+    pub holder: f64,
+    pub fid: u32,
+}
+
+fn p9_lock(value: TransportP9Lock) -> P9Lock {
+    P9Lock {
+        type_: value.type_,
+        start: BigInt::from(value.start),
+        length: BigInt::from(value.length),
+        proc_id: value.proc_id,
+        client_id: value.client_id,
+        holder: value.holder as f64,
+        fid: value.fid,
+    }
+}
+
+#[derive(Clone)]
+#[napi]
+pub struct P9LockTable {
+    inner: TransportP9LockTable,
+}
+
+#[napi]
+impl P9LockTable {
+    #[napi(constructor)]
+    pub fn new(options: Option<P9LockTableOptions>) -> napi::Result<Self> {
+        let max_locks_per_file = positive_number(
+            "maxLocksPerFile",
+            options.and_then(|options| options.max_locks_per_file),
+            TransportP9LockTableOptions::default().max_locks_per_file,
+        )?;
+        Ok(Self {
+            inner: TransportP9LockTable::new(TransportP9LockTableOptions { max_locks_per_file }),
+        })
+    }
+
+    #[napi(getter)]
+    pub fn files(&self) -> f64 {
+        self.inner.files() as f64
+    }
+
+    #[napi(getter)]
+    pub fn size(&self) -> f64 {
+        self.inner.size() as f64
+    }
+
+    #[napi]
+    pub fn at(&self, path: String) -> Vec<P9Lock> {
+        self.inner.at(&path).into_iter().map(p9_lock).collect()
+    }
+
+    #[napi]
+    pub fn getlock(&self, request: P9LockRequest) -> napi::Result<Option<P9LockHolder>> {
+        self.inner
+            .getlock(&p9_lock_request(request)?)
+            .map(|holder| holder.map(p9_lock_holder))
+            .map_err(super::to_js_error)
+    }
+
+    #[napi]
+    pub fn remap(&self, from: String, to: String) {
+        self.inner.remap(&from, &to);
+    }
+
+    #[napi]
+    pub fn release(&self, path: String) {
+        self.inner.release(&path);
+    }
+
+    #[napi]
+    pub fn client(&self) -> P9LockClient {
+        P9LockClient {
+            inner: self.inner.client(),
+        }
+    }
+}
+
+#[napi]
+pub struct P9LockClient {
+    inner: TransportP9LockClient,
+}
+
+#[napi]
+impl P9LockClient {
+    #[napi(getter)]
+    pub fn table(&self) -> P9LockTable {
+        P9LockTable {
+            inner: self.inner.table.clone(),
+        }
+    }
+
+    #[napi(getter)]
+    pub fn id(&self) -> f64 {
+        self.inner.id as f64
+    }
+
+    #[napi(getter)]
+    pub fn held(&self) -> f64 {
+        self.inner.held() as f64
+    }
+
+    #[napi]
+    pub fn lock(&self, request: P9LockRequest) -> napi::Result<u8> {
+        self.inner
+            .lock(&p9_lock_request(request)?)
+            .map_err(super::to_js_error)
+    }
+
+    #[napi]
+    pub fn getlock(&self, request: P9LockRequest) -> napi::Result<Option<P9LockHolder>> {
+        self.inner
+            .getlock(&p9_lock_request(request)?)
+            .map(|holder| holder.map(p9_lock_holder))
+            .map_err(super::to_js_error)
+    }
+
+    #[napi]
+    pub fn release_fid(&self, fid: u32) {
+        self.inner.release_fid(fid);
+    }
+
+    #[napi]
+    pub fn release_all(&self) {
+        self.inner.release_all();
+    }
+
+    #[napi]
+    pub fn renamed(&self, from: String, to: String) {
+        self.inner.renamed(&from, &to);
+    }
+
+    #[napi]
+    pub fn released(&self, path: String) {
+        self.inner.released(&path);
+    }
+}
+
 #[napi(object)]
 pub struct P9ServerOptions {
     pub port: Option<f64>,
@@ -880,6 +1087,10 @@ pub struct P9Session {
     options: P9SessionOptions,
 }
 
+fn p9_lock_client(inner: TransportP9LockClient) -> P9LockClient {
+    P9LockClient { inner }
+}
+
 fn p9_session_options(options: &TransportP9ServerOptions) -> P9SessionOptions {
     P9SessionOptions {
         msize: options.msize.map(f64::from),
@@ -965,6 +1176,13 @@ impl P9Session {
     #[napi]
     pub fn user_for(&self, fid: u32) -> Option<P9User> {
         self.inner.user_for(fid).map(p9_user)
+    }
+
+    /// The live byte-range lock handle owned by this session. Its client id is
+    /// stable across getter calls and teardown releases the same ranges.
+    #[napi(getter)]
+    pub fn locks(&self) -> P9LockClient {
+        p9_lock_client(self.inner.lock_client())
     }
 
     #[napi(getter)]
@@ -1269,7 +1487,7 @@ pub fn create_p9_server(
     // The native listener and the JavaScript attach seam must share byte-range
     // lock ownership when they are used on the same public server object.
     if options.locks.is_none() {
-        options.locks = Some(P9LockTable::new(Default::default()));
+        options.locks = Some(TransportP9LockTable::new(Default::default()));
     }
     let transport_error = on_transport_error
         .map(TransportErrorCallback::new)

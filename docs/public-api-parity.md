@@ -231,11 +231,15 @@ Current focused behavior:
 - The N-API P9 session now exposes the scalar session policy through
   `session.options` and the attach identity through `userFor(fid)`; the server
   exposes its effective scalar policy through `server.options`. These members
-  are covered by generated typecheck and a live attach-only runtime check.
-  The upstream `driver`, `fids`, `locks`, assertion/debug callbacks and full
-  lock/fid object graphs remain unresolved rather than being treated as
-  intentionally out of scope. The server's property-shaped `clients` contract
-  and the 9P mount/barrel helpers are also still open.
+  are covered by generated typecheck and a live attach-only runtime check. The
+  live session lock client and the standalone `P9LockTable`/`P9LockClient`
+  inspection and mutation surface are now backed by the transport's shared
+  lock state, including conflict, rename, release, and ownership evidence.
+  The upstream `driver`, `fids`, assertion/debug callbacks, full fid object
+  graph, and lock-table injection through session/server option bags remain
+  unresolved rather than being treated as intentionally out of scope. The
+  server's property-shaped `clients` contract and the 9P mount/barrel helpers
+  are also still open.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
@@ -314,6 +318,11 @@ session with exact body readback; this is in-process same-driver evidence only.
 The Rust XML boundary accepts the five predefined and bounded numeric
 references used by valid WebDAV owner documents while refusing DTD/custom
 entities.
+The remaining N-API session boundary is explicit: it exposes scalar effective
+options, snapshot `WebdavLockView[]` records, numeric/record-shaped statistics,
+and assertion readback, but not the oracle's injectable `now`, `onError`,
+`onAssertion`, live `DavLockTable` methods, or `Map<string, number>` method
+counters. Those are public-parity gaps, not silently accepted scope.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full

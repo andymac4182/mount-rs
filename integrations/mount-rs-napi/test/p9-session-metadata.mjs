@@ -70,6 +70,20 @@ try {
     uname: "node",
     aname: "",
   });
+  assert.equal(connection.session.locks.table.files, 0);
+  assert.equal(connection.session.locks.lock({
+    path: "/",
+    fid: 1,
+    type: 1,
+    start: 0n,
+    length: 1n,
+    procId: 17,
+    clientId: "metadata-test",
+  }), 0);
+  assert.equal(connection.session.locks.held, 1);
+  assert.equal(connection.session.locks.table.at("/").length, 1);
+  connection.session.locks.releaseFid(1);
+  assert.equal(connection.session.locks.held, 0);
 } finally {
   await connection.close();
   await server.close();

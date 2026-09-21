@@ -57,6 +57,12 @@ import {
   createP9Server,
   type P9AttachOptions,
   type P9Connection,
+  type P9Lock,
+  type P9LockClient,
+  type P9LockHolder,
+  type P9LockRequest,
+  P9LockTable,
+  type P9LockTableOptions,
   type P9Server,
   type P9ServerOptions,
   type P9Session,
@@ -425,6 +431,20 @@ function checkServerAndKvSubpaths(): void {
   const p9Session: P9Session = p9Connection.session
   const p9SessionOptions: P9SessionOptions = p9Session.options
   const p9SessionStats: P9SessionStats = p9Session.stats
+  const p9Locks: P9LockClient = p9Session.locks
+  const p9LockTable: P9LockTable = p9Locks.table
+  const p9LockTableOptions: P9LockTableOptions = { maxLocksPerFile: 2 }
+  const p9LockRequest: P9LockRequest = {
+    path: "/",
+    fid: 1,
+    type: 1,
+    start: 0n,
+    length: 1n,
+    procId: 1,
+    clientId: "types",
+  }
+  const p9Lock: P9Lock | undefined = p9LockTable.at("/")[0]
+  const p9LockHolder: P9LockHolder | null = p9Locks.getlock(p9LockRequest)
   const p9User: P9User | null = p9Session.userFor(1)
   const connectionId: number = p9Connection.id
   const connectionPeer: string | null | undefined = p9Connection.peer
@@ -443,6 +463,9 @@ function checkServerAndKvSubpaths(): void {
   ]
   void connectionCompletion
   void attachedP9
+  void p9LockTableOptions
+  void p9Lock
+  void p9LockHolder
   void attachedP9Peer
   void attachedP9Stream
   void attachedP9Call

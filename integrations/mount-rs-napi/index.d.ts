@@ -467,6 +467,29 @@ export declare class P9Connection {
   readonly stream: Duplex | undefined
 }
 
+export declare class P9LockClient {
+  get table(): P9LockTable
+  get id(): number
+  get held(): number
+  lock(request: P9LockRequest): number
+  getlock(request: P9LockRequest): P9LockHolder | null
+  releaseFid(fid: number): void
+  releaseAll(): void
+  renamed(from: string, to: string): void
+  released(path: string): void
+}
+
+export declare class P9LockTable {
+  constructor(options?: P9LockTableOptions | undefined | null)
+  get files(): number
+  get size(): number
+  at(path: string): Array<P9Lock>
+  getlock(request: P9LockRequest): P9LockHolder | null
+  remap(from: string, to: string): void
+  release(path: string): void
+  client(): P9LockClient
+}
+
 export declare class P9Server {
   /**
    * Create a session for the JavaScript duplex-stream adapter. The method
@@ -507,6 +530,11 @@ export declare class P9Session {
   get options(): P9SessionOptions
   /** The attach identity recorded for a live fid, if any. */
   userFor(fid: number): P9User | null
+  /**
+   * The live byte-range lock handle owned by this session. Its client id is
+   * stable across getter calls and teardown releases the same ranges.
+   */
+  get locks(): P9LockClient
   get msize(): number | null
   get version(): string | null
   get generation(): number
@@ -2173,6 +2201,38 @@ export declare function nfsXdrAlign(length: number): number
 export declare function nfsXdrPad(length: number): number
 
 export declare function normalizePath(path: string): string
+
+export interface P9Lock {
+  type: number
+  start: bigint
+  length: bigint
+  procId: number
+  clientId: string
+  holder: number
+  fid: number
+}
+
+export interface P9LockHolder {
+  type: number
+  start: bigint
+  length: bigint
+  procId: number
+  clientId: string
+}
+
+export interface P9LockRequest {
+  path: string
+  fid: number
+  type: number
+  start: bigint
+  length: bigint
+  procId: number
+  clientId: string
+}
+
+export interface P9LockTableOptions {
+  maxLocksPerFile?: number
+}
 
 export interface P9AttachOptions {
   peer?: string

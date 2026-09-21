@@ -39,6 +39,23 @@ pub struct P9LockHolder {
     pub client_id: String,
 }
 
+/// One granted byte range, including the connection and fid that own it.
+///
+/// This is the inspection form of the private table record.  Keeping the
+/// holder and fid alongside the wire-visible range is important: a clunk
+/// releases ranges by fid, while conflicts are judged by the `(proc_id,
+/// client_id)` owner pair.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct P9Lock {
+    pub type_: u8,
+    pub start: u64,
+    pub length: u64,
+    pub proc_id: u32,
+    pub client_id: String,
+    pub holder: u64,
+    pub fid: u32,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct P9LockTableOptions {
     pub max_locks_per_file: usize,
@@ -103,6 +120,27 @@ impl P9LockTable {
             .sum()
     }
 
+    /// Number of paths that currently carry at least one granted range.
+    pub fn files(&self) -> usize {
+        self.state
+            .lock()
+            .expect("9P lock table mutex poisoned")
+            .files
+            .len()
+    }
+
+    /// Return the granted ranges for one path in ascending start order.
+    pub fn at(&self, path: &str) -> Vec<P9Lock> {
+        let state = self.state.lock().expect("9P lock table mutex poisoned");
+        let mut locks = state
+            .files
+            .get(path)
+            .map(|locks| locks.iter().map(lock_record).collect::<Vec<_>>())
+            .unwrap_or_default();
+        locks.sort_by_key(|lock| lock.start);
+        locks
+    }
+
     fn lock(&self, holder: u64, request: &P9LockRequest) -> Result<u8> {
         let (start, end) = range(request.start, request.length)?;
         let owner = owner_key(request);
@@ -143,7 +181,7 @@ impl P9LockTable {
         Ok(P9_LOCK_SUCCESS)
     }
 
-    fn getlock(&self, request: &P9LockRequest) -> Result<Option<P9LockHolder>> {
+    pub fn getlock(&self, request: &P9LockRequest) -> Result<Option<P9LockHolder>> {
         let (start, end) = range(request.start, request.length)?;
         if request.type_ != P9_LOCK_TYPE_RDLCK
             && request.type_ != P9_LOCK_TYPE_WRLCK
@@ -182,7 +220,7 @@ impl P9LockTable {
         });
     }
 
-    fn remap(&self, from: &str, to: &str) {
+    pub fn remap(&self, from: &str, to: &str) {
         if from == to {
             return;
         }
@@ -206,7 +244,7 @@ impl P9LockTable {
         }
     }
 
-    fn release_path(&self, path: &str) {
+    pub fn release(&self, path: &str) {
         let mut state = self.state.lock().expect("9P lock table mutex poisoned");
         state.files.remove(path);
     }
@@ -219,6 +257,21 @@ pub struct P9LockClient {
 }
 
 impl P9LockClient {
+    /// Number of ranges held by this connection across all paths.
+    pub fn held(&self) -> usize {
+        let state = self
+            .table
+            .state
+            .lock()
+            .expect("9P lock table mutex poisoned");
+        state
+            .files
+            .values()
+            .flat_map(|locks| locks.iter())
+            .filter(|lock| lock.holder == self.id)
+            .count()
+    }
+
     pub fn lock(&self, request: &P9LockRequest) -> Result<u8> {
         self.table.lock(self.id, request)
     }
@@ -235,7 +288,7 @@ impl P9LockClient {
         self.table.remap(from, to);
     }
     pub fn released(&self, path: &str) {
-        self.table.release_path(path);
+        self.table.release(path);
     }
 }
 
@@ -312,6 +365,22 @@ fn holder(lock: &Lock) -> P9LockHolder {
         },
         proc_id: lock.proc_id,
         client_id: lock.client_id.clone(),
+    }
+}
+
+fn lock_record(lock: &Lock) -> P9Lock {
+    P9Lock {
+        type_: lock.type_,
+        start: lock.start as u64,
+        length: if lock.end == P9_LOCK_EOF_END {
+            0
+        } else {
+            (lock.end - lock.start) as u64
+        },
+        proc_id: lock.proc_id,
+        client_id: lock.client_id.clone(),
+        holder: lock.holder,
+        fid: lock.fid,
     }
 }
 

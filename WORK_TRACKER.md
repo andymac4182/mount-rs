@@ -14,10 +14,12 @@ attached connection identity/peer/stream/closed state (including the native
 `null` versus attached-stream `undefined` peer boundary), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. It now also exposes the effective scalar server/session policy and
-`P9Session.userFor(fid)`, with generated declarations and an attach-only runtime
-check; the upstream driver/fid/lock/assertion/debug graphs, property-shaped
-`clients` contract, and 9P mount/barrel helpers remain open rather than being
-silently narrowed away. The transport now also broadcasts shutdown safely
+`P9Session.userFor(fid)`, a live transport-backed `P9Session.locks` client, and
+the public `P9LockTable`/`P9LockClient` surface, with generated declarations and
+attach/runtime lock checks; the upstream driver/fid/assertion/debug graphs,
+full fid graph, lock-table option injection, property-shaped `clients` contract,
+and 9P mount/barrel helpers remain open rather than being silently narrowed
+away. The transport now also broadcasts shutdown safely
 across the accept loop and all connections, closes the active-connection
 accept-loop race, and
 reaps completed request tasks while reporting task failures; its in-flight
@@ -270,6 +272,12 @@ callback-silent. Host all-target FUSE tests, strict Clippy, formatting/diff,
 and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior,
 native mutation/write concurrency, close/crash/restart, callback events, locks
 and durability remain external, so W01 stays NO-GO.
+The ignored Linux FUSE harness now starts eight concurrent blocking kernel
+clients; each writes, reads, renames, and rereads a distinct file, then the
+harness checks that all eight entries are visible through the mounted root.
+The host harness compiles and Linux-target strict Clippy passes, but only the
+hosted `native-fuse` execution can qualify this as native runtime evidence;
+W01 remains NO-GO until that result and the other lifecycle gates are green.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -779,6 +787,19 @@ and [fault-injection run
 cancelled, while [Live Cloudflare R2 run
 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
 failed; no hosted WebDAV acceptance is claimable from that tip.
+The remaining N-API session member boundary is also explicit: scalar options,
+snapshot lock records, assertion readback and record-shaped counters are
+implemented, while the oracle's injectable `now`, `onError`, `onAssertion`,
+live `DavLockTable` methods and `Map`-shaped method counters remain OPEN rather
+than being treated as accepted scope.
+The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
+[CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
+and [fault-injection run
+35633305962](https://github.com/andymac4182/mount-rs/actions/runs/35633305962)
+cancelled; [W04 production policy
+35633305932](https://github.com/andymac4182/mount-rs/actions/runs/35633305932)
+succeeded, and no fresh Live Cloudflare R2 run was listed. No hosted WebDAV
+PASS is claimable from the current tip.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1937,6 +1958,19 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   acceptance, canary, rollback or owner approval. *(Hosted/provider
   qualification; release approval and production deployment are external
   gates.)*
+- [x] W08.25 **Current shared-main workspace verification after the FUSE session
+  fix:** on source `f16eec2a6a1f79a5543ba345c67b86eaae837312`, the full locked
+  workspace test command and strict workspace Clippy command both exited 0
+  using fresh bounded target `/private/tmp/mount-rs-w08-current-cargo-target`.
+  All non-ignored tests passed and Clippy reported no diagnostics with
+  `-D warnings`; TiDB, RustFS, PGlite, R2, FUSE, NFS and other capability-gated
+  rows remained explicit skips/ignores. Two attempts against the configured
+  shared target failed before tests because dependency metadata/artifacts were
+  missing, and are not counted as source failures or passing evidence. This
+  is source-health evidence only; it does not close live provider,
+  native-kernel or W08-P01–P09 production gates. *(Implementation
+  verification; provider, native and production environments remain
+  external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -2535,6 +2569,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `futures-util` dependency so the harness now passes its `--locked` gate.
   This remains qualification-account and local-metadata evidence, not
   production deployment acceptance.
+- [x] A fresh current-source scoped rerun at pushed source
+  `860492d8595b665361e8d9eff46498280fc8de1f` on 2026-09-22 passed the same
+  dedicated-role sibling-prefix denial, public SDK/CLI self-test, composed
+  AWS S3 filesystem, process reopen, independent-PGlite metadata, writer
+  fencing, PGlite backup/restore, fresh-server reopen, and exact owned-prefix
+  cleanup gates under
+  `mount-rs-tests/aws-s3/20260921T173952Z-67696-542c6ba2bf6552e46bc85e0c0873bf8c`.
+  Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+  refreshed qualification-account and local-metadata evidence only; production
+  metadata ownership, independent backup/restore, schema migration, failure
+  recovery, DR, and operational sign-off remain open.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -2626,13 +2671,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   tests, S3 gateway tests, SDK/CLI tests, and the current W01/W26 workspace
   changes. Explicitly ignored native/service rows remain separate prerequisites
   and are not promoted to production evidence.
-- [x] The latest tested integrated boundary `00d2b80` passed on 2026-09-22
-  after rebase onto `origin/main`: `cargo fmt --all -- --check`, the full
-  locked offline workspace test gate, and strict workspace Clippy with
-  `-D warnings` using the explicitly isolated Cargo target and required local
-  loopback permission. The gate includes the 9P loopback integration and the
-  AWS provider, S3 gateway, SDK/CLI, N-API, W01, W04, W26, and other
-  non-ignored workspace rows.
+- [x] The latest tested integrated boundary
+  `0bb628b0323901a1632b05dd8321c32fcabca7d8` passed on 2026-09-22 after
+  the documentation chunk was rebased onto and pushed to `origin/main`:
+  `cargo fmt --all -- --check`, the full locked offline workspace/all-target
+  test gate, and strict workspace Clippy with `-D warnings` using the
+  explicitly isolated Cargo target and required local loopback permission.
+  The gate includes the 9P loopback integration and the AWS provider, S3
+  gateway, SDK/CLI, N-API, W01, W04, W26, and other non-ignored workspace rows.
   Explicitly ignored native/service rows remain separate prerequisites and are
   not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
