@@ -907,7 +907,7 @@ opt-in
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
 Hosted network concurrency, power-loss/live-provider durability, and broader
-hosted session/member lifecycle remain open; local SQLite process-crash
+hosted session/member lifecycle remain open; local NodeFs/SQLite process-crash
 recovery is covered by the dedicated N-API probe. The callable/member packet
 `8f0e74138286a678cbc5868d3cc4a528fb1b9fe9` has exact-SHA CI and release lanes
 pending or queued, so no hosted WebDAV acceptance is claimable from that packet.
@@ -961,7 +961,7 @@ and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
 `/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
 acceptance. The host-enabled WebDAV session
-packet also completes 32 parallel unique-file PUTs and GETs through one
+packet also completes 64 parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
@@ -980,9 +980,9 @@ native WebDAV I/O for that packet only, not the overall CI run or production
 acceptance. The focused N-API NodeFs and SQLite provider/reopen probes now also
 preserve exact file bytes across orderly provider/server recreation and observe
 zero replacement-session locks, classifying bytes as durable and locks as
-process-local for those local providers; the SQLite process-crash probe adds
-abrupt-death recovery, but none of these local results qualify power-loss or
-live remote-provider durability. A read-only status check for the published tip
+process-local for those local providers; the NodeFs and SQLite process-crash
+probes add abrupt-death recovery, but none of these local results qualify
+power-loss or live remote-provider durability. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -1451,7 +1451,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   peer-aware callback event for both S3 and WebDAV. The supported WebDAV
   session/member differential and full direct class 1/2/3 method matrix now
   pass; the oracle-only controls remain outside scope. Active lock-record readback and
-  post-UNLOCK cleanup, 32 parallel unique-file direct-session PUT/GET
+  post-UNLOCK cleanup, 64 parallel unique-file direct-session PUT/GET
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
@@ -1475,6 +1475,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   server/provider shutdown and a replacement-session zero-lock check. This
   classifies local NodeFs byte persistence and process-local WebDAV locks only;
   power-loss ordering and live-provider durability remain open.
+- [x] The focused N-API NodeFs WebDAV process-crash probe is now part of the
+  package test sequence: `node test/typecheck.mjs && node
+  test/webdav-node-fs-crash.mjs` passed exact PUT-byte readback after forced
+  child termination and a replacement-session zero-lock check. This classifies
+  local NodeFs process-crash recovery and process-local WebDAV locks only;
+  power-loss ordering, live-provider behavior, durable locks, and hosted
+  lifecycle remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
