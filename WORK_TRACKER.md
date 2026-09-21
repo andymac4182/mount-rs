@@ -1031,6 +1031,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Docker evidence are not production acceptance. Before enabling any production
   consumer, close every gate below with a linked revision, test/run result,
   environment identity and accountable owner:
+  The credential-free
+  `scripts/verify-w07-production-config.mjs` gate and its positive/negative
+  fixtures now enforce the accepted production configuration shape in hosted
+  qualification: durable FoundationDB metadata, `shared-provider` authority,
+  HTTPS RustFS blocks and external credential references. This is static policy
+  evidence only; it cannot prove the actual cluster, ACLs, TLS handshake,
+  replication, recovery, capacity, telemetry or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove

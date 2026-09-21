@@ -166,6 +166,15 @@ jobs:
         with:
           version: 11
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify W07 production config policy without credentials or network
+        run: |
+          node scripts/verify-w07-production-config.mjs \
+            tests/foundationdb/production-config-policy.json
+          if node scripts/verify-w07-production-config.mjs \
+            tests/foundationdb/production-config-policy.invalid.json; then
+            echo 'W07 production config policy accepted an insecure fixture' >&2
+            exit 1
+          fi
       - name: Install real PGlite and Node factory prerequisites
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile

@@ -61,10 +61,10 @@ and cannot close the production gates below.
 
 | Gate | Status | Required exit evidence |
 | --- | --- | --- |
-| P0 — scope, support matrix, SLO/RPO/RTO and ownership | Open | Named production topology, supported FoundationDB/RustFS/metadata/client versions, traffic envelope, SLOs, RPO/RTO, on-call owner, rollback authority, and approved non-goals |
-| P1 — production FoundationDB topology and rehearsal | Not started | Repeatable multi-process/HA topology, replication and storage policy, pinned images, network policy, capacity limits, clean-client readiness, restart/failover and deployment rehearsal |
+| P0 — scope, support matrix, SLO/RPO/RTO and ownership | Open; config policy implemented | Named production topology, supported FoundationDB/RustFS/metadata/client versions, traffic envelope, SLOs, RPO/RTO, on-call owner, rollback authority, and approved non-goals |
+| P1 — production FoundationDB topology and rehearsal | Not started; config policy requires durable/shared-provider shape | Repeatable multi-process/HA topology, replication and storage policy, pinned images, network policy, capacity limits, clean-client readiness, restart/failover and deployment rehearsal |
 | P2 — metadata and block-provider matrix | Qualification only | Explicit production provider choices and supported combinations; secure staging runs for FoundationDB metadata, RustFS/AWS-compatible blocks, Node, Rust CLI and native clients |
-| P3 — authority identity, ACLs, TLS and secret lifecycle | Not started | One write-capable authority identity per prefix; read-only consumer identities; actual tenant/credential/ACL negative test proving consumers cannot publish or overwrite; secret injection/rotation, TLS policy and redacted logs |
+| P3 — authority identity, ACLs, TLS and secret lifecycle | Not started; config policy checks shared-provider mode, HTTPS blocks and external references | One write-capable authority identity per prefix; read-only consumer identities; actual tenant/credential/ACL negative test proving consumers cannot publish or overwrite; secret injection/rotation, TLS policy and redacted logs |
 | P4 — replicated durability and storage failure protection | Not started | Backup/replication and sync policy review; node, disk, process and power-loss boundaries; integrity checks for metadata, fences, authority samples and immutable blocks; recovery evidence on the intended storage class |
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification; local and hosted durable restart evidence | Secure multi-node tests covering stale writers, lease expiry/renewal, maybe-committed reconciliation, network delay/partition, authority loss, reviewed failover and no split-brain publication |
 | P6 — backup, restore and disaster recovery | Not started | Consistent metadata/authority/block backup definition, encrypted retention, clean-environment restore, hash/revision verification, measured RPO/RTO and provider/region-loss procedure |
@@ -73,7 +73,7 @@ and cannot close the production gates below.
 | P9 — upgrade, rollback and compatibility | Not started | Forward/backward keyspace and configuration compatibility, rolling provider/client upgrade, failed-upgrade rollback, retained-data downgrade boundary, lockfile/image/artifact provenance |
 | P10 — security, privacy, tenancy and audit | Not started | Threat-model review, prefix/tenant isolation, data classification, encryption, audit retention, dependency/image review, abuse/rate limits, closed findings or approved exceptions |
 | P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI evidence | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
-| P12 — release packaging, CI promotion and canary | Qualification CI only | Locked and signed artifacts, SBOM/provenance, protected environment approvals, production-like canary, holdback, promotion checks, rollback automation and retained evidence packet |
+| P12 — release packaging, CI promotion and canary | Qualification CI plus policy gate | Locked and signed artifacts, SBOM/provenance, protected environment approvals, production-like canary, holdback, promotion checks, rollback automation and retained evidence packet |
 | P13 — incident, failover and recovery rehearsal | Not started | Timed operator exercises for authority loss, cluster loss, stale client, storage exhaustion, bad deploy, credential expiry and restore; paging, runbook, integrity and RTO evidence |
 | P14 — final launch audit and go/no-go | Not started | One-revision audit of P0–P13, known-limitations record, release-owner decision, canary exit evidence and explicit GO or NO-GO |
 
@@ -81,6 +81,32 @@ No P0–P14 gate is currently terminally accepted. A production gate may move to
 complete only when the exit evidence is from the named production-like
 environment and the owner records the result; implementation tests alone do
 not close operations, security, native, or release gates.
+
+## Credential-free production configuration policy
+
+The repository now includes
+`scripts/verify-w07-production-config.mjs` and positive/negative fixtures under
+`tests/foundationdb/`. The gate checks the configuration shape that the
+configuration-driven CLI accepts: split-store FoundationDB metadata, an
+absolute cluster-file path, `durable: true`, the protected `shared-provider`
+authority mode and non-empty stable prefixes; it also requires durable HTTPS
+RustFS blocks and external `R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`
+references. It rejects placeholders, inline secrets, remote plaintext HTTP,
+authority modes that are not suitable for independent production writers and
+other unsafe shapes.
+
+Run it without credentials or network access:
+
+```sh
+node scripts/verify-w07-production-config.mjs \
+  tests/foundationdb/production-config-policy.json
+```
+
+The dedicated hosted qualification workflow runs both fixtures. A
+`W07_PRODUCTION_CONFIG_POLICY_PASS` line is only static deployment-shape
+evidence: the verifier does not open FoundationDB or RustFS, cannot prove
+ACLs, certificate trust, replication, backups, capacity, monitoring or owner
+approval, and does not change the **NO-GO** decision.
 
 ## FoundationDB deployment contract
 
