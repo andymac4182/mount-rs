@@ -12,13 +12,17 @@ Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
 attached connection identity/peer/stream/closed state, duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
-coverage. The focused Rust 9P tests, strict affected-crate checks, rebuilt
-declarations, host-enabled N-API server phases, and pinned-oracle package gate
-pass. Native accepted connections deliberately expose no Node stream because
-their Tokio stream is not transferable across the N-API boundary; `attach` is
-the supported Node Duplex seam. Production remains NO-GO pending a fresh
-revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
-native fault/race/crash evidence, and the remaining W01 gates.
+coverage. The transport now also broadcasts shutdown safely across the accept
+loop and all connections, closes the active-connection accept-loop race, and
+reaps completed request tasks while reporting task failures. Local lifecycle
+5/5, transport-error 8/8, strict 9P Clippy and formatting pass. Hosted run
+`35616832528` / job `106389895603` passed the prior Linux kernel-client
+mount/read/write/unmount packet; a fresh run is required for this packet.
+Native accepted connections deliberately expose no Node stream because their
+Tokio stream is not transferable across the N-API boundary; `attach` is the
+supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
+rerun, native reset/half-close/concurrency/crash evidence, and the remaining
+W01 gates.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
