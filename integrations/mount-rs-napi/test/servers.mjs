@@ -1209,6 +1209,7 @@ async function exerciseWebdav() {
       Buffer.alloc(4 * 1024 * 1024, 0x2d),
     );
     const faultReplyCount = server.session.stats.replies;
+    const faultReportCount = reports.length;
     faultSocket = (await connectLoopback(server.port)).socket;
     await writeSocket(
       faultSocket,
@@ -1226,11 +1227,55 @@ async function exerciseWebdav() {
       "WebDAV JavaScript peer-fault response readiness",
     );
     faultSocket.destroy(new Error("deliberate WebDAV peer reset"));
-    const faultReport = await waitForTransportError(reports, "WebDAV JavaScript peer fault");
+    await within(
+      (async () => {
+        while (reports.length <= faultReportCount) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      })(),
+      "WebDAV JavaScript peer-fault callback",
+    );
+    const faultReport = reports[faultReportCount];
     assert.ok(faultReport.error instanceof Error);
     assert.match(faultReport.peer, /^127\.0\.0\.1:\d+$/);
-    assert.equal(reports.length, 1);
+    assert.equal(reports.length, faultReportCount + 1);
     faultSocket = undefined;
+
+    const malformedReports = [];
+    const malformedServer = createWebdavServer(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      onTransportError(error, peer) {
+        malformedReports.push({ error, peer });
+      },
+    });
+    let malformedListening;
+    let malformedSocket;
+    try {
+      malformedListening = (await listenLifecycle(malformedServer, "WebDAV malformed")).listening;
+      malformedSocket = (await connectLoopback(malformedServer.port)).socket;
+      await writeSocket(
+        malformedSocket,
+        Buffer.from("not a valid HTTP request\r\n\r\n"),
+        "WebDAV malformed HTTP request",
+      );
+      const malformedReport = await waitForTransportError(
+        malformedReports,
+        "WebDAV malformed HTTP",
+      );
+      assert.ok(malformedReport.error instanceof Error);
+      assert.match(malformedReport.peer, /^127\.0\.0\.1:\d+$/);
+      assert.equal(malformedReports.length, 1);
+    } finally {
+      if (malformedSocket) {
+        await runPhase("WebDAV cleanup: malformed socket close", () =>
+          closeSocket(malformedSocket, "WebDAV malformed socket close"),
+        );
+      }
+      await runPhase("WebDAV cleanup: malformed server lifecycle", () =>
+        closeLifecycle(malformedServer, "WebDAV malformed", malformedListening),
+      );
+    }
 
     const authServer = createWebdavServer(filesystem, {
       host: "127.0.0.1",

@@ -24,8 +24,8 @@ streaming APIs, connection faults, lifecycle, and provider/native boundaries.
 
 - Bind the remaining applicable WebDAV session/server members, including
   complete direct method/member parity.
-- Exercise malformed connection, cancellation, close, and restart behavior
-  through the N-API boundary.
+- Exercise cancellation, close, and restart behavior through the N-API
+  boundary.
 - Run the pinned oracle differential when `MOUNTX_SOURCE` is supplied.
 - Qualify supported provider/native/hosted paths; keep unavailable rows
   explicitly classified.
@@ -39,6 +39,7 @@ streaming APIs, connection faults, lifecycle, and provider/native boundaries.
 | 2026-09-22 | WebDAV N-API active lock records | Added generated `WebdavLockView` records and `WebdavSession.locks`; `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-test-target ./scripts/cargo-shared test -p mount-rs-webdav --locked` passed 13/13 with the native mount probe explicitly ignored, `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-check-target ./scripts/cargo-shared check -p mount-rs-napi --locked`, `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-napi-target pnpm build`, `node test/servers.mjs`, and `node test/typecheck.mjs` passed; direct LOCK exposed token/path/depth/exclusive/timeout state and UNLOCK reduced the session view to zero | Complete session/member parity, direct listener lifecycle on a host that permits loopback binds, peer-fault injection, oracle differential, restart/durability, provider, and native/hosted gates remain open |
 | 2026-09-22 | WebDAV direct N-API method matrix | Host-enabled `node test/servers.mjs` passed direct `OPTIONS`/`MKCOL`/`PUT`/`HEAD`/`GET`, `PROPFIND`/`PROPPATCH`, `COPY`/`MOVE`, `LOCK`/`UNLOCK`, `DELETE`, and explicit `PATCH` refusal at the session boundary | Complete session/member parity, direct listener lifecycle on a host that permits loopback binds, peer-fault injection, oracle differential, restart/durability, provider, and native/hosted gates remain open |
 | 2026-09-22 | WebDAV N-API peer-fault callback | Host-enabled `node test/servers.mjs` drove a large-response Node socket reset after reply readiness; exactly one typed transport callback carried the accepted `127.0.0.1:<port>` peer and server cleanup completed | Malformed-connection, lock conflict/expiry, restart/durability, complete session/member parity, oracle differential, provider, and native/hosted gates remain open |
+| 2026-09-22 | WebDAV N-API malformed connection | Host-enabled `node test/servers.mjs` isolated a malformed HTTP request on a second WebDAV server and received one typed transport callback with the accepted `127.0.0.1:<port>` peer; the malformed socket and server then closed cleanly | Lock conflict/expiry, restart/durability, complete session/member parity, oracle differential, provider, and native/hosted gates remain open |
 | 2026-09-22 | WebDAV N-API lock conflict and expiry | Host-enabled `node test/servers.mjs` created a direct exclusive lock, observed an unsubmitted-token `PUT` return `423`, then verified a `Second-1` lock expired and `WebdavSession.locks` returned to zero | Malformed-connection, restart/durability, complete session/member parity, oracle differential, provider, and native/hosted gates remain open |
 | 2026-09-22 | Package integration boundaries | `node test/webdav-codec.mjs`: explicit SKIP because `MOUNTX_SOURCE` is unset; package-wide `node test/servers.mjs` reached the unrelated NFS lane first and hit its host-permission prerequisite | Do not promote the package-wide NFS failure or the skipped oracle row into WebDAV PASS evidence |
 

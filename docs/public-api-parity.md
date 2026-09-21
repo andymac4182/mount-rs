@@ -299,8 +299,8 @@ accepts async-iterable or Web ReadableStream request bodies and returns a
 pull-based response iterator; the session also exposes read-only active lock
 records with expiry cleanup. The direct probe covers the class 1/2/3 method
 matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
-return, deliberate request-body failure mapping, and one typed peer-aware
-callback from a Node socket reset. The
+return, deliberate request-body failure mapping, one typed peer-aware callback
+from a Node socket reset, and one malformed-HTTP callback. The
 pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
 provider/native, restart, and complete member-parity gates remain open.
 
