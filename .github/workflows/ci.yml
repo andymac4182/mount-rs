@@ -95,8 +95,6 @@ jobs:
     # silently downgrading to a single-node or underprovisioned diagnostic.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
     permissions:
       contents: read
     steps:
@@ -104,6 +102,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Verify durable TiDB, PD, and TiKV restart acceptance
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
         run: ./scripts/test-tidb.sh
 
   tidb-rustfs:
@@ -112,8 +112,6 @@ jobs:
     # fixture after the durable TiDB component restarts.
     runs-on: ubuntu-24.04
     timeout-minutes: 100
-    env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
     permissions:
       contents: read
     steps:
@@ -133,6 +131,7 @@ jobs:
       - name: Build the N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
         run: pnpm --dir integrations/mount-rs-napi build
       - name: Install and verify the Linux FUSE prerequisite for the consumer gate
         run: |
@@ -148,6 +147,7 @@ jobs:
           MOUNT_RS_TIDB_RUSTFS_PREFIX: mount-rs-ci/tidb-rustfs/${{ github.run_id }}/${{ github.run_attempt }}
           MOUNT_RS_TIDB_CHUNKED_VOLUME_KEY: mount-rs-ci-tidb-rustfs-${{ github.run_id }}-${{ github.run_attempt }}
           MOUNT_RS_TIDB_CHUNKED_RUSTFS_FIXTURE: ${{ runner.temp }}/mount-rs-tidb-rustfs-${{ github.run_id }}-${{ github.run_attempt }}.fixture
+          CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
         run: ./scripts/test-tidb-rustfs.sh
 
   native-webdav:
