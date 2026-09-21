@@ -2452,6 +2452,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `aws-s3-qualification-35622312798-1` (6,338 bytes). The preceding hosted
   run `35620404949` at `0010246` stopped at the same preflight boundary, as
   did `35619552809` at `a84fa3e`. A fresh
+  provenance-hash expansion now binds the policy, preflight, resource/OIDC
+  audit, acceptance, PGlite harness, and AWS test manifest inputs in the next
+  hosted artifact; this improves evidence integrity but does not create AWS
+  authentication or deployment evidence. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
