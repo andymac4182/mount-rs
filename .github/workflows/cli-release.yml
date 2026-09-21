@@ -148,4 +148,8 @@ jobs:
           node scripts/verify-w08-release-manifest.mjs \
             "$verification_dir/$manifest" \
             "$verification_dir/$artifact"
-          tar -tzf "$verification_dir/$artifact" | grep -qx 'mount-rs'
+          test "$(tar -tzf "$verification_dir/$artifact")" = "mount-rs"
+          extracted_dir="$verification_dir/extracted"
+          mkdir -p "$extracted_dir"
+          tar -xzf "$verification_dir/$artifact" -C "$extracted_dir"
+          test "$("$extracted_dir/mount-rs" --version)" = "mount-rs $package_version"
