@@ -157,7 +157,11 @@ boundary. The Linux-gated stuck-helper regression checks the callback kind and
 message plus bounded timeout and terminal state; host FUSE tests,
 host/Linux-target strict Clippy, and Linux-target test check pass, while the
 Linux-only callback execution and hosted native forced-unmount/fault,
-crash/restart and durability evidence remain external, so W01 stays NO-GO.
+crash/restart and durability evidence remain external. This packet is published
+as `0d06abb10899f307ce83cd5fa198bab9c5f156a9`; exact-SHA CI workflow-dispatch
+run `35650347479` is queued, push CI run `35650323951` was cancelled, and Fault
+injection run `35650324040` is in progress. No hosted FUSE acceptance is
+claimable, so W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
