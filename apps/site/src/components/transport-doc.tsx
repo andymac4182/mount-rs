@@ -112,6 +112,10 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>LISTXATTR</code>, and <code>REMOVEXATTR</code> codecs with
         pinned-oracle coverage across protocol contexts, malformed,
         truncated, trailing, and declared-size checks. The existing
+        raw-layout <code>IOCTL</code> request/reply and typed
+        <code>BMAP</code> request/reply bodies are now covered by pinned-oracle
+        differentials as well; these remain focused codecs rather than a full
+        native session. Other existing
         <code>RELEASE</code>/<code>RELEASEDIR</code>, <code>FLUSH</code>,
         <code>FSYNC</code>/<code>FSYNCDIR</code>,
         <code>packDirents</code>/<code>unpackDirents</code>, and
@@ -287,7 +291,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
     name: 'macOS FSKit',
     eyebrow: 'Transport / Apple extension boundary',
     maturity: 'Planned',
-    maturityNote: 'Unsigned SDK/worker checkpoint; signing, installation, activation, and real mounts remain pending.',
+    maturityNote: 'Unsigned SDK/worker checkpoint with a 12-test Rust bridge suite and arm64 build evidence; signing, installation, activation, and real mounts remain pending.',
     summary: (
       <>
         FSKit is the native macOS extension path for a future mounted volume.
@@ -314,10 +318,11 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
     ),
     surface: (
       <>
-        Swift translates FSKit operations to the bounded Rust worker frame;
-        Rust owns filesystem, provider, locking, and lifecycle behavior. The
-        bridge supports memory, rooted host, SQLite, and split SQLite backends
-        in its current test configuration.
+        Swift translates FSKit operations to a little-endian bounded Rust
+        worker frame with a 1 MiB body limit and 128 KiB data chunks; Rust owns
+        filesystem, provider, locking, and lifecycle behavior. The bridge
+        supports memory, rooted host, SQLite, and split SQLite backends in its
+        current test configuration.
       </>
     ),
     verifyLabel: 'Verify the unsigned seam without calling it a mount',
@@ -337,16 +342,26 @@ xcodebuild -project integrations/mount-rs-fskit/MountRsFSKit.xcodeproj \
     limitations: (
       <>
         No valid Apple signing identity, provisioning profile, launchd
-        registration, or FSKit activation test is currently recorded. Optional
-        xattrs, offloaded I/O, extent/preallocation, and special-node surfaces
-        also remain separate gaps. FUSE/NFS fallback does not close this stream.
+        registration, or FSKit activation test is currently recorded. The
+        local Rust toolchain can build arm64 targets and the extension for
+        x86_64, but cannot link the x86_64 XPC service because that Rust target
+        is not installed. Optional xattrs, offloaded I/O, extent/preallocation,
+        and special-node surfaces also remain separate gaps. FUSE/NFS fallback
+        does not close this stream.
       </>
     ),
     evidence: (
       <>
-        Rust bridge tests, Swift frame tests, XPC lifecycle tests, and unsigned
-        arm64/Xcode builds are current evidence. They are deliberately labeled
-        as transport/worker evidence rather than a mounted-volume result.
+        The Rust bridge suite has 12 passing tests covering bounded frames,
+        malformed input, provider errno propagation, handle shutdown, rooted
+        host round trips, and durable split-SQLite reopen. Swift frame tests,
+        in-process XPC lifecycle tests, and unsigned arm64/Xcode builds also
+        pass on the recorded macOS 26.5.1 arm64 SDK/Xcode 26.6 environment.
+        The activation script now has an explicit required mode that only
+        passes after signing, installation, user approval, and a real read/write
+        mount check; without those prerequisites it reports a diagnostic block.
+        All of this remains transport/worker evidence rather than a mounted-
+        volume result.
       </>
     ),
     sources: [
