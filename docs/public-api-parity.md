@@ -297,7 +297,9 @@ Current focused behavior:
   independent sessions through concurrent distinct-file OPEN/WRITE/READ
   round trips. NFSv4 lease/replay/file-handle recovery, cross-process/native
   concurrency, power-loss durability, and whole-workflow release acceptance
-  remain open. S3 now
+  remain open. The exact published concurrency tip's CI run
+  `35663954461` was cancelled before jobs were created, so it adds no newer
+  hosted native result. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
   safe effective options, debug-gated assertions, buffered `handleRequest`,
   streaming `handleRequestStream`, async session metrics, live `connections`,
