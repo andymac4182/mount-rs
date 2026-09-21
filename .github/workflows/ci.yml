@@ -5,8 +5,11 @@ on:
   pull_request:
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Ordinary pushes stay cheap, while an explicitly dispatched release
+  # qualification must retain a private group and finish across mainline
+  # churn so its terminal evidence is usable for production review.
+  group: ci-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-manual-{0}', github.run_id) || '' }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   ozone:

@@ -719,6 +719,32 @@ async fn write_reply_until_stop(
 }
 
 #[cfg(target_os = "linux")]
+fn read_task_join_error(error: tokio::task::JoinError) -> FuseTransportError {
+    FuseTransportError::from_message(
+        FuseTransportErrorKind::Task,
+        if error.is_panic() {
+            "FUSE read task panicked".to_owned()
+        } else {
+            format!("FUSE read task failed: {error}")
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+async fn drain_read_tasks(
+    read_tasks: &mut tokio::task::JoinSet<Result<(), FuseTransportError>>,
+) -> Option<FuseTransportError> {
+    while let Some(task) = read_tasks.join_next().await {
+        match task {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return Some(error),
+            Err(error) => return Some(read_task_join_error(error)),
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
 async fn run_session_loop(
     session: &mut FuseSession,
     device: Arc<FuseDevice>,
@@ -742,14 +768,7 @@ async fn run_session_loop(
                         break;
                     }
                     Some(Err(error)) => {
-                        failure = Some(FuseTransportError::from_message(
-                            FuseTransportErrorKind::Task,
-                            if error.is_panic() {
-                                "FUSE read task panicked".to_owned()
-                            } else {
-                                format!("FUSE read task failed: {error}")
-                            },
-                        ));
+                        failure = Some(read_task_join_error(error));
                         break;
                     }
                 }
@@ -790,7 +809,12 @@ async fn run_session_loop(
                 });
                 continue;
             }
-            Ok(None) => {}
+            Ok(None) => {
+                if let Some(error) = drain_read_tasks(&mut read_tasks).await {
+                    failure = Some(error);
+                    break;
+                }
+            }
             Err(error) => {
                 failure = Some(FuseTransportError::from_message(
                     FuseTransportErrorKind::Protocol,
@@ -830,17 +854,15 @@ async fn run_session_loop(
     }
     read_tasks.abort_all();
     while let Some(task) = read_tasks.join_next().await {
-        if failure.is_none()
-            && let Err(error) = task
-        {
-            failure = Some(FuseTransportError::from_message(
-                FuseTransportErrorKind::Task,
-                if error.is_panic() {
-                    "FUSE read task panicked".to_owned()
-                } else {
-                    format!("FUSE read task failed: {error}")
-                },
-            ));
+        if failure.is_none() {
+            match task {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failure = Some(error),
+                Err(error) if error.is_panic() => {
+                    failure = Some(read_task_join_error(error));
+                }
+                Err(_) => {}
+            }
         }
     }
     failure
@@ -2062,12 +2084,21 @@ mod tests {
         let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
         let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
             .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
         let state = Arc::new(MountState::new(
             MountMode::Privileged,
             PathBuf::from("/tmp/mount-rs-fuse-read-concurrency-test"),
             MountOptions::default(),
             None,
-            FuseMountHooks::default(),
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
         ));
         let task = tokio::spawn(run_session(
             FuseSession::new(driver),
@@ -2121,6 +2152,12 @@ mod tests {
             .expect("stop should close the read session")
             .expect("read session task should finish");
         assert!(state.closed.load(Ordering::Acquire));
+        assert!(
+            observed
+                .lock()
+                .expect("callback observation lock")
+                .is_empty()
+        );
     }
 
     #[test]
