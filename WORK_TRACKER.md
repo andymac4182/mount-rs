@@ -2416,6 +2416,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   commits do not change the provider source covered by that gate. Explicitly
   ignored native/service rows remain separate prerequisites and are not promoted
   to production evidence.
+- [x] Current W25 repository-gate boundary `daf2a51` passed on 2026-09-22:
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings`. The test and Clippy runs used
+  an explicitly isolated Cargo target so concurrent worktrees could not supply
+  stale package metadata; the isolated run included the AWS provider's 15 unit
+  tests, S3 gateway tests, SDK/CLI tests, and the current W01/W26 workspace
+  changes. Explicitly ignored native/service rows remain separate prerequisites
+  and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

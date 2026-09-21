@@ -38,10 +38,12 @@ then safely refused the unconfigured protected environment with
 completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
-The latest tested repository boundary `8004999` also passed formatting, the
-full locked offline workspace test gate, and strict workspace Clippy with
-`-D warnings`. Subsequent W25 workflow and evidence-documentation commits do
-not change the provider source covered by that gate.
+The latest tested repository boundary `daf2a51` passed formatting, the full
+locked offline workspace test gate, and strict workspace Clippy with
+`-D warnings` on an explicitly isolated Cargo target. The isolated target was
+used because concurrent worktrees share the normal Cargo target and can expose
+cross-worktree artifact races; this gate therefore binds to the checked-out
+source rather than another thread's compiled metadata.
 Ignored native/service rows remain explicit prerequisites and are not treated
 as production acceptance.
 
