@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 08:06 AEST**
+Status snapshot: **2026-09-22 08:10 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -8,9 +8,12 @@ implementation was qualified at hosted source `e0ab07d6`; the latest W08 ledger
 pointer synchronization before the live production-boundary audit was
 `f1362442`. The audit documentation was committed as `fd29a297`, reconciled
 with concurrent mainline work and pushed in public merge tip `a40f5b8d`.
-The current public mainline source is now `6a19ff6555635b20385acdc30d7aa2da143f6931`
-after unrelated concurrent merges; its full locked workspace test and strict
-Clippy verification are recorded below. The W08.35 implementation and
+The locally verified source for the current-source check is
+`6a19ff6555635b20385acdc30d7aa2da143f6931`; its full locked workspace test
+and strict Clippy verification are recorded below. Subsequent unrelated
+mainline changes were reconciled and the documentation was published in merge
+tip `ffc6efa5`; that newer merge tip has not been promoted to the source-test
+row without a fresh full workspace run. The W08.35 implementation and
 hosted-result ledger history remain in the same public ancestry; subsequent
 unrelated mainline merges do not change any W08 production-gate decision.
 W08.34 implementation commit `59149b95`, hosted-boundary documentation commit
@@ -490,7 +493,8 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 07:27–07:29 AEST | Pushed the pointer-only ledger synchronization as `f1362442` and verified `HEAD == origin/main` with a clean worktree. | ~0.03 engineer-day | ~1 min final push/fetch verification | No W08 implementation or production-gate state changed; the packet remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 07:29–07:36 AEST | Ran a read-only live production-boundary audit, fetched the concurrent `origin/main` tip, and recorded the P09 environment/tag/workflow findings in the ledger, rollout contract and tracker. | ~0.1 engineer-day | ~3 min GitHub API/CLI observation plus ~2 min mainline synchronization | The protected workflow file exists, but `w08-production`, its environment-secret surface, the candidate tag and production workflow runs are absent; only the CLI preview prerelease exists. P09 remains externally blocked and the rollout stays NO-GO. |
 | 2026-09-22 07:36–07:49 AEST | Committed the audit documentation as `fd29a297`, reconciled concurrent `origin/main` changes, reran the 36-item/7-case/NO-GO/11-case W08 checks, and pushed the reconciled public merge tip `a40f5b8d`; then verified `HEAD == origin/main` and confirmed the audit commit is in remote ancestry. | ~0.05 engineer-day | ~2 min validator execution plus ~8 min fetch/merge/push retries caused by concurrent mainline updates | The live P09 boundary audit is publicly integrated; the packet remains NO-GO with nine open gates and zero evidence records. |
-| 2026-09-22 07:49–08:06 AEST | Fast-forwarded to current public mainline `6a19ff65`, re-ran all four W08 ledger/evidence validators, ran the full locked workspace test suite (exit 0) and strict workspace Clippy (exit 0), and prepared the current-source evidence update. | ~0.2 engineer-day | ~1 min mainline synchronization plus ~1 min test and ~54s Clippy execution | Current integrated source is test- and lint-clean; explicit provider/native skips and all nine production gates remain open. |
+| 2026-09-22 07:49–08:06 AEST | Fast-forwarded to public source `6a19ff65`, re-ran all four W08 ledger/evidence validators, ran the full locked workspace test suite (exit 0) and strict workspace Clippy (exit 0), and prepared the current-source evidence update. | ~0.2 engineer-day | ~1 min mainline synchronization plus ~1 min test and ~54s Clippy execution | Source `6a19ff65` is test- and lint-clean; explicit provider/native skips and all nine production gates remain open. Subsequent unrelated merges were not promoted to this test result. |
+| 2026-09-22 08:06–08:10 AEST | Committed the current-source verification as `4c6628ac`, reconciled concurrent mainline changes, reran the W08 policy suites, and pushed the public merge tip `ffc6efa5`; corrected the ledger wording to retain the exact tested source boundary. | ~0.05 engineer-day | ~2 min fetch/merge/push reconciliation | The verification evidence is publicly integrated, but the newer merge tip needs a fresh full workspace run before being called current-source verified. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

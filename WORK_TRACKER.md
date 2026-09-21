@@ -2788,12 +2788,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  The current integrated public mainline source
-  `6a19ff6555635b20385acdc30d7aa2da143f6931` was then reverified with the full
-  locked workspace test suite (exit 0) and strict workspace Clippy with
-  `-D warnings` (exit 0). Provider/native tests requiring TiDB, RustFS,
-  PGlite, R2, FUSE or NFS remained explicit opt-in skips; this is current
-  source-health evidence only and does not close W08-P01–P09.
+  Public source `6a19ff6555635b20385acdc30d7aa2da143f6931` was then reverified
+  with the full locked workspace test suite (exit 0) and strict workspace
+  Clippy with `-D warnings` (exit 0). Provider/native tests requiring TiDB,
+  RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips; this is
+  source-health evidence only and does not close W08-P01–P09. Subsequent
+  unrelated mainline changes were reconciled into public merge tip `ffc6efa5`
+  without promoting that newer tip to this test result.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
