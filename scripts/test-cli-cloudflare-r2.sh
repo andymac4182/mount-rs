@@ -141,7 +141,7 @@ export PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postg
 export MOUNT_RS_CLI_REMOTE_ALLOW_EXTERNAL_ENDPOINT=1
 
 echo "CLOUDFLARE_R2_CLI_START prefix=$MOUNT_RS_CLI_REMOTE_PREFIX"
-if cargo test \
+if "$repo_dir/scripts/cargo-shared" test \
   --manifest-path "$repo_dir/Cargo.toml" \
   --locked \
   -p mount-rs-cli \

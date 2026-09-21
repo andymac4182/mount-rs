@@ -28,20 +28,24 @@ if [ "$ready" -ne 1 ]; then
 fi
 
 if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "benchmark" ]; then
+  benchmark_providers="mount-rs-pglite,mount-rs-split-pglite"
+  if [ "${MOUNT_RS_PGLITE_R2_BENCHMARK:-0}" = "1" ]; then
+    benchmark_providers="$benchmark_providers,mount-rs-split-pglite-r2"
+  fi
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   MOUNT_RS_PGLITE_DURABLE=0 \
     node "$repo_dir/benchmarks/storage/runner.mjs" --smoke \
-      --providers mount-rs-pglite,mount-rs-split-pglite \
+      --providers "$benchmark_providers" \
       --output "$repo_dir/artifacts/storage-pglite-smoke.json"
   exit 0
 fi
 
 if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-fuse" ]; then
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-    cargo test --locked -p mount-rs-core --test native_fuse_backends mounted_pglite_persists_through_connection_reopen -- --ignored --nocapture
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test native_fuse_backends mounted_pglite_persists_through_connection_reopen -- --ignored --nocapture
   MOUNT_RS_RUN_NATIVE_PGLITE_SQLITE=1 \
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-    cargo test --locked -p mount-rs-core --test native_pglite_sqlite -- --ignored --nocapture
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test native_pglite_sqlite -- --ignored --nocapture
   exit 0
 fi
 
@@ -54,28 +58,28 @@ node --unhandled-rejections=strict \
 
 MOUNT_RS_REQUIRE_PGLITE=1 \
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  cargo test --locked -p mount-rs-core --test backend_parity pglite_matches_the_same_contract_when_a_socket_is_configured -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test backend_parity pglite_matches_the_same_contract_when_a_socket_is_configured -- --ignored --nocapture
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  cargo test --locked -p mount-rs-pglite configured_pglite_state_survives_reconnect -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite configured_pglite_state_survives_reconnect -- --ignored --nocapture
 
-cargo test --locked -p mount-rs-pglite readiness_handshake_does_not_consume_bounded_connection_slot -- --ignored --nocapture
+"$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite readiness_handshake_does_not_consume_bounded_connection_slot -- --ignored --nocapture
 
-cargo test --locked -p mount-rs-pglite split_stores_enforce_durability_fencing_cas_and_immutable_blocks -- --ignored --nocapture
-
-PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  cargo test --locked -p mount-rs-pglite --test versioned pglite_versioning_snapshot_history_view_survives_reconnect -- --ignored --nocapture
+"$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite split_stores_enforce_durability_fencing_cas_and_immutable_blocks -- --ignored --nocapture
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  cargo test --locked -p mount-rs-sqlite-vfs --features pglite-harness --test pglite pglite_sqlite_vfs_round_trip_and_fresh_provider_reconnect -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite --test versioned pglite_versioning_snapshot_history_view_survives_reconnect -- --ignored --nocapture
 
-cargo test --locked -p mount-rs-pglite close_is_shared_cancellation_safe -- --ignored --nocapture
+PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-sqlite-vfs --features pglite-harness --test pglite pglite_sqlite_vfs_round_trip_and_fresh_provider_reconnect -- --ignored --nocapture
+
+"$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-pglite close_is_shared_cancellation_safe -- --ignored --nocapture
 
 MOUNT_RS_RUN_PGLITE_SERVER_LIFECYCLE=1 \
-  cargo test --locked -p mount-rs-core --test pglite_server_lifecycle -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test pglite_server_lifecycle -- --ignored --nocapture
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  cargo test --locked -p mount-rs-core --test split_store pglite_metadata_and_blocks_compose_independently -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test split_store pglite_metadata_and_blocks_compose_independently -- --ignored --nocapture
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   node "$repo_dir/integrations/mount-rs-napi/test/pglite.mjs"
@@ -87,16 +91,16 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
   node "$repo_dir/integrations/mount-rs-napi/test/chunked.mjs"
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  cargo test --locked -p mount-rs-core --test fuse_backends fuse_pglite_operations_survive_connection_reopen -- --ignored --nocapture
+  "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test fuse_backends fuse_pglite_operations_survive_connection_reopen -- --ignored --nocapture
 
 # Run the provider matrix while this isolated PGlite server is alive. The
 # matrix reports missing R2 credentials as skips and scopes any live objects
 # to a per-run prefix; it never treats RustFS or local object storage as R2.
 provider_matrix_url="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable"
-provider_matrix_run_id="pglite-$port"
+provider_matrix_run_id="${MOUNT_RS_PROVIDER_MATRIX_RUN_ID:-pglite-$port}"
 PGLITE_DATABASE_URL="$provider_matrix_url" \
 MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$provider_matrix_run_id" \
-  cargo run --quiet --manifest-path "$repo_dir/tests/provider_matrix/Cargo.toml" --locked
+  "$repo_dir/scripts/cargo-shared" run --quiet --manifest-path "$repo_dir/tests/provider_matrix/Cargo.toml" --locked
 PGLITE_DATABASE_URL="$provider_matrix_url" \
 MOUNT_RS_PROVIDER_MATRIX_RUN_ID="$provider_matrix_run_id" \
   node "$repo_dir/tests/provider_matrix/node-sdk.mjs"
@@ -114,5 +118,5 @@ fi
 if [ -n "${R2_ENDPOINT:-}" ] && [ -n "${R2_BUCKET:-}" ] && \
    [ -n "${R2_ACCESS_KEY_ID:-}" ] && [ -n "${R2_SECRET_ACCESS_KEY:-}" ]; then
   PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-    cargo test --locked -p mount-rs-core --test split_store live_r2_blocks_with_independent_pglite_metadata -- --ignored --nocapture
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test split_store live_r2_blocks_with_independent_pglite_metadata -- --ignored --nocapture
 fi

@@ -1,0 +1,103 @@
+name: Live Cloudflare R2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/cloudflare-r2.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'benchmarks/**'
+      - 'crates/**'
+      - 'examples/**'
+      - 'integrations/**'
+      - 'scripts/**'
+      - 'tests/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-cloudflare-r2
+  cancel-in-progress: false
+
+jobs:
+  budget:
+    name: Admit bounded R2 usage
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enforce the monthly R2 CI usage envelope
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MOUNT_RS_R2_CI_WORKFLOW_FILE: cloudflare-r2.yml
+          MOUNT_RS_R2_CI_MAX_RUNS_PER_MONTH: '20'
+          MOUNT_RS_R2_CI_MAX_COST_CENTS_PER_RUN: '400'
+          MOUNT_RS_R2_CI_MONTHLY_BUDGET_CENTS: '10000'
+        run: sh scripts/r2-ci-budget.sh
+
+  live-r2:
+    name: Rust and Node live R2 integration
+    needs: budget
+    environment: r2-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      R2_ENDPOINT: ${{ secrets.MOUNT_RS_R2_ENDPOINT }}
+      R2_BUCKET: ${{ secrets.MOUNT_RS_R2_BUCKET }}
+      R2_ACCESS_KEY_ID: ${{ secrets.MOUNT_RS_R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.MOUNT_RS_R2_SECRET_ACCESS_KEY }}
+      MOUNT_RS_R2_CI_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      MOUNT_RS_RUN_CLOUDFLARE_R2_CLI: '1'
+      AWS_DEFAULT_REGION: auto
+      AWS_EC2_METADATA_DISABLED: 'true'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: pithings/mountx
+          ref: 85361a8212ff9bff8e69f62fa8993ef2c2ec51e8
+          path: mountx-source
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - name: Verify the AWS CLI cleanup dependency
+        run: |
+          if ! command -v aws >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y awscli
+          fi
+          aws --version
+      - name: Install locked Rust and Node test dependencies
+        run: |
+          pnpm --dir tests/pglite install --frozen-lockfile
+          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir tests/upstream install --frozen-lockfile
+          pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
+      - name: Build the public Node SDK addon
+        env:
+          CARGOFLAGS: --locked
+        run: pnpm --dir integrations/mount-rs-napi build
+      - name: Run the complete authenticated R2 acceptance packet
+        env:
+          MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
+        run: sh scripts/test-cloudflare-r2-full.sh
+      - name: Preserve the bounded live R2 benchmark sample
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cloudflare-r2-storage-smoke
+          path: artifacts/storage-pglite-smoke.json
+          if-no-files-found: warn

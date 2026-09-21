@@ -3,7 +3,7 @@
 // CLI consumer checks. The config-validation rows are intentionally mount-free:
 // they prove the public schema and provider selection without opening a
 // database, resolving credentials, or contacting PGlite/R2. The opt-in
-// PGlite row below is the separate configured SDK read/write/reopen exercise.
+// PGlite/R2 row below is the separate configured SDK read/write/reopen exercise.
 
 import { spawn } from "node:child_process";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -13,11 +13,13 @@ import { fileURLToPath } from "node:url";
 import {
   cleanupR2Prefix,
   listR2Prefix,
+  r2ConfigFromEnv,
   rustfsConfigFromEnv,
 } from "./r2-cleanup.mjs";
 
 const matrixDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(matrixDirectory, "../..");
+const cargoShared = join(repositoryRoot, "scripts", "cargo-shared");
 const configFiles = [
   ["memory-config", resolve(matrixDirectory, "config-memory.json")],
   ["sqlite-config", resolve(matrixDirectory, "config-sqlite.json")],
@@ -78,7 +80,7 @@ await commandCase(
 // filesystem and performs driver I/O.
 await commandCase(
   "rust-cli-sdk-self-test",
-  "cargo",
+  cargoShared,
   [
     "run",
     "--quiet",
@@ -122,7 +124,7 @@ await commandCase(
 );
 await commandCase(
   "rust-cli-sdk-self-test-sqlite-reopen",
-  "cargo",
+  cargoShared,
   [
     "run",
     "--quiet",
@@ -216,7 +218,7 @@ if (process.env.PGLITE_DATABASE_URL) {
   );
   await commandCase(
     "rust-cli-pglite-config-reopen",
-    "cargo",
+    cargoShared,
     [
       "run",
       "--quiet",
@@ -280,7 +282,7 @@ if (tidbRustfsReady) {
     );
     await commandCase(
       "rust-cli-tidb-rustfs-config-reopen-partial-truncate",
-      "cargo",
+      cargoShared,
       [
         "run",
         "--quiet",
@@ -320,7 +322,7 @@ if (tidbRustfsReady) {
 for (const [label, path] of configFiles) {
   await commandCase(
     label,
-    "cargo",
+    cargoShared,
     [
       "run",
       "--quiet",
@@ -341,7 +343,7 @@ for (const [label, path] of configFiles) {
 // can open, write, read, and shut down a composed filesystem offline.
 await commandCase(
   "memory-runtime",
-  "cargo",
+  cargoShared,
   [
     "test",
     "--quiet",
@@ -356,7 +358,7 @@ await commandCase(
 );
 await commandCase(
   "sqlite-runtime",
-  "cargo",
+  cargoShared,
   [
     "test",
     "--quiet",
@@ -378,16 +380,82 @@ const r2Required = [
   "R2_SECRET_ACCESS_KEY",
 ];
 const missingR2 = r2Required.filter((name) => !process.env[name]);
-skips += 1;
-const cliGates = [];
-if (!hasPglite) cliGates.push("PGLITE_DATABASE_URL");
-if (missingR2.length > 0) cliGates.push(missingR2.join("|"));
-if (cliGates.length === 0) cliGates.push("explicit-live-cli-opt-in");
-console.log(
-  "SKIP cli case=pglite-r2-runtime gate=" +
-    cliGates.join("+") +
-    " reason=matrix-keeps-cli-runtime-mount-free",
-);
+const r2 = r2ConfigFromEnv();
+if (hasPglite && missingR2.length === 0 && r2.config) {
+  const configDirectory = await mkdtemp(join(tmpdir(), "mount-rs-provider-matrix-cli-r2-"));
+  const configPath = join(configDirectory, "pglite-r2.json");
+  const prefix = `mount-rs-provider-matrix/${providerRunId}/cli-pglite-r2`;
+  const volumeKey = `mount-rs-provider-matrix/${providerRunId}/cli-pglite-r2-metadata`;
+  const config = {
+    version: 1,
+    driver: {
+      kind: "splitstore",
+      storage: {
+        metadata: {
+          kind: "pglite",
+          connection: { env: "PGLITE_DATABASE_URL" },
+          volume_key: volumeKey,
+          durable: false,
+        },
+        blocks: {
+          kind: "r2",
+          endpoint: r2.config.endpoint,
+          bucket: r2.config.bucket,
+          prefix,
+          access_key_id: { env: "R2_ACCESS_KEY_ID" },
+          secret_access_key: { env: "R2_SECRET_ACCESS_KEY" },
+          durable: true,
+        },
+        chunk_size_bytes: 7,
+        owner: `provider-matrix-cli-${providerRunId}-pglite-r2`,
+      },
+    },
+  };
+  const protectedKeys = await listR2Prefix(r2.config, prefix);
+  try {
+    await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+    await commandCase(
+      "node-cli-pglite-r2-config-reopen",
+      process.execPath,
+      ["examples/node-cli/index.mjs", "--config", configPath, "--sdk-self-test", "--reopen"],
+    );
+    await commandCase(
+      "rust-cli-pglite-r2-config-reopen",
+      cargoShared,
+      [
+        "run",
+        "--quiet",
+        "--offline",
+        "--locked",
+        "-p",
+        "mount-rs-cli",
+        "--",
+        "sdk-self-test",
+        "--config",
+        configPath,
+        "--reopen",
+      ],
+    );
+  } finally {
+    try {
+      await cleanupR2Prefix(r2.config, prefix, protectedKeys);
+    } catch (error) {
+      failures.push("pglite-r2-cli-prefix-cleanup");
+      console.log("FAIL cli case=pglite-r2-cli-prefix-cleanup reason=" + error.message);
+    }
+    await rm(configDirectory, { recursive: true, force: true });
+  }
+} else {
+  skips += 1;
+  const cliGates = [];
+  if (!hasPglite) cliGates.push("PGLITE_DATABASE_URL");
+  if (missingR2.length > 0) cliGates.push(missingR2.join("|"));
+  console.log(
+    "SKIP cli case=pglite-r2-runtime gate=" +
+      cliGates.join("+") +
+      " reason=requires_live_pglite_and_r2",
+  );
+}
 
 console.log(
   "SUMMARY cli pass=" +

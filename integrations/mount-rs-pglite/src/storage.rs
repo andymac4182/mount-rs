@@ -1576,7 +1576,7 @@ impl BlockStore for PgliteBlockStore {
 
 #[cfg(test)]
 pub(crate) mod test_support {
-    use std::io::{BufRead, BufReader};
+    use std::io::{BufRead, BufReader, Read};
     use std::process::{Child, Command, Stdio};
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::thread::{self, JoinHandle};
@@ -1611,9 +1611,20 @@ pub(crate) mod test_support {
                 .env("PGLITE_PORT", port.to_string())
                 .env("PGLITE_MAX_CONNECTIONS", max_connections.to_string())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap_or_else(|error| panic!("start node PGlite helper: {error}"));
+
+            let stderr = child
+                .stderr
+                .take()
+                .unwrap_or_else(|| panic!("PGlite helper did not expose a stderr pipe"));
+            let stderr_reader = thread::spawn(move || {
+                let mut stderr = stderr;
+                let mut output = String::new();
+                let _ = stderr.read_to_string(&mut output);
+                output
+            });
 
             let stdout = child
                 .stdout
@@ -1684,7 +1695,11 @@ pub(crate) mod test_support {
                     let _ = child.kill();
                     let _ = child.wait();
                     let _ = stdout_reader.join();
-                    panic!("{error}");
+                    let stderr = stderr_reader.join().unwrap_or_default();
+                    if stderr.trim().is_empty() {
+                        panic!("{error}");
+                    }
+                    panic!("{error}: {}", stderr.trim());
                 }
                 _ => unreachable!("PGlite startup ended without readiness or an error"),
             };
