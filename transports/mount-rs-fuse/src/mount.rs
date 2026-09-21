@@ -616,7 +616,13 @@ impl MountState {
 
     fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
+        // Wake every currently waiting lifecycle/read future, and retain one
+        // permit for a request loop that is between select! polls.  The
+        // atomic flag is the source of truth; the retained permit closes the
+        // Notify race where notify_waiters() can otherwise be lost before the
+        // loop registers its next waiter.
         self.stop_notify.notify_waiters();
+        self.stop_notify.notify_one();
     }
 
     fn abort_task(&self) {
@@ -864,6 +870,35 @@ async fn write_reply_until_stop(
 }
 
 #[cfg(target_os = "linux")]
+async fn write_terminal_reply(
+    device: Arc<FuseDevice>,
+    writer: Arc<tokio::sync::Mutex<()>>,
+    reply: Vec<u8>,
+) -> Result<(), FuseTransportError> {
+    let _guard = writer.lock().await;
+    device
+        .write_frame(&reply)
+        .await
+        .map_err(|error| FuseTransportError::from_io(FuseTransportErrorKind::Write, &error))
+}
+
+#[cfg(target_os = "linux")]
+async fn prepared_read_reply(prepared: PreparedRead, state: Arc<MountState>) -> Vec<u8> {
+    let unique = prepared.unique();
+    let stopped = state.stop_notify.notified();
+    tokio::pin!(stopped);
+    stopped.as_mut().enable();
+    if state.stop.load(Ordering::Acquire) {
+        crate::error_reply(unique, ErrorCode::Eio).to_vec()
+    } else {
+        tokio::select! {
+            _ = &mut stopped => crate::error_reply(unique, ErrorCode::Eio).to_vec(),
+            reply = prepared.reply() => reply,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn read_task_join_error(error: tokio::task::JoinError) -> FuseTransportError {
     FuseTransportError::from_message(
         FuseTransportErrorKind::Task,
@@ -902,11 +937,8 @@ fn spawn_prepared_read(
     let state = Arc::clone(state);
     let abort = read_tasks.spawn(async move {
         let _permit = permit;
-        let reply = prepared.reply().await;
-        (
-            unique,
-            write_reply_until_stop(device, writer, state, reply).await,
-        )
+        let reply = prepared_read_reply(prepared, Arc::clone(&state)).await;
+        (unique, write_terminal_reply(device, writer, reply).await)
     });
     in_flight.insert(unique, abort);
 }
@@ -1030,9 +1062,6 @@ async fn run_session_loop(
             // bounded terminal drain below prevents an uncooperative backend
             // future from keeping the device open forever, while
             // run_session() performs the final session-owned cleanup.
-            for abort in in_flight.drain().map(|(_, abort)| abort) {
-                abort.abort();
-            }
             pending_reads.clear();
             state.request_stop();
             break;
@@ -1129,7 +1158,10 @@ async fn run_session_loop(
         }
     }
     pending_reads.clear();
-    read_tasks.abort_all();
+    // Wake positional-read workers before joining them. Each worker turns the
+    // stop signal into an EIO reply, which releases a kernel read that would
+    // otherwise keep FUSE_DESTROY and the native unmount helper blocked.
+    state.request_stop();
     match tokio::time::timeout(
         READ_TASK_DRAIN_TIMEOUT,
         drain_read_tasks(&mut read_tasks, &mut in_flight),
@@ -1142,6 +1174,7 @@ async fn run_session_loop(
         Ok(None) => {}
         Err(_) => {
             failure.get_or_insert_with(read_worker_drain_timeout_error);
+            read_tasks.abort_all();
             // Dropping the JoinSet releases any worker that did not honor
             // cancellation within the bound. The native device must be
             // released even when a backend future is not cancellation
@@ -3027,6 +3060,11 @@ mod tests {
         peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 5, 0, &[]))
             .await
             .expect("send destroy");
+        let read_reply = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
+            .await
+            .expect("destroy should terminate the blocked read");
+        assert_eq!(i32::from_le_bytes(read_reply[4..8].try_into().unwrap()), -5);
+        assert_eq!(u64::from_le_bytes(read_reply[8..16].try_into().unwrap()), 4);
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("FUSE_DESTROY should close the session")
@@ -3036,6 +3074,93 @@ mod tests {
             observed
                 .lock()
                 .expect("callback observation lock")
+                .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_cancels_blocked_positional_read_before_next_device_frame() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.write(b"data", Some(0)).await.expect("seed file");
+        file.close().await.expect("close seed file");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let driver = Arc::new(ReadBarrierDriver {
+            inner,
+            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            entered: Arc::clone(&entered),
+        });
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-stop-blocked-read-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        let _ = read_test_reply(&mut peer).await;
+        peer.write_all(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_reply(&mut peer).await;
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+        peer.write_all(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_reply(&mut peer).await;
+        let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
+        peer.write_all(&test_frame(15, 4, nodeid, &read_body(handle)))
+            .await
+            .expect("send blocked read");
+        tokio::time::timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("read should enter the worker");
+
+        state.request_stop();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("stop should cancel a blocked read before the next frame")
+            .expect("stopped read session should finish");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(
+            observed
+                .lock()
+                .expect("transport error observation lock")
                 .is_empty()
         );
     }
