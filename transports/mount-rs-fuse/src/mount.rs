@@ -657,6 +657,11 @@ impl MountState {
         let result = match attempt_unmount(&self, timeout).await {
             UnmountAttempt::Done => Ok(()),
             UnmountAttempt::TimedOut => {
+                // A graceful native unmount can wait for an in-flight kernel
+                // request to finish. Cancel the session before asking for a
+                // lazy detach so a blocked backend future cannot deadlock the
+                // forced phase behind the same request.
+                self.request_stop();
                 forced_deadline = Some(
                     force_unmount_async(
                         self.mode,
@@ -2765,6 +2770,80 @@ mod tests {
                 .message
                 .contains("forced teardown was requested")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn forced_unmount_stops_session_before_lazy_detach() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-ordering-helper-{}-{suffix}",
+            std::process::id()
+        ));
+        let marker = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-ordering-marker-{}-{suffix}",
+            std::process::id()
+        ));
+        let forced_marker = PathBuf::from(format!("{}.forced", marker.display()));
+        let script = b"#!/bin/sh\nif [ \"$2\" = \"-z\" ]; then\n    while [ ! -f \"$4\" ]; do\n        sleep 0.01\n    done\n    : > \"$4.forced\"\n    exit 0\nfi\nwhile [ ! -f \"$3\" ]; do\n    sleep 0.01\ndone\nexit 0\n";
+        std::fs::write(&helper, script).expect("write ordering helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("ordering helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make ordering helper executable");
+
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            marker.clone(),
+            MountOptions {
+                mode: MountMode::Rootless,
+                unmount_timeout: Duration::from_millis(100),
+                ..MountOptions::default()
+            },
+            Some(helper.clone()),
+            FuseMountHooks::default(),
+        ));
+        let task_state = Arc::clone(&state);
+        let task_marker = marker.clone();
+        state.set_task(tokio::spawn(async move {
+            loop {
+                let notified = task_state.stop_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if task_state.stop.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+            std::fs::write(task_marker, b"stopped").expect("write stop marker");
+        }));
+
+        let result = Arc::clone(&state).perform_unmount().await;
+
+        assert!(matches!(
+            result,
+            Err(MountError::Timeout {
+                operation: "unmount",
+                ..
+            })
+        ));
+        assert!(state.stop.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(
+            forced_marker.exists(),
+            "lazy detach must start only after the session stop request"
+        );
+
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(forced_marker);
     }
 
     #[cfg(target_os = "linux")]

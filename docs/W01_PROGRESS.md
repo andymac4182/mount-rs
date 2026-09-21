@@ -186,6 +186,16 @@ and diff checks pass; Darwin cannot execute the Linux-only validation test, and
 hosted Linux native lifecycle/callback evidence remains external. W01 stays
 NO-GO.
 
+The follow-up FUSE teardown packet addresses the first hosted native lifecycle
+failure. Run `35657075892`, native-FUSE job `106523259210`, passed the backend
+read-panic callback case but failed both the concurrent round-trip unmount and
+blocked-read unmount at the test's 15-second bound. The graceful
+`fusermount3 -u` phase could wait for a request that the session would only
+cancel after the helper returned; the forced path now requests session stop
+before lazy detach, with a Linux-gated helper-ordering regression. Local host
+and Linux-target checks pass, but the corrected hosted native run is still
+required, so W01 remains **NO-GO**.
+
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
 direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed
