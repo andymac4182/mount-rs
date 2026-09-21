@@ -597,7 +597,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35623491280`/`336d9a3`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35627206302`/`87db9fd`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1482,7 +1482,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification checkpoint for that revision; production identity/ACL/TLS,
   backup/recovery, capacity, observability, macOS and release-owner gates
   remain open.
-  A later non-cancelling hosted run
+  A prior non-cancelling hosted run
   [35623491280](https://github.com/andymac4182/mount-rs/actions/runs/35623491280)
   (job
   [106415143857](https://github.com/andymac4182/mount-rs/actions/runs/35623491280/job/106415143857))
@@ -1494,13 +1494,30 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
   throughput_ops_per_sec=64.28`, `FOUNDATIONDB_TEST_PASS topology=durable
   ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
-  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a newer bounded
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a prior bounded
   current-main qualification checkpoint; its retained artifact
   `foundationdb-production-qualification-35623491280-1` has SHA-256
   `b353ac2744dae9c469f7807533f8eec0d52e49120a101552c428585e0559741d`, and
   the workflow summary records the repository, source revision, ref, runner,
   workflow, run ID and attempt. It is not production-duration, capacity,
   identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
+  The latest non-cancelling hosted run
+  [35627206302](https://github.com/andymac4182/mount-rs/actions/runs/35627206302)
+  (job
+  [106424385715](https://github.com/andymac4182/mount-rs/actions/runs/35627206302/job/106424385715))
+  tested current-main revision `87db9fd` on `ubuntu-24.04` and completed green
+  in 10m47s. Its retained artifact
+  `foundationdb-production-qualification-35627206302-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=7981 p95_us=23550 p99_us=23550 total_ms=124
+  throughput_ops_per_sec=120.85`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. Its artifact has SHA-256
+  `d2e6743dedf5d1099e383cfc41fe00cfb2e22a05068289084c2db75641cbf7e3`, and
+  the schema-2 workflow summary records the repository, source revision, ref,
+  runner, workflow, run ID and attempt. It is not production-duration,
+  capacity, identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1541,9 +1558,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35623491280` recorded
-    `operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
-    throughput_ops_per_sec=64.28` at revision `336d9a3`. This is bounded
+    latency and throughput; latest hosted run `35627206302` recorded
+    `operations=15 p50_us=7981 p95_us=23550 p99_us=23550 total_ms=124
+    throughput_ops_per_sec=120.85` at revision `87db9fd`. This is bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -1556,8 +1573,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `336d9a3` in run
-    `35623491280` on `ubuntu-24.04`, with the retained
+    Node, CLI/native Linux checkpoint is green for revision `87db9fd` in run
+    `35627206302` on `ubuntu-24.04`, with the retained
     `qualification-pass` artifact. Complete the advertised macOS/Linux
     build/native matrix and any remaining clean-install/package evidence;
     record the actual runner, cluster/image, revision and result. Failed,
