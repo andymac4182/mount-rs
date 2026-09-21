@@ -1031,9 +1031,16 @@ outcomes, and the run emitted
 p95_us=28865 p99_us=28865 total_ms=124 throughput_ops_per_sec=88.62`, followed
 by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
 `RUSTFS_COMBO_PASS` and RustFS integration markers. This is terminal hosted
-Linux qualification and bounded workload measurement for the tested revision;
-it does not close production identity/ACL/TLS, backup/recovery, capacity,
-observability, macOS or release-owner gates.
+  Linux qualification and bounded workload measurement for the tested revision;
+  it does not close production identity/ACL/TLS, backup/recovery, capacity,
+  observability, macOS or release-owner gates.
+  Hosted attempt
+  [35606084750](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606084750)
+  at revision `2d4ca9f` reached the policy, prerequisite and N-API steps but
+  stopped before provider execution because `tests/rustfs/Cargo.lock` was
+  missing the `futures-util` dependency declared by `mount-rs-r2`. It is not
+  runtime acceptance evidence; the lockfile correction is being published
+  before the guarded-authority run is retried.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
