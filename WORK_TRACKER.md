@@ -846,7 +846,12 @@ also passes all 40 paired TypeScript/Rust S3+WebDAV loopback cases, including
 16 authenticated WebDAV cases for streaming PUT, XML property updates,
 GET/HEAD/range/conditional behavior, PROPFIND, COPY/MOVE, refusal,
 missing-resource, and DELETE. This is local pinned-oracle HTTP evidence, not
-hosted/native acceptance. A read-only status check for the published tip
+hosted/native acceptance. At exact scope-packet SHA
+`e13c52bea3485fada8be03ed62fba9a107255507`, CI run `35640746296` also reported
+successful `native-webdav (macos-latest)` job `106469172312` and
+`native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
+native WebDAV I/O for that packet only, not the overall CI run or production
+acceptance. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
