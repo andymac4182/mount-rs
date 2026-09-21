@@ -318,7 +318,9 @@ Current focused behavior:
   streaming `handleRequestStream`, async session metrics, live `connections`,
   and typed `onTransportError` delivery. WebDAV exposes `connections`, a
   session view, buffered and streamed direct requests, and positional response
-  bodies, but complete oracle member parity remains open. Compare the current
+bodies, and the full supported server/session string/symbol prototype-member
+differential now passes; only the three oracle-only controls remain outside
+scope. Compare the current
   native options and objects in
   [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L816-L1192) with
   the declarations in [`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L1085-L1203).
@@ -398,7 +400,7 @@ matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
 return, deliberate request-body failure mapping, one typed peer-aware callback
 from a Node socket reset, one malformed-HTTP callback, and same-driver server
 recreation preserving file bytes while resetting session locks. It also
-completes 64 parallel unique-file PUT/GET requests through one direct
+completes 128 parallel unique-file PUT/GET requests through one direct
 session with exact body readback; this is in-process same-driver evidence only.
 The pinned TypeScript-vs-Rust loopback HTTP differential also passes all 40
 paired S3+WebDAV cases, including 16 authenticated WebDAV cases covering
@@ -436,7 +438,7 @@ Clippy and formatting. The N-API WebDAV wrapper also serializes its
 closed-state check with the transport lifecycle; a rebuilt 40-iteration
 real-loopback race test passes. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
-host-enabled WebDAV network/fault/restart matrix, and a focused 64-pair live
+host-enabled WebDAV network/fault/restart matrix, and a focused 128-pair live
 HTTP network-concurrency/authentication/streaming test; hosted network
 concurrency and hosted lifecycle remain open.
 The shared postbuild server facade keeps close idempotent while in flight but
