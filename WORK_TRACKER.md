@@ -800,6 +800,12 @@ cancelled; [W04 production policy
 35633305932](https://github.com/andymac4182/mount-rs/actions/runs/35633305932)
 succeeded, and no fresh Live Cloudflare R2 run was listed. No hosted WebDAV
 PASS is claimable from the current tip.
+The immediately preceding tracker tip `4b103b1ab9be142b15638a9679999bfd43d3bd80`
+had [CI run 35633547228](https://github.com/andymac4182/mount-rs/actions/runs/35633547228)
+pending and [fault-injection run
+35633547086](https://github.com/andymac4182/mount-rs/actions/runs/35633547086)
+in progress at the read-only check; W04 policy succeeded, but no hosted
+WebDAV PASS was claimable.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
