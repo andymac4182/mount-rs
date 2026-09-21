@@ -1067,22 +1067,11 @@ async fn run_session_loop(
                         break;
                     }
                 }
-                match tokio::time::timeout(
-                    READ_TASK_DRAIN_TIMEOUT,
-                    drain_read_tasks(&mut read_tasks, &mut in_flight),
-                )
-                .await
-                {
-                    Ok(Some(error)) => {
-                        failure = Some(error);
-                        break;
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        failure = Some(read_worker_drain_timeout_error());
-                        break;
-                    }
-                }
+                // Positional read workers do not borrow mutable session
+                // state, so interrupting one does not require draining
+                // unrelated reads. Leaving their join results in the set
+                // keeps the control plane responsive while those workers
+                // continue or are canceled independently.
             }
             Err(error) => {
                 failure = Some(FuseTransportError::from_message(
@@ -2846,7 +2835,7 @@ mod tests {
             inner,
             active: Arc::new(AtomicUsize::new(0)),
             max_active: Arc::new(AtomicUsize::new(0)),
-            barrier: Arc::new(tokio::sync::Barrier::new(2)),
+            barrier: Arc::new(tokio::sync::Barrier::new(3)),
             entered: Arc::new(tokio::sync::Notify::new()),
         });
 
@@ -2904,6 +2893,14 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), entered.notified())
             .await
             .expect("read should enter the worker");
+
+        let second_entered = entered.notified();
+        peer.write_all(&test_frame(15, 6, nodeid, &read_body(handle)))
+            .await
+            .expect("send unrelated blocking read");
+        tokio::time::timeout(Duration::from_secs(1), second_entered)
+            .await
+            .expect("unrelated read should enter the worker");
 
         peer.write_all(&test_frame(
             crate::constants::FUSE_INTERRUPT,
