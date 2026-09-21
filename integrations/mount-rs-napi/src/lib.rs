@@ -1153,6 +1153,7 @@ pub struct JsNodeFsOptions {
     pub read_only: Option<bool>,
 }
 
+#[derive(Default)]
 #[napi(object)]
 pub struct JsP9MountOptions {
     /// Select the kernel's 9P transport. The default is the private Unix
@@ -1161,6 +1162,14 @@ pub struct JsP9MountOptions {
     pub host: Option<String>,
     pub port: Option<f64>,
     pub path: Option<String>,
+    /// Scalar policy for a server created by this mount. A supplied server
+    /// keeps its already-configured policy instead.
+    pub allow_remote: Option<bool>,
+    pub socket_mode: Option<f64>,
+    pub allow_shared_directory: Option<bool>,
+    pub max_frame: Option<f64>,
+    pub max_in_flight: Option<f64>,
+    pub msize: Option<f64>,
     pub mount_msize: Option<f64>,
     pub access: Option<String>,
     pub cache: Option<String>,
@@ -1168,6 +1177,9 @@ pub struct JsP9MountOptions {
     pub aname: Option<String>,
     pub read_only: Option<bool>,
     pub use_driver_ino: Option<bool>,
+    pub claim_ownership: Option<bool>,
+    pub debug: Option<bool>,
+    pub locks: Option<crate::servers::P9LockTable>,
     pub mount_options: Option<Vec<String>>,
     pub unmount_timeout_ms: Option<f64>,
     /// Reuse a configured native 9P server. The server must be listening
@@ -2208,6 +2220,64 @@ fn p9_mount_msize(value: Option<f64>) -> Option<u32> {
     ) as u32)
 }
 
+fn p9_mount_usize(
+    name: &str,
+    value: Option<f64>,
+    default: usize,
+    positive: bool,
+) -> Result<usize, Error> {
+    let Some(value) = value else {
+        return Ok(default);
+    };
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value < if positive { 1.0 } else { 0.0 }
+        || value > MAX_SAFE_INTEGER
+        || value > usize::MAX as f64
+    {
+        let bound = if positive {
+            format!("an integer greater than zero and at most {MAX_SAFE_INTEGER}")
+        } else {
+            format!("an integer between 0 and {MAX_SAFE_INTEGER}")
+        };
+        return Err(config_error(format!("{name} must be {bound}")));
+    }
+    Ok(value as usize)
+}
+
+fn p9_mount_server_options(
+    options: &JsP9MountOptions,
+) -> Result<mount_rs_9p::P9ServerOptions, Error> {
+    let defaults = mount_rs_9p::P9ServerOptions::default();
+    Ok(mount_rs_9p::P9ServerOptions {
+        allow_remote: options.allow_remote.unwrap_or(defaults.allow_remote),
+        socket_mode: validate_u32(
+            "9p.socketMode",
+            options.socket_mode.unwrap_or(defaults.socket_mode as f64),
+        )?,
+        allow_shared_directory: options
+            .allow_shared_directory
+            .unwrap_or(defaults.allow_shared_directory),
+        max_frame: p9_mount_usize("9p.maxFrame", options.max_frame, defaults.max_frame, true)?,
+        max_in_flight: p9_mount_usize(
+            "9p.maxInFlight",
+            options.max_in_flight,
+            defaults.max_in_flight,
+            true,
+        )?,
+        msize: options
+            .msize
+            .map(|value| validate_u32("9p.msize", value))
+            .transpose()?,
+        use_driver_ino: options.use_driver_ino.unwrap_or(defaults.use_driver_ino),
+        read_only: options.read_only.unwrap_or(defaults.read_only),
+        claim_ownership: options.claim_ownership.unwrap_or(defaults.claim_ownership),
+        debug: options.debug.unwrap_or(defaults.debug),
+        locks: options.locks.as_ref().map(|locks| locks.transport()),
+        ..defaults
+    })
+}
+
 fn p9_mount_options(
     options: Option<JsP9MountOptions>,
     read_only: Option<bool>,
@@ -2226,11 +2296,13 @@ fn p9_mount_options(
         None => None,
     };
     let mount_msize = p9_mount_msize(options.mount_msize);
+    let server_options = p9_mount_server_options(&options)?;
     Ok(Some(mount_rs_9p::P9MountOptions {
         server: options
             .server
             .map(|server| server.transport_server())
             .transpose()?,
+        server_options,
         server_hooks: mount_rs_9p::P9ServerHooks::default(),
         transport: parse_p9_mount_transport(options.transport)?,
         host: options.host.unwrap_or(defaults.host),
@@ -3737,6 +3809,37 @@ mod tests {
             p9_mount_msize(Some(f64::INFINITY)),
             Some(mount_rs_9p::mount::P9_MAX_MOUNT_MSIZE)
         );
+    }
+
+    #[test]
+    fn p9_mount_server_policy_maps_scalar_options_and_lock_table() {
+        let options = JsP9MountOptions {
+            allow_remote: Some(true),
+            socket_mode: Some(0o640 as f64),
+            allow_shared_directory: Some(true),
+            max_frame: Some(2.0 * 1024.0 * 1024.0),
+            max_in_flight: Some(7.0),
+            msize: Some(64.0 * 1024.0),
+            use_driver_ino: Some(false),
+            read_only: Some(true),
+            claim_ownership: Some(false),
+            debug: Some(false),
+            locks: Some(crate::servers::P9LockTable::new(None).expect("lock table")),
+            ..JsP9MountOptions::default()
+        };
+
+        let mapped = p9_mount_server_options(&options).expect("9P mount policy");
+        assert!(mapped.allow_remote);
+        assert_eq!(mapped.socket_mode, 0o640);
+        assert!(mapped.allow_shared_directory);
+        assert_eq!(mapped.max_frame, 2 * 1024 * 1024);
+        assert_eq!(mapped.max_in_flight, 7);
+        assert_eq!(mapped.msize, Some(64 * 1024));
+        assert!(!mapped.use_driver_ino);
+        assert!(mapped.read_only);
+        assert!(!mapped.claim_ownership);
+        assert!(!mapped.debug);
+        assert!(mapped.locks.is_some());
     }
 
     #[test]
