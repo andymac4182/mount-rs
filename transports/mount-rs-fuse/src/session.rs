@@ -5,10 +5,11 @@ use crate::constants::FUSE_READ;
 use crate::{
     Request,
     constants::{
-        FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE,
-        FUSE_FORGET, FUSE_GETLK, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_KERNEL_MINOR_VERSION,
-        FUSE_LK_FLOCK, FUSE_LSEEK, FUSE_NOTIFY_REPLY, FUSE_POLL, FUSE_READLINK, FUSE_RENAME2,
-        FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FOPEN_KEEP_CACHE, FOPEN_NOFLUSH, FUSE_BATCH_FORGET, FUSE_BMAP, FUSE_COPY_FILE_RANGE,
+        FUSE_FALLOCATE, FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL,
+        FUSE_KERNEL_MINOR_VERSION, FUSE_LISTXATTR, FUSE_LK_FLOCK, FUSE_LSEEK, FUSE_NOTIFY_REPLY,
+        FUSE_POLL, FUSE_READLINK, FUSE_REMOVEXATTR, FUSE_RENAME2, FUSE_SETLK, FUSE_SETLKW,
+        FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS,
     },
     error_reply,
     inodes::InodeTable,
@@ -190,7 +191,7 @@ fn u64_at(b: &[u8], offset: usize) -> Result<u64> {
         .map(|v| u64::from_le_bytes(v.try_into().unwrap()))
         .ok_or_else(|| FsError::new(ErrorCode::Einval))
 }
-fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
+fn validate_body(opcode: u32, body: &[u8], context: Option<ProtocolContext>) -> Result<()> {
     let exact = match opcode {
         2 => Some(8),
         3 => Some(16),
@@ -221,6 +222,14 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
             return Err(FsError::new(ErrorCode::Einval));
         }
     }
+    if matches!(
+        opcode,
+        FUSE_BMAP | FUSE_GETXATTR | FUSE_LISTXATTR | FUSE_SETXATTR
+    ) {
+        decode_request_body(opcode, body, context)
+            .map(|_| ())
+            .map_err(|_| FsError::new(ErrorCode::Einval))?;
+    }
     if opcode == FUSE_BATCH_FORGET {
         if body.len() < 8 {
             return Err(FsError::new(ErrorCode::Einval));
@@ -241,7 +250,7 @@ fn validate_body(opcode: u32, body: &[u8]) -> Result<()> {
         return Err(FsError::new(ErrorCode::Einval));
     }
     let names = match opcode {
-        1 | 10 | 11 => Some((0, 1)),
+        1 | 10 | 11 | FUSE_REMOVEXATTR => Some((0, 1)),
         6 => Some((0, 2)),
         9 | 13 => Some((8, 1)),
         12 => Some((8, 2)),
@@ -638,7 +647,7 @@ impl FuseSession {
             || request.header.unique == 0
             || self.negotiated.is_none()
             || self.destroyed
-            || validate_body(FUSE_READ, request.body).is_err()
+            || validate_body(FUSE_READ, request.body, None).is_err()
         {
             return Ok(None);
         }
@@ -692,7 +701,12 @@ impl FuseSession {
         if request.header.opcode == FUSE_BATCH_FORGET {
             // BATCH_FORGET is also no-reply, but its count and fixed-width
             // records must be validated before applying any inode changes.
-            validate_body(FUSE_BATCH_FORGET, request.body).map_err(|error| {
+            validate_body(
+                FUSE_BATCH_FORGET,
+                request.body,
+                Some(self.protocol_context()),
+            )
+            .map_err(|error| {
                 crate::ProtocolError::new(format!(
                     "BATCH_FORGET body validation failed: {}",
                     error.code.as_str()
@@ -711,7 +725,11 @@ impl FuseSession {
         if request.header.unique == 0 || request.header.opcode == FUSE_NOTIFY_REPLY {
             return Ok(None);
         }
-        if let Err(error) = validate_body(request.header.opcode, request.body) {
+        if let Err(error) = validate_body(
+            request.header.opcode,
+            request.body,
+            Some(self.protocol_context()),
+        ) {
             self.last_error = Some(error.clone());
             return Ok(Some(
                 error_reply(request.header.unique, error.code).to_vec(),

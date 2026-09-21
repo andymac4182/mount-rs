@@ -676,6 +676,23 @@ hosted/live boundaries stay open below.
   full N-API package matrix, privileged Linux FUSE, native callback/lifecycle,
   FSKit, cancellation/concurrency, crash/restart, or durability acceptance.
 
+### W01 FUSE session unsupported-operation boundary (2026-09-22)
+
+- **PASS** — `./scripts/cargo-shared test -p mount-rs-fuse --all-targets
+  --locked` passed the complete FUSE target: 14 unit, 6 INIT, 6 notify/record,
+  11 protocol, 20 session, and 3 sync-barrier tests. The new session checks
+  validate codec-backed `BMAP`, legacy and negotiated `SETXATTR`, `GETXATTR`,
+  `LISTXATTR`, and `REMOVEXATTR` bodies before valid unsupported requests return
+  `ENOSYS`; malformed forms return `EINVAL`.
+- **PASS** —
+  `CARGO_TARGET_DIR=/private/tmp/mount-rs-clippy-fuse-validate-20260922
+  ./scripts/cargo-shared clippy -p mount-rs-fuse --all-targets --locked --
+  -D warnings` passed.
+- This remains a mount-free validation boundary. Native xattr/BMAP support is
+  not advertised or implemented, and hosted Linux FUSE, callback/lifecycle,
+  FSKit, cancellation/concurrency, crash/restart, and durability acceptance
+  remain open.
+
 ### W01 lock-codec packet evidence (2026-09-21)
 
 - **PASS** — the N-API FUSE barrel now exports typed `GETLK`, `SETLK` and

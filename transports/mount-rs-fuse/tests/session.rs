@@ -5,10 +5,11 @@ use mount_rs_core::{
 use mount_rs_fuse::{
     RequestHeader,
     constants::{
-        FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET,
-        FUSE_GETLK, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR,
-        FUSE_MKNOD, FUSE_POLL, FUSE_READLINK, FUSE_RELEASE, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR,
-        FUSE_SETLK, FUSE_SETLKW, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK,
+        FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_BMAP, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE,
+        FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK,
+        FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_POLL, FUSE_READLINK,
+        FUSE_RELEASE, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_SETLK,
+        FUSE_SETLKW, FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::{FuseFlushMechanism, FuseSession, FuseSessionOptions},
@@ -954,6 +955,76 @@ async fn advanced_operations_fail_closed_and_remain_explicitly_unsupported() {
         .unwrap()
         .unwrap();
     assert_eq!(errno(&lookup), 0);
+}
+
+#[tokio::test]
+async fn unsupported_codec_operations_validate_bodies_before_enosys() {
+    let fs = Arc::new(MemoryFs::empty());
+    let mut session = FuseSession::new(fs);
+    negotiate(&mut session).await;
+
+    let errno = |reply: &[u8]| i32::from_le_bytes(reply[4..8].try_into().unwrap());
+    for (opcode, valid_body) in [
+        (FUSE_BMAP, vec![0; 16]),
+        (FUSE_GETXATTR, {
+            let mut body = vec![0; 8];
+            body.extend(b"user.test\0");
+            body
+        }),
+        (FUSE_LISTXATTR, vec![0; 8]),
+        (FUSE_SETXATTR, {
+            let mut body = vec![0; 8];
+            body[..4].copy_from_slice(&1u32.to_le_bytes());
+            body.extend(b"user.test\0v");
+            body
+        }),
+        (FUSE_REMOVEXATTR, b"user.test\0".to_vec()),
+    ] {
+        let mut malformed = valid_body.clone();
+        malformed.pop();
+        let reply = session
+            .handle(&frame(opcode, 1, &malformed))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&reply), -22, "malformed opcode {opcode}");
+
+        let reply = session
+            .handle(&frame(opcode, 1, &valid_body))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&reply), -38, "valid unsupported opcode {opcode}");
+    }
+
+    let mut extended = FuseSession::with_options(
+        Arc::new(MemoryFs::empty()),
+        FuseSessionOptions {
+            init: mount_rs_fuse::init::Preferences {
+                flags: FUSE_SETXATTR_EXT,
+                ..Default::default()
+            },
+            ..FuseSessionOptions::default()
+        },
+    );
+    negotiate(&mut extended).await;
+    let mut extended_body = vec![0; 16];
+    extended_body[..4].copy_from_slice(&1u32.to_le_bytes());
+    extended_body.extend(b"user.test\0v");
+    let mut malformed_extended = extended_body.clone();
+    malformed_extended.pop();
+    let reply = extended
+        .handle(&frame(FUSE_SETXATTR, 1, &malformed_extended))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&reply), -22, "malformed extended SETXATTR");
+    let reply = extended
+        .handle(&frame(FUSE_SETXATTR, 1, &extended_body))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(errno(&reply), -38, "valid extended SETXATTR");
 }
 
 fn io_body(handle: u64, offset: u64, size: u32) -> Vec<u8> {

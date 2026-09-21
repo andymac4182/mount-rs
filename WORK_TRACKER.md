@@ -289,6 +289,13 @@ and `node test/fuse-inodes.mjs` passed inode parity. This closes focused
 mount-free codec/inode evidence only; the full package matrix, hosted Linux
 `/dev/fuse`, native callback/lifecycle, remaining session parity, FSKit,
 cancellation/concurrency, crash/restart, and durability remain open.
+The follow-up session boundary now runs the public codec validators for
+`BMAP`, legacy and negotiated-extended `SETXATTR`, `GETXATTR`, `LISTXATTR`,
+and `REMOVEXATTR` before returning their valid-request `ENOSYS` boundary.
+Malformed bodies return `EINVAL` without backend mutation. The complete locked
+FUSE target passed 14 unit, 6 INIT, 6 notify/record, 11 protocol, 20 session,
+and 3 sync-barrier tests, and strict warning-denied Clippy passed; native xattr
+and BMAP support remains unadvertised and unimplemented.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
