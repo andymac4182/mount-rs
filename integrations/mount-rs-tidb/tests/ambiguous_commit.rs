@@ -208,13 +208,10 @@ async fn start_commit_drop_proxy(database_url: &str) -> (String, JoinHandle<IoRe
                     relays.spawn(async move { relay_until_commit_response(client, upstream).await });
                 }
                 relay = relays.join_next(), if !relays.is_empty() => {
-                    match relay {
-                        Some(Ok(Ok(()))) => {
-                            relays.abort_all();
-                            while relays.join_next().await.is_some() {}
-                            return Ok(());
-                        }
-                        Some(Ok(Err(_))) | Some(Err(_)) | None => {}
+                    if let Some(Ok(Ok(()))) = relay {
+                        relays.abort_all();
+                        while relays.join_next().await.is_some() {}
+                        return Ok(());
                     }
                 }
             }
