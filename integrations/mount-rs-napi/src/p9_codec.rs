@@ -103,6 +103,7 @@ pub struct NativeP9Time {
 }
 
 #[napi(object)]
+#[derive(Clone)]
 pub struct NativeP9Header {
     pub size: u32,
     #[napi(js_name = "type")]

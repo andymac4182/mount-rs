@@ -23,7 +23,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::constants::{P9_DEFAULT_MAX_FRAME, P9_HDRSZ};
 use crate::locks::P9LockTable;
 use crate::protocol::P9FrameAssembler;
-use crate::session::{P9Session, P9SessionOptions};
+use crate::session::{P9Session, P9SessionHooks, P9SessionOptions};
 
 pub const DEFAULT_P9_PORT: u16 = 564;
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 16;
@@ -97,6 +97,7 @@ pub struct P9ServerOptions {
     pub use_driver_ino: bool,
     pub read_only: bool,
     pub claim_ownership: bool,
+    pub debug: bool,
     pub locks: Option<crate::locks::P9LockTable>,
 }
 
@@ -115,6 +116,7 @@ impl Default for P9ServerOptions {
             use_driver_ino: true,
             read_only: false,
             claim_ownership: true,
+            debug: cfg!(debug_assertions),
             locks: None,
         }
     }
@@ -127,6 +129,7 @@ impl P9ServerOptions {
             use_driver_ino: self.use_driver_ino,
             read_only: self.read_only,
             claim_ownership: self.claim_ownership,
+            debug: self.debug,
             locks: self.locks.clone(),
         }
     }
@@ -236,6 +239,7 @@ pub struct P9Server {
     driver: Arc<dyn FsDriver>,
     options: P9ServerOptions,
     hooks: P9ServerHooks,
+    session_hooks: P9SessionHooks,
     locks: P9LockTable,
     shutdown: Arc<Notify>,
     shutdown_requested: Arc<AtomicBool>,
@@ -275,6 +279,21 @@ impl P9Server {
         options: P9ServerOptions,
         hooks: P9ServerHooks,
     ) -> Self {
+        Self::new_arc_with_hooks_and_session_hooks(
+            driver,
+            options,
+            hooks,
+            P9SessionHooks::default(),
+        )
+    }
+
+    /// Construct an attach-only server with transport and session hooks.
+    pub fn new_arc_with_hooks_and_session_hooks(
+        driver: Arc<dyn FsDriver>,
+        options: P9ServerOptions,
+        hooks: P9ServerHooks,
+        session_hooks: P9SessionHooks,
+    ) -> Self {
         let locks = options
             .locks
             .clone()
@@ -284,6 +303,7 @@ impl P9Server {
             driver,
             options,
             hooks,
+            session_hooks,
             locks,
             shutdown: Arc::new(Notify::new()),
             shutdown_requested: Arc::new(AtomicBool::new(false)),
@@ -324,7 +344,28 @@ impl P9Server {
         options: P9ServerOptions,
         hooks: P9ServerHooks,
     ) -> io::Result<Self> {
-        let server = Self::new_arc_with_hooks(driver, options.clone(), hooks);
+        Self::bind_arc_with_hooks_and_session_hooks(
+            driver,
+            options,
+            hooks,
+            P9SessionHooks::default(),
+        )
+        .await
+    }
+
+    /// Bind a listener with transport and session hooks.
+    pub async fn bind_arc_with_hooks_and_session_hooks(
+        driver: Arc<dyn FsDriver>,
+        options: P9ServerOptions,
+        hooks: P9ServerHooks,
+        session_hooks: P9SessionHooks,
+    ) -> io::Result<Self> {
+        let server = Self::new_arc_with_hooks_and_session_hooks(
+            driver,
+            options.clone(),
+            hooks,
+            session_hooks,
+        );
         if let Some(path) = options.path {
             #[cfg(unix)]
             {
@@ -698,7 +739,11 @@ impl P9Server {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let control = Arc::new(ConnectionControl::new());
         let connection = P9Connection {
-            session: P9Session::with_options(Arc::clone(&self.driver), self.session_options()),
+            session: P9Session::with_options_and_hooks(
+                Arc::clone(&self.driver),
+                self.session_options(),
+                self.session_hooks.clone(),
+            ),
             peer: attach.peer,
             id,
             control: Arc::clone(&control),

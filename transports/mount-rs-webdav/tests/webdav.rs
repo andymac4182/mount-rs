@@ -92,6 +92,55 @@ async fn transport_connection_failures_are_reported() {
     server.close().await.expect("close");
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn immediate_close_after_listen_does_not_lose_shutdown_wakeup() {
+    let server = create_webdav_server(
+        Arc::new(MemoryFs::empty()),
+        WebdavServerOptions {
+            drain_timeout: Duration::from_millis(250),
+            ..WebdavServerOptions::default()
+        },
+    )
+    .expect("loopback bind");
+
+    server.listen().await.expect("listen");
+    timeout(Duration::from_secs(1), server.close())
+        .await
+        .expect("close did not complete")
+        .expect("close");
+    assert_eq!(server.connections(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_listen_calls_share_one_lifecycle() {
+    let probe = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("reserve loopback port");
+    let port = probe.local_addr().expect("probe address").port();
+    drop(probe);
+
+    let server = Arc::new(
+        create_webdav_server(
+            Arc::new(MemoryFs::empty()),
+            WebdavServerOptions {
+                port,
+                ..WebdavServerOptions::default()
+            },
+        )
+        .expect("loopback bind"),
+    );
+    let mut calls = Vec::new();
+    for _ in 0..16 {
+        let server = Arc::clone(&server);
+        calls.push(tokio::spawn(async move { server.listen().await }));
+    }
+    for call in calls {
+        call.await.expect("listen task").expect("listen");
+    }
+    assert_eq!(server.port(), port);
+    server.close().await.expect("close");
+}
+
 #[tokio::test]
 async fn session_errors_are_reported_once_with_the_request_head() {
     let reports = Arc::new(Mutex::new(Vec::new()));
