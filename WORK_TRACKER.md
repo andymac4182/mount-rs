@@ -286,6 +286,12 @@ session to close, asserts exactly one owned `Task` transport callback, and
 completes bounded unmount and mountpoint cleanup. Local focused tests and
 Linux-target strict Clippy pass; hosted execution is still required for native
 callback-event and panic/cleanup acceptance, so W01 remains NO-GO.
+The automatic named-FUSE harness now routes the same read-only backend panic
+through `AutoMountHooks.fuse`; it asserts one owned `Task` callback at the
+facade boundary, observes `active == false`, and completes bounded unmount and
+cleanup. Locked host compilation and Linux-target strict Clippy pass; hosted
+execution is still required for root automatic callback-event acceptance, so
+W01 remains NO-GO.
 The actual Darwin 27.0.0 arm64 host has no `/dev/fuse`, and the focused
 non-Linux mount regression returns `UnsupportedPlatform` without touching its
 requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the

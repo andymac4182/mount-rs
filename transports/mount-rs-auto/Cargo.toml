@@ -16,4 +16,5 @@ mount-rs-nfs = { path = "../mount-rs-nfs" }
 libc = "0.2"
 
 [dev-dependencies]
+async-trait = "0.1"
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "time"] }

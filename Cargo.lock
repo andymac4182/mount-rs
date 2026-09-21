@@ -1269,6 +1269,7 @@ dependencies = [
 name = "mount-rs-auto"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "libc",
  "mount-rs-9p",
  "mount-rs-core",
