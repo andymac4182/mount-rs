@@ -901,10 +901,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
 - [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage. Rust
-  SDK/CLI FoundationDB selection is now wired behind an opt-in native feature
-  with an explicit persisted single-authority/test mode; Node and live
-  native-mount acceptance remain open. The native-feature test binaries still
-  require the host FoundationDB client library (libfdb_c).
+  SDK/CLI and the Node chunked factory now expose FoundationDB selection behind
+  opt-in native features with an explicit persisted single-authority/test mode;
+  the live Node gate is checked in but requires a feature-built addon, host
+  libfdb_c and a live cluster. Native-mount and macOS/Linux acceptance remain
+  open.
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.

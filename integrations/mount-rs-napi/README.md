@@ -61,6 +61,32 @@ is unavailable and includes the probe's prerequisite reason in the failure.
 If mount or teardown fails, the mountpoint is printed and is not recursively
 removed, so an active host mount is never hidden by cleanup.
 
+## FoundationDB chunked provider
+
+The chunked Node factory accepts a foundationdb provider when the N-API crate
+is built with its opt-in native feature:
+
+    cargo check -p mount-rs-napi --features foundationdb
+
+Use uri for the cluster-file path, key for the volume prefix, and require
+leaseAuthority: "persisted-single-authority". This is an owned
+single-authority/test mode; it is not the protected shared provider-time
+authority required for independent production writers. The provider retains
+the process-scoped FoundationDB client network until its filesystem handles
+are dropped.
+
+The live Node gate is intentionally opt-in:
+
+    MOUNT_RS_NAPI_FOUNDATIONDB=1 \
+    MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/path/to/fdb.cluster \
+      node integrations/mount-rs-napi/test/foundationdb.mjs
+
+If R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY are
+present, the gate composes FoundationDB metadata with R2-compatible blocks;
+otherwise it exercises the FoundationDB metadata path with in-memory blocks.
+The native feature build requires the host FoundationDB client library for
+linking, and a live cluster is required for the runtime gate.
+
 ## Optional observability
 
 The native crate has an opt-in `observability` feature that decorates every

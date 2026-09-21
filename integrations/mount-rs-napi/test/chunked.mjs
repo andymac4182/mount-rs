@@ -104,6 +104,22 @@ try {
       }),
     "EINVAL",
   )
+  if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
+    await assertCode(
+      () =>
+        createChunkedDriver({
+          metadata: {
+            kind: "foundationdb",
+            uri: "/missing/fdb.cluster",
+            key: "feature-off",
+            leaseAuthority: "persisted-single-authority",
+          },
+          blocks: { kind: "memory" },
+          chunkSize: 4096,
+        }),
+      "EINVAL",
+    )
+  }
   await assertCode(
     () =>
       createChunkedDriver({

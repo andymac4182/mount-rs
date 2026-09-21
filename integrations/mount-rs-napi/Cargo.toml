@@ -9,6 +9,7 @@ license = "Apache-2.0"
 [features]
 default = []
 observability = ["dep:mount-rs-observability"]
+foundationdb = ["dep:mount-rs-foundationdb", "mount-rs-foundationdb/foundationdb"]
 
 [lib]
 crate-type = ["cdylib"]
@@ -32,6 +33,9 @@ mount-rs-sqlite = { path = "../mount-rs-sqlite" }
 mount-rs-tidb = { path = "../mount-rs-tidb" }
 napi = { version = "3", default-features = false, features = ["napi8", "async", "dyn-symbols"] }
 napi-derive = "3"
+
+[target.'cfg(any(all(target_os = "linux", target_arch = "x86_64"), all(target_os = "linux", target_arch = "aarch64"), all(target_os = "macos", target_arch = "x86_64"), all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+mount-rs-foundationdb = { path = "../mount-rs-foundationdb", optional = true }
 
 [build-dependencies]
 napi-build = "2"

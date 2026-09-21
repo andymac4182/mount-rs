@@ -266,6 +266,24 @@ setting, locking/recovery results, and cleanup evidence. The host-backed case
 keeps the NFS server's backing-directory ownership aligned with the
 unprivileged macOS kernel client.
 
+For the opt-in FoundationDB metadata/RustFS block composition, build the CLI
+with the native feature and provide the disposable cluster/client plus RustFS
+environment:
+
+    MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 \
+    MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/path/to/fdb.cluster \
+    R2_ENDPOINT=http://127.0.0.1:9878 \
+    R2_BUCKET=mount-rs-rustfs \
+    R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=... \
+    cargo test -p mount-rs-cli --features foundationdb \
+      --test native_lifecycle -- --ignored --nocapture
+
+Linux selects FUSE and macOS selects native NFS. The test runs the actual
+config-driven CLI twice, writes and reopens bytes through FoundationDB
+metadata plus RustFS-compatible blocks, and verifies each native unmount. It
+is separate from the portable CLI suite and does not pass without a matching
+FoundationDB client library and live services.
+
 ## macOS three-way shared visibility boundary
 
 There is currently no valid acceptance command for mounting one mount-rs

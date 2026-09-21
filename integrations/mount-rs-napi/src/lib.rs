@@ -26,6 +26,16 @@ use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, MemoryFs,
     MkdirOptions, OpenFlags, Result as CoreResult, Stats, StatsFs,
 };
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
+use mount_rs_foundationdb::{FoundationDbStorage, FoundationDbStorageOptions};
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 #[cfg(feature = "observability")]
@@ -1134,11 +1144,14 @@ pub struct JsMountFailure {
 /// backend never falls back to an in-memory store.
 #[napi(object)]
 pub struct JsChunkedStoreOptions {
-    /// Supported values are memory, sqlite, pglite, tidb, and r2 (blocks only).
+    /// Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
+    /// (blocks only). FoundationDB requires the native feature and an
+    /// explicit persisted-single-authority lease authority.
     pub kind: String,
     pub uri: Option<String>,
     pub key: Option<String>,
     pub durable: Option<bool>,
+    pub lease_authority: Option<String>,
     pub endpoint: Option<String>,
     pub bucket: Option<String>,
     pub access_key_id: Option<String>,
@@ -1632,6 +1645,40 @@ fn required_string(value: &Option<String>, field: &str) -> Result<String, Error>
     Ok(value.to_owned())
 }
 
+#[cfg(all(
+    feature = "foundationdb",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64"),
+    )
+))]
+fn open_foundationdb_storage(
+    options: &JsChunkedStoreOptions,
+    role: &str,
+) -> Result<FoundationDbStorage, Error> {
+    let uri = required_string(&options.uri, &format!("{role}.uri"))?;
+    let key = required_string(&options.key, &format!("{role}.key"))?;
+    let authority = required_string(&options.lease_authority, &format!("{role}.leaseAuthority"))?;
+    if authority != "persisted-single-authority" {
+        return Err(config_error(format!(
+            "{role}.leaseAuthority must be 'persisted-single-authority'"
+        )));
+    }
+    reject_set(&options.endpoint, &format!("{role}.endpoint"))?;
+    reject_set(&options.bucket, &format!("{role}.bucket"))?;
+    reject_set(&options.access_key_id, &format!("{role}.accessKeyId"))?;
+    reject_set(
+        &options.secret_access_key,
+        &format!("{role}.secretAccessKey"),
+    )?;
+    let storage = FoundationDbStorageOptions::new(key)
+        .with_durable(options.durable.unwrap_or(false))
+        .with_persisted_lease_oracle();
+    FoundationDbStorage::connect(uri, storage).map_err(to_js_error)
+}
+
 fn validate_chunk_size(value: f64) -> Result<usize, Error> {
     if !value.is_finite()
         || value.fract() != 0.0
@@ -1670,6 +1717,9 @@ fn optional_u32(name: &str, value: Option<f64>, default: u32) -> Result<u32, Err
 async fn build_metadata_store(
     options: &JsChunkedStoreOptions,
 ) -> Result<(Arc<dyn MetadataStore>, Option<ChunkedProviderResource>), Error> {
+    if options.kind != "foundationdb" {
+        reject_set(&options.lease_authority, "metadata.leaseAuthority")?;
+    }
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "metadata.uri")?;
@@ -1728,8 +1778,41 @@ async fn build_metadata_store(
                 Some(ChunkedProviderResource::TidbMetadata(store)),
             ))
         }
+        "foundationdb" => {
+            #[cfg(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            ))]
+            {
+                let storage = open_foundationdb_storage(options, "metadata")?;
+                let store = storage.metadata();
+                Ok((
+                    Arc::new(store),
+                    Some(ChunkedProviderResource::FoundationDb(storage)),
+                ))
+            }
+            #[cfg(not(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            )))]
+            {
+                Err(config_error(
+                    "FoundationDB requires the foundationdb feature on a supported native target",
+                ))
+            }
+        }
         "r2" => Err(config_error(
-            "R2 is a block-only backend; metadata must use memory, sqlite, pglite, or tidb",
+            "R2 is a block-only backend; metadata must use memory, sqlite, pglite, tidb, or foundationdb",
         )),
         other => Err(config_error(format!("unknown metadata backend: {other}"))),
     }
@@ -1738,6 +1821,9 @@ async fn build_metadata_store(
 async fn build_block_store(
     options: &JsChunkedStoreOptions,
 ) -> Result<(Arc<dyn BlockStore>, Option<ChunkedProviderResource>), Error> {
+    if options.kind != "foundationdb" {
+        reject_set(&options.lease_authority, "blocks.leaseAuthority")?;
+    }
     match options.kind.as_str() {
         "memory" => {
             reject_set(&options.uri, "blocks.uri")?;
@@ -1795,6 +1881,39 @@ async fn build_block_store(
                 Arc::new(store.clone()),
                 Some(ChunkedProviderResource::TidbBlocks(store)),
             ))
+        }
+        "foundationdb" => {
+            #[cfg(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            ))]
+            {
+                let storage = open_foundationdb_storage(options, "blocks")?;
+                let store = storage.blocks();
+                Ok((
+                    Arc::new(store),
+                    Some(ChunkedProviderResource::FoundationDb(storage)),
+                ))
+            }
+            #[cfg(not(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            )))]
+            {
+                Err(config_error(
+                    "FoundationDB requires the foundationdb feature on a supported native target",
+                ))
+            }
         }
         "r2" => {
             let prefix = required_string(&options.key, "blocks.key")?;
@@ -2805,6 +2924,16 @@ enum ChunkedProviderResource {
     PgliteBlocks(PgliteBlockStore),
     TidbMetadata(TidbMetadataStore),
     TidbBlocks(TidbBlockStore),
+    #[cfg(all(
+        feature = "foundationdb",
+        any(
+            all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
+            all(target_os = "macos", target_arch = "x86_64"),
+            all(target_os = "macos", target_arch = "aarch64"),
+        )
+    ))]
+    FoundationDb(FoundationDbStorage),
 }
 
 impl ChunkedProviderResource {
@@ -2814,6 +2943,19 @@ impl ChunkedProviderResource {
             Self::PgliteBlocks(store) => store.close().await,
             Self::TidbMetadata(store) => store.close().await,
             Self::TidbBlocks(store) => store.close().await,
+            #[cfg(all(
+                feature = "foundationdb",
+                any(
+                    all(target_os = "linux", target_arch = "x86_64"),
+                    all(target_os = "linux", target_arch = "aarch64"),
+                    all(target_os = "macos", target_arch = "x86_64"),
+                    all(target_os = "macos", target_arch = "aarch64"),
+                )
+            ))]
+            Self::FoundationDb(storage) => {
+                let _ = storage;
+                Ok(())
+            }
         }
     }
 }
