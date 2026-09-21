@@ -1704,6 +1704,83 @@ impl From<protocol::FuseGetxattrOut> for NativeFuseGetxattrOut {
     }
 }
 
+#[napi(object)]
+pub struct NativeFuseFileLock {
+    pub start: BigInt,
+    pub end: BigInt,
+    #[napi(js_name = "type")]
+    pub type_: u32,
+    pub pid: u32,
+}
+
+impl From<protocol::FuseFileLock> for NativeFuseFileLock {
+    fn from(value: protocol::FuseFileLock) -> Self {
+        Self {
+            start: bigint(value.start),
+            end: bigint(value.end),
+            type_: value.type_,
+            pid: value.pid,
+        }
+    }
+}
+
+fn file_lock(value: NativeFuseFileLock) -> protocol::FuseFileLock {
+    protocol::FuseFileLock {
+        start: u64_from_bigint(&value.start),
+        end: u64_from_bigint(&value.end),
+        type_: value.type_,
+        pid: value.pid,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseLkIn {
+    pub fh: BigInt,
+    pub owner: BigInt,
+    pub lk: NativeFuseFileLock,
+    #[napi(js_name = "lkFlags")]
+    pub lk_flags: u32,
+}
+
+impl From<protocol::FuseLkIn> for NativeFuseLkIn {
+    fn from(value: protocol::FuseLkIn) -> Self {
+        Self {
+            fh: bigint(value.fh),
+            owner: bigint(value.owner),
+            lk: value.lk.into(),
+            lk_flags: value.lk_flags,
+        }
+    }
+}
+
+fn lk_in(value: NativeFuseLkIn) -> protocol::FuseLkIn {
+    protocol::FuseLkIn {
+        fh: u64_from_bigint(&value.fh),
+        owner: u64_from_bigint(&value.owner),
+        lk: file_lock(value.lk),
+        lk_flags: value.lk_flags,
+    }
+}
+
+#[napi(object)]
+pub struct NativeFuseLkOut {
+    pub lk: NativeFuseFileLock,
+}
+
+impl From<protocol::FuseLkOut> for NativeFuseLkOut {
+    fn from(value: protocol::FuseLkOut) -> Self {
+        Self {
+            lk: value.lk.into(),
+        }
+    }
+}
+
+fn lk_out(value: NativeFuseLkOut) -> protocol::FuseLkOut {
+    protocol::FuseLkOut {
+        lk: file_lock(value.lk),
+    }
+}
+
 #[napi(js_name = "fuseDecodeOpenIn")]
 pub fn fuse_decode_open_in(
     #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
@@ -2569,6 +2646,56 @@ pub fn fuse_encode_fsync_in(value: NativeFuseFsyncIn) -> napi::Result<Buffer> {
     protocol::encode_request_body(
         mount_rs_fuse::FUSE_FSYNC,
         &protocol::FuseRequestBody::Fsync(fsync_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLkIn")]
+pub fn fuse_decode_lk_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseLkIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_GETLK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Lk(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_GETLK did not decode as a lock request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLkIn")]
+pub fn fuse_encode_lk_in(value: NativeFuseLkIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_GETLK,
+        &protocol::FuseRequestBody::Lk(lk_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeLkOut")]
+pub fn fuse_decode_lk_out(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseLkOut> {
+    match protocol::decode_reply_body(mount_rs_fuse::FUSE_GETLK, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseReplyBody::Lk(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_GETLK did not decode as a lock reply",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeLkOut")]
+pub fn fuse_encode_lk_out(value: NativeFuseLkOut) -> napi::Result<Buffer> {
+    protocol::encode_reply_body(
+        mount_rs_fuse::FUSE_GETLK,
+        &protocol::FuseReplyBody::Lk(lk_out(value)),
         None,
     )
     .map(Buffer::from)

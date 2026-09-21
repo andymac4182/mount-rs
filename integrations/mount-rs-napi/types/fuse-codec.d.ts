@@ -16,6 +16,7 @@ import type {
   NativeFuseFlushIn,
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
+  NativeFuseFileLock,
   NativeFuseGetattrIn,
   NativeFuseGetxattrIn,
   NativeFuseGetxattrOut,
@@ -26,6 +27,8 @@ import type {
   NativeFuseIoctlIn,
   NativeFuseIoctlOut,
   NativeFuseListxattrIn,
+  NativeFuseLkIn,
+  NativeFuseLkOut,
   NativeFuseLinkIn,
   NativeFuseLseekIn,
   NativeFuseLseekOut,
@@ -72,6 +75,7 @@ export type {
   NativeFuseFlushIn,
   NativeFuseForgetOne,
   NativeFuseFsyncIn,
+  NativeFuseFileLock,
   NativeFuseGetattrIn,
   NativeFuseGetxattrIn,
   NativeFuseGetxattrOut,
@@ -82,6 +86,8 @@ export type {
   NativeFuseIoctlIn,
   NativeFuseIoctlOut,
   NativeFuseListxattrIn,
+  NativeFuseLkIn,
+  NativeFuseLkOut,
   NativeFuseLinkIn,
   NativeFuseLseekIn,
   NativeFuseLseekOut,
@@ -190,6 +196,13 @@ export declare const FUSE_SETXATTR: number
 export declare const FUSE_GETXATTR: number
 export declare const FUSE_LISTXATTR: number
 export declare const FUSE_REMOVEXATTR: number
+export declare const FUSE_GETLK: number
+export declare const FUSE_SETLK: number
+export declare const FUSE_SETLKW: number
+export declare const FUSE_LK_FLOCK: number
+export declare const F_RDLCK: number
+export declare const F_WRLCK: number
+export declare const F_UNLCK: number
 export declare const FUSE_SETXATTR_EXT: bigint
 export declare const FUSE_SETXATTR_ACL_KILL_SGID: number
 export declare const XATTR_CREATE: number
@@ -293,6 +306,10 @@ export declare function decodeFlushIn(body: Uint8Array): NativeFuseFlushIn
 export declare function encodeFlushIn(value: NativeFuseFlushIn): Buffer
 export declare function decodeFsyncIn(body: Uint8Array): NativeFuseFsyncIn
 export declare function encodeFsyncIn(value: NativeFuseFsyncIn): Buffer
+export declare function decodeLkIn(body: Uint8Array): NativeFuseLkIn
+export declare function encodeLkIn(value: NativeFuseLkIn): Buffer
+export declare function decodeLkOut(body: Uint8Array): NativeFuseLkOut
+export declare function encodeLkOut(value: NativeFuseLkOut): Buffer
 export declare function decodeSetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseSetxattrIn
 export declare function encodeSetxattrIn(value: NativeFuseSetxattrIn, context?: NativeFuseProtocolContext): Buffer
 export declare function decodeGetxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext): NativeFuseGetxattrIn

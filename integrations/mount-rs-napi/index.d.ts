@@ -540,6 +540,10 @@ export declare function fuseDecodeLinkOut(body: Uint8Array, context?: NativeFuse
 
 export declare function fuseDecodeListxattrIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseListxattrIn
 
+export declare function fuseDecodeLkIn(body: Uint8Array): NativeFuseLkIn
+
+export declare function fuseDecodeLkOut(body: Uint8Array): NativeFuseLkOut
+
 export declare function fuseDecodeLookupIn(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseNameIn
 
 export declare function fuseDecodeLookupOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseEntryOut
@@ -671,6 +675,10 @@ export declare function fuseEncodeLinkIn(value: NativeFuseLinkIn): Buffer
 export declare function fuseEncodeLinkOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
 export declare function fuseEncodeListxattrIn(value: NativeFuseListxattrIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeLkIn(value: NativeFuseLkIn): Buffer
+
+export declare function fuseEncodeLkOut(value: NativeFuseLkOut): Buffer
 
 export declare function fuseEncodeLookupIn(value: NativeFuseNameIn, context?: NativeFuseProtocolContext | undefined | null): Buffer
 
@@ -1048,6 +1056,13 @@ export interface NativeFuseFallocateIn {
   mode: number
 }
 
+export interface NativeFuseFileLock {
+  start: bigint
+  end: bigint
+  type: number
+  pid: number
+}
+
 export interface NativeFuseFlushIn {
   fh: bigint
   lockOwner: bigint
@@ -1177,6 +1192,17 @@ export interface NativeFuseLinkIn {
 
 export interface NativeFuseListxattrIn {
   size: number
+}
+
+export interface NativeFuseLkIn {
+  fh: bigint
+  owner: bigint
+  lk: NativeFuseFileLock
+  lkFlags: number
+}
+
+export interface NativeFuseLkOut {
+  lk: NativeFuseFileLock
 }
 
 export interface NativeFuseLseekIn {

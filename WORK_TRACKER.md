@@ -133,6 +133,15 @@ Windows oracle cases where runnable). These are focused local gates at
 `3042d09`; the current shell still lacks live R2 credentials and hosted
 Windows/macOS and privileged native-mount runs remain unqualified.
 
+The current W01 mount-free FUSE packet adds typed napi-rs `GETLK`, `SETLK` and
+`SETLKW` request codecs plus the typed `GETLK` reply codec. The generated root
+bindings, explicit CommonJS/ESM barrel exports and `./fuse` declarations are
+covered by a typecheck and a pinned-oracle differential covering the 48-byte
+request, 24-byte typed reply, truncation, trailing-byte and empty status-reply
+boundaries. The release N-API build, oracle-enabled package suite and focused
+locked `mount-rs-fuse` tests passed. This is mount-free wire evidence only;
+native FUSE lock/session semantics remain an explicit boundary.
+
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
 - `ccaf8f5` + `4cdeb58` correct the Windows SQLite WAL shared-memory access mask
@@ -429,6 +438,7 @@ patch):
 | Main | W01 Rust FUSE IOCTL session framing | `transports/mount-rs-fuse/{src/session.rs,tests/session.rs}` | Integrated as `f1872f8`; live source/test blobs verified; strict 32-byte header and declared-input-size framing, malformed/trailing `EINVAL`, valid-request `ENOSYS`, and no-mutation coverage passed in 12 focused tests and strict scoped Clippy |
 | Meitner the 2nd | W01 napi-rs FUSE IOCTL codecs | `integrations/mount-rs-napi/**` | Integrated as `32ddee3`; published sequentially through `8ea5f38`; build, typecheck, focused pinned-oracle raw-layout differential, and the full oracle-enabled N-API suite passed |
 | Pasteur the 2nd | W01 napi-rs FUSE BMAP codecs | `integrations/mount-rs-napi/**` | Integrated as `387940b`; published sequentially through `091ddcf`; Rust/N-API release build, typecheck, protocol-minor/truncation/trailing/wrong-shape oracle differentials, and the full oracle-enabled N-API suite passed |
+| Main | W01 napi-rs FUSE GETLK/SETLK/SETLKW codecs | `integrations/mount-rs-napi/**` | Current packet: generated bindings/declarations, explicit ESM/CommonJS exports, typecheck, pinned-oracle request/reply/error-boundary differential, release build, focused locked FUSE tests and full oracle-enabled N-API suite passed; native FUSE session/mount remains open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2

@@ -724,6 +724,8 @@ function install(binding) {
     ["decodeReleaseIn", "fuseDecodeReleaseIn"], ["encodeReleaseIn", "fuseEncodeReleaseIn"],
     ["decodeFlushIn", "fuseDecodeFlushIn"], ["encodeFlushIn", "fuseEncodeFlushIn"],
     ["decodeFsyncIn", "fuseDecodeFsyncIn"], ["encodeFsyncIn", "fuseEncodeFsyncIn"],
+    ["decodeLkIn", "fuseDecodeLkIn"], ["encodeLkIn", "fuseEncodeLkIn"],
+    ["decodeLkOut", "fuseDecodeLkOut"], ["encodeLkOut", "fuseEncodeLkOut"],
     ["decodeReadIn", "fuseDecodeReadIn"], ["encodeReadIn", "fuseEncodeReadIn"],
     ["decodeReadOut", "fuseDecodeReadOut"], ["encodeReadOut", "fuseEncodeReadOut"],
     ["decodeWriteIn", "fuseDecodeWriteIn"], ["encodeWriteIn", "fuseEncodeWriteIn"],
