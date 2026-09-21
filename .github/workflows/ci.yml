@@ -73,6 +73,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
       - uses: Swatinem/rust-cache@v2
       - name: Verify durable TiDB metadata over Apache Ozone chunks
         env:
