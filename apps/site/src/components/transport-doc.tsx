@@ -179,8 +179,9 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         than advertising asynchronous or parallel capabilities that the
         serialized path cannot provide. Native FUSE now has up to 16
         positional read workers with a serialized reply writer and targeted
-        interrupt handling; the eight-client native harness compiles and
-        remains awaiting hosted <code>/dev/fuse</code> execution.
+        interrupt handling; the eight-client native harness compiles and now
+        also includes blocked-read teardown and backend-panic callback cases,
+        all awaiting hosted <code>/dev/fuse</code> execution.
         The current W01 packet also adds public <code>FuseSession</code>
         options, negotiated state, inode views, request/reply/error counters,
         assertion and transport-error callbacks, notification encoders, and
@@ -584,7 +585,7 @@ curl -H 'Authorization: Bearer demo-memory' \
     name: 'WebDAV',
     eyebrow: 'Transport / HTTP filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, same-session concurrency, and a local macOS native round trip pass within scope; member parity, restart/durability, provider, and hosted gates remain open.',
+    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
     summary: (
       <>
         WebDAV makes the filesystem contract available through standard HTTP
@@ -660,10 +661,14 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         number&gt;</code> shape and exposes a request-level
         <code>onError(error, head)</code> callback. The explicit macOS native
         harness passed 1/1 on Darwin 27 arm64 using
-        <code>/sbin/mount_webdav</code> and <code>/sbin/umount</code>; hosted
-        macOS/Linux lifecycle and provider rows remain separate, and current
-        hosted workflow snapshots are canceled or pending rather than a
-        WebDAV PASS. No local protocol or native pass is promoted to a
+        <code>/sbin/mount_webdav</code> and <code>/sbin/umount</code>. At exact
+        scope-packet revision <code>e13c52be</code>, hosted native-WebDAV jobs
+        for macOS and Ubuntu completed successfully in run
+        <code>35640746296</code>; those jobs use <code>mount_webdav</code> on
+        macOS and <code>davfs2</code>/FUSE on Ubuntu. The surrounding workflow
+        still had unrelated lanes in progress, so this is scoped native
+        execution evidence, not full hosted session/member or provider
+        acceptance. No local protocol or native pass is promoted to a
         production mount claim. A pinned TypeScript/Rust HTTP differential
         now passes 40 paired S3 and WebDAV cases, including 16 authenticated
         WebDAV cases. Rust-only injected session-clock tests prove exact lock
@@ -677,6 +682,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'WebDAV transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-webdav/README.md' },
       { label: 'W01 WebDAV progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_WEBDAV_PROGRESS.md' },
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
+      { label: 'Hosted native WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35640746296' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
