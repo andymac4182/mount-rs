@@ -27,6 +27,20 @@ case "$AWS_S3_AUDIT_BUCKET" in
     exit 2
     ;;
 esac
+[ "${#AWS_S3_AUDIT_BUCKET}" -ge 3 ] || {
+  echo "AWS_S3_AUDIT_BUCKET must contain 3-63 characters" >&2
+  exit 2
+}
+[ "${#AWS_S3_AUDIT_BUCKET}" -le 63 ] || {
+  echo "AWS_S3_AUDIT_BUCKET must contain 3-63 characters" >&2
+  exit 2
+}
+case "$AWS_S3_AUDIT_BUCKET" in
+  [!a-z0-9]*|*[!a-z0-9]|*..*)
+    echo "AWS_S3_AUDIT_BUCKET must start/end alphanumerically without consecutive dots" >&2
+    exit 2
+    ;;
+esac
 case "$region" in
   ''|*[!A-Za-z0-9.-]*)
     echo "AWS_S3_AUDIT_REGION contains an invalid AWS region" >&2

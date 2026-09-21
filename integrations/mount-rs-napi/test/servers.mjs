@@ -963,6 +963,43 @@ async function exerciseWebdav() {
     assert.ok([200, 201, 204].includes(direct.status));
     assert.equal(direct.body ?? null, null);
 
+    const lock = await server.session.handleRequest(
+      {
+        method: "LOCK",
+        target: "/direct-webdav.txt",
+        headers: [{ name: "depth", value: "0" }],
+      },
+      Buffer.from('<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>'),
+    );
+    assert.equal(lock.status, 200);
+    const lockToken = lock.headers.find(({ name }) => name === "lock-token")?.value;
+    assert.match(lockToken ?? "", /^<urn:uuid:/);
+    assert.equal(server.session.locks.length, 1);
+    assert.deepEqual(
+      {
+        path: server.session.locks[0].path,
+        depth: server.session.locks[0].depth,
+        exclusive: server.session.locks[0].exclusive,
+        timeoutSeconds: server.session.locks[0].timeoutSeconds,
+      },
+      {
+        path: "/direct-webdav.txt",
+        depth: "0",
+        exclusive: true,
+        timeoutSeconds: 30,
+      },
+    );
+    const unlock = await server.session.handleRequest(
+      {
+        method: "UNLOCK",
+        target: "/direct-webdav.txt",
+        headers: [{ name: "lock-token", value: lockToken }],
+      },
+      null,
+    );
+    assert.equal(unlock.status, 204);
+    assert.equal(server.session.locks.length, 0);
+
     const put = await fetchBody(
       `${server.url}/servers-webdav.txt`,
       { method: "PUT", body: object },

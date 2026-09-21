@@ -34,7 +34,7 @@ required_parameters = %w[
 ]
 require_value(parameters.keys.sort == required_parameters.sort, "parameter_set")
 require_value(
-  parameters.fetch("BucketName")["AllowedPattern"] == "^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
+  parameters.fetch("BucketName")["AllowedPattern"] == "^(?!.*\\.\\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$",
   "bucket_name_constraint"
 )
 require_value(
