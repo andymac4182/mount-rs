@@ -9,8 +9,8 @@ Parameters:
   BucketName:
     Type: String
     Description: Globally unique private S3 bucket name for the production deployment.
-    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
-    ConstraintDescription: Must be a 3-63 character lowercase DNS-compatible S3 bucket name.
+    AllowedPattern: '^(?!.*\.\.)[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be a 3-63 character lowercase DNS-compatible S3 bucket name without consecutive dots.
   OwnedPrefix:
     Type: String
     Description: >-

@@ -22,10 +22,11 @@ Linux harnesses now run eight concurrent mounted file write/read/rename/read
 round trips before a bounded unmount, and close the server side while verifying
 kernel-connection teardown. Session destruction also wakes and drains in-flight
 `Tflush` waiters. Local lifecycle 6/6, transport-error 8/8, the focused native
-target, strict 9P Clippy and formatting pass. Hosted
-run `35616832528` / job `106389895603` passed the prior Linux kernel-client
-mount/read/write/unmount packet; a fresh run is required for this packet and
-the concurrent-I/O harness.
+target, strict 9P Clippy and formatting pass. Hosted run `35616832528` / job
+`106389895603` passed the prior Linux kernel-client mount/read/write/unmount
+packet; the current packet's CI run `35624869535` at `e5f4dda` was canceled
+before jobs materialized, so a fresh hosted run is still required for this
+packet and the concurrent-I/O harness.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
@@ -1017,7 +1018,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   multi-chunk GET, early iterator return, and deliberate request-stream
   failure; WebDAV integration 13/13, isolated N-API compile, release build,
   generated typecheck, server integration, and scoped warning-denied Clippy
-  passed. Direct Node socket-reset tests now produce exactly one typed
+  passed. The same direct session packet exposes active `WebdavLockView`
+  records after LOCK and observes zero records after UNLOCK. Direct Node
+  socket-reset tests now produce exactly one typed
   peer-aware callback event for both S3 and WebDAV. Complete WebDAV
   session/member parity remains open; active lock-record readback and
   post-UNLOCK cleanup, plus the session-owned driver wrapper, are verified.
@@ -2446,7 +2449,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `scripts/test-aws-s3-production-template.rb` gate now structurally asserts
   the retained bucket controls, KMS/versioning rules, lifecycle, and all five
   policy statements; it is wired into the hosted preflight and passed locally
-  without AWS credentials.
+  without AWS credentials. The CloudFormation bucket-name constraint and the
+  read-only resource audit now reject consecutive dots and invalid length or
+  edge characters consistently with the hosted preflight.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -2500,16 +2505,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  observed hosted run `35624389197` at `2a711e9` passed provenance capture,
-  the seven-case validator, bucket-policy, and CloudFormation contract tests,
-  then stopped
+  observed hosted run `35625592317` at `fb34d8b` passed provenance capture,
+  the seven-case validator, bucket-policy, CloudFormation, and environment
+  approval contract tests, then stopped
   before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
   skipped, so this is a successful safety refusal, not acceptance evidence.
   The run uploaded the non-expired artifact
-  `aws-s3-qualification-35624389197-1` (6,797 bytes). The preceding hosted
-  runs `35623711876` at `8b7502a`, `35622312798` at `4242c24`, and
-  `35620404949` at `0010246` stopped at the same preflight boundary, as did
+  `aws-s3-qualification-35625592317-1` (6,836 bytes). The preceding hosted
+  runs `35625182517` at `6393b4c`, `35624389197` at `2a711e9`, `35623711876` at `8b7502a`,
+  `35622312798` at `4242c24`, and `35620404949` at `0010246` stopped at the same preflight boundary, as did
   `35619552809` at `a84fa3e`. The provenance-hash expansion now binds the
   policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
   PGlite harness, and AWS test manifest inputs in this artifact; this improves
@@ -2529,9 +2534,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   evidence. The read-only
   [`scripts/audit-aws-s3-ci-oidc.sh`](scripts/audit-aws-s3-ci-oidc.sh) now
   checks the immutable GitHub subject, OIDC provider, exact single GitHub
-  federation trust statement, protected environment, and required input names
-  without mutating either system; additional or broad GitHub federation trust
-  statements fail closed. The
+  federation trust statement, protected environment branch policy, and a
+  non-self-approvable required reviewer plus required input names without
+  mutating either system; additional or broad GitHub federation trust
+  statements fail closed. Its credential-free three-case environment fixture
+  test is wired into the hosted preflight. The
   fresh read-only audit on 2026-09-22 returned
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing protected-environment inputs and
   secret, missing GitHub OIDC provider, and missing immutable-subject role

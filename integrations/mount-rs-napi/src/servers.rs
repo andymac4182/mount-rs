@@ -1806,6 +1806,17 @@ pub struct WebdavSessionStats {
     pub assertions: f64,
 }
 
+#[napi(object)]
+pub struct WebdavLockView {
+    pub token: String,
+    pub path: String,
+    pub collection: bool,
+    pub depth: String,
+    pub exclusive: bool,
+    pub timeout_seconds: f64,
+    pub expires_at: f64,
+}
+
 #[derive(Clone)]
 #[napi(object)]
 pub struct WebdavHeader {
@@ -2186,6 +2197,23 @@ impl WebdavSession {
     #[napi(getter)]
     pub fn lock_count(&self) -> f64 {
         self.inner.lock_count() as f64
+    }
+
+    #[napi(getter)]
+    pub fn locks(&self) -> Vec<WebdavLockView> {
+        self.inner
+            .lock_records()
+            .into_iter()
+            .map(|lock| WebdavLockView {
+                token: lock.token,
+                path: lock.path,
+                collection: lock.collection,
+                depth: lock.depth.to_string(),
+                exclusive: lock.exclusive,
+                timeout_seconds: lock.timeout_seconds as f64,
+                expires_at: lock.expires_at as f64,
+            })
+            .collect()
     }
 }
 

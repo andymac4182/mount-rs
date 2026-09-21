@@ -8,6 +8,7 @@ set -eu
 REPOSITORY=${AWS_S3_CI_GITHUB_REPOSITORY:-andymac4182/mount-rs}
 ENVIRONMENT=${AWS_S3_CI_GITHUB_ENVIRONMENT:-aws-s3-ci}
 ROLE_ARN=${AWS_S3_CI_ROLE_ARN:-}
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 blocked=""
 
@@ -73,6 +74,9 @@ else
   printf '%s' "$environment_json" |
     jq -e '.deployment_branch_policy.protected_branches == true' >/dev/null 2>&1 ||
     block environment_missing_protected_branch_policy
+  printf '%s' "$environment_json" |
+    jq -e -f "$repo_dir/scripts/check-aws-s3-ci-environment.jq" >/dev/null 2>&1 ||
+    block environment_missing_non_self_review_required_reviewer
 fi
 
 variables=$(gh variable list --repo "$REPOSITORY" --env "$ENVIRONMENT" --json name --jq '.[].name' 2>/dev/null || true)

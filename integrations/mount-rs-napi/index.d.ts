@@ -459,7 +459,7 @@ export declare class NfsXdrWriter {
 export declare class P9Connection {
   get session(): P9Session
   get id(): number
-  get peer(): string | null | undefined
+  get peer(): string | null
   get isClosed(): boolean
   close(): Promise<void>
   waitClosed(): Promise<void>
@@ -632,6 +632,7 @@ export declare class WebdavSession {
   get assertions(): Array<string>
   get options(): WebdavSessionOptionsView
   get lockCount(): number
+  get locks(): Array<WebdavLockView>
 }
 
 /**
@@ -2284,6 +2285,16 @@ export interface WebdavLockOptionsView {
   defaultTimeoutSeconds: number
   maxTimeoutSeconds: number
   maxLocks: number
+}
+
+export interface WebdavLockView {
+  token: string
+  path: string
+  collection: boolean
+  depth: string
+  exclusive: boolean
+  timeoutSeconds: number
+  expiresAt: number
 }
 
 export interface WebdavRequestHead {
