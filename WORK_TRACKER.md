@@ -502,7 +502,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
-| W26 | Apache Ozone S3 backend | W26 qualification complete within documented scope: local and hosted Ozone gateway, SQLite/PGlite composition, durable FoundationDB, and Ozone-backed durable TiDB gates passed; post-demo production rollout track is open and currently NO-GO | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification complete; customer-deployed Ozone integration track is open and currently NO-GO pending CI qualification for all feasible providers, 1,000 IOPS per drive, 99.99%/5-minute objective boundaries, security and end-to-end client coverage | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -1695,34 +1695,37 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ### W26 production-rollout readiness (post-demo; currently NO-GO)
 
-W26 qualification is complete, but production rollout is a separate open
-track. The detailed evidence ledger, provisional estimates and blockers are in
+W26 qualification is complete, but production integration readiness is a
+separate open track. Customers own Ozone deployment, backup/DR and operations;
+another stream owns releases. The detailed evidence ledger, product decisions,
+provisional estimates and blockers are in
 [`docs/w26-progress-ledger.md`](docs/w26-progress-ledger.md). Do not mark a
-production gate complete from the demo or from the hosted qualification packet
-alone.
+production/integration gate complete from the demo or from the hosted
+qualification packet alone. W26 has CI only and no staging environment.
 
 | Gate | Status | Completion | Exit evidence / primary blocker |
 | --- | --- | ---: | --- |
-| P0 — scope, support matrix, SLO/RPO/RTO, ownership | Open | 10% | Approved production target and non-goals; product/operations decisions required |
-| P1 — secure production Ozone topology and rehearsal | Not started | 0% | Multi-node persistent production-like deployment; Ozone/cluster infrastructure required |
-| P2 — production metadata-provider matrix | Qualification only | 10% | Selected supported providers and secure staging matrix; managed-provider/version access required |
-| P3 — authentication, TLS, secrets and redaction | Not started | 0% | Certificate/identity/secret rotation and negative tests; security/platform access required |
-| P4 — replicated durability and storage failure protection | Not started | 0% | Storage/node/power-loss boundary and integrity recovery; production storage/fault controls required |
-| P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 25% | Secure multi-node failure/retry evidence; distributed fault tooling required |
-| P6 — backup, restore and DR | Not started | 0% | Clean-environment restore with measured RPO/RTO; backup/KMS/second failure domain required |
-| P7 — observability, alerting and runbooks | Not started | 0% | SLO telemetry, alerts and tested operator procedures; monitoring/on-call ownership required |
-| P8 — load, capacity, soak and cost envelope | Not started | 0% | Production-shaped performance/soak evidence; dedicated capacity and budget required |
-| P9 — upgrade, rollback and compatibility | Not started | 0% | Rehearsed migration and rollback on retained data; release/change-window approval required |
-| P10 — security, privacy, tenancy and audit | Not started | 0% | Security review and closed findings/approved exceptions; security/compliance owner required |
-| P11 — native client/mount/platform matrix | Not started | 0% | Every advertised native platform passes; native runners, facilities and signing required |
-| P12 — signed release, promotion, canary and rollback automation | Qualification CI only | 10% | Production promotion controls and canary evidence; CI/CD/artifact/signing access required |
-| P13 — incident, failover and recovery rehearsal | Not started | 0% | Timed operator exercise meets RTO and integrity criteria; on-call/incident participation required |
-| P14 — final launch evidence audit and GO/NO-GO | Not started | 0% | One-revision evidence packet and release-owner decision; all upstream gates required |
+| P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
+| P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
+| P2 — all-feasible-provider Ozone CI matrix | Open | 20% | Each provider needs its own terminal Ozone CI packet; provider images/versions and CI capacity required |
+| P3 — authentication, TLS, secrets and redaction | Open | 20% | Secure endpoint/auth, secret references, least privilege, redaction and negative CI tests |
+| P4 — durability/storage failure contract | Partial qualification | 10% | CI client recovery/error evidence plus customer Ozone replication/storage requirements |
+| P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
+| P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |
+| P7 — integration observability and error contract | Open | 10% | Redacted retry/fencing/recovery telemetry and handoff to W30/customer operations |
+| P8 — 1,000 IOPS per-drive CI workload | Open | 5% | Repeatable workload with latency, errors, resources, soak and provider-specific results |
+| P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
+| P10 — security, privacy, tenancy and audit | Open | 15% | Threat model, provenance, isolation, encryption expectations and security CI evidence |
+| P11 — end-to-end client/platform matrix | Open | 20% | Rust/Node/CLI/HTTP/native advertised surfaces through Ozone; cross-workstream runners required |
+| P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
+| P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
+| P14 — final W26 integration-readiness review | Not started | 0% | One-revision all-provider/performance/security/end-to-end audit and explicit handoff decision |
 
-The production track is **0/15 terminal gates accepted**. Its current
-provisional planning range is **31–76 engineering days plus external waits**;
-this is not a delivery commitment and must be refined after P0 fixes the
-advertised provider/platform scope.
+The production/integration track is **0/15 terminal gates accepted**. Its
+current provisional W26 planning range is **31–82 engineering/contract days
+plus external waits**; this is not a delivery commitment. Customer Ozone
+deployment, backup/DR, operations and release execution are excluded from that
+W26 estimate.
 
 ## W27 — Native Windows support and CI
 
