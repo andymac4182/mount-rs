@@ -2758,6 +2758,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   protected-environment fixture (`AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`).
   These are credential-free fail-closed safeguards only; they do not approve
   the external GitHub environment, IAM trust, or production parameters.
+- [x] The exact pushed S3 observability source
+  `eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed on 2026-09-22:
+  `cargo fmt --all -- --check`, the full locked offline workspace/all-target
+  test gate, and strict workspace Clippy with `-D warnings` using the isolated
+  Cargo target and required local loopback permission. The gate includes the
+  streamed request/response byte accounting tests in the 17-case S3 gateway
+  suite. Explicitly ignored native/service rows remain separate prerequisites
+  and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
