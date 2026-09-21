@@ -47,7 +47,7 @@ use mount_rs_webdav::{
     WebdavServer as TransportWebdavServer, WebdavServerHooks as TransportWebdavServerHooks,
     WebdavServerOptions as TransportWebdavServerOptions, WebdavSession as TransportWebdavSession,
     WebdavTransportError as TransportWebdavError,
-    WebdavTransportErrorHook as TransportWebdavErrorHook,
+    WebdavTransportErrorHook as TransportWebdavErrorHook, XmlNode as TransportWebdavXmlNode,
 };
 use napi::bindgen_prelude::{
     BigInt, Buffer, Either, FnArgs, Function, JsObjectValue, Object, ReadableStream, Reader,
@@ -801,6 +801,16 @@ pub struct P9ServerOptions {
     pub on_transport_error: Option<JsTransportErrorCallback>,
 }
 
+/// Read-only scalar session policy exposed to Node callers. The transport's
+/// driver and shared lock table remain owned by the server.
+#[napi(object)]
+pub struct P9SessionOptions {
+    pub msize: Option<f64>,
+    pub use_driver_ino: bool,
+    pub read_only: bool,
+    pub claim_ownership: bool,
+}
+
 fn p9_options(
     options: Option<P9ServerOptions>,
 ) -> Result<
@@ -867,6 +877,31 @@ struct P9State {
 #[napi]
 pub struct P9Session {
     inner: mount_rs_9p::P9Session,
+    options: P9SessionOptions,
+}
+
+fn p9_session_options(options: &TransportP9ServerOptions) -> P9SessionOptions {
+    P9SessionOptions {
+        msize: options.msize.map(f64::from),
+        use_driver_ino: options.use_driver_ino,
+        read_only: options.read_only,
+        claim_ownership: options.claim_ownership,
+    }
+}
+
+#[napi(object)]
+pub struct P9User {
+    pub uname: String,
+    pub uid: Option<f64>,
+    pub aname: String,
+}
+
+fn p9_user(user: mount_rs_9p::P9User) -> P9User {
+    P9User {
+        uname: user.uname,
+        uid: user.uid.map(f64::from),
+        aname: user.aname,
+    }
 }
 
 #[napi(object)]
@@ -915,6 +950,23 @@ impl P9Session {
         self.inner.destroy().await;
     }
 
+    /// The scalar policy used when this session was created.
+    #[napi(getter)]
+    pub fn options(&self) -> P9SessionOptions {
+        P9SessionOptions {
+            msize: self.options.msize,
+            use_driver_ino: self.options.use_driver_ino,
+            read_only: self.options.read_only,
+            claim_ownership: self.options.claim_ownership,
+        }
+    }
+
+    /// The attach identity recorded for a live fid, if any.
+    #[napi]
+    pub fn user_for(&self, fid: u32) -> Option<P9User> {
+        self.inner.user_for(fid).map(p9_user)
+    }
+
     #[napi(getter)]
     pub fn msize(&self) -> Option<u32> {
         self.inner.msize()
@@ -949,6 +1001,7 @@ impl P9Session {
 #[napi]
 pub struct P9Connection {
     inner: mount_rs_9p::P9Connection,
+    options: P9SessionOptions,
 }
 
 #[napi]
@@ -957,6 +1010,12 @@ impl P9Connection {
     pub fn session(&self) -> P9Session {
         P9Session {
             inner: self.inner.session.clone(),
+            options: P9SessionOptions {
+                msize: self.options.msize,
+                use_driver_ino: self.options.use_driver_ino,
+                read_only: self.options.read_only,
+                claim_ownership: self.options.claim_ownership,
+            },
         }
     }
 
@@ -1015,6 +1074,34 @@ impl P9Server {
                 Arc::clone(&self.driver),
                 self.options.session_options(),
             ),
+            options: p9_session_options(&self.options),
+        }
+    }
+
+    /// The configured server policy, including the session settings applied to
+    /// both native-listener and attached-stream connections. The callback is
+    /// intentionally not reflected because its native lifetime is owned by the
+    /// transport hook rather than exposed as a reusable N-API function.
+    #[napi(getter)]
+    pub fn options(&self) -> P9ServerOptions {
+        P9ServerOptions {
+            port: Some(f64::from(self.options.port)),
+            host: Some(self.host.clone()),
+            path: self
+                .options
+                .path
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            allow_remote: Some(self.options.allow_remote),
+            socket_mode: Some(f64::from(self.options.socket_mode)),
+            allow_shared_directory: Some(self.options.allow_shared_directory),
+            max_frame: Some(self.options.max_frame as f64),
+            max_in_flight: Some(self.options.max_in_flight as f64),
+            msize: self.options.msize.map(f64::from),
+            use_driver_ino: Some(self.options.use_driver_ino),
+            read_only: Some(self.options.read_only),
+            claim_ownership: Some(self.options.claim_ownership),
+            on_transport_error: None,
         }
     }
 
@@ -1072,7 +1159,10 @@ impl P9Server {
                 .map(|clients| {
                     clients
                         .into_iter()
-                        .map(|inner| P9Connection { inner })
+                        .map(|inner| P9Connection {
+                            inner,
+                            options: p9_session_options(&self.options),
+                        })
                         .collect()
                 })
                 .map_err(|error| transport_error("9P clients", error))
@@ -1876,12 +1966,30 @@ pub struct WebdavSessionStats {
 }
 
 #[napi(object)]
+pub struct WebdavXmlNode {
+    pub name: String,
+    pub ns: String,
+    pub text: String,
+    pub children: Vec<WebdavXmlNode>,
+}
+
+fn webdav_xml_node(node: TransportWebdavXmlNode) -> WebdavXmlNode {
+    WebdavXmlNode {
+        name: node.name,
+        ns: node.ns,
+        text: node.text,
+        children: node.children.into_iter().map(webdav_xml_node).collect(),
+    }
+}
+
+#[napi(object)]
 pub struct WebdavLockView {
     pub token: String,
     pub path: String,
     pub collection: bool,
     pub depth: String,
     pub exclusive: bool,
+    pub owner: Option<WebdavXmlNode>,
     pub timeout_seconds: f64,
     pub expires_at: f64,
 }
@@ -2279,6 +2387,7 @@ impl WebdavSession {
                 collection: lock.collection,
                 depth: lock.depth.to_string(),
                 exclusive: lock.exclusive,
+                owner: lock.owner.map(webdav_xml_node),
                 timeout_seconds: lock.timeout_seconds as f64,
                 expires_at: lock.expires_at as f64,
             })

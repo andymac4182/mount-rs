@@ -854,6 +854,57 @@ fn start_node(
     ))
 }
 
+fn is_xml_character(code: u32) -> bool {
+    if code < 0x20 {
+        return matches!(code, 0x09 | 0x0a | 0x0d);
+    }
+    if code < 0x7f {
+        return true;
+    }
+    if code <= 0x9f {
+        return false;
+    }
+    (code & 0xfffe) != 0xfffe
+}
+
+fn decode_xml_reference(reference: &[u8]) -> Result<String, DavFault> {
+    let reference = std::str::from_utf8(reference)
+        .map_err(|_| xml_fault("XML entity reference is not valid UTF-8"))?;
+    let character = match reference {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        _ => {
+            let (radix, digits) = if let Some(digits) = reference.strip_prefix("#x") {
+                (16, digits)
+            } else if let Some(digits) = reference.strip_prefix("#X") {
+                (16, digits)
+            } else if let Some(digits) = reference.strip_prefix('#') {
+                (10, digits)
+            } else {
+                return Err(xml_fault(
+                    "XML entities must be one of the five predefined references",
+                ));
+            };
+            if digits.is_empty() || digits.len() > 10 {
+                return Err(xml_fault("XML character reference has invalid length"));
+            }
+            let code = u32::from_str_radix(digits, radix)
+                .map_err(|_| xml_fault("XML character reference has invalid digits"))?;
+            if !is_xml_character(code) {
+                return Err(xml_fault(
+                    "XML character reference names an unsupported character",
+                ));
+            }
+            char::from_u32(code)
+                .ok_or_else(|| xml_fault("XML character reference names an invalid character"))?
+        }
+    };
+    Ok(character.to_string())
+}
+
 pub fn parse_xml(body: &[u8], max_bytes: usize) -> Result<XmlNode, DavFault> {
     if body.len() > max_bytes {
         return Err(refuse(413).with_message("the XML body exceeds its byte budget"));
@@ -946,8 +997,16 @@ pub fn parse_xml(body: &[u8], max_bytes: usize) -> Result<XmlNode, DavFault> {
                 }
             }
             Event::Decl(_) | Event::PI(_) | Event::Comment(_) => {}
-            Event::DocType(_) | Event::GeneralRef(_) => {
-                return Err(xml_fault("DOCTYPE and entities are not accepted"));
+            Event::DocType(_) => {
+                return Err(xml_fault("DOCTYPE is not accepted"));
+            }
+            Event::GeneralRef(reference) => {
+                let text = decode_xml_reference(reference.as_ref())?;
+                if let Some(frame) = stack.last_mut() {
+                    frame.node.text.push_str(&text);
+                } else if !text.trim().is_empty() {
+                    return Err(xml_fault("text outside the XML root"));
+                }
             }
             Event::Eof => break,
         }

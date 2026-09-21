@@ -13,8 +13,13 @@ Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
 attached connection identity/peer/stream/closed state (including the native
 `null` versus attached-stream `undefined` peer boundary), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
-coverage. The transport now also broadcasts shutdown safely across the accept
-loop and all connections, closes the active-connection accept-loop race, and
+coverage. It now also exposes the effective scalar server/session policy and
+`P9Session.userFor(fid)`, with generated declarations and an attach-only runtime
+check; the upstream driver/fid/lock/assertion/debug graphs, property-shaped
+`clients` contract, and 9P mount/barrel helpers remain open rather than being
+silently narrowed away. The transport now also broadcasts shutdown safely
+across the accept loop and all connections, closes the active-connection
+accept-loop race, and
 reaps completed request tasks while reporting task failures; its in-flight
 permit acquisition now also observes connection/server shutdown instead of
 wedging close behind a slow request. An ignored native
@@ -39,7 +44,7 @@ Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Crash/reset/half-close recovery is supervisor-owned
 and not a library guarantee; overall production remains NO-GO for the remaining
-W01 gates and intentionally partial public parity.
+W01 gates and unresolved public parity.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
@@ -57,8 +62,9 @@ backend durability, crash injection, and durable-restart qualification. The
 new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
 session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
-options; the wire suite passes 5/5, including rejection of an additional
-range on an existing lock state at `maxLocksPerFile`. Upstream ID-map, deterministic clock/seed,
+options; the wire suite passes 5/5, including `maxLocksPerFile` rejection for
+an existing lock state, `NFS4ERR_TOOSMALL`/`NFS4ERR_NOSPC` channel-cap statuses,
+and refused-`CREATE_SESSION` replay followed by a next-sequence retry. Upstream ID-map, deterministic clock/seed,
 and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -255,6 +261,15 @@ all-target FUSE tests, strict Clippy, formatting, and Linux-target test
 type-check pass, while hosted `/dev/fuse`, native mutation/write concurrency,
 close/crash/restart, callback-event, lock and durability evidence remain
 external; W01 stays NO-GO.
+The follow-up interrupt packet registers those read workers by request unique:
+`FUSE_INTERRUPT` aborts a known in-flight read, unknown targets retain the
+existing `EAGAIN` boundary, and serial stateful requests drain read workers
+before mutation or release. A Linux-gated Unix-stream regression proves that
+interrupting a blocked read leaves the session open and that orderly stop stays
+callback-silent. Host all-target FUSE tests, strict Clippy, formatting/diff,
+and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior,
+native mutation/write concurrency, close/crash/restart, callback events, locks
+and durability remain external, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -283,6 +298,13 @@ and `node test/fuse-inodes.mjs` passed inode parity. This closes focused
 mount-free codec/inode evidence only; the full package matrix, hosted Linux
 `/dev/fuse`, native callback/lifecycle, remaining session parity, FSKit,
 cancellation/concurrency, crash/restart, and durability remain open.
+The follow-up session boundary now runs the public codec validators for
+`BMAP`, legacy and negotiated-extended `SETXATTR`, `GETXATTR`, `LISTXATTR`,
+and `REMOVEXATTR` before returning their valid-request `ENOSYS` boundary.
+Malformed bodies return `EINVAL` without backend mutation. The complete locked
+FUSE target passed 14 unit, 6 INIT, 6 notify/record, 11 protocol, 20 session,
+and 3 sync-barrier tests, and strict warning-denied Clippy passed; native xattr
+and BMAP support remains unadvertised and unimplemented.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -743,7 +765,10 @@ session/member parity, provider, hosted, native, network-client concurrency,
 and restart/durability gates remain open. The host-enabled WebDAV session
 packet also completes eight parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
-same-driver evidence only. W01 and production status remain **NO-GO**.
+same-driver evidence only. The active lock view now preserves a recursive
+namespaced owner XML tree, and bounded predefined/numeric XML references are
+accepted while DTD/custom entities remain refused. W01 and production status
+remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1059,6 +1084,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   rootless wire assertion for the additional-range rejection. The complete
   NFS target and scoped Clippy pass; native Linux/hosted/crash gates remain
   open.
+- [x] The NFSv4 channel follow-up aligns `CREATE_SESSION` with the pinned
+  negotiation boundary: undersized fore responses return `NFS4ERR_TOOSMALL`,
+  per-client exhaustion returns `NFS4ERR_NOSPC`, and back-channel count offers
+  are preserved. The complete NFS target and scoped Clippy pass.
+- [x] The NFSv4 `CREATE_SESSION` sequence slot now caches refusal replies for
+  retransmission and advances to the next sequence for a retry; the focused
+  wire test proves the refusal replay and successful next-sequence creation.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1105,8 +1137,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   peer-aware callback event for both S3 and WebDAV. Complete WebDAV
   session/member parity remains open; active lock-record readback and
   post-UNLOCK cleanup, eight parallel unique-file direct-session PUT/GET
-  requests, plus the session-owned driver wrapper, are verified. The
-  parallel packet is limited to in-process same-driver concurrency.
+  requests, recursive owner XML readback, plus the session-owned driver
+  wrapper, are verified. The parallel packet is limited to in-process
+  same-driver concurrency.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -2936,6 +2969,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Terminal hosted provider/aggregate results and customer security/capacity
   evidence remain open; current CI `35630094815` is pending and no result is
   promoted from it.
+- [x] W26.12 Make the IOPS artifact verifier reject incomplete performance
+  evidence. It now requires the fixed payload-size mapping, 100% lifecycle
+  success, finite elapsed/operation statistics, zero timeout and cleanup
+  failures, and exact operation/statistic sample counts. Local positive and
+  negative benchmark/evidence tests, Node/shell syntax, YAML parsing and diff
+  checks pass. Commit `e875ba6` was merged with concurrent mainline changes
+  and published at `1775895`; security scan
+  `04c7ba9d-ad9f-40aa-a5b2-d28b9a46a564` found zero reportable findings.
+  Hosted provider performance, artifact review and customer capacity remain
+  open; no current-tip hosted result is promoted.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed

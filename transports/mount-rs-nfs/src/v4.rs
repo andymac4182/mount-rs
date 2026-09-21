@@ -401,6 +401,7 @@ const DEFAULT_MAX_SLOTS: usize = 64;
 const DEFAULT_MAX_READ: usize = 1024 * 1024;
 const DEFAULT_MAX_WRITE: usize = 1024 * 1024;
 const MAX_OFFSET: u64 = 9_007_199_254_740_991;
+const MIN_RESPONSE_SIZE: u32 = 128;
 
 // ---------------------------------------------------------------------------
 // v4 wire values
@@ -628,6 +629,7 @@ struct ClientState {
     confirmed: bool,
     sequence: u32,
     reclaim_complete: bool,
+    create_session_replay: Option<CreateSessionReplay>,
 }
 
 #[derive(Debug, Clone)]
@@ -1276,6 +1278,12 @@ struct V4OpResult {
     op: u32,
     status: u32,
     body: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct CreateSessionReplay {
+    sequence: u32,
+    result: V4OpResult,
 }
 
 impl V4OpResult {
@@ -2160,6 +2168,7 @@ impl Nfs4Session {
                         confirmed: false,
                         sequence: 1,
                         reclaim_complete: false,
+                        create_session_replay: None,
                     },
                 );
                 (id, false)
@@ -2200,14 +2209,32 @@ impl Nfs4Session {
         // flags and returns csr_flags=0 because this server implements no
         // persistent session cache, callback channel, or RDMA transport.
         let response_flags = *flags & SERVER_CREATE_SESSION_FLAGS;
-        let (sessionid, slots, max_operations, max_cached, max_request_size) = {
+        {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let Some(client) = state.clients.get(clientid) else {
                 return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_STALE_CLIENTID);
             };
             let _ = client.id;
+            if let Some(replay) = client.create_session_replay.as_ref()
+                && replay.sequence == *sequence
+            {
+                return replay.result.clone();
+            }
             if client.sequence != *sequence {
-                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_BAD_SEQID);
+                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_SEQ_MISORDERED);
+            }
+            if fore.maxresponsesize < MIN_RESPONSE_SIZE {
+                let result = V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_TOOSMALL);
+                let client = state
+                    .clients
+                    .get_mut(clientid)
+                    .expect("validated client while holding state lock");
+                client.sequence = client.sequence.wrapping_add(1);
+                client.create_session_replay = Some(CreateSessionReplay {
+                    sequence: *sequence,
+                    result: result.clone(),
+                });
+                return result;
             }
             if state
                 .sessions
@@ -2216,14 +2243,24 @@ impl Nfs4Session {
                 .count()
                 >= self.options.nfs4.max_sessions.max(1)
             {
-                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_RESOURCE);
+                let result = V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_NOSPC);
+                let client = state
+                    .clients
+                    .get_mut(clientid)
+                    .expect("validated client while holding state lock");
+                client.sequence = client.sequence.wrapping_add(1);
+                client.create_session_replay = Some(CreateSessionReplay {
+                    sequence: *sequence,
+                    result: result.clone(),
+                });
+                return result;
             }
             let client = state
                 .clients
                 .get_mut(clientid)
                 .expect("validated client while holding state lock");
             client.confirmed = true;
-            client.sequence = client.sequence.saturating_add(1);
+            client.sequence = client.sequence.wrapping_add(1);
             let counter = state.next_session;
             state.next_session = state.next_session.saturating_add(1).max(1);
             let mut id = [0_u8; NFS4_SESSIONID_SIZE];
@@ -2264,36 +2301,44 @@ impl Nfs4Session {
                     max_cached,
                 },
             );
-            (id, slots, max_operations, max_cached, max_request_size)
-        };
-        let response_fore = ChannelAttrs4 {
-            headerpadsize: 0,
-            maxrequestsize: fore.maxrequestsize.min(max_request_size),
-            maxresponsesize: fore.maxresponsesize.min(max_request_size),
-            maxresponsesize_cached: fore.maxresponsesize_cached.min(max_cached as u32),
-            maxoperations: max_operations,
-            maxrequests: slots as u32,
-        };
-        let max_cached_response_size = self
-            .options
-            .nfs4
-            .max_cached_response_size
-            .min(u32::MAX as usize) as u32;
-        let response_back = ChannelAttrs4 {
-            headerpadsize: 0,
-            maxrequestsize: back.maxrequestsize.min(max_request_size),
-            maxresponsesize: back.maxresponsesize.min(max_request_size),
-            maxresponsesize_cached: back.maxresponsesize_cached.min(max_cached_response_size),
-            maxoperations: back.maxoperations.max(1),
-            maxrequests: back.maxrequests.max(1),
-        };
-        let mut body = XdrWriter::with_capacity(128);
-        body.fixed_opaque(&sessionid, NFS4_SESSIONID_SIZE);
-        body.u32(1);
-        body.u32(response_flags);
-        write_channel_attrs(&mut body, response_fore);
-        write_channel_attrs(&mut body, response_back);
-        V4OpResult::with_body(OP_CREATE_SESSION, NFS4_OK, body.into_bytes())
+            let response_fore = ChannelAttrs4 {
+                headerpadsize: 0,
+                maxrequestsize: fore.maxrequestsize.min(max_request_size),
+                maxresponsesize: fore.maxresponsesize.min(max_request_size),
+                maxresponsesize_cached: fore.maxresponsesize_cached.min(max_cached as u32),
+                maxoperations: max_operations,
+                maxrequests: slots as u32,
+            };
+            let max_cached_response_size = self
+                .options
+                .nfs4
+                .max_cached_response_size
+                .min(u32::MAX as usize) as u32;
+            let response_back = ChannelAttrs4 {
+                headerpadsize: 0,
+                maxrequestsize: back.maxrequestsize.min(max_request_size),
+                maxresponsesize: back.maxresponsesize.min(max_request_size),
+                maxresponsesize_cached: back.maxresponsesize_cached.min(max_cached_response_size),
+                maxoperations: back.maxoperations,
+                maxrequests: back.maxrequests,
+            };
+            let mut body = XdrWriter::with_capacity(128);
+            body.fixed_opaque(&id, NFS4_SESSIONID_SIZE);
+            body.u32(1);
+            body.u32(response_flags);
+            write_channel_attrs(&mut body, response_fore);
+            write_channel_attrs(&mut body, response_back);
+            let result = V4OpResult::with_body(OP_CREATE_SESSION, NFS4_OK, body.into_bytes());
+            let client = state
+                .clients
+                .get_mut(clientid)
+                .expect("validated client while holding state lock");
+            client.create_session_replay = Some(CreateSessionReplay {
+                sequence: *sequence,
+                result: result.clone(),
+            });
+            result
+        }
     }
 
     async fn destroy_session(&self, raw_id: &[u8]) -> V4OpResult {

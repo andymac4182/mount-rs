@@ -2,8 +2,8 @@ use std::sync::{Arc, Mutex};
 
 use mount_rs_core::MemoryFs;
 use mount_rs_webdav::protocol::{
-    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_token,
-    parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
+    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_info,
+    parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavRequestHead, WebdavServer,
@@ -200,6 +200,26 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         Some("urn:uuid:token".to_owned())
     );
     assert_eq!(parse_lock_token(Some("<a><b>")), None);
+    let lock_info = parse_lock_info(
+        br#"<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner><Z:name xmlns:Z="urn:test">A&amp;B&#x21;</Z:name></D:owner></D:lockinfo>"#,
+        256 * 1024,
+    )
+    .expect("valid lockinfo")
+    .expect("lockinfo body");
+    assert_eq!(
+        lock_info.owner.expect("lock owner").children[0].text,
+        "A&B!"
+    );
+    assert_eq!(
+        parse_xml(br#"<x>&quot;&apos;&#65;&#x42;</x>"#, 256)
+            .unwrap()
+            .text,
+        "\"'AB"
+    );
+    assert_eq!(
+        parse_xml(br#"<x>&unknown;</x>"#, 256).unwrap_err().status,
+        400
+    );
 
     let mut nested = String::new();
     for _ in 0..33 {

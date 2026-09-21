@@ -10,7 +10,8 @@ use std::time::Duration;
 use mount_rs_core::MemoryFs;
 use mount_rs_nfs::v4::{
     CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME, NFS4ERR_BADSESSION,
-    NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, UNSTABLE4,
+    NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL,
+    UNSTABLE4,
 };
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
@@ -228,6 +229,29 @@ fn create_session_args_with_sequence(clientid: u64, sequence: u32) -> Vec<u8> {
         // otherwise valid CREATE_SESSION operation.
         writer.u32(CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
         channel(writer);
+        channel(writer);
+        writer.u32(0);
+        writer.u32(1);
+        writer.u32(0);
+    })
+}
+
+fn create_session_args_with_response_size(
+    clientid: u64,
+    sequence: u32,
+    response_size: u32,
+) -> Vec<u8> {
+    op(OP_CREATE_SESSION, |writer| {
+        writer.u64(clientid);
+        writer.u32(sequence);
+        writer.u32(CREATE_SESSION4_FLAG_CONN_BACK_CHAN);
+        writer.u32(0);
+        writer.u32(1 << 20);
+        writer.u32(response_size);
+        writer.u32(1 << 20);
+        writer.u32(64);
+        writer.u32(4);
+        writer.u32(0);
         channel(writer);
         writer.u32(0);
         writer.u32(1);
@@ -1126,9 +1150,76 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
                     assert_eq!(back[1..4], [4096, 4096, 32]);
                     response.end("limited create session response").unwrap();
 
+                    let small_clientid = parse_exchange(
+                        rpc(
+                            &mut stream,
+                            403,
+                            compound(
+                                "exchange-small-response",
+                                &[exchange_args_for(b"mount-rs-v4-small-response")],
+                            ),
+                        )
+                        .await,
+                    );
                     let mut response = rpc(
                         &mut stream,
-                        403,
+                        404,
+                        compound(
+                            "too-small-response",
+                            &[create_session_args_with_response_size(
+                                small_clientid,
+                                1,
+                                64,
+                            )],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 1),
+                        NFS4ERR_TOOSMALL,
+                        "CREATE_SESSION rejects a fore-channel response too small for SEQUENCE"
+                    );
+                    assert_eq!(
+                        parse_result_status(&mut response, OP_CREATE_SESSION),
+                        NFS4ERR_TOOSMALL
+                    );
+                    response.end("too-small response").unwrap();
+
+                    let mut response = rpc(
+                        &mut stream,
+                        405,
+                        compound(
+                            "too-small-replay",
+                            &[create_session_args_with_response_size(
+                                small_clientid,
+                                1,
+                                1 << 20,
+                            )],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 1), NFS4ERR_TOOSMALL);
+                    assert_eq!(
+                        parse_result_status(&mut response, OP_CREATE_SESSION),
+                        NFS4ERR_TOOSMALL
+                    );
+                    response.end("too-small replay response").unwrap();
+
+                    let _small_session = parse_create_session(
+                        rpc(
+                            &mut stream,
+                            406,
+                            compound(
+                                "too-small-retry",
+                                &[create_session_args_with_sequence(small_clientid, 2)],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    let mut response = rpc(
+                        &mut stream,
+                        407,
                         compound(
                             "second-session",
                             &[create_session_args_with_sequence(clientid, 2)],
@@ -1137,12 +1228,12 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
                     .await;
                     assert_eq!(
                         parse_compound_status(&mut response, 1),
-                        NFS4ERR_RESOURCE,
+                        NFS4ERR_NOSPC,
                         "maxSessions rejects a second session for one client"
                     );
                     assert_eq!(
                         parse_result_status(&mut response, OP_CREATE_SESSION),
-                        NFS4ERR_RESOURCE
+                        NFS4ERR_NOSPC
                     );
                     response.end("second session response").unwrap();
 

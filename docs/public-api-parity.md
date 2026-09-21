@@ -228,11 +228,14 @@ Current focused behavior:
   `Duplex`; the supported Node stream-injection boundary is `attach`.
   The public `peer` type retains the native listener's `null` absence while
   allowing the attached-stream contract's `undefined` absence.
-- The supported N-API P9 session boundary is intentionally smaller than the
-  oracle's internal/debug surface: direct calls, destroy, stats, lifecycle,
-  clients, connection identity, and attached streams are exposed; mutable
-  driver/options/fid/lock maps, `userFor`, assertions, debug hooks, and other
-  upstream implementation helpers are not exposed or claimed for parity.
+- The N-API P9 session now exposes the scalar session policy through
+  `session.options` and the attach identity through `userFor(fid)`; the server
+  exposes its effective scalar policy through `server.options`. These members
+  are covered by generated typecheck and a live attach-only runtime check.
+  The upstream `driver`, `fids`, `locks`, assertion/debug callbacks and full
+  lock/fid object graphs remain unresolved rather than being treated as
+  intentionally out of scope. The server's property-shaped `clients` contract
+  and the 9P mount/barrel helpers are also still open.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
@@ -300,13 +303,17 @@ root server/class identity while exposing the low-level constants/status,
 path/header/XML/lock helpers and generated declarations. The N-API session now
 accepts async-iterable or Web ReadableStream request bodies and returns a
 pull-based response iterator; the session also exposes read-only active lock
-records with expiry cleanup. The direct probe covers the class 1/2/3 method
+records with expiry cleanup and recursive namespaced owner XML trees. The
+direct probe covers the class 1/2/3 method
 matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
 return, deliberate request-body failure mapping, one typed peer-aware callback
 from a Node socket reset, one malformed-HTTP callback, and same-driver server
 recreation preserving file bytes while resetting session locks. It also
 completes eight parallel unique-file PUT/GET requests through one direct
 session with exact body readback; this is in-process same-driver evidence only.
+The Rust XML boundary accepts the five predefined and bounded numeric
+references used by valid WebDAV owner documents while refusing DTD/custom
+entities.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full
@@ -672,6 +679,23 @@ hosted/live boundaries stay open below.
 - This refresh is focused mount-free oracle evidence; it does not claim the
   full N-API package matrix, privileged Linux FUSE, native callback/lifecycle,
   FSKit, cancellation/concurrency, crash/restart, or durability acceptance.
+
+### W01 FUSE session unsupported-operation boundary (2026-09-22)
+
+- **PASS** — `./scripts/cargo-shared test -p mount-rs-fuse --all-targets
+  --locked` passed the complete FUSE target: 14 unit, 6 INIT, 6 notify/record,
+  11 protocol, 20 session, and 3 sync-barrier tests. The new session checks
+  validate codec-backed `BMAP`, legacy and negotiated `SETXATTR`, `GETXATTR`,
+  `LISTXATTR`, and `REMOVEXATTR` bodies before valid unsupported requests return
+  `ENOSYS`; malformed forms return `EINVAL`.
+- **PASS** —
+  `CARGO_TARGET_DIR=/private/tmp/mount-rs-clippy-fuse-validate-20260922
+  ./scripts/cargo-shared clippy -p mount-rs-fuse --all-targets --locked --
+  -D warnings` passed.
+- This remains a mount-free validation boundary. Native xattr/BMAP support is
+  not advertised or implemented, and hosted Linux FUSE, callback/lifecycle,
+  FSKit, cancellation/concurrency, crash/restart, and durability acceptance
+  remain open.
 
 ### W01 lock-codec packet evidence (2026-09-21)
 

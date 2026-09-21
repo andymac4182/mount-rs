@@ -110,9 +110,12 @@ The W26 shell lanes reject a weakened production profile and run
 pass marker. The verifier requires the 4 KiB, 400-iteration, concurrency-64
 profile, a target of at least 1,000 IOPS, the exact requested provider set,
 zero skipped/configuration-failed rows, successful cleanup, and a passing
-machine-readable result for every size. This protects the CI evidence marker;
-it does not replace hosted provider, customer-capacity, availability or
-recovery evidence.
+machine-readable result for every size. It also requires the configured
+payload-size map, a 100% successful lifecycle rate, zero timeout/cleanup
+failures, complete write/read/delete/verified-read counts, and finite
+median/p95/p99 operation statistics. This protects the CI evidence marker; it
+does not replace hosted provider, customer-capacity, availability or recovery
+evidence.
 
 The CI workflow retains one evidence packet for the W26 Ozone lanes: the
 policy/recovery log from the base Ozone job, plus the acceptance log and IOPS
