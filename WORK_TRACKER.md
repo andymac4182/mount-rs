@@ -1161,9 +1161,14 @@ reproducible in a production-like environment.
   TiDB/RustFS soak harness in
   `tests/provider_matrix/tidb-rustfs-soak.mjs` is enabled in the hosted
   `tidb-rustfs` composition at 64 operations, concurrency 8 and 65,536-byte
-  payloads, and emits p50/p95/p99/throughput markers. *(Hosted/provider +
-  implementation; workload representativeness, resource telemetry and
-  production-sized capacity are open.)*
+  payloads, and emits p50/p95/p99/throughput markers. Run
+  `35595664981`, source `c5532e3`, `tidb-rustfs` job `106319766691` passed both
+  seed and reopen phases with `errors=0`; seed p50/p95/p99/throughput were
+  `668.59/918.49/918.62 ms` and `11.47 ops/s`, and reopen values were
+  `648.69/815.50/816.83 ms` and `12.15 ops/s`. This is bounded hosted
+  qualification only; workload representativeness, resource telemetry,
+  failover, multi-hour duration and production-sized capacity remain open.
+  *(Hosted/provider + implementation; production gate remains unchecked.)*
 - [ ] **W08-P07 (20%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
