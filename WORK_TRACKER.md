@@ -321,6 +321,7 @@ non-overlapping packet. The current bounded allocation is:
 
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
+| `dbfa2ea` | N-API strict-Clippy type cleanup | Factors the structural-driver open future into a named alias; full scoped N-API Clippy now passes with `-D warnings` and no type-complexity exclusion. This is lint evidence, not native-mount or hosted-platform acceptance |
 | `66c79e0` | Rust FUSE session parity for simple namespace operations | 16 frame-level session tests cover SYMLINK/MKNOD/MKDIR/UNLINK/RMDIR/RENAME/LINK/ACCESS, error/state cleanup, MKNOD fallback and POSIX name limits; focused FUSE tests, strict Clippy and formatting passed. Native device/mount and advanced FALLOCATE/LSEEK semantics remain open |
 | `6972fbe` | Unstorage hardlink alias capability boundary | Direct and N-API packets now cover six exact `ENOSYS` hardlink rows, including alias write-through and unlink-lifetime cases, with zero `ENOTSUP` mismatches and zero skips; generic hardlink inode support remains open |
 | `96bbbd9` | Structural-driver native lifecycle assertion hardening | Explicit transport identity is asserted and the PASS marker is emitted only after unmount, live-mount cleanup and mountpoint teardown; macOS NFS structural mount/read/write/unmount passed. Linux FUSE hosted execution remains unverified |
