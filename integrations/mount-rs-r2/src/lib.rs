@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use mount_rs_core::{FsError, Result, backend_error};
 use mount_rs_persist::{LoadedSnapshot, PersistedFs, StateStore, snapshot_conflict};
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut};
+use object_store::client::ClientConfigKey;
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
@@ -316,6 +317,26 @@ fn validate_aws_builder(builder: &AmazonS3Builder) -> Result<()> {
         == Some("true")
     {
         return Err(FsError::backend("AWS S3 provider requires signed requests"));
+    }
+    if builder
+        .get_config_value(&AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp))
+        .as_deref()
+        == Some("true")
+    {
+        return Err(FsError::backend(
+            "AWS S3 provider rejects HTTP transport overrides",
+        ));
+    }
+    if builder
+        .get_config_value(&AmazonS3ConfigKey::Client(
+            ClientConfigKey::AllowInvalidCertificates,
+        ))
+        .as_deref()
+        == Some("true")
+    {
+        return Err(FsError::backend(
+            "AWS S3 provider rejects invalid-certificate overrides",
+        ));
     }
     Ok(())
 }
@@ -649,6 +670,20 @@ mod tests {
         let unsigned = AmazonS3Builder::new().with_skip_signature(true);
         let error = validate_aws_builder(&unsigned).unwrap_err();
         assert!(error.to_string().contains("signed requests"));
+
+        let allow_http = AmazonS3Builder::new().with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::AllowHttp),
+            "true",
+        );
+        let error = validate_aws_builder(&allow_http).unwrap_err();
+        assert!(error.to_string().contains("HTTP transport"));
+
+        let invalid_certificates = AmazonS3Builder::new().with_config(
+            AmazonS3ConfigKey::Client(ClientConfigKey::AllowInvalidCertificates),
+            "true",
+        );
+        let error = validate_aws_builder(&invalid_certificates).unwrap_err();
+        assert!(error.to_string().contains("invalid-certificate"));
     }
 
     #[test]

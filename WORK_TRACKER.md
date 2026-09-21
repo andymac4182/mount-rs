@@ -1683,9 +1683,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
-  smoke. The workflow action references are now pinned to verified full SHAs,
-  but hosted OIDC trust, the protected versioning-status input, and the
-  deployment evidence remain open. The adjacent S3 gateway now refuses
+  smoke. The fresh targeted security scan at baseline `89992ce` identified
+  an AWS transport-override finding and mutable non-AWS workflow action
+  references; this packet closes the transport override, while the workflow
+  pinning remains an active remediation. Hosted OIDC trust, the protected
+  versioning-status input, and the deployment evidence remain open. The
+  adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
   same bounded cross-driver staging and atomic publication path. ListObjectsV2
