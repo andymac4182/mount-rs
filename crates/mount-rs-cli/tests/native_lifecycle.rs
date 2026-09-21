@@ -457,6 +457,103 @@ fn cli_nfs_sqlite_config_binary_hosts_sqlite_and_reopens() {
     artifacts.finish();
 }
 
+#[test]
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    feature = "foundationdb"
+))]
+#[ignore = "requires opt-in native transport, FoundationDB, RustFS, and the host libfdb_c"]
+fn cli_foundationdb_rustfs_config_binary_mounts_and_reopens() {
+    require_opt_in("MOUNT_RS_CLI_NATIVE_FOUNDATIONDB");
+    let cluster_file = std::env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE")
+        .expect("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE must be set");
+    let r2_endpoint = std::env::var("R2_ENDPOINT").expect("R2_ENDPOINT must be set");
+    let r2_bucket = std::env::var("R2_BUCKET").expect("R2_BUCKET must be set");
+    for name in ["R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"] {
+        assert!(
+            std::env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .is_some(),
+            "{name} must be set"
+        );
+    }
+
+    let transport = if cfg!(target_os = "linux") {
+        "fuse"
+    } else {
+        "nfs"
+    };
+    let mountpoint = unique_mountpoint();
+    let config_path = mountpoint.with_extension("foundationdb.json");
+    let volume_key = format!(
+        "mount-rs/cli-foundationdb/{}/{}",
+        std::process::id(),
+        unique_mountpoint().display()
+    );
+    let block_prefix = format!("{volume_key}/blocks");
+    let mut artifacts = NativeArtifacts::new(mountpoint.clone(), transport);
+    artifacts.file(config_path.clone());
+    fs::create_dir(&mountpoint).expect("create FoundationDB native mountpoint");
+    let config = serde_json::json!({
+        "version": 1,
+        "mountpoint": mountpoint,
+        "transport": transport,
+        "driver": {
+            "kind": "splitstore",
+            "storage": {
+                "metadata": {
+                    "kind": "foundationdb",
+                    "cluster_file": cluster_file,
+                    "volume_key": volume_key,
+                    "durable": true,
+                    "lease_authority": "persisted-single-authority"
+                },
+                "blocks": {
+                    "kind": "r2",
+                    "endpoint": r2_endpoint,
+                    "bucket": r2_bucket,
+                    "prefix": block_prefix,
+                    "access_key_id": {"env": "R2_ACCESS_KEY_ID"},
+                    "secret_access_key": {"env": "R2_SECRET_ACCESS_KEY"},
+                    "durable": true
+                },
+                "chunk_size_bytes": 4096,
+                "owner": "mount-rs-cli-foundationdb-native"
+            }
+        }
+    });
+    fs::write(
+        &config_path,
+        serde_json::to_vec_pretty(&config).expect("serialize FoundationDB native config"),
+    )
+    .expect("write FoundationDB native config");
+
+    let path = "foundationdb-native-round-trip";
+    let payload = b"FoundationDB metadata with RustFS blocks";
+    run_configured_mount_cycle(&config_path, &mountpoint, transport, |target| {
+        let path = target.join(path);
+        fs::write(&path, payload)?;
+        if fs::read(&path)? != payload {
+            return Err(std::io::Error::other(
+                "FoundationDB/RustFS native read mismatch",
+            ));
+        }
+        Ok(())
+    });
+    run_configured_mount_cycle(&config_path, &mountpoint, transport, |target| {
+        let path = target.join(path);
+        if fs::read(&path)? != payload {
+            return Err(std::io::Error::other(
+                "FoundationDB/RustFS native reopen mismatch",
+            ));
+        }
+        fs::remove_file(path)
+    });
+
+    artifacts.finish();
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_configured_mount_cycle<F>(
     config_path: &std::path::Path,
