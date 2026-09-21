@@ -9,6 +9,7 @@ use mount_rs_kv::{KeyValueMetadata, KeyValueStore, UnstorageOptions, create_unst
 struct MemoryStore {
     values: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     metadata: Arc<Mutex<HashMap<String, KeyValueMetadata>>>,
+    bounded_limits: Arc<Mutex<Vec<usize>>>,
     fail_next_set: Arc<Mutex<bool>>,
 }
 
@@ -75,6 +76,10 @@ impl KeyValueStore for MemoryStore {
         prefix: &str,
         max_keys: usize,
     ) -> Result<Option<Vec<String>>, Self::Error> {
+        self.bounded_limits
+            .lock()
+            .expect("bounded limits lock")
+            .push(max_keys);
         let keys = self.get_keys(prefix).await?;
         Ok(Some(
             keys.into_iter().take(max_keys.saturating_add(1)).collect(),
@@ -212,6 +217,11 @@ async fn bounded_readdir_enforces_the_provider_limit() {
             .expect("bounded listing")
             .len(),
         3
+    );
+    assert_eq!(
+        *store.bounded_limits.lock().expect("bounded limits lock"),
+        vec![2, 3],
+        "the adapter must request the caller's exact provider bound"
     );
 }
 
