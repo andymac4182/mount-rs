@@ -574,6 +574,7 @@ if [ "$run_napi" -eq 1 ]; then
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
+      --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
       --env "R2_ENDPOINT=$rustfs_endpoint" \
       --env R2_BUCKET \
       --env R2_ACCESS_KEY_ID \
@@ -592,6 +593,7 @@ if [ "$run_napi" -eq 1 ]; then
       --env MOUNT_RS_NAPI_FOUNDATIONDB=1 \
       --env MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER=1 \
       --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
+      --env "MOUNT_RS_FOUNDATIONDB_NODE_PREFIX=$test_prefix/napi" \
       "$node_image" node integrations/mount-rs-napi/test/foundationdb.mjs
   fi
   echo "FOUNDATIONDB_NAPI_PASS image=$node_image"

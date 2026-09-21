@@ -118,6 +118,7 @@ jobs:
         env:
           MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
+          MOUNT_RS_FOUNDATIONDB_NAPI: '1'
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: sh scripts/test-ozone.sh
 

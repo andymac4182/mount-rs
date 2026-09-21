@@ -14,7 +14,9 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
   )
 
   const suffix = `${process.pid}-${Date.now()}`
-  const prefix = `mount-rs-napi/foundationdb/${suffix}`
+  const prefix =
+    process.env.MOUNT_RS_FOUNDATIONDB_NODE_PREFIX ||
+    `mount-rs-napi/foundationdb/${suffix}`
   const sharedProvider = process.env.MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER === "1"
   const authorityPrefix = process.env.MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX
   if (sharedProvider) {
@@ -90,6 +92,20 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
   assert.deepEqual(Buffer.from(await first.readFile("/foundationdb-node.txt")), payload)
   await first.truncate("/foundationdb-node.txt", 4096 + 11)
   assert.equal((await first.stat("/foundationdb-node.txt")).size, 4096 + 11)
+  await first.mkdir("/bounded-listing")
+  await first.writeFile("/bounded-listing/alpha", Buffer.from("alpha"))
+  await first.writeFile("/bounded-listing/beta", Buffer.from("beta"))
+  assert.deepEqual(
+    (await first.readdirBounded("/bounded-listing", 2)).map((entry) => entry.name).sort(),
+    ["alpha", "beta"],
+  )
+  await assert.rejects(
+    () => first.readdirBounded("/bounded-listing", 1),
+    (error) => error.code === "EOVERFLOW",
+  )
+  console.log(
+    `FOUNDATIONDB_NAPI_BOUNDED_READDIR_PASS phase=seed prefix=${prefix}`,
+  )
   await first.shutdown()
 
   const reopened = await createChunkedDriver({
@@ -105,6 +121,19 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
     assert.equal(
       (await reopened.readFile("/foundationdb-node.txt")).length,
       4096 + 11,
+    )
+    assert.deepEqual(
+      (await reopened.readdirBounded("/bounded-listing", 2))
+        .map((entry) => entry.name)
+        .sort(),
+      ["alpha", "beta"],
+    )
+    await assert.rejects(
+      () => reopened.readdirBounded("/bounded-listing", 1),
+      (error) => error.code === "EOVERFLOW",
+    )
+    console.log(
+      `FOUNDATIONDB_NAPI_BOUNDED_READDIR_PASS phase=reopen prefix=${prefix}`,
     )
   } finally {
     await reopened.shutdown()
