@@ -1904,13 +1904,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  hosted run `35601403560` at head `2159976` stopped before AWS authentication with
-  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a successful safety
-  refusal, not acceptance evidence. The existing test
+  hosted run `35608516727` at head `8e271cd` stopped before AWS authentication
+  with `AWS_S3_CI_CONFIG_BLOCKED`; this is a successful safety refusal, not
+  acceptance evidence. A fresh Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42`
+  was launched against the then-current W25 head and remains in preflight; it
+  has no result yet and cannot be used as release evidence. The existing test
   role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
-  evidence. The workflow now has a secret-safe preflight validator that blocks
+  evidence. The read-only
+  [`scripts/audit-aws-s3-ci-oidc.sh`](scripts/audit-aws-s3-ci-oidc.sh) now
+  checks the immutable GitHub subject, OIDC provider, exact role trust, protected
+  environment, and required input names without mutating either system. The
+  workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed, and it
   rejects a role ARN whose account does not match the protected
   `MOUNT_RS_AWS_S3_ACCOUNT_ID` value. The
