@@ -103,9 +103,11 @@ the retention period, and the encryption choice.
 
 The template defaults to BucketOwnerEnforced ownership, all four S3 public
 access blocks, versioning enabled, retained state on stack deletion or
-replacement, a one-day incomplete-multipart abort, and SSE-S3. Its bucket
-policy denies insecure transport for the bucket and every object key. It can select
-SSE-KMS and an optional customer-managed key ARN. The reviewed retention
+replacement, a one-day incomplete-multipart abort, and SSE-S3. Its parameter
+rules require runtime and maintenance to be different roles, require a key ARN
+when SSE-KMS is selected, and reject an unused key ARN for SSE-S3. Its bucket
+policy denies insecure transport for the bucket and every object key. It can
+select SSE-KMS and an optional customer-managed key ARN. The reviewed retention
 period applies to current objects and noncurrent versions under the owned
 prefix. The runtime role can list,
 read, and publish only objects below the owned prefix; version listing and
@@ -220,6 +222,7 @@ AWS_PROFILE=<approved-audit-profile> \
 AWS_S3_AUDIT_BUCKET=<private-bucket> \
 AWS_S3_AUDIT_REGION=<aws-region> \
 AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID=<approved-audit-account-id> \
+AWS_S3_AUDIT_EXPECTED_VERSIONING_STATUS=Enabled \
 ./scripts/audit-aws-s3-resource.sh
 ```
 
@@ -227,9 +230,12 @@ The command fails closed on inherited AWS endpoint or service-profile overrides,
 checks the caller account and bucket region, then checks all four Block Public
 Access settings, BucketOwnerEnforced ownership, default server-side encryption,
 the configured current-object lifecycle expiry, matching noncurrent-version
-expiry when versioning is enabled, and multipart-abort days. It reports rather
-than changes bucket versioning. It is safe to run during review, but a passing
-qualification-bucket audit does not close the production-resource gate.
+expiry when versioning is enabled, and multipart-abort days. When
+`AWS_S3_AUDIT_EXPECTED_VERSIONING_STATUS` is set, it also fails closed unless
+the live bucket matches the reviewed `None`, `Enabled`, or `Suspended` choice.
+It reports rather than changes bucket versioning. It is safe to run during
+review, but a passing qualification-bucket audit does not close the
+production-resource gate.
 
 The latest current-tree qualification at pushed head `2633bec` passed this
 audit in account `922978963556`, then passed the scoped sibling-prefix denial,

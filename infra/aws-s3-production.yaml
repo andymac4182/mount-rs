@@ -62,6 +62,22 @@ Parameters:
 Conditions:
   UseCustomerManagedKms: !Equals [!Ref EncryptionAlgorithm, aws:kms]
 
+Rules:
+  RuntimeAndMaintenanceRolesMustDiffer:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref RuntimeRoleArn, !Ref MaintenanceRoleArn]]
+        AssertDescription: RuntimeRoleArn and MaintenanceRoleArn must be different roles.
+  KmsKeyRequiredWhenSelected:
+    RuleCondition: !Equals [!Ref EncryptionAlgorithm, aws:kms]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref KmsKeyArn, '']]
+        AssertDescription: KmsKeyArn is required when EncryptionAlgorithm is aws:kms.
+  KmsKeyMustBeOmittedForSseS3:
+    RuleCondition: !Equals [!Ref EncryptionAlgorithm, AES256]
+    Assertions:
+      - Assert: !Equals [!Ref KmsKeyArn, '']
+        AssertDescription: KmsKeyArn must be empty when EncryptionAlgorithm is AES256.
+
 Resources:
   MountRsBucket:
     Type: AWS::S3::Bucket

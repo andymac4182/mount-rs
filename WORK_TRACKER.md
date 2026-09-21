@@ -2287,7 +2287,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   CloudFormation validation API on 2026-09-22 without creating a stack or
   change set. Its versioning lifecycle now also expires noncurrent versions
   using the same reviewed retention parameter, avoiding an unbounded version
-  accumulation path.
+  accumulation path. The template now fails closed on reused runtime and
+  maintenance role parameters, requires `KmsKeyArn` for SSE-KMS, and rejects
+  an unused key ARN for SSE-S3. The resource audit can also enforce the
+  reviewed live versioning status with
+  `AWS_S3_AUDIT_EXPECTED_VERSIONING_STATUS`; the hosted workflow path set now
+  includes the resource audit, PGlite harness, and shared provider/metadata
+  packages. These are reviewable safeguards only; production parameters,
+  role trust, change-set review, and live production audit remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
