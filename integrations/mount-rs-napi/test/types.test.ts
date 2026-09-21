@@ -81,6 +81,9 @@ import {
   decodeLkOut,
   encodeLkIn,
   encodeLkOut,
+  FUSE_ASYNC_DIO,
+  FUSE_PARALLEL_DIROPS,
+  FUSE_SETXATTR_EXT,
   FUSE_LK_FLOCK,
   F_UNLCK,
   FuseSession,
@@ -123,6 +126,7 @@ const autoMountOptions: JsAutoMountOptions = {
   },
 }
 void autoMountOptions
+void (FUSE_ASYNC_DIO | FUSE_PARALLEL_DIROPS | FUSE_SETXATTR_EXT)
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
   __napiBindingTarget

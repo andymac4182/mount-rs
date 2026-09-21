@@ -18,13 +18,13 @@ function frame(opcode, nodeid, body, unique = 42n) {
   ])
 }
 
-function initBody() {
+function initBody(flags = 0, flags2 = 0) {
   const body = Buffer.alloc(20)
   body.writeUInt32LE(7, 0)
   body.writeUInt32LE(41, 4)
   body.writeUInt32LE(65_536, 8)
-  body.writeUInt32LE(0, 12)
-  body.writeUInt32LE(0, 16)
+  body.writeUInt32LE(flags, 12)
+  body.writeUInt32LE(flags2, 16)
   return body
 }
 
@@ -37,6 +37,25 @@ assert.equal(typeof fuse.FuseSession, "function")
 
 const filesystem = fuse.Filesystem.memory()
 await filesystem.writeFile("/visible", Buffer.from("session"))
+const asyncDio = BigInt(fuse.FUSE_ASYNC_DIO)
+const parallelDirops = BigInt(fuse.FUSE_PARALLEL_DIROPS)
+const setxattrExt = BigInt(fuse.FUSE_SETXATTR_EXT)
+const defaultSession = new fuse.FuseSession(filesystem)
+await defaultSession.handle(frame(26, 0n, initBody()))
+assert.equal(defaultSession.negotiated.parallelDirops, false)
+assert.equal(defaultSession.negotiated.setxattrExt, false)
+assert.equal(defaultSession.negotiated.flags & asyncDio, 0n)
+assert.equal(defaultSession.negotiated.flags & parallelDirops, 0n)
+assert.equal(defaultSession.negotiated.flags & setxattrExt, 0n)
+await defaultSession.destroy()
+
+const explicitFlagsSession = new fuse.FuseSession(filesystem, {
+  init: { extraFlags: asyncDio },
+})
+await explicitFlagsSession.handle(frame(26, 0n, initBody(Number(asyncDio))))
+assert.notEqual(explicitFlagsSession.negotiated.flags & asyncDio, 0n)
+await explicitFlagsSession.destroy()
+
 const observedErrors = []
 const session = new fuse.FuseSession(filesystem, {
   maxRequest: 65_536,
@@ -62,6 +81,11 @@ assert.equal(session.negotiated.major, 7)
 assert.equal(session.negotiated.minor, 41)
 assert.ok(session.negotiated.maxWrite <= 65_456)
 assert.equal(session.negotiated.readdirplus, false)
+assert.equal(session.negotiated.parallelDirops, false)
+assert.equal(session.negotiated.setxattrExt, false)
+assert.equal(session.negotiated.flags & asyncDio, 0n)
+assert.equal(session.negotiated.flags & parallelDirops, 0n)
+assert.equal(session.negotiated.flags & setxattrExt, 0n)
 
 const lookup = await session.handle(frame(1, 1n, lookupBody("visible")))
 assert.ok(lookup instanceof Buffer)

@@ -268,9 +268,15 @@ fn init_preferences(
     options: Option<NativeFuseInitPreferences>,
 ) -> napi::Result<mount_rs_fuse::init::Preferences> {
     let Some(options) = options else {
-        return Ok(mount_rs_fuse::init::Preferences::default());
+        return Ok(FuseSessionOptions::default().init);
     };
-    let mut preferences = mount_rs_fuse::init::Preferences::default();
+    // The generic INIT codec defaults intentionally expose the broad protocol
+    // negotiation surface. A serialized mount-free session must start from the
+    // same conservative policy as the native dispatcher, however: it does not
+    // provide asynchronous direct I/O, parallel directory dispatch, or the
+    // SETXATTR extension. Callers may still opt into explicit flags through
+    // `flags`/`extraFlags` when they own the corresponding implementation.
+    let mut preferences = FuseSessionOptions::default().init;
     if let Some(value) = u32_value("init.minor", options.minor)? {
         preferences.minor = value;
     }

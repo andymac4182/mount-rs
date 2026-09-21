@@ -255,6 +255,13 @@ and releases it on `Mounted` teardown. The scoped auto/NFS/N-API Rust tests,
 debug addon build, native-facade skip lane, generated typecheck, formatting
 and diff checks pass; hosted native fault-event delivery and the remaining
 native lifecycle gates remain open.
+The latest mount-free N-API session follow-up now starts from the same
+conservative INIT policy as the serialized native dispatcher. Default
+negotiation no longer advertises asynchronous direct I/O, parallel directory
+dispatch, or `SETXATTR_EXT` without an explicit caller override; the generated
+N-API session test asserts those flags remain clear. This closes a capability-
+honesty gap but does not qualify hosted Linux negotiation, native callback
+delivery, cancellation/concurrency, crash/restart, durability, or FSKit.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 

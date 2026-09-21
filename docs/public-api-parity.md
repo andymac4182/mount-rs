@@ -99,17 +99,18 @@ transport/session parity:
   [`9p-codec.mjs`](../integrations/mount-rs-napi/test/9p-codec.mjs#L132-L245)
   do not establish the complete upstream 9P server object or all protocol
   behavior.
-- The package now has a `./fuse` export. Its codec barrel covers the currently
-  bound notify/record/protocol helpers, and its `InodeTable` facade delegates to
-  the Rust transport table. The complete request/reply body codec, session,
-  and mount objects are still not exposed at the N-API boundary; see
+- The package now has a `./fuse` export. Its codec barrel covers the bound
+  notify/record/protocol helpers, its `InodeTable` facade delegates to the Rust
+  transport table, and its Rust-backed `FuseSession` exposes the mount-free
+  request/lifecycle boundary. Native kernel mount objects remain outside this
+  subpath; root `mount` owns that platform-specific surface. See
   [`fuse.cjs`](../integrations/mount-rs-napi/fuse.cjs) and
-  [`fuse_inodes.rs`](../integrations/mount-rs-napi/src/fuse_inodes.rs).
+  [`fuse_session.rs`](../integrations/mount-rs-napi/src/fuse_session.rs).
 
-**Required closure evidence:** expose the remaining FUSE request/reply body,
-session, and native-mount surfaces, then run oracle-backed subpath tests for
-every exported transport rather than treating codec or inode fixture tests as
-transport completion.
+**Required closure evidence:** keep the broad request/reply and mount-free
+session exports aligned with the serialized dispatch policy, then qualify the
+platform-specific native mount and lifecycle surfaces. Oracle-backed subpath
+tests are necessary but do not substitute for native acceptance.
 
 ### P1 — FUSE public layer: IMPLEMENTED (focused); PARTIAL
 
@@ -171,9 +172,11 @@ protocol, record, and session, including a broad request/reply body codec.
 - The latest N-API FUSE codec packet exposes typed `SYMLINK`, `MKNOD`, `MKDIR`, `UNLINK`, `RMDIR`, `RENAME`, `RENAME2`, `LINK`, `ACCESS`, `FALLOCATE`, and `LSEEK` request/reply bodies with generated declarations and explicit CommonJS/ESM exports. Pinned mountx byte/decode differentials and the full artifact-aggregation suite passed; this remains mount-free codec evidence, and native session/device/mount parity remains open.
 - The Rust FUSE session packet now covers the already-supported simple namespace operations at the frame boundary, including successful mutation, error-state preservation, MKNOD fallback, ACCESS credential behavior and the 255-byte POSIX name limit. The focused 16-test session suite and strict Clippy passed; native device/mount acceptance and advanced operation semantics remain open.
 
-The N-API package still does not expose the complete request/reply body codec,
-init negotiation, session, or native mount objects. Therefore this packet
-proves focused body/inode components only, not full FUSE transport parity.
+The N-API package now exposes the broad request/reply body codec, INIT
+negotiation readback, and a Rust-backed mount-free session. It deliberately
+does not expose a portable native mount object from `./fuse`; the root auto
+facade owns native mounting and its platform boundary. Therefore the local
+codec/session gates still do not prove full kernel FUSE or FSKit parity.
 
 The previously known `js_driver.rs` type-complexity lint was resolved in
 `dbfa2ea`; the current scoped N-API Clippy gate passes with `-D warnings`
