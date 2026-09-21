@@ -354,8 +354,16 @@ alongside the existing public-access, ownership, encryption, lifecycle, and
 multipart-abort checks. A current-source audit at pushed source
 `313fb2f2a6bd6e68305a86bc55036d77c563ca8c` repeated those controls on
 2026-09-22 without mutating AWS or rerunning the full service qualification.
-The latest full integrated qualification is the separate `860492d` run
-recorded above. This is qualification-account evidence only; production
+A current shared-source audit at pushed source
+`6e19c4d2388aac02c0a3278a3f524febdc4b07ec` on 2026-09-22 repeated the
+qualification bucket's account/region binding, all four public-access blocks,
+BucketOwnerEnforced ownership, AES256 encryption, `None` versioning, seven-day
+`mount-rs-tests/` lifecycle, and one-day incomplete-multipart abort checks. It
+made no AWS changes and remains qualification-account evidence only; the
+production bucket, policy, roles, and approved change set remain open.
+The latest full integrated qualification is the current shared-source
+`2101e555` run recorded above. This is qualification-account evidence only;
+production
 resource, metadata, identity, hosted release, and deployment operations gates
 remain open.
 

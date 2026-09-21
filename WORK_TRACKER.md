@@ -2921,6 +2921,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   incomplete-multipart abort checks. It made no AWS changes and remains
   qualification-account evidence only; the production bucket, policy, roles,
   and approved change set remain open.
+- [x] A current shared-source read-only resource audit at pushed source
+  `6e19c4d2388aac02c0a3278a3f524febdc4b07ec` on 2026-09-22 passed the
+  qualification bucket's account/region binding, all four public-access
+  blocks, BucketOwnerEnforced ownership, AES256 encryption, `None` versioning,
+  seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
+  abort checks. It made no AWS changes and remains qualification-account
+  evidence only; the production bucket, policy, roles, and approved change
+  set remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
