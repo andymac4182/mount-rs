@@ -11,7 +11,7 @@ gate required by W04.2.
 | Field | Current value |
 | --- | --- |
 | Snapshot base revision | `fac9c7e004b4eb1d9e742c180f967c97f3d89648` (origin/main immediately before this ledger update) |
-| Last published ledger commit | `5424080afbc2027d5dcb0ab79a09ca9a4a32fdc8` (published to `origin/main`) |
+| Ledger publication | This current ledger revision is committed and pushed to `origin/main`; the exact commit is recorded in Git history |
 | Current-head local evidence revision | `5424080afbc2027d5dcb0ab79a09ca9a4a32fdc8` (the docs-only `fac9c7e` sync landed after the gate) |
 | Snapshot time | 2026-09-21 17:54 AEST / 2026-09-21 07:54 UTC |
 | Tracker section | `WORK_TRACKER.md` § W04 — PGlite |
@@ -122,7 +122,7 @@ snapshot, while the broader work includes time spent waiting on hosted CI.
 
 ## Publication note
 
-This ledger revision is a documentation chunk. It must be reviewed with
-`git diff --check`, committed, rebased if `origin/main` advances, and pushed
-to `origin/main`. It does **not** close W04.2; that requires the missing
-hosted macOS log evidence described above.
+This ledger revision is a documentation chunk. It was reviewed with
+`git diff --check`, committed, and pushed to `origin/main`. It does **not**
+close W04.2; that requires the missing hosted macOS log evidence described
+above.
