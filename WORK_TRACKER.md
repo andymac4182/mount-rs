@@ -2851,11 +2851,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `0ab9bf41` was freshly reverified after the concurrent NFS/WebDAV/
-  provider updates with the full locked workspace test suite (exit 0) and
-  strict workspace Clippy with `-D warnings` (exit 0). Subsequent concurrent
-  9P/WebDAV changes were published in `2d840df9` after that run, so no full
-  source-health claim is made for the newer tip.
+  Source `be721a20` was freshly reverified after the concurrent NFS/WebDAV/
+  provider and Ozone updates with the full locked workspace test suite (exit 0)
+  and strict workspace Clippy with `-D warnings` (exit 0). This is
+  source-health evidence only and does not close W08-P01–P09.
   Provider/native tests requiring TiDB, RustFS, PGlite, R2, FUSE or NFS
   remained explicit opt-in skips; this is source-health evidence only and does
   not close W08-P01–P09.
