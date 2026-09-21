@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
-use crate::error::Result;
+use crate::error::{FsError, Result};
 use crate::path::normalize_path;
 use crate::types::{Capabilities, DirEntry, MkdirOptions, Stats, StatsFs};
 
@@ -55,6 +55,15 @@ pub trait FsDriver: Send + Sync {
         Err(crate::error::FsError::enosys("statfs"))
     }
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>>;
+    /// Enumerate at most `max_entries` directory entries.
+    ///
+    /// HTTP and other remotely reachable adapters must use this method before
+    /// serializing a directory response. Drivers that cannot enforce the
+    /// bound at their enumeration boundary fail closed instead of falling back
+    /// to [`FsDriver::readdir`], which may materialize an unbounded listing.
+    async fn readdir_bounded(&self, _path: &str, _max_entries: usize) -> Result<Vec<DirEntry>> {
+        Err(crate::error::FsError::enotsup("scandir"))
+    }
     async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>>;
 
     /// Open using decoded flags. Transports decode their own flag namespace.
@@ -134,6 +143,35 @@ pub trait FsDriver: Send + Sync {
     }
 }
 
+/// Build a directory result from a lazy iterator while enforcing the caller's
+/// entry bound before the result can grow beyond it.
+pub fn collect_bounded_dir_entries<I>(
+    path: &str,
+    max_entries: usize,
+    entries: I,
+) -> Result<Vec<DirEntry>>
+where
+    I: IntoIterator<Item = DirEntry>,
+{
+    if max_entries == 0 {
+        return Err(FsError::new(crate::error::ErrorCode::Einval)
+            .with_syscall("scandir")
+            .with_path(path)
+            .with_message("directory entry limit must be positive"));
+    }
+    let mut output = Vec::new();
+    for entry in entries {
+        if output.len() == max_entries {
+            return Err(FsError::new(crate::error::ErrorCode::Eoverflow)
+                .with_syscall("scandir")
+                .with_path(path)
+                .with_message("directory exceeds the configured entry limit"));
+        }
+        output.push(entry);
+    }
+    Ok(output)
+}
+
 /// The loopback harness: normalize paths, expose resolved capabilities, and
 /// provide whole-file helpers without involving any mount transport.
 #[derive(Clone)]
@@ -180,6 +218,12 @@ impl Loopback {
 
     pub async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
         self.driver.readdir(&normalize_path(path)).await
+    }
+
+    pub async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        self.driver
+            .readdir_bounded(&normalize_path(path), max_entries)
+            .await
     }
 
     pub async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {

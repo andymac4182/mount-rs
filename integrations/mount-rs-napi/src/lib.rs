@@ -736,6 +736,23 @@ impl FsDriver for DriverSlot {
         Box::pin(async move { driver.readdir(path).await })
     }
 
+    fn readdir_bounded<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        max_entries: usize,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<DirEntry>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.readdir_bounded(path, max_entries).await })
+    }
+
     fn open<'a, 'b, 'c, 'async_trait>(
         &'a self,
         path: &'b str,
@@ -1421,6 +1438,19 @@ impl FsDriver for MountDriver {
         Self: 'async_trait,
     {
         self.0.readdir(path)
+    }
+
+    fn readdir_bounded<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        max_entries: usize,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<DirEntry>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.readdir_bounded(path, max_entries)
     }
 
     fn open<'a, 'b, 'c, 'async_trait>(

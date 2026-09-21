@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(180);
+const AUTHORITY_MAX_FORWARD_JUMP: Duration = Duration::from_secs(300);
 
 #[derive(Default)]
 struct OperationMetrics {
@@ -595,7 +596,9 @@ async fn run_real_composition() -> Result<()> {
         &authority_prefix,
         FoundationDbLimits::default(),
     )?;
-    authority.publish_system_now_ms().await?;
+    authority
+        .publish_system_now_ms_with_max_forward_jump(AUTHORITY_MAX_FORWARD_JUMP)
+        .await?;
     drop(authority);
     let (expected, revision) = composition_round_trip(
         &cluster_file,

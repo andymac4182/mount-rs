@@ -1092,12 +1092,9 @@ async fn handle_file_read(
     if stats.is_directory() {
         let entries = drive
             .driver()
-            .readdir(&path)
+            .readdir_bounded(&path, config.max_directory_entries)
             .await
-            .map_err(RequestError::Fs)?;
-        if entries.len() > config.max_directory_entries {
-            return Err(RequestError::response_too_large());
-        }
+            .map_err(directory_listing_error)?;
         let payload = serde_json::to_vec(&DirectoryPayload {
             path: &path,
             stats: &stats,
@@ -1272,12 +1269,9 @@ async fn handle_entries(
     }
     let entries = drive
         .driver()
-        .readdir(&path)
+        .readdir_bounded(&path, config.max_directory_entries)
         .await
-        .map_err(RequestError::Fs)?;
-    if entries.len() > config.max_directory_entries {
-        return Err(RequestError::response_too_large());
-    }
+        .map_err(directory_listing_error)?;
     let payload = serde_json::to_vec(&entries)
         .map_err(|_| RequestError::Fs(FsError::backend("failed to encode directory entries")))?;
     if payload.len() > config.max_response_bytes {
@@ -1288,6 +1282,14 @@ async fn handle_entries(
         Bytes::from(payload),
         method == Method::HEAD,
     ))
+}
+
+fn directory_listing_error(error: FsError) -> RequestError {
+    if error.code == ErrorCode::Eoverflow {
+        RequestError::response_too_large()
+    } else {
+        RequestError::Fs(error)
+    }
 }
 
 async fn handle_operation(

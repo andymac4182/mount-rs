@@ -1129,6 +1129,47 @@ where
         Ok(result)
     }
 
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        if max_entries == 0 {
+            return Err(error_with_path(ErrorCode::Einval, "scandir", path)
+                .with_message("directory entry limit must be positive"));
+        }
+        let _gate = self.inner.gate.lock().await;
+        self.ensure_operation_lease().await?;
+        let (mut namespace, revision) = self.snapshot()?;
+        let normalized = normalize_path(path);
+        let inode = resolve(&namespace, &normalized, true, "scandir")?;
+        let node = namespace
+            .nodes
+            .get(&inode)
+            .ok_or_else(|| error_with_path(ErrorCode::Estale, "scandir", &normalized))?;
+        let entries = match &node.data {
+            NodeData::Directory { entries } => entries,
+            _ => return Err(error_with_path(ErrorCode::Enotdir, "scandir", &normalized)),
+        };
+        let mut result = Vec::new();
+        for entry in entries {
+            if result.len() == max_entries {
+                return Err(
+                    error_with_path(ErrorCode::Eoverflow, "scandir", &normalized)
+                        .with_message("directory exceeds the configured entry limit"),
+                );
+            }
+            if let Some(node) = namespace.nodes.get(&entry.inode) {
+                result.push(DirEntry {
+                    name: entry.name.clone(),
+                    parent_path: normalized.clone(),
+                    file_type: FileType::from_mode(node.stats.mode),
+                });
+            }
+        }
+        if let Some(node) = namespace.nodes.get_mut(&inode) {
+            node.stats.atime_ms = now_ms();
+        }
+        self.publish_namespace(revision, namespace, false).await?;
+        Ok(result)
+    }
+
     async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
         let parsed = OpenFlags::parse(flags, path)?;
         self.open_flags(path, parsed, mode).await

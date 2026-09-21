@@ -1748,6 +1748,23 @@ impl FsDriver for JsDriver {
         })
     }
 
+    fn readdir_bounded<'a, 'b, 'async_trait>(
+        &'a self,
+        _path: &'b str,
+        _max_entries: usize,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<Vec<DirEntry>>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        // The JavaScript callback contract returns a complete array and does
+        // not expose a provider-side enumeration limit. Refuse the bounded
+        // transport path until that contract can enforce the limit before the
+        // JS array is materialized.
+        Box::pin(async { Err(FsError::enotsup("scandir")) })
+    }
+
     fn open<'a, 'b, 'c, 'async_trait>(
         &'a self,
         path: &'b str,
