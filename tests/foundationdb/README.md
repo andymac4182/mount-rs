@@ -57,6 +57,12 @@ not a production capacity, cost, or multi-day soak claim; the production
 workload and duration must still be defined and accepted in
 `docs/foundationdb-production-rollout.md`.
 
+The dedicated hosted workflow also writes a schema-versioned summary artifact.
+When it runs in GitHub Actions, the validator requires the summary to include
+the repository, workflow, ref, full source revision, runner, run ID and run
+attempt that produced the markers. Local fixture validation may omit that
+provenance, but a partial provenance record fails closed.
+
 Set `MOUNT_RS_FOUNDATIONDB_TOPOLOGY=durable` for the three-node disposable
 cluster used by the hosted acceptance lane. It uses three pinned FoundationDB
 server containers, `double` redundancy, separate persistent Docker volumes,
