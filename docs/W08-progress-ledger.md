@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 08:42 AEST**
+Status snapshot: **2026-09-22 08:50 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -8,10 +8,10 @@ implementation was qualified at hosted source `e0ab07d6`; the latest W08 ledger
 pointer synchronization before the live production-boundary audit was
 `f1362442`. The audit documentation was committed as `fd29a297`, reconciled
 with concurrent mainline work and pushed in public merge tip `a40f5b8d`.
-The exact fully tested source is now `b7d77432`, which passed a fresh full
-locked workspace test and strict Clippy run, including the concurrent NFS/
-9P/WebDAV/provider and Ozone updates. Earlier source-health results at
-`be721a20`, `0ab9bf41`, `b27dd2bb`, `2d459e15`, `6e27d46c`,
+The exact fully tested source is now `229a9cd5`, which passed a fresh full
+locked workspace test and strict Clippy run after the concurrent NFS/9P/
+WebDAV/HTTP/provider and Ozone updates. Earlier source-health results at
+`b7d77432`, `be721a20`, `0ab9bf41`, `b27dd2bb`, `2d459e15`, `6e27d46c`,
 `49778fde` and
 `6a19ff6555635b20385acdc30d7aa2da143f6931` remain recorded below for
 reconciliation history. The W08.35 implementation and
@@ -428,6 +428,13 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
+### Latest evidence refresh — 2026-09-22 08:50 AEST
+
+| Evidence item | Status | Evidence and boundary | Remaining action / blocker |
+| --- | --- | --- | --- |
+| Local latest public mainline `229a9cd5` | PASS — current integrated source verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all runnable tests passing; provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE, NFS or other host capabilities remained explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0. This is source-health evidence only; no provider, native-host or production rollout gate is closed. | Re-run provider/native and production-like gates when their external services, credentials, host capabilities and owners are available. |
+| Live GitHub production-boundary audit, 2026-09-22 08:49 AEST | BLOCKED — P09 repository/API/environment execution boundary | Read-only `gh api` checks returned HTTP 404 for the repository, `w08-production` environment and environment-secret surface. `gh release list` could not resolve the repository and `gh run list --workflow w08-production-release.yml` returned HTTP 404, so neither is promoted to current release evidence; the last successful API observation at 08:38 showed only `v0.1.0-cli-preview`. `git ls-remote` found no `v*-cli-production-candidate*` tag, while fetched `origin/main` contains `.github/workflows/w08-production-release.yml`. This is external GitHub/API and release-configuration evidence, not production acceptance. | Restore/authorize the repository API surface, configure the protected environment and reviewers/secrets, create an approved immutable candidate tag, run the terminal workflow, then inspect registry assets and execute canary/rollback/approval. |
+
 ## Session time log
 
 Times below are approximate engineering/wall-clock accounting for this goal;
@@ -514,6 +521,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 08:31–08:33 AEST | Reconciled concurrent 9P/WebDAV changes and published the documentation at `2d840df9` after the `0ab9bf41` source run; preserved the exact tested-source boundary in the ledger. | ~0.05 engineer-day | ~1 min merge/push | W08 policy tracking remains green; the newer public source tip is explicitly awaiting a fresh full workspace run. |
 | 2026-09-22 08:33–08:38 AEST | Fast-forwarded to `be721a20`, reran all W08 policy/evidence suites, ran the full locked workspace test and strict Clippy (both exit 0), and performed a fresh read-only production-boundary audit. | ~0.15 engineer-day | ~1 min mainline synchronization plus ~30s source checks and ~9s GitHub audit | Current source is test- and lint-clean; the production API/environment/tag/run boundary remains externally blocked, and P01–P09 remain open. |
 | 2026-09-22 08:38–08:42 AEST | Published the reconciled W08 evidence refresh at `b7d77432`, then ran the full locked workspace test and strict Clippy on that exact public tip; both exited 0. | ~0.1 engineer-day | ~53s test execution plus ~2s Clippy execution | Latest public source is test- and lint-clean; explicit provider/native skips and all nine production gates remain open. |
+| 2026-09-22 08:43–08:50 AEST | Fast-forwarded this checkout to fetched `origin/main` `229a9cd5`, reran the 36-item rollout verifier, seven-case transition suite, NO-GO evidence validator and 11-case evidence suite, then ran the full locked workspace test and strict workspace Clippy; all exited 0. Refreshed the read-only GitHub production-boundary audit at 08:49 AEST and recorded the API 404 boundary. | ~0.15 engineer-day | ~7s policy checks, ~18s Cargo test/Clippy execution, plus ~9s GitHub audit and mainline synchronization | `229a9cd5` is current integrated source-health evidence; provider/native opt-in rows and all nine production gates remain open. The production API/environment/tag/run boundary remains externally blocked. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
