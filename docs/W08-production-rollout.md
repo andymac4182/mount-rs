@@ -116,6 +116,14 @@ GitHub CLI flag-surface check passed. No approved tag or manual attestation
 dispatch has run, so no Sigstore bundle, attestation ID/URL or production
 release signature is claimed.
 
+The first explicit target-matrix dispatch (`35620392878`, source `0a4de6f`)
+was accepted but cancelled before job creation because concurrent `main` pushes
+occupied the old shared pending concurrency group. W08.18 now keys the target
+workflow by event type and ref so a manual attestation qualification does not
+compete with push-triggered runs. The cancelled run is recorded as a no-job
+boundary, not a PASS or a provider failure; the corrected workflow still needs
+a terminal manual attestation result.
+
 ## Deployment contract
 
 The following is a shape, not a production configuration. Replace placeholders

@@ -1603,6 +1603,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   rollback or approval is claimed. *(Release implementation slice; GitHub
   OIDC/attestation availability, release owner and production approvers are
   external gates.)*
+- [x] W08.18 **Attestation dispatch concurrency isolation:**
+  `.github/workflows/w08-release-targets.yml` now keys its concurrency group by
+  event type and ref, separating the explicit manual `workflow_dispatch`
+  attestation qualification from push-triggered target runs. The first
+  dispatch `35620392878` at source `0a4de6f` was accepted but cancelled before
+  job creation (`jobs=[]`) while the old shared pending group was occupied by
+  concurrent main pushes; it created no OIDC token or attestation and is not a
+  PASS or provider failure. Push the fix and rerun the manual qualification;
+  target attestations, tag publication, canary, rollback and approval remain
+  W08-P09 gates. *(Release workflow implementation; hosted concurrency and
+  GitHub OIDC/attestation service are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1705,9 +1716,10 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17's pinned attestation wiring, but they do
-  not create executed cryptographic signing/attestation evidence or run a
-  real tag release, and do not close the canary, rollback or approval gates.
+  target/download matrix and W08.17–W08.18's pinned attestation wiring and
+  dispatch isolation, but they do not create executed cryptographic
+  signing/attestation evidence or run a real tag release, and do not close the
+  canary, rollback or approval gates.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
