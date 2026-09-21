@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native, hosted acceptance and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -957,16 +957,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   fail the lane. The live
   Node gate uses that same published authority prefix. The macOS native-NFS job
   now also compiles the FoundationDB-enabled CLI lifecycle test; live macOS
-  service/cluster acceptance and the hosted result remain open.
-- [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
+  service/cluster acceptance remains open, while the hosted Linux result is
+  recorded under W07.6 below.
+- [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
   FoundationDB service-restart evidence. The hosted CI lane and Docker harness
   now run the consumer feature checks, shared-provider authority publication,
   owned FoundationDB service restart, a separate post-restart authority
-  republish, and fresh-client RustFS reopen; hosted result remains pending until
-  CI runs. No emulated acceptance.
+  republish, and fresh-client RustFS reopen; the terminal hosted result is
+  recorded below. No emulated acceptance.
   The local arm64 durable qualification run on 2026-09-21 used the
   `foundationdb-soak-durable` composition name, three pinned FoundationDB
   7.4.7 server containers with `double`/SSD configuration, one bounded soak
@@ -1001,13 +1002,31 @@ Evidence landed without closing the remaining W01 acceptance gates:
   client checks with non-cancelling concurrency. It retains the terminal
   redacted log as a run artifact so a long W07 result is not invalidated by an
   unrelated mainline push; its result is still qualification evidence only.
+  Hosted run
+  [35598049389](https://github.com/andymac4182/mount-rs/actions/runs/35598049389)
+  (job
+  [106327338587](https://github.com/andymac4182/mount-rs/actions/runs/35598049389/job/106327338587))
+  at revision `65c52b9` completed green on `ubuntu-24.04` in 12m15s. It
+  emitted `FOUNDATIONDB_RUSTFS_NETWORK_READY alias=mount-rs-rustfs`,
+  `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403`,
+  `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=1`,
+  `FOUNDATIONDB_NAPI_PASS image=node:24-bookworm`,
+  `FOUNDATIONDB_SERVICE_RESTART_READY`,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64 service_restart=pass soak_rounds=1`,
+  `RUSTFS_COMBO_PASS name=foundationdb-production-qualification` and
+  `RUSTFS_INTEGRATION_PASS`. This is terminal hosted Linux qualification for
+  the tested revision; it does not close the production identity/TLS,
+  backup/recovery, capacity, observability, macOS or release-owner gates.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
-  sentinel objects remain untouched. This does not close the W07.6 service-
-  restart or hosted-composition boundaries above. The
+  sentinel objects remain untouched. The earlier target-gated packet did not
+  itself close the W07.6 service-restart or hosted-composition boundaries; the
+  terminal hosted evidence above now does. The
   published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
   fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
-  handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
+  handling; its original local runtime lane was blocked by host `libfdb_c` and
+  Docker, while the dedicated hosted lane is now green.
 - [ ] W07.7 **Production rollout readiness and go/no-go:** the demo and local
   Docker evidence are not production acceptance. Before enabling any production
   consumer, close every gate below with a linked revision, test/run result,
