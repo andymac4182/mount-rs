@@ -41,7 +41,7 @@ described as a complete session or native-mount implementation.
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR`/`SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/`ACCESS`/`FALLOCATE`/`LSEEK`/`GETLK`/`SETLK`/`SETLKW` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
-| NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway exposes bounded drain, live connection and peer-aware transport-hook state, and the N-API object now exposes a shared session with buffered and streaming request/response methods; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, while several oracle members remain absent | **PARTIAL** |
+| NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway and N-API object expose bounded drain, live connection and peer-aware transport-hook state, plus shared buffered/streaming session methods, safe effective options, bucket wrappers, and debug-gated assertions; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, while several oracle members remain absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
 | WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings, read-only active lock records, and direct LOCK/UNLOCK, cancellation, and body-error coverage; complete member parity remains open | **PARTIAL** |
 | CLI | Rust CLI constructs drivers through `mount-rs-sdk` and exposes a real `sdk-self-test`/durable-reopen path; Node CLI uses the N-API SDK for direct and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
@@ -254,12 +254,13 @@ Current focused behavior:
   N-API session views expose deterministic BigInt-backed snapshots of the Rust
   server's shared v3/v4 handle table; remaining upstream member differences
   and the complete stateful/crash/durability surface remain open. S3 now
-  exposes `S3Server.session`, bucket names, buffered `handleRequest`, streaming
-  `handleRequestStream`, and async session
-  metrics, but the N-API server still lacks the oracle `connections` and
-  transport-error members. WebDAV exposes `connections`, a session view,
-  buffered and streamed direct requests, and positional response bodies, but
-  complete oracle member parity remains open. Compare the current native options and objects in
+  exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
+  safe effective options, debug-gated assertions, buffered `handleRequest`,
+  streaming `handleRequestStream`, async session metrics, live `connections`,
+  and typed `onTransportError` delivery. WebDAV exposes `connections`, a
+  session view, buffered and streamed direct requests, and positional response
+  bodies, but complete oracle member parity remains open. Compare the current
+  native options and objects in
   [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L816-L1192) with
   the declarations in [`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L1085-L1203).
 - S3 and WebDAV lifecycle wrappers are covered only to the extent exercised by
@@ -290,20 +291,23 @@ XML, SigV4, gateway, and chunked tests exist, including
 
 The Node `./s3` entry is currently a root server/session facade, not an
 oracle-equivalent codec barrel. It now exposes buffered and incremental
-`S3Session` request/response bodies through the N-API bridge; the focused
-release-binding integration covers multi-chunk PUT/GET, response cancellation,
-request-generator failure mapping, bucket isolation, and async metric deltas.
+`S3Session` request/response bodies through the N-API bridge, safe effective
+options, bucket wrappers, debug-gated assertions, live connections, and typed
+transport-error callbacks; the focused release-binding integration covers
+multi-chunk PUT/GET, response cancellation, request-generator failure mapping,
+bucket isolation, and async metric deltas.
 The transport README records known behavior boundaries including List V1,
 bucket create/delete, `partNumber`, and non-`/` delimiters; see
 [`README.md`](../transports/mount-rs-s3/README.md#L21-L28). Rust component tests
 and a native gateway test do not establish complete oracle parity or a live AWS
 service result. The current Rust gateway packet also verifies bounded drain
-timeout, accepted-connection cleanup, loopback-only credentialed binding, and
-one peer-aware reset-on-close transport event across the 17 gateway cases.
-Generated package build, N-API connection/transport-error member parity,
-direct JavaScript peer-fault injection, live AWS/R2, and native/hosted
-lifecycle evidence remain open. The standalone TypeScript fixture check passes
-against the checked-in declarations.
+timeout, accepted-connection cleanup, loopback-only credentialed binding,
+assertion cleanliness, and one peer-aware reset-on-close transport event
+across the 18 gateway cases. The generated package build and N-API integration
+verify connection/transport-error member parity and direct Node peer-fault
+injection; live AWS/R2, complete oracle-specific member/codec parity, and
+native/hosted lifecycle evidence remain open. The standalone TypeScript fixture
+check passes against the checked-in declarations.
 
 ### P2 — WebDAV public barrel, session, and streaming: PARTIAL
 

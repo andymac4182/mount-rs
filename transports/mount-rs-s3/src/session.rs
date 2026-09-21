@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -108,6 +108,7 @@ pub struct S3SessionOptions {
     pub read_chunk_bytes: usize,
     pub multipart_staging_ttl_ms: i64,
     pub multipart_staging_max_bytes: u64,
+    pub debug: bool,
 }
 
 impl Default for S3SessionOptions {
@@ -120,6 +121,7 @@ impl Default for S3SessionOptions {
             read_chunk_bytes: DEFAULT_READ_CHUNK,
             multipart_staging_ttl_ms: DEFAULT_MULTIPART_STAGING_TTL_MS,
             multipart_staging_max_bytes: DEFAULT_MULTIPART_STAGING_MAX_BYTES,
+            debug: true,
         }
     }
 }
@@ -242,6 +244,7 @@ pub struct S3SessionStats {
     pub replies: u64,
     pub errors: u64,
     pub operations: BTreeMap<String, u64>,
+    pub assertions: u64,
     /// Total request handling time in whole milliseconds.
     pub duration_ms_total: u64,
     /// Maximum request handling time in whole milliseconds.
@@ -296,6 +299,9 @@ pub struct S3Session {
     stats: Arc<Mutex<S3SessionStats>>,
     stream_request_bytes: Arc<AtomicU64>,
     stream_response_bytes: Arc<AtomicU64>,
+    assertions: Arc<StdMutex<Vec<String>>>,
+    inflight: Arc<StdMutex<HashSet<u64>>>,
+    next_ticket: Arc<std::sync::atomic::AtomicU64>,
     next_request_id: Arc<AtomicU64>,
 }
 
@@ -339,6 +345,9 @@ impl S3Session {
             stats: Arc::new(Mutex::new(S3SessionStats::default())),
             stream_request_bytes: Arc::new(AtomicU64::new(0)),
             stream_response_bytes: Arc::new(AtomicU64::new(0)),
+            assertions: Arc::new(StdMutex::new(Vec::new())),
+            inflight: Arc::new(StdMutex::new(HashSet::new())),
+            next_ticket: Arc::new(AtomicU64::new(1)),
             next_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
@@ -352,6 +361,13 @@ impl S3Session {
             .response_bytes
             .saturating_add(self.stream_response_bytes.load(Ordering::Relaxed));
         snapshot
+    }
+
+    pub fn assertions(&self) -> Vec<String> {
+        self.assertions
+            .lock()
+            .map(|assertions| assertions.clone())
+            .unwrap_or_default()
     }
 
     pub fn bucket_names(&self) -> Vec<String> {
@@ -372,6 +388,7 @@ impl S3Session {
             let mut stats = self.stats.lock().await;
             stats.requests += 1;
         }
+        let ticket = self.begin_request();
         let request_id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -396,6 +413,7 @@ impl S3Session {
                 )
             }
         };
+        self.finish_request(ticket, &head).await;
         self.record_response_stats(
             started,
             body.len() as u64,
@@ -423,6 +441,7 @@ impl S3Session {
             let mut stats = self.stats.lock().await;
             stats.requests += 1;
         }
+        let ticket = self.begin_request();
         let request_id = self
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -464,6 +483,7 @@ impl S3Session {
             }
             body => body,
         };
+        self.finish_request(ticket, &head).await;
         let response_bytes = match &response.body {
             Some(S3StreamBody::Bytes(bytes)) => bytes.len() as u64,
             Some(S3StreamBody::Stream(_)) | None => 0,
@@ -473,6 +493,38 @@ impl S3Session {
         // Keep the response owned by this function until after statistics are
         // updated.  This also makes the error path mirror handle_request.
         response
+    }
+
+    fn begin_request(&self) -> Option<u64> {
+        if !self.options.debug {
+            return None;
+        }
+        let ticket = self
+            .next_ticket
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut inflight) = self.inflight.lock() {
+            inflight.insert(ticket);
+        }
+        Some(ticket)
+    }
+
+    async fn finish_request(&self, ticket: Option<u64>, head: &S3RequestHead) {
+        let Some(ticket) = ticket else {
+            return;
+        };
+        let removed = self
+            .inflight
+            .lock()
+            .map(|mut inflight| inflight.remove(&ticket))
+            .unwrap_or(false);
+        if !removed {
+            let message = format!("{} {} was answered twice", head.method, head.target);
+            if let Ok(mut assertions) = self.assertions.lock() {
+                assertions.push(message);
+            }
+            let mut stats = self.stats.lock().await;
+            stats.assertions += 1;
+        }
     }
 
     async fn record_response_stats(

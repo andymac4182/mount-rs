@@ -8,6 +8,7 @@ import {
   NfsConnection,
   Nfs4Session,
   NfsSession,
+  S3Session,
   createNfsServer,
   createP9Server,
   createS3Server,
@@ -804,19 +805,59 @@ async function fetchBody(url, init, label) {
 async function exerciseS3() {
   const photos = memoryFilesystem();
   const notes = memoryFilesystem();
+  const reports = [];
   const server = createS3Server({ buckets: { photos, notes } }, {
     bucket: "mountx",
     host: "127.0.0.1",
     port: 0,
     drainTimeout: 1000,
+    debug: true,
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+      throw new Error("S3 hook callback deliberately threw");
+    },
   });
   let listening;
+  let idleSocket;
+  let faultSocket;
   try {
     assert.equal(server.port, 0);
     listening = (await listenLifecycle(server, "S3")).listening;
     assert.ok(server.port > 0);
+    assert.equal(server.connections, 0);
     assert.equal(server.url.endsWith("/"), false);
     assert.deepEqual(server.buckets, ["notes", "photos"]);
+    idleSocket = (await connectLoopback(server.port)).socket;
+    await waitUntil(() => server.connections >= 1, "S3 accepted connection count");
+    await closeSocket(idleSocket, "S3 idle connection close");
+    idleSocket = undefined;
+    await waitUntil(() => server.connections === 0, "S3 disconnected connection count");
+    assert.ok(server.session instanceof S3Session);
+    assert.deepEqual(server.session.bucketNames, ["notes", "photos"]);
+    assert.deepEqual(Object.keys(server.session.buckets).sort(), ["notes", "photos"]);
+    assert.ok(server.session.buckets.photos instanceof Filesystem);
+    assert.ok(server.session.buckets.notes instanceof Filesystem);
+    assert.equal(server.session.options.credentialsConfigured, false);
+    assert.equal(server.session.options.region, undefined);
+    assert.equal(server.session.options.maxBodyBytes, 512 * 1024 * 1024);
+    assert.equal(server.session.options.maxXmlBytes, 16 * 1024 * 1024);
+    assert.equal(server.session.options.readChunkBytes, 128 * 1024);
+    assert.equal(server.session.options.multipartStagingTtlMs, 24 * 60 * 60 * 1000);
+    assert.equal(server.session.options.multipartStagingMaxBytes, 8 * 1024 * 1024 * 1024);
+    assert.equal(server.session.options.debug, true);
+    assert.deepEqual(await server.session.stats(), {
+      requests: 0,
+      replies: 0,
+      errors: 0,
+      operations: {},
+      assertions: 0,
+      durationMsTotal: 0,
+      durationMsMax: 0,
+      requestBytes: 0,
+      responseBytes: 0,
+      errorClasses: {},
+    });
+    assert.deepEqual(server.session.assertions, []);
 
     const object = Buffer.from("S3 over the real loopback HTTP listener");
     const put = await fetchBody(
@@ -934,10 +975,51 @@ async function exerciseS3() {
       streamedStats.operations.GetObject,
       (beforeStreamStats.operations.GetObject ?? 0) + 2,
     );
+    assert.equal(streamedStats.assertions, 0);
+    assert.deepEqual(server.session.assertions, []);
+    assert.deepEqual(reports, []);
+
+    await photos.writeFile("/peer-fault-s3.txt", Buffer.alloc(4 * 1024 * 1024, 0x1b));
+    const faultReplyCount = streamedStats.replies;
+    faultSocket = (await connectLoopback(server.port)).socket;
+    await writeSocket(
+      faultSocket,
+      Buffer.from(
+        `GET /photos/peer-fault-s3.txt HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
+      ),
+      "S3 JavaScript peer-fault request",
+    );
+    await within(
+      (async () => {
+        while ((await server.session.stats()).replies <= faultReplyCount) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      })(),
+      "S3 JavaScript peer-fault response readiness",
+    );
+    faultSocket.destroy(new Error("deliberate S3 peer reset"));
+    const faultReport = await waitForTransportError(reports, "S3 JavaScript peer fault");
+    assert.ok(faultReport.error instanceof Error);
+    assert.match(faultReport.peer, /^127\.0\.0\.1:\d+$/);
+    assert.equal(reports.length, 1);
+    faultSocket = undefined;
+    await waitUntil(() => server.connections === 0, "S3 peer-fault connection cleanup");
   } finally {
+    if (idleSocket) {
+      await runPhase("S3 cleanup: idle socket close", () =>
+        closeSocket(idleSocket, "S3 idle socket close"),
+      );
+    }
+    if (faultSocket) {
+      await runPhase("S3 cleanup: fault socket close", () =>
+        closeSocket(faultSocket, "S3 fault socket close"),
+      );
+    }
     await runPhase("S3 cleanup: server lifecycle", () =>
       closeLifecycle(server, "S3", listening),
     );
+    assert.equal(server.connections, 0);
+    assert.equal(reports.length, 1);
   }
 }
 

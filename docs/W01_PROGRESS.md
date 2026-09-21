@@ -54,7 +54,7 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-FUSE | FUSE protocol, mount-free session, native mount, callbacks and lifecycle | Focused Rust/N-API protocol/session evidence exists; macOS FUSE/FSKit is explicitly outside supported scope on the actual Darwin host, while native Linux, callback events, remaining session parity and lifecycle races remain | Hosted Linux native mount/read/write/unmount, callback-event and lifecycle evidence, plus the remaining supported-scope/lifecycle gates |
 | W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Rust/N-API attached Node Duplex with typed per-attachment peer/ownership/frame/in-flight bounds and source-specific peer absence (`undefined` for an attached stream, `null` for a native listener connection), direct session, scalar server/session options, `userFor`, ownership, duplicate-attach, bounded backpressure, write-fault, server-teardown, broadcast-shutdown, active-connection close-race, shutdown-aware permit waits, bounded task-reaping, and session-destroy/Tflush-wakeup evidence passes; the dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344) at `431affd` passed kernel probing plus all four ignored Linux lifecycle tests; native Tokio listener connections intentionally expose no Node stream and use the supported `attach` seam | Upstream driver/fid/lock/assertion/debug, property-shaped `clients`, and mount/barrel parity remain open; crash/reset/half-close recovery is explicitly supervisor-owned rather than a library claim, and the overall W01/release decision remains NO-GO |
 | W01-NFS | NFSv3/v4 router, sessions, handles, native mount and lifecycle | v3/v4 direct routing, shared server state, BigInt handle snapshots, active connection objects/count, close/wait lifecycle, v4 view, process-lifetime session continuity across an orderly TCP reconnect, rootless pipelined v3 dispatch, pinned 266-case upstream conformance, codec differential, bounded `maxHandles`/NFSv4 pinning, bounded v4 channel/state knobs, `maxLocksPerFile` enforcement, and refused-`CREATE_SESSION` replay/retry are evidenced; full stateful matrix and native/hosted qualification remain | Shared v3/v4 handle/state proof, native macOS/Linux lifecycle, v4 behavior matrix, and crash/close evidence |
-| W01-S3 | S3 protocol, session, streaming, providers and lifecycle | Local protocol and structural-driver evidence exists; live provider and complete member parity remain | Applicable API ledger, live AWS/R2, fault/restart and concurrency evidence |
+| W01-S3 | S3 protocol, session, streaming, providers and lifecycle | Local protocol/structural-driver evidence, streamed N-API bodies, effective session options, bucket wrappers, debug-gated assertions, live connections, and direct peer-fault callback delivery pass; live provider, complete oracle member parity, and native/hosted lifecycle remain | Applicable API ledger, live AWS/R2, fault/restart, concurrency, and native/hosted evidence |
 | W01-WebDAV | WebDAV protocol, locks, session, streaming and lifecycle | Local protocol/session evidence exists; provider/native lifecycle remains | Applicable API ledger, auth/lock durability and restart evidence |
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
@@ -144,7 +144,7 @@ surfaces.
 | Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
 | Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
 | NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with v3/v4-aware direct request routing, shared v3/v4 counters and sorted BigInt handle snapshots, a v4 session view, mounts, destroyed state, live connection objects/count, and close/wait lifecycle; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; the full upstream object/session/handle/attach surface and native qualification remain | 75% | — |
-| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection, direct peer-reset, lock-conflict, expiry, malformed-request, same-driver recreation, and same-session parallel-request evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and the WebDAV subpath now exposes pinned constants/status tables, protocol/XML/lock helpers, active lock-record and recursive owner views, and streamed request/response body bindings with direct class 1/2/3 method, LOCK/UNLOCK, cancellation, and error coverage; its pure pinned oracle differential also passes; S3 also exposes its incremental stream boundary; complete option/member parity and external lifecycle gates remain | 72% | — |
+| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection, direct peer-reset, lock-conflict, expiry, malformed-request, same-driver recreation, and same-session parallel-request evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and S3 also exposes safe effective options, bucket wrappers, debug-gated assertions, direct Node peer-fault delivery, and incremental `handleRequestStream` bodies with cancellation and async metrics; the WebDAV subpath now exposes pinned constants/status tables, protocol/XML/lock helpers, active lock-record and recursive owner views, and streamed request/response body bindings with direct class 1/2/3 method, LOCK/UNLOCK, cancellation, and error coverage; its pure pinned oracle differential also passes; complete option/member parity, live providers, and native/hosted lifecycle remain | 78% | — |
 | CLI parity and native consumer behavior | Partial | SDK-backed Rust/Node CLI and macOS NFS self-tests pass; exact oracle/native/hosted coverage remains | 65% | — |
 
 Latest W01.1 action: the shared `useDriverIno` option was added to the public
@@ -175,9 +175,9 @@ mount-level callback in the live mount object. The next server-object slice
 adds N-API `S3Session` and `WebdavSession` views behind the existing server
 objects: bucket/method counters, error/reply totals, WebDAV lock count, and
 assertion readback are exercised by the real loopback PUT/GET/404 tests. The
-S3 session assertion list is currently an explicit empty native boundary
-because the Rust S3 session does not retain assertion messages; this is not
-full S3 session parity. The NFS server-object follow-up adds N-API `NfsSession`
+S3 session now retains debug-gated assertion messages/counters alongside its
+bounded latency/byte/error-class metrics, while complete oracle member parity
+remains open. The NFS server-object follow-up adds N-API `NfsSession`
 behind the NFS server: synchronized request/reply/error/drop/procedure stats,
 mount records, and destroyed-state readback are exercised by real loopback
 NULL/MOUNT/GETATTR traffic. The server's live `connections` count is checked
@@ -202,29 +202,30 @@ server-object follow-up now exposes typed buffered `S3Session.handleRequest`
 and incremental `S3Session.handleRequestStream` request/response bodies with
 header mapping, cancellation, and an async metrics snapshot; direct streamed
 PUT/GET, response cancellation, generator failure mapping, and the existing
-loopback PUT/GET/404 lane pass. S3 assertion retention remains unqualified;
-the S3 server's live
-`connections` count now follows accepted TCP socket lifetimes and disconnect
-cleanup in both Rust and N-API loopback tests. Its tracked TCP boundary also
-reports a peer-aware `Connection` transport event on reset-on-close, verified
-by the Rust gateway test; the N-API bridge and callback ownership pass the
-rebuilt package integration, while direct JavaScript peer-fault injection
-remains unqualified. The
-WebDAV server-object follow-up now exposes typed buffered
+loopback PUT/GET/404 lane pass. The S3 server's live `connections` count now
+follows accepted TCP socket lifetimes and disconnect cleanup in both Rust and
+N-API loopback tests. Its tracked TCP boundary and N-API bridge report a
+peer-aware `Connection` transport event on reset-on-close; the direct Node
+peer-fault packet produces exactly one callback and returns the connection
+count to zero. The S3 view also exposes safe effective options and
+session-owned bucket wrappers. The
+WebDAV server-object follow-up now exposes a typed buffered
 `WebdavSession.handleRequest` and pull-based `handleRequestStream` methods. A
 direct N-API probe covers three-chunk PUT, multi-chunk GET, early response
 iterator return, and deliberate request-body failure mapping; the stream facade
-accepts async iterables and Web ReadableStreams. The `@mount-rs/core/webdav`
-subpath also exposes the WebDAV constants/status barrel and protocol/XML/lock
-helpers. The session exposes read-only active lock records with expiry cleanup;
-the direct method packet covers class 1/2/3 methods plus LOCK/UNLOCK, and the
-direct LOCK/UNLOCK check observes one record and then zero. A host-enabled
-Node socket reset during a large WebDAV response delivers one typed peer-aware
-transport callback, and an isolated malformed request delivers one typed
-peer-aware callback. An unsubmitted-token write returns `423` before a
-one-second lock expires and is removed. The active lock view now also
-preserves the recursive namespaced owner XML tree, including predefined entity
-text. Eight parallel unique-file PUTs and
+accepts async iterables and Web ReadableStreams. The N-API boundary also
+materializes file-backed response bodies. The direct PUT plus the existing
+loopback PUT/GET lane pass, and the direct method packet covers class 1/2/3
+methods plus LOCK/UNLOCK. The `@mount-rs/core/webdav` subpath now exposes the
+WebDAV constants/status barrel, protocol/XML/lock helpers, and oracle-matched
+literals, limits, status/errno tables and server defaults. The session exposes
+read-only active lock records with expiry cleanup; the direct LOCK/UNLOCK check
+observes one record and then zero. A host-enabled Node socket reset during a
+large WebDAV response delivers one typed peer-aware transport callback, and an
+isolated malformed request delivers one typed peer-aware callback. An
+unsubmitted-token write returns `423` before a one-second lock expires and is
+removed. The active lock view now also preserves the recursive namespaced owner
+XML tree, including predefined entity text. Eight parallel unique-file PUTs and
 GETs through one direct WebDAV session also pass with byte-for-byte readback;
 this is in-process same-driver concurrency evidence only. Complete
 session/member parity remains open: the current N-API scope does not claim the
@@ -243,7 +244,9 @@ and [fault-injection run
 35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044)
 cancelled, while [Live Cloudflare R2 run
 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
-failed; no hosted WebDAV PASS is claimable from this tip.
+failed; no hosted WebDAV PASS is claimable from this tip. Complete
+session/member parity, direct listener lifecycle, network/native/hosted
+concurrency, and the external provider/native/restart gates remain open.
 
 Next W01.1 action: close the next smallest remaining mount-free export or
 behavior gap, then rerun the pinned oracle and generated type/build checks
@@ -384,6 +387,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | Read-only status for published tip `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5`: [CI run 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088) and [fault-injection run 35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044) were cancelled, and [Live Cloudflare R2 run 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090) failed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Read-only status for current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871`: [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914) and [fault-injection run 35633305962](https://github.com/andymac4182/mount-rs/actions/runs/35633305962) were cancelled; the unrelated [W04 production-policy run 35633305932](https://github.com/andymac4182/mount-rs/actions/runs/35633305932) succeeded, and no fresh Live Cloudflare R2 run was listed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable from the current tip; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Read-only status for tracker tip `4b103b1ab9be142b15638a9679999bfd43d3bd80`: [CI run 35633547228](https://github.com/andymac4182/mount-rs/actions/runs/35633547228) was pending and [fault-injection run 35633547086](https://github.com/andymac4182/mount-rs/actions/runs/35633547086) was in progress; the unrelated [W04 production-policy run 35633547306](https://github.com/andymac4182/mount-rs/actions/runs/35633547306) succeeded | — | 72% W01.1 planning view | Pending/in-progress workflows are not hosted WebDAV acceptance; no WebDAV PASS is claimable and the hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-S3 | Closed the applicable S3 N-API member and peer-fault packet: `S3Server.connections`, `onTransportError`, safe effective session options, session-owned bucket wrappers, and debug-gated assertions are generated and exercised; Rust passed 4 unit, 6 chunked, 18 gateway, and 5 public-API tests, N-API library tests passed 16/16, release build/typecheck/strict Clippy/formatting passed, and host-enabled `node test/servers.mjs` passed one typed peer-aware callback after a direct Node reset | — | 78% W01.1 planning view | Live AWS/R2, complete oracle-specific S3 member/codec parity, restart/durability/concurrency matrices, and native/hosted lifecycle gates remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 

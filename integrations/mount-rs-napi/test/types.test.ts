@@ -83,6 +83,7 @@ import {
   type S3RequestHead,
   type S3RequestStreamBody,
   type S3Response,
+  type S3SessionOptionsView,
   type S3Session,
   type S3SessionStats,
   type S3StreamResponse,
@@ -372,6 +373,8 @@ function checkServerAndKvSubpaths(): void {
     },
     region: "us-east-1",
     drainTimeout: 1000,
+    debug: true,
+    onTransportError: (_error, _peer) => {},
   }
   const webdavOptions: WebdavServerOptions = {
     host: "127.0.0.1",
@@ -419,8 +422,12 @@ function checkServerAndKvSubpaths(): void {
   const p9Listen: Promise<P9Server> = p9Server.listen()
   const p9Close: Promise<void> = p9Server.close()
   const s3Url: string = s3Server.url
+  const s3Connections: number = s3Server.connections
   const s3Buckets: Array<string> = s3Server.buckets
   const s3Session: S3Session = s3Server.session
+  const s3Drivers: Record<string, Filesystem> = s3Session.buckets
+  const s3OptionsView: S3SessionOptionsView = s3Session.options
+  const s3Assertions: Array<string> = s3Session.assertions
   const s3Head: S3RequestHead = { method: "GET", target: "/", headers: [] }
   const s3RequestBody: S3RequestStreamBody = (async function* () {})()
   const s3Buffered: Promise<S3Response> = s3Session.handleRequest(s3Head)
@@ -507,7 +514,11 @@ function checkServerAndKvSubpaths(): void {
   void p9Listen
   void p9Close
   void s3Url
+  void s3Connections
   void s3Buckets
+  void s3Drivers
+  void s3OptionsView
+  void s3Assertions
   void s3Listen
   void s3Close
   void webdavUrl

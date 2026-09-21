@@ -578,6 +578,7 @@ export declare class S3Server {
   get session(): S3Session
   get host(): string
   get port(): number
+  get connections(): number
   get url(): string
   get buckets(): Array<string>
   listen(): Promise<S3Server>
@@ -599,6 +600,14 @@ export declare class S3Session {
    */
   handleRequestStream(head: S3RequestHead, body: S3RequestStreamBody): Promise<S3StreamResponse>
   get bucketNames(): Array<string>
+  /**
+   * Read-only N-API wrappers for the session-owned bucket drivers. Each
+   * wrapper shares the transport's driver state; shutting down the view
+   * does not tear down the server-owned session driver.
+   */
+  get buckets(): Record<string, Filesystem>
+  get options(): S3SessionOptionsView
+  get assertions(): Array<string>
   /** Read a coherent snapshot of the transport-owned session metrics. */
   stats(): Promise<S3SessionStats>
 }
@@ -2345,6 +2354,23 @@ export interface S3ServerOptions {
   maxXmlBytes?: number
   readChunkBytes?: number
   drainTimeout?: number
+  debug?: boolean
+  onTransportError?: (error: unknown, peer: string | undefined) => void
+}
+
+export interface S3SessionOptionsView {
+  /**
+   * Whether SigV4 credentials were configured. Secret material is never
+   * returned through the inspection surface.
+   */
+  credentialsConfigured: boolean
+  region?: string
+  maxBodyBytes: number
+  maxXmlBytes: number
+  readChunkBytes: number
+  multipartStagingTtlMs: number
+  multipartStagingMaxBytes: number
+  debug: boolean
 }
 
 export interface S3SessionStats {
@@ -2352,6 +2378,7 @@ export interface S3SessionStats {
   replies: number
   errors: number
   operations: Record<string, number>
+  assertions: number
   durationMsTotal: number
   durationMsMax: number
   requestBytes: number

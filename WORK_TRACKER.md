@@ -1156,7 +1156,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The S3 session view now exposes typed buffered `handleRequest` with
   header/response mapping. The N-API loopback integration verified a direct PUT
   with its required content-length independently of socket HTTP; loopback
-  PUT/GET/404, S3 gateway 15/15, N-API tests/typecheck, release build, and
+  PUT/GET/404, S3 gateway 18/18, N-API tests/typecheck, release build, and
   scoped Clippy passed. The S3 session now retains debug-gated assertion
   messages/counters, with concurrent direct replies and the loopback lane
   staying clean. The S3 server also exposes live TCP
@@ -2231,11 +2231,14 @@ reproducible in a production-like environment.
   mapping, and async metrics snapshots. The release N-API binding loaded
   directly from the locked Rust build, and the host-enabled N-API server
   integration passed streamed PUT/GET, bucket isolation, cancellation, and
-  metrics-delta checks. The generated `pnpm build`, package typecheck, and
-  strict TypeScript fixture check passed. Direct JavaScript peer-fault
-  evidence, complete S3 member parity, live AWS/R2, and broader
-  restart/durability/concurrency/native gates remain open; W01-S3 remains
-  **NO-GO**.
+  metrics-delta checks. The same packet now verifies safe effective session
+  options, session-owned bucket wrappers, debug-gated assertions, live
+  `connections`, typed `onTransportError`, and one direct Node peer-reset
+  callback. The generated `pnpm build`, package typecheck, strict TypeScript
+  fixture check, 4/6/18/5 S3 Rust target, 16/16 N-API library tests, and
+  warning-denied Clippy passed. Complete oracle-specific member/codec parity,
+  live AWS/R2, and broader restart/durability/concurrency/native gates remain
+  open; W01-S3 remains **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
