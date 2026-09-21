@@ -195,6 +195,11 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         parity; exact-SHA hosted runs remain pending and do not close native
         evidence. Hosted Linux callback, concurrency, close-race,
         crash/restart, and durability execution remain open.
+        The current native frame ledger also requires a modern
+        <code>FUSE_WRITE</code> header plus one page (<code>4176</code> bytes)
+        before advertising <code>max_frame</code>; the remaining mount-member
+        decisions are recorded explicitly in the transport README. This is
+        validation and scope evidence, not hosted <code>/dev/fuse</code> proof.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
         The no-reply <code>FORGET</code> path follows the pinned session
@@ -308,6 +313,14 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         deterministic lease expiry releases sessions, locks, open state, and
         pinned handles. The refreshed opt-in macOS native NFSv3 loopback mount
         passed 1/1 in 0.11s with filesystem round trips and bounded cleanup.
+        The latest N-API session/member packet also exposes the server-owned
+        read-only driver wrapper, effective scalar options, configured ID-map
+        presence, write verifier, shared v3 routing, and shared
+        handle/counter/destroy state; <code>./nfs</code> exports
+        <code>Nfs3Session</code>. Hosted runs
+        <code>35656252661</code>, <code>35657100915</code>, and
+        <code>35657445618</code> were cancelled before native-NFS jobs ran,
+        so no current hosted acceptance is claimed.
         The pinned oracle passes 266 NFSv3/MOUNT and NFSv4.1 TCP cases with 18
         capability/root skips; bounded <code>maxHandles</code> LRU and NFSv4
         open-state pinning are covered. Native Linux NFSv4.1, the full
@@ -404,9 +417,16 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         formatting, strict Clippy, and 31 ordinary 9P tests passed. The public
         barrel now differentially checks all 124 upstream constants and the
         44-codec surface, alongside live session fids, cursor/open state,
-        hardlink identity, clunk snapshots, and retained open handles. Lock
-        option injection, property-shaped clients, mount helpers, and hosted
-        revision gates remain open. Overall production status remains NO-GO.
+        hardlink identity, clunk snapshots, and retained open handles.
+        <code>P9Server.clients</code> is now a live property-shaped view,
+        <code>P9ServerOptions.locks</code> accepts a shared
+        <code>P9LockTable</code>, and the bounded <code>./9p</code> facade
+        exposes probe/refusal/option helpers plus named <code>mount9p</code>
+        delegation and mounted server/connection views. A configured
+        <code>P9Server</code> can be adopted when the Linux client probe is
+        usable. These local declarations, helper, and runtime checks do not
+        close hosted N-API native-mount lifecycle or broader upstream parity;
+        overall production status remains NO-GO.
       </>
     ),
     sources: [
@@ -661,6 +681,13 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         remains local lifecycle evidence; restart/hosted session lifecycle
         stays open. N-API network/hosted concurrency,
         crash/power-loss restart, and provider durability remain open.
+        The latest host-enabled N-API network packet also passes one
+        <code>MKCOL</code>, 16 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
+        pairs, chunked stream I/O, Basic authentication, and a live unsupported
+        <code>PATCH</code> that returns <code>405</code> and calls
+        <code>onError</code> once. A child-process <code>SIGKILL</code> and
+        SQLite reopen recovered file bytes with zero replacement-session locks;
+        these are local N-API/provider checks, not hosted or power-loss proof.
         The direct streaming facade passes a three-chunk PUT, multi-chunk GET,
         early response-iterator return, and deliberate request-body failure
         mapping for async iterables and Web ReadableStreams. Active

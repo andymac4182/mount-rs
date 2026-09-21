@@ -17,7 +17,7 @@ semantics.
 | NFSv3/MOUNT public API and wire behavior | In progress | Codec, rootless wire, session, error, generated N-API, and shared-handle-view evidence |
 | NFSv4.1 router/session behavior | In progress | Version routing, COMPOUND/state matrix, shared handle/counter proof, direct N-API view, and bounded channel/state knobs |
 | Connection and server lifecycle | In progress | Active connection objects/counts, malformed/EOF/reset handling, close/wait, async disposal, and restart evidence |
-| macOS/Linux native NFS | External gate | Actual supported-client mount/read/write/unmount and cleanup results |
+| macOS/Linux native NFS | Hosted acceptance evidenced | Run `35658285441` completed both `native-nfs` jobs successfully, including privileged native tests and SQLite-over-NFS; keep the job-scoped platform evidence current |
 | Handles, concurrency, crash and durability | In progress | Cross-version handle lifetime, bounded LRU/pinning, cancellation/close, crash/restart, ordering, and persistence evidence |
 
 ## Current queue
@@ -36,9 +36,10 @@ semantics.
   and live callback tests.
 - Exercise the full v3/v4 behavior matrix, including stateful v4 operations,
   malformed records, reconnects, and version negotiation.
-- Keep the macOS v3 native result current; execute the separate privileged
-  Linux v4.1 native lane and keep both platform results classified as external
-  gates.
+- Keep the hosted native result current. Run `35658285441` completed both
+  `native-nfs (macos-latest)` and `native-nfs (ubuntu-latest)` successfully:
+  macOS covered native NFSv3, CLI persistence/cleanup, and SQLite hosting;
+  Ubuntu covered the privileged NFSv3/NFSv4.1 lane and SQLite hosting.
 - Qualify cross-process crash, concurrency, and durability behavior; bounded
   cancellation/close now has a local transport lifecycle gate.
 
@@ -62,7 +63,8 @@ semantics.
 | 2026-09-22 | NFSv4 dynamic owner and clock callbacks | Rust `Nfs4IdMap` now supports panic-isolated synchronous name/id callbacks, and the N-API `nfs4.idmap.nameOf`/`idOf` plus `nfs4.now` callbacks are retained and released with the server; a live N-API v4.1 `EXCHANGE_ID`/`CREATE_SESSION`/`GETATTR`/`SETATTR` sequence observed owner and group callback arguments, translated names, reverse translations, and injected clock calls. The complete locked NFS target passes 38 unit, rootless wire 1, transport concurrency 1, transport errors 4, v4 barrier 1, and v4 wire 6; release build, generated typecheck, live server integration, pinned NFS codec differential, and strict affected Clippy pass | Full upstream state/member matrix, native Linux v4.1, hosted lifecycle, and cross-process crash/cancellation/concurrency/durability remain external gates |
 | 2026-09-22 | bounded NFS close cancellation | A new real-TCP lifecycle target drives MOUNT into a blocked `FsDriver::stat` and proves both `NfsConnection::close()` and `NfsServer::close()` cancel the request worker, retire the active connection, and return within 250 ms; 2/2 pass. The recorded hosted native-NFS jobs for run `35650924001` were cancelled, so they are not promoted to acceptance evidence. | Full upstream state/member matrix, native Linux v4.1, a completed hosted lifecycle run, and cross-process crash/concurrency/durability remain external gates |
 | 2026-09-22 | N-API session destroy parity | `NfsSession.destroy()` now tears down both shared v3/v4 sessions and `Nfs4Session.destroy()` tears down v4 state; generated declarations, direct runtime assertions, and TypeScript assignments pass alongside the release addon, live N-API server integration, pinned codec differential, and strict affected Clippy | Remaining upstream `driver`/`options`/direct-v3 member differences, native Linux v4.1, a completed hosted lifecycle run, and cross-process crash/concurrency/durability remain external gates |
-| 2026-09-22 | N-API session/member parity and supported scope | Unified, direct v3, and direct v4 N-API views now expose the server-owned read-only driver wrapper, effective scalar options, configured ID-map presence, write verifier, shared v3 routing, and shared handle/counter/destroy state; `./nfs` exports `Nfs3Session`. Release declarations, TypeScript assignments, live runtime identity/verifier/options assertions, the NFS codec differential, the refreshed pinned oracle conformance (266 passed, 18 explicit capability/root skips, 0 mismatches), full locked NFS targets, and strict affected Clippy pass. The low-level mutable v4 state table and callback function values remain intentionally unexposed; live wire/callback/lease tests cover their supported behavior. Hosted CI runs `35656252661` and `35657100915` for the published parity/evidence commits were cancelled before any job started and are not acceptance evidence. | Privileged Linux NFSv4.1, a completed hosted lifecycle run, and cross-process crash/concurrency/durability remain external gates; the 18 pinned-oracle capability/root skips remain explicit boundaries |
+| 2026-09-22 | N-API session/member parity and supported scope | Unified, direct v3, and direct v4 N-API views now expose the server-owned read-only driver wrapper, effective scalar options, configured ID-map presence, write verifier, shared v3 routing, and shared handle/counter/destroy state; `./nfs` exports `Nfs3Session`. Release declarations, TypeScript assignments, live runtime identity/verifier/options assertions, the NFS codec differential, the refreshed pinned oracle conformance (266 passed, 18 explicit capability/root skips, 0 mismatches), full locked NFS targets, and strict affected Clippy pass. The low-level mutable v4 state table and callback function values remain intentionally unexposed; live wire/callback/lease tests cover their supported behavior. Hosted CI runs `35656252661`, `35657100915`, and `35657445618` for the published parity/evidence commits were cancelled before any native-NFS job ran and are not acceptance evidence. | A completed hosted native lifecycle run and cross-process crash/concurrency/durability remain external gates; the 18 pinned-oracle capability/root skips remain explicit boundaries |
+| 2026-09-22 | hosted native NFS platform qualification | Run `35658285441` completed `native-nfs (macos-latest)` (`106528418544`) and `native-nfs (ubuntu-latest)` (`106528418983`) successfully. The macOS job passed native NFSv3, CLI persistence/cleanup, and SQLite-over-NFS; the Ubuntu job passed privileged native NFSv3/NFSv4.1 and SQLite-over-NFS, with macOS-only CLI checks skipped on Ubuntu. | The named NFS jobs are accepted platform evidence, but the overall workflow remains non-green because unrelated jobs failed; full upstream state/member scope, cross-process crash/concurrency/durability, and production acceptance remain open |
 
 ## Exact commands and gate boundaries
 
@@ -88,9 +90,7 @@ semantics.
 - `./scripts/cargo-shared clippy -p mount-rs-nfs -p mount-rs-napi --all-targets --locked -- -D warnings` — PASS.
 - `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture` — PASS: macOS native NFSv3 loopback mount, filesystem round trips, unmount, and bounded cleanup; 1 passed, 0 failed, 0.11s on the exact pushed tip.
 - `./scripts/cargo-shared test -p mount-rs-nfs --test transport_lifecycle --locked` — PASS: 2/2 bounded real-TCP cancellation tests covering connection-level and server-level close over a blocked backend request.
-- Linux v4.1 native qualification remains an external gate and was not run on
-  this macOS host; it requires the separate
-  `MOUNT_RS_NFS_NATIVE_V4_TEST=1` lane plus a privileged Linux NFS client.
+- Hosted run [`35658285441`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441) — PASS for both named NFS jobs: [`macOS job 106528418544`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441/job/106528418544) passed native NFSv3, CLI persistence/cleanup, and SQLite-over-NFS; [`Ubuntu job 106528418983`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441/job/106528418983) passed the privileged native NFSv3/NFSv4.1 lane and SQLite-over-NFS. The overall workflow remains non-green because unrelated jobs failed, so this is job-scoped NFS evidence rather than a whole-workflow release pass.
 
 ## Completion rule
 

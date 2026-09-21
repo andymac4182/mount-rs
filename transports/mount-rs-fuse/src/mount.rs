@@ -657,15 +657,29 @@ impl MountState {
         let result = match attempt_unmount(&self, timeout).await {
             UnmountAttempt::Done => Ok(()),
             UnmountAttempt::TimedOut => {
-                forced_deadline = Some(
-                    force_unmount_async(
-                        self.mode,
-                        &self.mountpoint,
-                        self.helper.as_deref(),
-                        timeout,
-                    )
-                    .await,
+                // A graceful native unmount can wait for an in-flight kernel
+                // request to finish. Cancel the session before asking for a
+                // lazy detach so a blocked backend future cannot deadlock the
+                // forced phase behind the same request.
+                self.request_stop();
+                let deadline = Instant::now() + timeout;
+                let task = self.task.lock().expect("mount task lock poisoned").take();
+                let force = force_unmount_until(
+                    self.mode,
+                    &self.mountpoint,
+                    self.helper.as_deref(),
+                    deadline,
                 );
+                if let Some(task) = task {
+                    // The lazy helper may itself wait for the FUSE device to
+                    // close. Drain the stopped session first so the helper
+                    // observes a closed descriptor instead of consuming the
+                    // entire forced-teardown deadline while the session still
+                    // owns it.
+                    drain_session_task(&self, task, Some(deadline)).await;
+                }
+                force.await;
+                forced_deadline = Some(deadline);
                 self.record_transport_error(FuseTransportError::from_message(
                     FuseTransportErrorKind::Task,
                     format!(
@@ -688,32 +702,8 @@ impl MountState {
 
         self.request_stop();
         let task = self.task.lock().expect("mount task lock poisoned").take();
-        if let Some(mut task) = task {
-            // A forced unmount has already consumed its own phase budget while
-            // running the abort/lazy-detach ladder. Drain the session only for
-            // the time left in that same budget; otherwise a stuck task turns
-            // the documented two-phase bound into a third full timeout.
-            let remaining = forced_deadline
-                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or(timeout);
-            if remaining.is_zero() {
-                task.abort();
-                let _ = task.await;
-            } else {
-                match tokio::time::timeout(remaining, &mut task).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        self.record_transport_error(FuseTransportError::from_message(
-                            FuseTransportErrorKind::Task,
-                            format!("FUSE task failed during teardown: {error}"),
-                        ));
-                    }
-                    Err(_) => {
-                        task.abort();
-                        let _ = task.await;
-                    }
-                }
-            }
+        if let Some(task) = task {
+            drain_session_task(&self, task, forced_deadline).await;
         }
         // A normal task exit publishes this state from `run_session`; the
         // timeout/cancellation branches above do not necessarily get there.
@@ -727,6 +717,39 @@ impl MountState {
     #[cfg(not(target_os = "linux"))]
     async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
         Err(MountError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn drain_session_task(
+    state: &MountState,
+    mut task: tokio::task::JoinHandle<()>,
+    deadline: Option<Instant>,
+) {
+    // A forced unmount has already consumed part of its phase budget while
+    // running the abort/lazy-detach ladder. Drain the session only for the
+    // time left in that same budget; otherwise a stuck task turns the
+    // documented two-phase bound into a third full timeout.
+    let remaining = deadline
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(state.options.unmount_timeout);
+    if remaining.is_zero() {
+        task.abort();
+        let _ = task.await;
+    } else {
+        match tokio::time::timeout(remaining, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                state.record_transport_error(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    format!("FUSE task failed during teardown: {error}"),
+                ));
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 }
 
@@ -1561,6 +1584,17 @@ async fn force_unmount_async(
     timeout: Duration,
 ) -> Instant {
     let deadline = Instant::now() + timeout;
+    force_unmount_until(mode, mountpoint, helper, deadline).await;
+    deadline
+}
+
+#[cfg(target_os = "linux")]
+async fn force_unmount_until(
+    mode: MountMode,
+    mountpoint: &Path,
+    helper: Option<&Path>,
+    deadline: Instant,
+) {
     match mode {
         MountMode::Rootless => {
             if let Some(helper) = helper {
@@ -1595,7 +1629,6 @@ async fn force_unmount_async(
         }
         MountMode::Auto => unreachable!("mounted mode is resolved before state creation"),
     }
-    deadline
 }
 
 #[cfg(target_os = "linux")]
@@ -2765,6 +2798,80 @@ mod tests {
                 .message
                 .contains("forced teardown was requested")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn forced_unmount_stops_session_before_lazy_detach() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-ordering-helper-{}-{suffix}",
+            std::process::id()
+        ));
+        let marker = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-ordering-marker-{}-{suffix}",
+            std::process::id()
+        ));
+        let forced_marker = PathBuf::from(format!("{}.forced", marker.display()));
+        let script = b"#!/bin/sh\nif [ \"$2\" = \"-z\" ]; then\n    while [ ! -f \"$4\" ]; do\n        sleep 0.01\n    done\n    : > \"$4.forced\"\n    exit 0\nfi\nwhile [ ! -f \"$3\" ]; do\n    sleep 0.01\ndone\nexit 0\n";
+        std::fs::write(&helper, script).expect("write ordering helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("ordering helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make ordering helper executable");
+
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            marker.clone(),
+            MountOptions {
+                mode: MountMode::Rootless,
+                unmount_timeout: Duration::from_millis(100),
+                ..MountOptions::default()
+            },
+            Some(helper.clone()),
+            FuseMountHooks::default(),
+        ));
+        let task_state = Arc::clone(&state);
+        let task_marker = marker.clone();
+        state.set_task(tokio::spawn(async move {
+            loop {
+                let notified = task_state.stop_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if task_state.stop.load(Ordering::Acquire) {
+                    break;
+                }
+                notified.await;
+            }
+            std::fs::write(task_marker, b"stopped").expect("write stop marker");
+        }));
+
+        let result = Arc::clone(&state).perform_unmount().await;
+
+        assert!(matches!(
+            result,
+            Err(MountError::Timeout {
+                operation: "unmount",
+                ..
+            })
+        ));
+        assert!(state.stop.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(
+            forced_marker.exists(),
+            "lazy detach must start only after the session stop request"
+        );
+
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_file(&marker);
+        let _ = std::fs::remove_file(forced_marker);
     }
 
     #[cfg(target_os = "linux")]

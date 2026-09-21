@@ -784,6 +784,18 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35638932960-1</code>
         (SHA-256
         <code>c474b5ef9275ef88daf73e7fe90e36bd25eba8d149ac6849edfc672217ef4bd0</code>).
+        The latest mainline run <code>35652638242</code> at revision
+        <code>c6f0039</code> also passed the explicit lease-TTL policy fixtures,
+        durable three-server composition, five isolated soak rounds, live
+        Node/N-API, native Linux CLI/FUSE mount and reopen, service restart,
+        and schema-2 provenance validation. Its base marker recorded
+        <code>p50_us=7712</code>, <code>p95_us=228723</code>,
+        <code>p99_us=228723</code>, and
+        <code>throughput_ops_per_sec=42.41</code>; the five-round throughput
+        range was 77.45–95.05 ops/s. The retained artifact is
+        <code>foundationdb-production-qualification-35652638242-1</code>
+        with SHA-256
+        <code>366cb78d19bc5182a438a8459ebfe54efc510232e9dab667a815aba5eacfbee7</code>.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -795,7 +807,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35638932960' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35652638242' },
     ],
   },
   'aws-s3': {
@@ -899,8 +911,16 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         multipart completion, and cross-driver CopyObject publication, with
         existing-object preservation on integrity/read failure. That is
         implementation and rootless gateway-test evidence, not a new hosted
-        AWS durability or release-qualification claim. The companion operations
-        runbook defines provider/reconciliation/identity/capacity signals,
+        AWS durability or release-qualification claim. The current local
+        S3/N-API packet also covers streamed async-iterable
+        and <code>ReadableStream</code> bodies, typed peer-fault callbacks,
+        cancellation-safe private staging, replacement-session multipart
+        completion, and native-filesystem process-restart recovery. The
+        replacement-session and restart checks preserve the boundary between
+        local filesystem evidence and live AWS durability; neither promotes
+        these results to hosted or power-loss acceptance. The companion
+        operations runbook defines provider/reconciliation/identity/capacity
+        signals,
         redaction boundaries, and O01–O08 drills, including identity expiry,
         conditional conflicts, throttling, metadata outage, restore, schema
         migration, cleanup/retention, and canary/rollback. It explicitly keeps
