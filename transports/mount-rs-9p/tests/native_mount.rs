@@ -264,6 +264,61 @@ async fn native_linux_concurrent_file_io_and_unmount_are_bounded() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Linux v9fs/CAP_SYS_ADMIN; set MOUNT_RS_9P_NATIVE_TEST=1 and pass --ignored"]
+async fn native_linux_server_close_releases_kernel_connection() {
+    require_native_host();
+    let mountpoint = make_mountpoint("server-close")
+        .await
+        .expect("create native mountpoint");
+    let mount = match mount_9p(
+        MemoryFs::empty(),
+        &mountpoint,
+        P9MountOptions {
+            unmount_timeout: Some(COMMAND_TIMEOUT),
+            ..P9MountOptions::default()
+        },
+    )
+    .await
+    {
+        Ok(mount) => mount,
+        Err(error) => {
+            remove_mountpoint(mountpoint)
+                .await
+                .expect("remove failed native mountpoint");
+            panic!("native server-close 9P mount failed: {error}");
+        }
+    };
+
+    let io_result = mounted_file_io(mountpoint.clone()).await;
+    let server_close_result = timeout(TEARDOWN_TIMEOUT, mount.server.close())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "native 9P server close timed out"))
+        .and_then(|result| result);
+    let connection_closed_result = timeout(TEARDOWN_TIMEOUT, mount.connection.wait_closed())
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "native 9P kernel connection did not close",
+            )
+        });
+    let unmount_result = bounded_unmount(&mount).await;
+    match (
+        io_result,
+        server_close_result,
+        connection_closed_result,
+        unmount_result,
+    ) {
+        (Ok(()), Ok(()), Ok(()), Ok(())) => remove_mountpoint(mountpoint)
+            .await
+            .expect("remove detached server-close mountpoint"),
+        (io_result, server_close_result, connection_closed_result, unmount_result) => panic!(
+            "native server-close 9P lifecycle failed; refusing recursive cleanup: I/O={io_result:?}, server={server_close_result:?}, connection={connection_closed_result:?}, unmount={unmount_result:?}"
+        ),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires Linux v9fs/CAP_SYS_ADMIN; set MOUNT_RS_9P_NATIVE_TEST=1 and pass --ignored"]
 async fn native_linux_external_umount_finishes_server_lifecycle() {
     require_native_host();
     let mountpoint = make_mountpoint("external")

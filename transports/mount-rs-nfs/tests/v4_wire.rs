@@ -18,6 +18,7 @@ use mount_rs_nfs::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::runtime::Builder;
+use tokio::time::timeout;
 
 const OP_CLOSE: u32 = 4;
 const OP_COMMIT: u32 = 5;
@@ -830,6 +831,102 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
         .expect("spawn v4 wire test thread")
         .join()
         .expect("v4 wire test thread panicked");
+}
+
+#[test]
+fn nfs_v4_session_survives_transport_reconnect() {
+    std::thread::Builder::new()
+        .name("nfs-v4-reconnect-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 reconnect test runtime")
+                .block_on(async {
+                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen rootless NFS server");
+                    let mut first = TcpStream::connect(address)
+                        .await
+                        .expect("connect first NFS transport");
+                    let clientid = parse_exchange(
+                        rpc(&mut first, 201, compound("exchange", &[exchange_args()])).await,
+                    );
+                    let session = parse_create_session(
+                        rpc(
+                            &mut first,
+                            202,
+                            compound("create-session", &[create_session_args(clientid)]),
+                        )
+                        .await,
+                    );
+                    let mut client = Client {
+                        session,
+                        clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    parse_sequence_and_handle(
+                        rpc(
+                            &mut first,
+                            203,
+                            compound(
+                                "initial-root",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_GETFH, |_| {}),
+                                ],
+                            ),
+                        )
+                        .await,
+                    );
+
+                    first.shutdown().await.expect("close first NFS transport");
+                    timeout(Duration::from_secs(2), async {
+                        while server.connections() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("first NFS transport closes");
+
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect replacement NFS transport");
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut second,
+                        204,
+                        compound(
+                            "reconnected-root",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "reconnected sequence");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    parse_result_header(&mut response, OP_GETFH);
+                    let _ = response.var_opaque(128, "reconnected root handle").unwrap();
+                    response.end("reconnected root response").unwrap();
+
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close replacement NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn v4 reconnect test thread")
+        .join()
+        .expect("v4 reconnect test thread panicked");
 }
 
 #[test]

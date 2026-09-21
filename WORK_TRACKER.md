@@ -15,10 +15,11 @@ ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. The transport now also broadcasts shutdown safely across the accept
 loop and all connections, closes the active-connection accept-loop race, and
 reaps completed request tasks while reporting task failures. An ignored native
-Linux harness now runs eight concurrent mounted file write/read/rename/read
-round trips before a bounded unmount. Session destruction also wakes and drains
-in-flight `Tflush` waiters. Local lifecycle 5/5, transport-error 8/8, the
-focused native target, strict 9P Clippy and formatting pass. Hosted
+Linux harnesses now run eight concurrent mounted file write/read/rename/read
+round trips before a bounded unmount, and close the server side while verifying
+kernel-connection teardown. Session destruction also wakes and drains in-flight
+`Tflush` waiters. Local lifecycle 5/5, transport-error 8/8, the focused native
+target, strict 9P Clippy and formatting pass. Hosted
 run `35616832528` / job `106389895603` passed the prior Linux kernel-client
 mount/read/write/unmount packet; a fresh run is required for this packet and
 the concurrent-I/O harness.
@@ -31,11 +32,13 @@ W01 gates.
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state.
-The focused Rust/N-API checks pass, and the opt-in macOS native NFSv3 loopback
-mount gate passed 1/1 in 0.14s on the exact published tree. Production remains NO-GO pending the
-privileged Linux v4.1 lane, the full v3/v4 stateful/member surface,
-hosted/native lifecycle evidence, and crash/concurrency/durability
-qualification.
+The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
+NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
+NFSv3 calls under bounded in-flight dispatch. The opt-in macOS native NFSv3
+loopback mount gate passed 1/1 in 0.14s on the exact published tree. Production
+remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
+stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
+and crash/durable-restart qualification.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -2326,6 +2329,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   includes the resource audit, PGlite harness, and shared provider/metadata
   packages. These are reviewable safeguards only; production parameters,
   role trust, change-set review, and live production audit remain open.
+  A separate read-only bucket-policy audit now verifies the full-bucket
+  transport deny and exact prefix-scoped runtime/maintenance statements from
+  the CloudFormation contract; its synthetic valid/tampered policy tests are
+  wired into the hosted preflight. No production bucket policy has been
+  changed or claimed as audited.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.

@@ -22,7 +22,11 @@ filesystem-backed attributes exposed by `FsDriver`. `NfsServer::clients()`
 returns live accepted `NfsConnection` objects in arrival order; each exposes a
 stable id, peer, shared v3/v4 sessions, and bounded `close`/`wait_closed`
 lifecycle operations. Closing one connection tears down only its TCP serving
-task; the server-owned protocol state remains available to other clients.
+task; the server-owned protocol state remains available to other clients. The
+rootless wire suite also proves that a v4.1 session can be used again after an
+orderly TCP transport reconnect while this server process remains alive, and
+that multiple v3 calls can be pipelined on one connection within the configured
+in-flight bound.
 
 ## Native macOS/Linux mount lifecycle
 
@@ -101,7 +105,8 @@ crate.
 UDP transport, portmapper registration, NLM/NSM locking, and persistent
 cross-process file-handle recovery remain unimplemented. File handles and
 exclusive-create verifiers are process-local unless the caller supplies a
-stable handle verifier. `NfsConnection` close/wait state is process-local and
-does not provide reconnect, lease recovery, or crash-durable session/reply
-state; cross-process crash and durability behavior remains outside the
-supported local scope until a separate qualification lane is accepted.
+stable handle verifier. A caller can reconnect to a still-running server and
+reuse the tested session, but `NfsConnection` close/wait state does not provide
+automatic reconnect, lease recovery, or crash-durable session/reply state;
+cross-process crash and durability behavior remains outside the supported local
+scope until a separate qualification lane is accepted.
