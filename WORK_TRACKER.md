@@ -2329,6 +2329,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   includes the resource audit, PGlite harness, and shared provider/metadata
   packages. These are reviewable safeguards only; production parameters,
   role trust, change-set review, and live production audit remain open.
+  A separate read-only bucket-policy audit now verifies the full-bucket
+  transport deny and exact prefix-scoped runtime/maintenance statements from
+  the CloudFormation contract; its synthetic valid/tampered policy tests are
+  wired into the hosted preflight. No production bucket policy has been
+  changed or claimed as audited.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.

@@ -241,6 +241,25 @@ It reports rather than changes bucket versioning. It is safe to run during
 review, but a passing qualification-bucket audit does not close the
 production-resource gate.
 
+For a production bucket, run the separate read-only policy audit with the
+reviewed role bindings and owned prefix:
+
+```sh
+AWS_PROFILE=<approved-audit-profile> \
+AWS_S3_AUDIT_BUCKET=<private-bucket> \
+AWS_S3_AUDIT_REGION=<aws-region> \
+AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID=<approved-audit-account-id> \
+AWS_S3_AUDIT_RUNTIME_ROLE_ARN=<approved-runtime-role-arn> \
+AWS_S3_AUDIT_MAINTENANCE_ROLE_ARN=<approved-maintenance-role-arn> \
+AWS_S3_AUDIT_OWNED_PREFIX=<owned-volume-prefix> \
+./scripts/audit-aws-s3-bucket-policy.sh
+```
+
+It verifies the attached policy's full-bucket TLS deny and the exact
+prefix-scoped runtime and maintenance statements from the reviewable
+CloudFormation contract. It never prints the policy or role values and fails
+closed when the bucket policy is absent or differs from that contract.
+
 The latest read-only qualification-bucket audit at pushed head `0010246`
 passed in account `922978963556` with the expected versioning status `None`,
 alongside the existing public-access, ownership, encryption, lifecycle, and
