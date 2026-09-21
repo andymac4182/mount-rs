@@ -1418,6 +1418,7 @@ dependencies = [
 name = "mount-rs-napi"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "mount-rs-9p",
  "mount-rs-auto",
  "mount-rs-chunked",

@@ -656,15 +656,18 @@ transport tracker together.
 
 WebDAV-owned W01 tracking is maintained in
 [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md). The current
-bounded slice adds the low-level `./webdav` barrel and generated declarations,
-the N-API `WebdavSession`/server session view, buffered request handling,
-serializable session and lock policy, driver access, Basic-auth challenge and
-acceptance, and Rust transport-hook plumbing. The Rust WebDAV target passed
-13/13 tests and the isolated locked N-API check plus release generation passed;
-the oracle differential is explicitly skipped without `MOUNTX_SOURCE`, the
-sandbox blocks the live N-API loopback bind with `Operation not permitted`, and
-streaming, peer-fault, restart/durability, provider, hosted, and native gates
-remain open. W01 and production status remain **NO-GO**.
+bounded slices add the low-level `./webdav` barrel and generated declarations,
+the N-API `WebdavSession`/server session view, buffered and pull-based streamed
+request handling, positional response chunks, serializable session and lock
+policy, driver access, Basic-auth challenge and acceptance, and Rust
+transport-hook plumbing. The Rust WebDAV target passed 13/13 tests; the
+isolated locked N-API check, release addon, generated declarations, and direct
+N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
+return, and deliberate body failure. The oracle differential is explicitly
+skipped without `MOUNTX_SOURCE`, the sandbox blocks the live N-API loopback
+bind with `Operation not permitted`, and complete member parity, peer-fault,
+restart/durability, provider, hosted, and native gates remain open. W01 and
+production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 

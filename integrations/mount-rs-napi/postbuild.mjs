@@ -261,4 +261,12 @@ const harnessTypes = 'export { createLoopback, resolveCapabilities } from "./typ
 if (!types.includes(harnessTypes)) {
   types += `\n${harnessTypes}\nexport type { Loopback, ResolvedCapabilities } from "./types/harness.js"\n`
 }
+const webdavRequestStreamTypes = `
+export type WebdavRequestStreamBody = AsyncIterable<Uint8Array> | ReadableStream<Uint8Array>
+`
+types = types.replace(
+  /handleRequestStream\(head: WebdavRequestHead, body: ReadableStream<Buffer>\): WebdavStreamRequest/g,
+  "handleRequestStream(head: WebdavRequestHead, body: WebdavRequestStreamBody): Promise<WebdavStreamResponse>",
+)
+if (!types.includes("export type WebdavRequestStreamBody =")) types += webdavRequestStreamTypes
 await writeFile(declarations, types)

@@ -41,9 +41,9 @@ described as a complete session or native-mount implementation.
 | `auto` and `mount` lifecycle | Native mount and typed auto options exist; option and lifecycle surface is narrower than oracle | **PARTIAL; UNVERIFIED** for native mount |
 | NFS and 9P Node subpaths | NFS XDR/RPC and 9P codec facades plus NFS/P9 servers | **PARTIAL** |
 | FUSE Node subpath and full protocol barrel | Rust notify/record/protocol pieces, typed `READ`/`WRITE`/`GETATTR`/`SETATTR`/`OPEN`/`OPENDIR`/`LOOKUP`/`READLINK`/`STATFS`/`BATCH_FORGET`/`INTERRUPT`/`RELEASE`/`RELEASEDIR`/`FLUSH`/`FSYNC`/`FSYNCDIR`/`SYMLINK`/`MKNOD`/`MKDIR`/`UNLINK`/`RMDIR`/`RENAME`/`RENAME2`/`LINK`/`ACCESS`/`FALLOCATE`/`LSEEK`/`GETLK`/`SETLK`/`SETLKW` bodies, directory codecs, and a Rust-backed `InodeTable` are exported through `./fuse`; Rust session `ACCESS`, validated `BATCH_FORGET`, and fail-closed `INTERRUPT` dispatch plus pure Rust INIT negotiation are tested separately; remaining body, session, and mount surfaces remain open | **IMPLEMENTED (focused); PARTIAL** |
-| NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway exposes bounded drain, live connection and peer-aware transport-hook state, and the N-API object now exposes a shared session with buffered and streaming request/response methods, while several oracle members remain absent | **PARTIAL** |
+| NFS/P9/S3/WebDAV server objects | Native servers and postbuild lifecycle facade exist; S3's Rust gateway exposes bounded drain, live connection and peer-aware transport-hook state, and the N-API object now exposes a shared session with buffered and streaming request/response methods; WebDAV likewise exposes buffered and streamed direct session requests with positional response bodies, while several oracle members remain absent | **PARTIAL** |
 | S3 low-level Node API and structural bucket sources | Native Rust low-level API and native `Filesystem` bucket map exist; JS structural drivers and Node codec barrel do not | **PARTIAL** |
-| WebDAV low-level public API | Rust server/session/protocol exist; constants are not public and Node has only the root server facade | **PARTIAL** |
+| WebDAV low-level public API | Rust server/session/protocol and the `./webdav` constants/status/protocol/XML/lock barrel are public; the N-API session exposes buffered and streamed request/response bindings with direct cancellation and body-error coverage; complete member parity remains open | **PARTIAL** |
 | CLI | Rust CLI constructs drivers through `mount-rs-sdk` and exposes a real `sdk-self-test`/durable-reopen path; Node CLI uses the N-API SDK for direct and versioned provider-config/reopen self-tests; native mount/live behavior is not established by ordinary tests | **PARTIAL; UNVERIFIED** |
 
 The oracle source used for comparison is local and immutable for this audit;
@@ -233,8 +233,9 @@ Current focused behavior:
   exposes `S3Server.session`, bucket names, buffered `handleRequest`, streaming
   `handleRequestStream`, and async session
   metrics, but the N-API server still lacks the oracle `connections` and
-  transport-error members. WebDAV exposes `connections` but not the oracle
-  session member. Compare the current native options and objects in
+  transport-error members. WebDAV exposes `connections`, a session view,
+  buffered and streamed direct requests, and positional response bodies, but
+  complete oracle member parity remains open. Compare the current native options and objects in
   [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L816-L1192) with
   the declarations in [`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L1085-L1203).
 - S3 and WebDAV lifecycle wrappers are covered only to the extent exercised by
@@ -280,14 +281,17 @@ direct JavaScript peer-fault injection, live AWS/R2, and native/hosted
 lifecycle evidence remain open. The standalone TypeScript fixture check passes
 against the checked-in declarations.
 
-### P2 — WebDAV public barrel and constants: PARTIAL
+### P2 — WebDAV public barrel, session, and streaming: PARTIAL
 
-The Rust WebDAV server, session, protocol, and lock modules are public, but the
-constants module is private and only `DEFAULT_HOST` is re-exported from the
-barrel; see [`mount-rs-webdav/src/lib.rs`](../transports/mount-rs-webdav/src/lib.rs#L30-L51).
-The N-API `./webdav` entry is a root server facade with no low-level WebDAV
-codec/constants/session barrel. Current server lifecycle behavior therefore
-does not close the oracle WebDAV package surface.
+The Rust WebDAV server, session, protocol, constants, and lock modules are
+public through the transport crate, and the N-API `./webdav` entry preserves
+root server/class identity while exposing the low-level constants/status,
+path/header/XML/lock helpers and generated declarations. The N-API session now
+accepts async-iterable or Web ReadableStream request bodies and returns a
+pull-based response iterator; the direct probe covers chunked PUT, multi-chunk
+GET, early iterator return, and deliberate request-body failure mapping. The
+pinned oracle differential still requires `MOUNTX_SOURCE`, and listener,
+provider/native, restart, and complete member-parity gates remain open.
 
 ### P2 — CLI parity: PARTIAL; UNVERIFIED
 
