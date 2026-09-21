@@ -95,7 +95,13 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         are focused mount-free boundaries: malformed or trailing advanced
         requests fail closed and valid unsupported operations still return
         <code>ENOSYS</code>. Full request/reply, init negotiation, session, and
-        native-mount surfaces remain open.
+        native-mount surfaces remain open. The current-tree Rust session packet
+        adds 16 frame-level cases for <code>SYMLINK</code>, <code>MKNOD</code>,
+        <code>MKDIR</code>, <code>UNLINK</code>, <code>RMDIR</code>,
+        <code>RENAME</code>, <code>LINK</code>, and <code>ACCESS</code>, including
+        error/state cleanup, regular-file <code>MKNOD</code> fallback, and the
+        POSIX 255-byte name limit. Advanced <code>FALLOCATE</code>/<code>LSEEK</code>
+        semantics and the native device/mount remain open.
         FUSE evidence does not qualify NFS, 9P, or FSKit.
       </>
     ),
@@ -133,9 +139,14 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         7.8/7.39/7.41 differential tests cover protocol bytes, legacy layouts,
         truncation, trailing data, UTF-8 names, 8-byte alignment, bounded
         packing, integer coercion, malformed input, embedded-NUL rejection, and
-        inode parity. Rust session tests cover focused <code>ACCESS</code>,
-        <code>BATCH_FORGET</code>, and fail-closed <code>INTERRUPT</code>
-        validation; six INIT tests cover negotiated <code>FUSE_INIT_EXT</code>
+        inode parity. Current-tree Rust session coverage adds 16 frame-level
+        cases for the simple namespace operations above, including rollback and
+        inode-path cleanup, error/state preservation, regular-file
+        <code>MKNOD</code> fallback, symlink access checks, and the
+        <code>NAME_MAX</code> boundary. Existing session tests cover focused
+        <code>ACCESS</code>, <code>BATCH_FORGET</code>, and fail-closed
+        <code>INTERRUPT</code> validation; six INIT tests cover negotiated
+        <code>FUSE_INIT_EXT</code>
         and <code>flags2</code> handling. Hosted CI run 35499717435 passed Linux
         native FUSE/NFS/9P/WebDAV at 37e9ba1; newer current-tree CI is queued,
         so full request/reply, session, and native-mount surfaces stay open.
@@ -247,14 +258,3 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         modules plus mount capability, normally <code>CAP_SYS_ADMIN</code>.
         macOS would require an external userspace client.
       </>
-    ),
-    access: (
-      <>
-        The standard path is mount-free: start <code>P9Server</code> and test
-        frames or a loopback client. A Linux mount is an explicit host test,
-        not something the Rust transport wrapper silently provides.
-      </>
-    ),
-    surface: (
-      <>
-        The implementation covers 9P2000.L attach/walk, open/create, I/O,
