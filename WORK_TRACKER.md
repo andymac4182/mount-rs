@@ -3041,13 +3041,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `7f964ca3` was freshly reverified after the concurrent NFS/9P/WebDAV/
-  HTTP/provider, Ozone, FUSE, chunked, 9P parity, bounded teardown and NFS
-  restart-fencing updates with the full locked workspace test suite (exit 0)
-  and strict workspace Clippy with `-D warnings` (exit 0). Provider/
-  native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit
-  opt-in skips. This is source-health evidence only and does not close
-  W08-P01–P09.
+  Source base `4268559c2b7796789b29435f32ebf6f0777e82f5` was freshly reverified
+  after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider, Ozone,
+  FUSE, chunked, bounded teardown and restart-fencing updates with the full
+  locked workspace test suite (exit 0) and strict workspace Clippy with
+  `-D warnings` (exit 0). The four W08 rollout/evidence policy commands also
+  passed with 36 functional items, 9 open production gates, 7 rollout tests
+  and 11 evidence tests; the packet remains NO-GO with zero evidence records.
+  Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained
+  explicit opt-in skips. This is source-health and tracking-control evidence
+  only and does not close W08-P01–P09.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
