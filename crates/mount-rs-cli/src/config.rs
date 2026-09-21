@@ -1065,7 +1065,7 @@ fn is_local_http_authority(authority: &str) -> bool {
     };
     matches!(
         host,
-        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
+        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal" | "mount-rs-rustfs"
     )
 }
 
@@ -1555,6 +1555,34 @@ mod tests {
             let error = parse_config_str(&config, Path::new("/tmp/config")).unwrap_err();
             assert!(error.message().contains("endpoint"), "{endpoint}: {error}");
             assert!(!error.message().contains("password"), "{endpoint}: {error}");
+        }
+
+        for endpoint in [
+            "http://127.0.0.1:9878",
+            "http://host.docker.internal:9878",
+            "http://mount-rs-rustfs:9000",
+        ] {
+            let config = format!(
+                r#"{{
+                    "version": 1,
+                    "driver": {{
+                        "kind": "splitstore",
+                        "storage": {{
+                            "metadata": {{"kind": "memory"}},
+                            "blocks": {{
+                                "kind": "r2",
+                                "endpoint": "{endpoint}",
+                                "bucket": "mount-rs-tests",
+                                "prefix": "blocks",
+                                "access_key_id": {{"env": "R2_ACCESS_KEY_ID"}},
+                                "secret_access_key": {{"env": "R2_SECRET_ACCESS_KEY"}}
+                            }}
+                        }}
+                    }}
+                }}"#
+            );
+            parse_config_str(&config, Path::new("/tmp/config"))
+                .unwrap_or_else(|error| panic!("{endpoint}: {error}"));
         }
     }
 
