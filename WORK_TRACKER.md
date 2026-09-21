@@ -2842,8 +2842,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   retry metrics, conditional-conflict and orphan/cleanup signals, credential
   expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
   canary/rollback procedures. The adjacent S3 gateway now exposes a bounded
-  `S3Session::stats()` snapshot for latency, buffered bytes, operation counts,
-  and authentication/conditional/throttling/client/server error classes; the
+  `S3Session::stats()` snapshot for latency, buffered and consumed streaming
+  request/response bytes, operation counts, and
+  authentication/conditional/throttling/client/server error classes; the
   public SDK's optional observability path records provider block latency,
   errors, bytes, and bounded reconciliation scanned/protected/recent/deleted
   counts through local snapshots, tracing, and OTLP counters. The new

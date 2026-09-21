@@ -32,15 +32,15 @@ backing staging tree or returns an error instead of reporting an unperformed
 deletion.
 
 `S3Session::stats()` exposes a point-in-time operational snapshot with request
-latency totals/maxima, buffered request/response bytes, operation counts, and
-bounded authentication, conditional-conflict, throttling, client, and server
-error classes. It never uses object keys, request paths, provider messages, or
-raw error codes as labels. Buffered in-process requests contribute byte counts;
-streaming HTTP bodies contribute latency and status/error counts only. The
-snapshot is an instrumentation surface for an application-owned exporter, not
-an alerting system or a hosted SLO result; provider retry, cost, retention,
-credential-expiry, and durable metric delivery still require deployment-level
-controls.
+latency totals/maxima, buffered and consumed streaming request/response bytes,
+operation counts, and bounded authentication, conditional-conflict,
+throttling, client, and server error classes. Streaming byte totals include
+only chunks consumed or delivered before an error or client disconnect. It
+never uses object keys, request paths, provider messages, or raw error codes as
+labels. The snapshot is an instrumentation surface for an application-owned
+exporter, not an alerting system or a hosted SLO result; provider retry, cost,
+retention, credential-expiry, and durable metric delivery still require
+deployment-level controls.
 
 `cargo test -p mount-rs-s3` is rootless and runs on macOS and Linux. It does
 not prove FUSE, NFS, macFUSE, or Linux kernel mount behavior. Native mount

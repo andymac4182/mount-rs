@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -154,6 +155,53 @@ pub struct S3Request {
 pub type S3RequestBody = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + Send>>;
 pub type S3ResponseBodyStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, std::io::Error>> + Send>>;
 
+fn add_stream_bytes(counter: &AtomicU64, bytes: usize) {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+        Some(current.saturating_add(bytes))
+    });
+}
+
+struct CountingRequestBody {
+    inner: S3RequestBody,
+    bytes: Arc<AtomicU64>,
+}
+
+impl Stream for CountingRequestBody {
+    type Item = Result<Vec<u8>, String>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                add_stream_bytes(&this.bytes, chunk.len());
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            other => other,
+        }
+    }
+}
+
+struct CountingResponseBody {
+    inner: S3ResponseBodyStream,
+    bytes: Arc<AtomicU64>,
+}
+
+impl Stream for CountingResponseBody {
+    type Item = Result<Vec<u8>, std::io::Error>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(chunk))) => {
+                add_stream_bytes(&this.bytes, chunk.len());
+                Poll::Ready(Some(Ok(chunk)))
+            }
+            other => other,
+        }
+    }
+}
+
 pub enum S3StreamBody {
     Bytes(Vec<u8>),
     Stream(S3ResponseBodyStream),
@@ -198,11 +246,13 @@ pub struct S3SessionStats {
     pub duration_ms_total: u64,
     /// Maximum request handling time in whole milliseconds.
     pub duration_ms_max: u64,
-    /// Bytes received by the buffered in-process request API. Streaming HTTP
-    /// bodies are not counted because they are consumed after dispatch.
+    /// Bytes consumed from buffered and streaming request bodies. For a
+    /// streaming body this includes the chunks consumed before an error or
+    /// client disconnect.
     pub request_bytes: u64,
-    /// Bytes returned before a streaming response is handed to the HTTP
-    /// runtime. A streamed response is therefore counted as zero here.
+    /// Bytes delivered from buffered and streaming response bodies. For a
+    /// streaming body this includes the chunks delivered before an error or
+    /// client disconnect.
     pub response_bytes: u64,
     /// Error counts by a bounded operational class. The map can never contain
     /// user-controlled labels or an unbounded S3 error-code cardinality.
@@ -244,7 +294,9 @@ pub struct S3Session {
     pub buckets: Arc<BTreeMap<String, Arc<dyn FsDriver>>>,
     pub options: S3SessionOptions,
     stats: Arc<Mutex<S3SessionStats>>,
-    next_request_id: Arc<std::sync::atomic::AtomicU64>,
+    stream_request_bytes: Arc<AtomicU64>,
+    stream_response_bytes: Arc<AtomicU64>,
+    next_request_id: Arc<AtomicU64>,
 }
 
 impl S3Session {
@@ -285,12 +337,21 @@ impl S3Session {
             buckets: Arc::new(buckets.into_iter().collect()),
             options,
             stats: Arc::new(Mutex::new(S3SessionStats::default())),
-            next_request_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            stream_request_bytes: Arc::new(AtomicU64::new(0)),
+            stream_response_bytes: Arc::new(AtomicU64::new(0)),
+            next_request_id: Arc::new(AtomicU64::new(1)),
         }
     }
 
     pub async fn stats(&self) -> S3SessionStats {
-        self.stats.lock().await.clone()
+        let mut snapshot = self.stats.lock().await.clone();
+        snapshot.request_bytes = snapshot
+            .request_bytes
+            .saturating_add(self.stream_request_bytes.load(Ordering::Relaxed));
+        snapshot.response_bytes = snapshot
+            .response_bytes
+            .saturating_add(self.stream_response_bytes.load(Ordering::Relaxed));
+        snapshot
     }
 
     pub fn bucket_names(&self) -> Vec<String> {
@@ -366,8 +427,12 @@ impl S3Session {
             .next_request_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let request_id = format!("mountx-{request_id:016x}");
+        let body = Box::pin(CountingRequestBody {
+            inner: body,
+            bytes: Arc::clone(&self.stream_request_bytes),
+        });
         let result = self.dispatch_stream(&head, body).await;
-        let (response, error_class) = match result {
+        let (mut response, error_class) = match result {
             Ok(mut response) => {
                 response
                     .headers
@@ -389,6 +454,15 @@ impl S3Session {
                     Some(error_class),
                 )
             }
+        };
+        response.body = match response.body.take() {
+            Some(S3StreamBody::Stream(stream)) => {
+                Some(S3StreamBody::Stream(Box::pin(CountingResponseBody {
+                    inner: stream,
+                    bytes: Arc::clone(&self.stream_response_bytes),
+                })))
+            }
+            body => body,
         };
         let response_bytes = match &response.body {
             Some(S3StreamBody::Bytes(bytes)) => bytes.len() as u64,
