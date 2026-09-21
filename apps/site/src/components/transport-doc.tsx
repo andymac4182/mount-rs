@@ -27,7 +27,7 @@ export const transportSpecs = {
     name: 'FUSE',
     eyebrow: 'Transport / kernel-facing Unix mount',
     maturity: 'Preview',
-    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; focused current-tree codec packets now cover additional FUSE operations and xattrs, while the latest recorded hosted Linux run passed the structural FUSE lifecycle at 37e9ba1 and current-tree requalification remains open.',
+    maturityNote: 'Linux native mount and SQLite-hosting checkpoints exist; focused current-tree codec packets now cover additional FUSE operations and xattrs, while hosted Linux FUSE passed on a revision-specific CI run and current-tree requalification remains open.',
     summary: (
       <>
         FUSE is the kernel-facing route for a host that can provide the FUSE
@@ -157,9 +157,12 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>ACCESS</code>, <code>BATCH_FORGET</code>, and fail-closed
         <code>INTERRUPT</code> validation; six INIT tests cover negotiated
         <code>FUSE_INIT_EXT</code>
-        and <code>flags2</code> handling. Hosted CI run 35499717435 passed Linux
-        native FUSE/NFS/9P/WebDAV at 37e9ba1; newer current-tree CI is queued,
-        so full request/reply, session, and native-mount surfaces stay open.
+        and <code>flags2</code> handling. Hosted CI run 35575442663 completed
+        the Linux native FUSE job <code>106256211393</code> successfully on
+        revision <code>35ffbfa</code>; the same run also passed its Linux NFS,
+        9P, and WebDAV jobs. The workflow was later canceled by concurrency and
+        newer current-tree jobs did not retain equivalent evidence, so full
+        request/reply, session, and native-mount surfaces stay open.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
         The no-reply <code>FORGET</code> path follows the pinned session
@@ -176,6 +179,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'FUSE body codec tests', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-napi/test/fuse-codec.mjs' },
       { label: 'N-API FUSE parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'CLI native prerequisites', href: 'https://github.com/andymac4182/mount-rs/blob/main/crates/mount-rs-cli/README.md#native-prerequisites' },
+      { label: 'Hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
   },
   nfs: {
@@ -249,13 +253,17 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         Rust and Node clients, verified cross-client readback, unmount,
         backing-root persistence, and clean teardown. The TypeScript control,
         Linux FUSE, and privileged cross-platform
-        qualification remain separate.
+        qualification remain separate. Hosted run <code>35575442663</code>
+        passed the Linux native NFS job <code>106256211572</code>; its macOS
+        native-NFS job was canceled, so this does not replace the recorded
+        macOS-specific evidence.
       </>
     ),
     sources: [
       { label: 'NFS transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-nfs/README.md' },
       { label: 'Public API parity ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/public-api-parity.md' },
       { label: 'SQLite-over-NFS boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
+      { label: 'Hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
   },
   '9p': {
@@ -319,12 +327,15 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
     evidence: (
       <>
         Complete protocol frames, session operations, and loopback TCP tests
-        are covered; native Linux evidence is narrower and revision-specific.
+        are covered; hosted run <code>35575442663</code> passed the Linux
+        native-9P job <code>106256211265</code>, but native Linux evidence is
+        still narrower and revision-specific.
       </>
     ),
     sources: [
       { label: '9P transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-9p/README.md' },
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
+      { label: 'Hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
   },
   fskit: {
@@ -554,13 +565,17 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
     evidence: (
       <>
         The repository records portable protocol coverage and revision-specific
-        native Linux/macOS read/write/unmount checks. Remaining client,
-        platform, and full upstream parity limits stay explicit.
+        native Linux/macOS read/write/unmount checks. Hosted run
+        <code>35575442663</code> passed the Linux native-WebDAV job
+        <code>106256211234</code>; its macOS native-WebDAV job was canceled.
+        Remaining client, platform, and full upstream parity limits stay
+        explicit.
       </>
     ),
     sources: [
       { label: 'WebDAV transport README', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-webdav/README.md' },
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
+      { label: 'Hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
