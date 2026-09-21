@@ -9,7 +9,7 @@ use mount_rs_core::{ErrorCode, Result};
 use mount_rs_foundationdb::{
     DEFAULT_METADATA_CHUNK_BYTES, FoundationDbLeaseAuthority, FoundationDbLimits,
     FoundationDbSharedLeaseOracle, FoundationDbStorage, FoundationDbStorageOptions,
-    LeaseAuthorityKind, LeaseOracle,
+    LeaseAuthorityKind, LeaseOracle, LeasePublicationPolicy,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -18,6 +18,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const AUTHORITY_MAX_FORWARD_JUMP: Duration = Duration::from_secs(300);
+
+fn authority_publication_policy() -> LeasePublicationPolicy {
+    LeasePublicationPolicy::new(
+        Duration::from_secs(120),
+        Duration::from_secs(30),
+        Duration::from_secs(120),
+    )
+    .expect("the hosted production authority policy must be valid")
+}
 
 fn configured_cluster_file() -> Option<String> {
     match env::var("MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE") {
@@ -237,7 +246,7 @@ async fn publish_authority_with_bounded_retry(
     let mut last_error = None;
     for attempt in 0..MAX_ATTEMPTS {
         match authority
-            .publish_system_now_ms_with_max_forward_jump(AUTHORITY_MAX_FORWARD_JUMP)
+            .publish_system_now_ms_with_policy(authority_publication_policy())
             .await
         {
             Ok(published) => return Ok(published),
@@ -420,6 +429,21 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
         .expect_err("deleted block must not be readable");
     assert_eq!(missing.code, ErrorCode::Enoent);
     Ok(())
+}
+
+#[test]
+fn authority_publication_policy_matches_the_production_contract() {
+    let policy = authority_publication_policy();
+    assert!(policy.publication_interval < policy.lease_ttl);
+    assert!(policy.max_forward_jump <= policy.lease_ttl);
+    assert!(
+        LeasePublicationPolicy::new(
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+        .is_err()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

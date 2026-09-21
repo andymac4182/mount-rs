@@ -242,6 +242,64 @@ fn duration_millis(duration: Duration, description: &str) -> Result<u64> {
     Ok(millis)
 }
 
+/// Safety policy for publishing the shared lease authority.
+///
+/// The authority service still owns the scheduling loop, but constructing a
+/// policy makes the production relationship explicit: publication must be
+/// more frequent than the lease TTL, and one accepted wall-clock advance may
+/// not exceed one lease TTL. Callers should retain publication failures as
+/// operational clock/authority alerts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeasePublicationPolicy {
+    /// Maximum age of a lease issued against the shared authority.
+    pub lease_ttl: Duration,
+    /// Authority publication cadence. This must be shorter than `lease_ttl`.
+    pub publication_interval: Duration,
+    /// Maximum forward wall-clock advance accepted in one publication.
+    pub max_forward_jump: Duration,
+}
+
+impl LeasePublicationPolicy {
+    /// Construct and validate a shared-authority publication policy.
+    pub fn new(
+        lease_ttl: Duration,
+        publication_interval: Duration,
+        max_forward_jump: Duration,
+    ) -> Result<Self> {
+        Self {
+            lease_ttl,
+            publication_interval,
+            max_forward_jump,
+        }
+        .validate()
+    }
+
+    /// Revalidate a policy, including policies built with a struct literal.
+    pub fn validate(self) -> Result<Self> {
+        let lease_ttl_ms =
+            duration_millis(self.lease_ttl, "FoundationDB lease TTL must be positive")?;
+        let publication_interval_ms = duration_millis(
+            self.publication_interval,
+            "FoundationDB lease publication interval must be positive",
+        )?;
+        let max_forward_jump_ms = duration_millis(
+            self.max_forward_jump,
+            "FoundationDB authority forward-jump bound must be positive",
+        )?;
+        if publication_interval_ms >= lease_ttl_ms {
+            return Err(FsError::new(ErrorCode::Einval).with_message(
+                "FoundationDB lease publication interval must be shorter than the lease TTL",
+            ));
+        }
+        if max_forward_jump_ms > lease_ttl_ms {
+            return Err(FsError::new(ErrorCode::Einval).with_message(
+                "FoundationDB authority forward-jump bound must not exceed the lease TTL",
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// A FoundationDB-backed shared lease oracle.
 ///
 /// Every call transactionally reads and advances one persisted monotonic
@@ -407,6 +465,17 @@ impl FoundationDbLeaseAuthority {
             .await
     }
 
+    /// Publish an explicit authority sample under a validated lease policy.
+    pub async fn publish_now_ms_with_policy(
+        &self,
+        now_ms: u64,
+        policy: LeasePublicationPolicy,
+    ) -> Result<u64> {
+        let policy = policy.validate()?;
+        self.publish_now_ms_with_max_forward_jump(now_ms, policy.max_forward_jump)
+            .await
+    }
+
     async fn publish_now_ms_internal(
         &self,
         now_ms: u64,
@@ -457,6 +526,18 @@ impl FoundationDbLeaseAuthority {
         max_forward_jump: Duration,
     ) -> Result<u64> {
         self.publish_now_ms_with_max_forward_jump(system_now_ms()?, max_forward_jump)
+            .await
+    }
+
+    /// Publish the authority process's wall-clock sample under a validated
+    /// lease publication policy. The caller remains responsible for invoking
+    /// this method on the policy's publication cadence.
+    pub async fn publish_system_now_ms_with_policy(
+        &self,
+        policy: LeasePublicationPolicy,
+    ) -> Result<u64> {
+        let policy = policy.validate()?;
+        self.publish_system_now_ms_with_max_forward_jump(policy.max_forward_jump)
             .await
     }
 
@@ -2012,6 +2093,44 @@ mod tests {
             duration_millis(Duration::from_millis(1), "authority bound").unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn lease_publication_policy_requires_cadence_and_jump_bounds() {
+        let policy = LeasePublicationPolicy::new(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+        assert_eq!(policy.lease_ttl, Duration::from_secs(30));
+
+        let equal_cadence = LeasePublicationPolicy::new(
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+        )
+        .unwrap_err();
+        assert_eq!(equal_cadence.code, ErrorCode::Einval);
+        assert!(equal_cadence.to_string().contains("shorter"));
+
+        let oversized_jump = LeasePublicationPolicy::new(
+            Duration::from_secs(30),
+            Duration::from_secs(5),
+            Duration::from_secs(31),
+        )
+        .unwrap_err();
+        assert_eq!(oversized_jump.code, ErrorCode::Einval);
+        assert!(oversized_jump.to_string().contains("lease TTL"));
+
+        let zero_interval = LeasePublicationPolicy {
+            lease_ttl: Duration::from_secs(30),
+            publication_interval: Duration::ZERO,
+            max_forward_jump: Duration::from_secs(5),
+        }
+        .validate()
+        .unwrap_err();
+        assert_eq!(zero_interval.code, ErrorCode::Einval);
     }
 
     #[test]
