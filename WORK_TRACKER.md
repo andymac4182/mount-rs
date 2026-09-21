@@ -944,8 +944,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The surrounding RustFS/PGlite VFS restart checks also passed, but are not
   FoundationDB service-restart evidence. The hosted CI lane and Docker harness
   now run the consumer feature checks, shared-provider authority publication,
-  owned FoundationDB service restart and fresh-client RustFS reopen; hosted
-  result remains pending until CI runs. No emulated acceptance.
+  owned FoundationDB service restart, a separate post-restart authority
+  republish, and fresh-client RustFS reopen; hosted result remains pending until
+  CI runs. No emulated acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-

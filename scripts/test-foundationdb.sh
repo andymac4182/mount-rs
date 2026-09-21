@@ -366,7 +366,7 @@ if [ -n "$rustfs_endpoint" ]; then
   wait_for_foundationdb
   echo "FOUNDATIONDB_SERVICE_RESTART_READY server=$server"
 
-  restart_test_command="cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
+  restart_test_command="cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
   docker run --rm \
     --platform "$docker_platform" \
     --network "$network" \

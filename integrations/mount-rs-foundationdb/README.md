@@ -233,9 +233,10 @@ workspace gate.
 
 When `R2_ENDPOINT` is set for the composed FoundationDB + RustFS lane, the
 script runs the composition client, restarts the owned FoundationDB container,
-and runs a fresh-client reopen/fencing check before reporting success. External
-FoundationDB mode is intentionally rejected for this lane because it cannot
-provide service-restart evidence owned by the harness.
+republishes the authority sample in a separate client process, and then runs a
+fresh-client reopen/fencing check before reporting success. External FoundationDB
+mode is intentionally rejected for this lane because it cannot provide
+service-restart evidence owned by the harness.
 
 Set `MOUNT_RS_FOUNDATIONDB_NAPI=1` to add the live Node chunked-factory gate.
 The script builds the feature-enabled N-API artifact in the same pinned Rust
