@@ -2652,7 +2652,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `35622312798` at `4242c24`, and `35620404949` at `0010246` stopped at the same preflight boundary, as did
   `35619552809` at `a84fa3e`. The provenance-hash expansion now binds the
   policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
-  PGlite harness, and AWS test manifest inputs in this artifact; this improves
+  PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs
+  in this artifact; the workflow also validates the standalone AWS manifest
+  with `cargo metadata --locked` before any AWS authentication. This improves
   evidence integrity but does not create AWS authentication or deployment
   evidence. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not

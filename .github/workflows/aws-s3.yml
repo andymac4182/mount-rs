@@ -75,6 +75,7 @@ jobs:
             printf 'working_tree='; git status --porcelain=v1
           } > artifacts/aws-s3/provenance.txt
           cargo metadata --locked --no-deps --format-version 1 > artifacts/aws-s3/cargo-metadata.json
+          cargo metadata --manifest-path tests/aws/Cargo.toml --locked --no-deps --format-version 1 > artifacts/aws-s3/aws-test-cargo-metadata.json
           sha256sum Cargo.lock infra/aws-s3-production.yaml \
             scripts/validate-aws-s3-ci-config.sh \
             scripts/test-aws-s3-ci-config.sh \
@@ -88,6 +89,7 @@ jobs:
             scripts/test-aws-s3.sh \
             scripts/test-aws-s3-pglite.sh \
             tests/aws/Cargo.toml \
+            tests/aws/Cargo.lock \
             .github/workflows/aws-s3.yml > artifacts/aws-s3/input-sha256sums.txt
 
       - name: Test protected AWS S3 CI configuration validator
