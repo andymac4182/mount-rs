@@ -662,15 +662,24 @@ impl MountState {
                 // lazy detach so a blocked backend future cannot deadlock the
                 // forced phase behind the same request.
                 self.request_stop();
-                forced_deadline = Some(
-                    force_unmount_async(
-                        self.mode,
-                        &self.mountpoint,
-                        self.helper.as_deref(),
-                        timeout,
-                    )
-                    .await,
+                let deadline = Instant::now() + timeout;
+                let task = self.task.lock().expect("mount task lock poisoned").take();
+                let force = force_unmount_until(
+                    self.mode,
+                    &self.mountpoint,
+                    self.helper.as_deref(),
+                    deadline,
                 );
+                if let Some(task) = task {
+                    // The lazy helper may itself wait for the FUSE device to
+                    // close. Drain the stopped session first so the helper
+                    // observes a closed descriptor instead of consuming the
+                    // entire forced-teardown deadline while the session still
+                    // owns it.
+                    drain_session_task(&self, task, Some(deadline)).await;
+                }
+                force.await;
+                forced_deadline = Some(deadline);
                 self.record_transport_error(FuseTransportError::from_message(
                     FuseTransportErrorKind::Task,
                     format!(
@@ -693,32 +702,8 @@ impl MountState {
 
         self.request_stop();
         let task = self.task.lock().expect("mount task lock poisoned").take();
-        if let Some(mut task) = task {
-            // A forced unmount has already consumed its own phase budget while
-            // running the abort/lazy-detach ladder. Drain the session only for
-            // the time left in that same budget; otherwise a stuck task turns
-            // the documented two-phase bound into a third full timeout.
-            let remaining = forced_deadline
-                .map(|deadline| deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or(timeout);
-            if remaining.is_zero() {
-                task.abort();
-                let _ = task.await;
-            } else {
-                match tokio::time::timeout(remaining, &mut task).await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(error)) => {
-                        self.record_transport_error(FuseTransportError::from_message(
-                            FuseTransportErrorKind::Task,
-                            format!("FUSE task failed during teardown: {error}"),
-                        ));
-                    }
-                    Err(_) => {
-                        task.abort();
-                        let _ = task.await;
-                    }
-                }
-            }
+        if let Some(task) = task {
+            drain_session_task(&self, task, forced_deadline).await;
         }
         // A normal task exit publishes this state from `run_session`; the
         // timeout/cancellation branches above do not necessarily get there.
@@ -732,6 +717,39 @@ impl MountState {
     #[cfg(not(target_os = "linux"))]
     async fn perform_unmount(self: Arc<Self>) -> Result<(), MountError> {
         Err(MountError::UnsupportedPlatform)
+    }
+}
+
+#[cfg(target_os = "linux")]
+async fn drain_session_task(
+    state: &MountState,
+    mut task: tokio::task::JoinHandle<()>,
+    deadline: Option<Instant>,
+) {
+    // A forced unmount has already consumed part of its phase budget while
+    // running the abort/lazy-detach ladder. Drain the session only for the
+    // time left in that same budget; otherwise a stuck task turns the
+    // documented two-phase bound into a third full timeout.
+    let remaining = deadline
+        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(state.options.unmount_timeout);
+    if remaining.is_zero() {
+        task.abort();
+        let _ = task.await;
+    } else {
+        match tokio::time::timeout(remaining, &mut task).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                state.record_transport_error(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    format!("FUSE task failed during teardown: {error}"),
+                ));
+            }
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 }
 
@@ -1566,6 +1584,17 @@ async fn force_unmount_async(
     timeout: Duration,
 ) -> Instant {
     let deadline = Instant::now() + timeout;
+    force_unmount_until(mode, mountpoint, helper, deadline).await;
+    deadline
+}
+
+#[cfg(target_os = "linux")]
+async fn force_unmount_until(
+    mode: MountMode,
+    mountpoint: &Path,
+    helper: Option<&Path>,
+    deadline: Instant,
+) {
     match mode {
         MountMode::Rootless => {
             if let Some(helper) = helper {
@@ -1600,7 +1629,6 @@ async fn force_unmount_async(
         }
         MountMode::Auto => unreachable!("mounted mode is resolved before state creation"),
     }
-    deadline
 }
 
 #[cfg(target_os = "linux")]

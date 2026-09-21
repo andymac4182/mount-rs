@@ -41,6 +41,9 @@ jobs:
       - name: Test W07 rollout ledger fail-closed cases
         run: node scripts/test-w07-rollout-ledger.mjs
 
+      - name: Test W07 qualification evidence verifier fail-closed cases
+        run: node scripts/test-w07-qualification-log.mjs
+
       - name: Verify W07 production config policy without credentials or network
         run: |
           set -o pipefail

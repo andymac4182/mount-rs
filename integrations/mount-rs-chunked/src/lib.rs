@@ -21,7 +21,10 @@ use mount_rs_core::types::{
     now_ms,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 const BLOCK_SIZE: u64 = 4096;
@@ -132,6 +135,78 @@ struct RuntimeState {
     closed: bool,
 }
 
+enum MutationResult {
+    WholeFile(WholeFileMutationResult),
+    Unit,
+}
+
+enum WholeFileMutationResult {
+    Committed,
+    Conflict,
+}
+
+struct WholeFileMutation {
+    path: String,
+    inode: InodeId,
+    expected_revision: u64,
+    new_inode: bool,
+    original: Option<NodeMetadata>,
+    layout: FileLayout,
+    data_length: u64,
+}
+
+enum MutationRequest {
+    WholeFile {
+        mutation: Box<WholeFileMutation>,
+        reply: tokio::sync::oneshot::Sender<Result<MutationResult>>,
+    },
+    Unlink {
+        path: String,
+        reply: tokio::sync::oneshot::Sender<Result<MutationResult>>,
+    },
+}
+
+struct MutationQueue {
+    pending: Vec<MutationRequest>,
+    running: bool,
+}
+
+impl MutationQueue {
+    fn new() -> Self {
+        Self {
+            pending: Vec::new(),
+            running: false,
+        }
+    }
+}
+
+/// A single cooperative yield is enough to let concurrent remote block
+/// operations enqueue their metadata mutations before the first publisher
+/// takes the batch. This avoids requiring a runtime-spawned worker, which is
+/// important because the core ChunkedFs tests deliberately run without a
+/// Tokio runtime.
+struct CooperativeYield {
+    yielded: bool,
+}
+
+impl Future for CooperativeYield {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        if self.yielded {
+            Poll::Ready(())
+        } else {
+            self.yielded = true;
+            context.waker().wake_by_ref();
+            Poll::Pending
+        }
+    }
+}
+
+async fn cooperative_yield() {
+    CooperativeYield { yielded: false }.await;
+}
+
 struct ChunkedInner<M, B>
 where
     M: MetadataStore,
@@ -144,6 +219,7 @@ where
     lifecycle: tokio::sync::RwLock<()>,
     state: Mutex<RuntimeState>,
     lease: Mutex<Option<WriterLease>>,
+    mutations: Mutex<MutationQueue>,
 }
 
 /// A filesystem driver composed from one metadata provider and one block
@@ -240,6 +316,7 @@ where
                     closed: false,
                 }),
                 lease: Mutex::new(Some(lease.clone())),
+                mutations: Mutex::new(MutationQueue::new()),
             }),
         };
 
@@ -568,6 +645,151 @@ where
         self.publish_namespace(revision, namespace, false)
             .await
             .map(|_| ())
+    }
+
+    async fn submit_whole_file_mutation(
+        &self,
+        mutation: WholeFileMutation,
+    ) -> Result<WholeFileMutationResult> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_mutation(MutationRequest::WholeFile {
+            mutation: Box::new(mutation),
+            reply,
+        })
+        .await?;
+        match response
+            .await
+            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("mutation batch stopped"))??
+        {
+            MutationResult::WholeFile(result) => Ok(result),
+            MutationResult::Unit => Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("write")
+                .with_message("mutation batch returned the wrong result type")),
+        }
+    }
+
+    async fn submit_unlink_mutation(&self, path: String) -> Result<()> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_mutation(MutationRequest::Unlink { path, reply })
+            .await?;
+        match response
+            .await
+            .map_err(|_| FsError::new(ErrorCode::Eio).with_message("mutation batch stopped"))??
+        {
+            MutationResult::Unit => Ok(()),
+            MutationResult::WholeFile(_) => Err(FsError::new(ErrorCode::Eio)
+                .with_syscall("unlink")
+                .with_message("mutation batch returned the wrong result type")),
+        }
+    }
+
+    async fn enqueue_mutation(&self, request: MutationRequest) -> Result<()> {
+        let run = {
+            let mut queue = self.inner.mutations.lock().map_err(|_| {
+                FsError::new(ErrorCode::Eio).with_message("mutation queue poisoned")
+            })?;
+            queue.pending.push(request);
+            if queue.running {
+                false
+            } else {
+                queue.running = true;
+                true
+            }
+        };
+        if run {
+            self.run_mutation_batches().await;
+        }
+        Ok(())
+    }
+
+    async fn run_mutation_batches(&self) {
+        loop {
+            // Let other operations finish their immutable block work and
+            // enqueue their prepared metadata mutations before this runner
+            // snapshots the namespace.
+            cooperative_yield().await;
+
+            let requests = {
+                let mut queue = match self.inner.mutations.lock() {
+                    Ok(queue) => queue,
+                    Err(_) => return,
+                };
+                if queue.pending.is_empty() {
+                    queue.running = false;
+                    return;
+                }
+                std::mem::take(&mut queue.pending)
+            };
+            self.apply_mutation_batch(requests).await;
+        }
+    }
+
+    async fn apply_mutation_batch(&self, requests: Vec<MutationRequest>) {
+        let mut responses = Vec::with_capacity(requests.len());
+        let _gate = self.inner.gate.lock().await;
+        let prepared = self
+            .ensure_operation_lease()
+            .await
+            .and_then(|_| self.snapshot());
+        let (mut namespace, revision) = match prepared {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                for request in requests {
+                    mutation_reply(request, Err(error.clone()));
+                }
+                return;
+            }
+        };
+        let mut changed = false;
+
+        for request in requests {
+            match request {
+                MutationRequest::WholeFile { mutation, reply } => {
+                    let mut candidate = namespace.clone();
+                    let result = apply_whole_file_mutation(&mut candidate, revision, &mutation);
+                    match result {
+                        Ok(WholeFileMutationResult::Committed) => {
+                            namespace = candidate;
+                            changed = true;
+                            responses.push((
+                                reply,
+                                Ok(MutationResult::WholeFile(
+                                    WholeFileMutationResult::Committed,
+                                )),
+                            ));
+                        }
+                        Ok(WholeFileMutationResult::Conflict) => {
+                            responses.push((
+                                reply,
+                                Ok(MutationResult::WholeFile(WholeFileMutationResult::Conflict)),
+                            ));
+                        }
+                        Err(error) => responses.push((reply, Err(error))),
+                    }
+                }
+                MutationRequest::Unlink { path, reply } => {
+                    let mut candidate = namespace.clone();
+                    match apply_unlink_mutation(self, &mut candidate, &path) {
+                        Ok(()) => {
+                            namespace = candidate;
+                            changed = true;
+                            responses.push((reply, Ok(MutationResult::Unit)));
+                        }
+                        Err(error) => responses.push((reply, Err(error))),
+                    }
+                }
+            }
+        }
+
+        if changed && let Err(error) = self.publish_namespace(revision, namespace, true).await {
+            for (reply, _) in responses {
+                let _ = reply.send(Err(error.clone()));
+            }
+            return;
+        }
+        for (reply, result) in responses {
+            let _ = reply.send(result);
+        }
     }
 
     async fn mutate<F, R>(&self, operation: F) -> Result<R>
@@ -908,66 +1130,19 @@ where
                 .map_err(|error| with_context(error, "block-flush", Some(&normalized)))?;
         }
 
-        let committed = {
-            let _gate = self.inner.gate.lock().await;
-            self.ensure_operation_lease().await?;
-            let (mut namespace, revision) = self.snapshot()?;
-            if new_inode {
-                let entry = walk(&namespace, &normalized, true, "open", 0)?;
-                if revision != expected_revision
-                    || entry.node.is_some()
-                    || namespace.next_inode != inode
-                {
-                    false
-                } else {
-                    namespace.next_inode =
-                        namespace.next_inode.checked_add(1).ok_or_else(|| {
-                            error_with_path(ErrorCode::Eoverflow, "open", &normalized)
-                        })?;
-                    let node = new_file_node(
-                        inode,
-                        S_IFREG | (0o666 & !namespace.umask & 0o7777),
-                        namespace.default_uid,
-                        namespace.default_gid,
-                        namespace.default_chunker.clone(),
-                    );
-                    namespace.nodes.insert(inode, node);
-                    add_entry(
-                        &mut namespace,
-                        entry.parent,
-                        entry.name,
-                        inode,
-                        "open",
-                        &entry.path,
-                    )?;
-                    let target = namespace
-                        .nodes
-                        .get_mut(&inode)
-                        .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", &normalized))?;
-                    target.data = NodeData::File(new_layout);
-                    set_file_size(&mut target.stats, data.len() as u64);
-                    touch_modified(&mut target.stats);
-                    self.publish_namespace(revision, namespace, true).await?;
-                    true
-                }
-            } else {
-                let target = namespace.nodes.get_mut(&inode).filter(|target| {
-                    original
-                        .as_ref()
-                        .is_some_and(|original| write_base_unchanged(target, original))
-                });
-                if let Some(target) = target {
-                    target.data = NodeData::File(new_layout);
-                    set_file_size(&mut target.stats, data.len() as u64);
-                    touch_modified(&mut target.stats);
-                    self.publish_namespace(revision, namespace, true).await?;
-                    true
-                } else {
-                    false
-                }
-            }
-        };
-        if committed {
+        let committed = self
+            .submit_whole_file_mutation(WholeFileMutation {
+                path: normalized.clone(),
+                inode,
+                expected_revision,
+                new_inode,
+                original,
+                layout: new_layout,
+                data_length: u64::try_from(data.len())
+                    .map_err(|_| error_with_path(ErrorCode::Efbig, "write", &normalized))?,
+            })
+            .await?;
+        if matches!(committed, WholeFileMutationResult::Committed) {
             return Ok(());
         }
 
@@ -1766,30 +1941,8 @@ where
 
     async fn unlink(&self, path: &str) -> Result<()> {
         let normalized = normalize_path(path);
-        let runtime = self.clone();
-        self.mutate(|namespace| {
-            let entry = walk(namespace, &normalized, false, "unlink", 0)?;
-            let inode = entry
-                .node
-                .ok_or_else(|| error_with_path(ErrorCode::Enoent, "unlink", &entry.path))?;
-            let node = namespace
-                .nodes
-                .get(&inode)
-                .ok_or_else(|| error_with_path(ErrorCode::Estale, "unlink", &entry.path))?;
-            if matches!(node.data, NodeData::Directory { .. }) {
-                return Err(error_with_path(ErrorCode::Eisdir, "unlink", &entry.path));
-            }
-            detach_entry(
-                namespace,
-                entry.parent,
-                &entry.name,
-                true,
-                "unlink",
-                &entry.path,
-            )?;
-            runtime.reap_detached(namespace, inode)
-        })
-        .await
+        let _lifecycle = self.inner.lifecycle.read().await;
+        self.submit_unlink_mutation(normalized).await
     }
 
     async fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
@@ -2107,6 +2260,104 @@ where
         })
         .await
     }
+}
+
+fn mutation_reply(request: MutationRequest, result: Result<MutationResult>) {
+    match request {
+        MutationRequest::WholeFile { reply, .. } | MutationRequest::Unlink { reply, .. } => {
+            let _ = reply.send(result);
+        }
+    }
+}
+
+fn apply_whole_file_mutation(
+    namespace: &mut Namespace,
+    current_revision: u64,
+    mutation: &WholeFileMutation,
+) -> Result<WholeFileMutationResult> {
+    if mutation.new_inode {
+        let entry = walk(namespace, &mutation.path, true, "open", 0)?;
+        if current_revision != mutation.expected_revision
+            || namespace.next_inode != mutation.inode
+            || entry.node.is_some()
+        {
+            return Ok(WholeFileMutationResult::Conflict);
+        }
+        namespace.next_inode = namespace
+            .next_inode
+            .checked_add(1)
+            .ok_or_else(|| error_with_path(ErrorCode::Eoverflow, "open", &mutation.path))?;
+        let node = new_file_node(
+            mutation.inode,
+            S_IFREG | (0o666 & !namespace.umask & 0o7777),
+            namespace.default_uid,
+            namespace.default_gid,
+            namespace.default_chunker.clone(),
+        );
+        namespace.nodes.insert(mutation.inode, node);
+        add_entry(
+            namespace,
+            entry.parent,
+            entry.name,
+            mutation.inode,
+            "open",
+            &entry.path,
+        )?;
+        let target = namespace
+            .nodes
+            .get_mut(&mutation.inode)
+            .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", &mutation.path))?;
+        target.data = NodeData::File(mutation.layout.clone());
+        set_file_size(&mut target.stats, mutation.data_length);
+        touch_modified(&mut target.stats);
+        return Ok(WholeFileMutationResult::Committed);
+    }
+
+    let Some(target) = namespace.nodes.get_mut(&mutation.inode) else {
+        return Ok(WholeFileMutationResult::Conflict);
+    };
+    if !mutation
+        .original
+        .as_ref()
+        .is_some_and(|original| write_base_unchanged(target, original))
+    {
+        return Ok(WholeFileMutationResult::Conflict);
+    }
+    target.data = NodeData::File(mutation.layout.clone());
+    set_file_size(&mut target.stats, mutation.data_length);
+    touch_modified(&mut target.stats);
+    Ok(WholeFileMutationResult::Committed)
+}
+
+fn apply_unlink_mutation<M, B>(
+    runtime: &ChunkedFs<M, B>,
+    namespace: &mut Namespace,
+    path: &str,
+) -> Result<()>
+where
+    M: MetadataStore + 'static,
+    B: BlockStore + 'static,
+{
+    let entry = walk(namespace, path, false, "unlink", 0)?;
+    let inode = entry
+        .node
+        .ok_or_else(|| error_with_path(ErrorCode::Enoent, "unlink", &entry.path))?;
+    let node = namespace
+        .nodes
+        .get(&inode)
+        .ok_or_else(|| error_with_path(ErrorCode::Estale, "unlink", &entry.path))?;
+    if matches!(node.data, NodeData::Directory { .. }) {
+        return Err(error_with_path(ErrorCode::Eisdir, "unlink", &entry.path));
+    }
+    detach_entry(
+        namespace,
+        entry.parent,
+        &entry.name,
+        true,
+        "unlink",
+        &entry.path,
+    )?;
+    runtime.reap_detached(namespace, inode)
 }
 
 fn initial_namespace(options: &ChunkedOptions) -> Result<Namespace> {
@@ -2824,6 +3075,30 @@ mod tests {
         }
     }
 
+    fn block_on_all<F: Future>(futures: Vec<Pin<Box<F>>>) -> Vec<F::Output> {
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let mut futures: Vec<_> = futures.into_iter().map(Some).collect();
+        let mut results: Vec<Option<F::Output>> = (0..futures.len()).map(|_| None).collect();
+        let mut remaining = futures.len();
+        while remaining > 0 {
+            for index in 0..futures.len() {
+                let Some(future) = futures[index].as_mut() else {
+                    continue;
+                };
+                if let Poll::Ready(value) = Future::poll(future.as_mut(), &mut context) {
+                    futures[index] = None;
+                    results[index] = Some(value);
+                    remaining -= 1;
+                }
+            }
+        }
+        results
+            .into_iter()
+            .map(|result| result.expect("all futures must complete"))
+            .collect()
+    }
+
     #[derive(Clone)]
     struct FaultBlockStore {
         inner: MemoryBlockStore,
@@ -2949,6 +3224,51 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct CountingMetadataStore {
+        inner: MemoryMetadataStore,
+        publishes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl MetadataStore for CountingMetadataStore {
+        fn durable(&self) -> bool {
+            self.inner.durable()
+        }
+
+        async fn load(&self) -> Result<LoadedMetadata> {
+            self.inner.load().await
+        }
+
+        async fn acquire_writer(&self, owner: &str, ttl: Duration) -> Result<WriterLease> {
+            self.inner.acquire_writer(owner, ttl).await
+        }
+
+        async fn renew_writer(&self, lease: &WriterLease, ttl: Duration) -> Result<WriterLease> {
+            self.inner.renew_writer(lease, ttl).await
+        }
+
+        async fn release_writer(&self, lease: &WriterLease) -> Result<()> {
+            self.inner.release_writer(lease).await
+        }
+
+        async fn publish(
+            &self,
+            expected_revision: u64,
+            lease: &WriterLease,
+            namespace: Namespace,
+        ) -> Result<u64> {
+            self.publishes.fetch_add(1, Ordering::SeqCst);
+            self.inner
+                .publish(expected_revision, lease, namespace)
+                .await
+        }
+
+        async fn flush(&self) -> Result<()> {
+            self.inner.flush().await
+        }
+    }
+
     fn options(owner: &str) -> ChunkedOptions {
         ChunkedOptions::fixed(owner, 4)
             .unwrap()
@@ -3026,6 +3346,50 @@ mod tests {
         assert_eq!(&buffer, b"atomic bytes");
         block_on(file.close()).unwrap();
         block_on(reopened.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn concurrent_whole_file_mutations_share_one_fenced_publication() {
+        const PARTICIPANTS: usize = 4;
+        let metadata = CountingMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            publishes: Arc::new(AtomicUsize::new(0)),
+        };
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("mutation-batch"),
+        ))
+        .unwrap();
+        for index in 0..PARTICIPANTS {
+            block_on(filesystem.write_file(&format!("/file-{index}"), b"old!")).unwrap();
+        }
+        let before = metadata.publishes.load(Ordering::SeqCst);
+        let futures = (0..PARTICIPANTS)
+            .map(|index| {
+                let filesystem = filesystem.clone();
+                Box::pin(async move {
+                    let path = format!("/file-{index}");
+                    filesystem.write_file(&path, b"new!").await
+                })
+            })
+            .collect();
+        for result in block_on_all(futures) {
+            result.unwrap();
+        }
+        assert_eq!(
+            metadata.publishes.load(Ordering::SeqCst),
+            before + 1,
+            "concurrent whole-file mutations must share one fenced publication"
+        );
+        let loaded = block_on(metadata.load()).unwrap();
+        let namespace = loaded.namespace.unwrap();
+        for index in 0..PARTICIPANTS {
+            let inode = resolve(&namespace, &format!("/file-{index}"), true, "test").unwrap();
+            assert_eq!(namespace.nodes[&inode].stats.size, 4);
+        }
+        block_on(filesystem.shutdown()).unwrap();
     }
 
     #[test]

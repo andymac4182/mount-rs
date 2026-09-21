@@ -196,6 +196,15 @@ before lazy detach, with a Linux-gated helper-ordering regression. Local host
 and Linux-target checks pass, but the corrected hosted native run is still
 required, so W01 remains **NO-GO**.
 
+The next FUSE teardown attempt reached hosted Linux at exact commit
+`962e981f`: native-FUSE job `106530560678` in CI run `35659287961` still
+timed out both unmount cases. The first cancellation signal was present, but
+the lazy helper was invoked before the session task had drained and released
+the FUSE descriptor. The follow-up now drains or aborts that task before lazy
+detach and shares one deadline across both phases; local host and Linux-target
+checks remain green, while the hosted native rerun is still required. W01
+remains **NO-GO**.
+
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
 direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed
