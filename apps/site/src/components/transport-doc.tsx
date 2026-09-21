@@ -664,7 +664,13 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         macOS/Linux lifecycle and provider rows remain separate, and current
         hosted workflow snapshots are canceled or pending rather than a
         WebDAV PASS. No local protocol or native pass is promoted to a
-        production mount claim.
+        production mount claim. A pinned TypeScript/Rust HTTP differential
+        now passes 40 paired S3 and WebDAV cases, including 16 authenticated
+        WebDAV cases. Rust-only injected session-clock tests prove exact lock
+        expiry; the N-API binding intentionally keeps the safer serializable
+        options and expiry-aware lock snapshots rather than exposing a
+        synchronous JavaScript clock, assertion hook, or live lock-table
+        mutator.
       </>
     ),
     sources: [
