@@ -672,8 +672,13 @@ async function exerciseP9AttachedBackpressure() {
       pending.push({ chunk: Buffer.from(chunk), callback });
     },
   });
-  const server = createP9Server(memoryFilesystem(), { maxInFlight: 1 });
-  const connection = server.attach(stream, { peer: "backpressure-test", own: false });
+  const server = createP9Server(memoryFilesystem(), { maxInFlight: 4 });
+  const connection = server.attach(stream, {
+    peer: "backpressure-test",
+    own: false,
+    maxFrame: 256,
+    maxInFlight: 1,
+  });
   const version = p9Frame(
     100,
     0xffff,
@@ -695,6 +700,36 @@ async function exerciseP9AttachedBackpressure() {
   await within(connection.closed, "attached backpressure close");
   await server.close();
   assert.equal(connection.session.destroyed, true);
+  stream.destroy();
+}
+
+async function exerciseP9AttachedFrameLimit() {
+  const reports = [];
+  const stream = new Duplex({
+    read() {},
+    write(_chunk, _encoding, callback) {
+      callback();
+    },
+  });
+  const server = createP9Server(memoryFilesystem(), {
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+    },
+  });
+  const connection = server.attach(stream, {
+    peer: "attached-frame-limit",
+    own: false,
+    maxFrame: 32,
+  });
+  const oversized = Buffer.alloc(33);
+  oversized.writeUInt32LE(33, 0);
+  stream.push(oversized);
+  await within(connection.closed, "attached frame-limit close");
+  assert.equal(reports.length, 1);
+  assert.match(reports[0].error.message, /invalid 9P frame size 33/);
+  assert.equal(reports[0].peer, "attached-frame-limit");
+  assert.equal(connection.session.destroyed, true);
+  await server.close();
   stream.destroy();
 }
 
@@ -1067,6 +1102,7 @@ await within(
     await runPhase("9P attached stream", exerciseP9AttachedStream);
     await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
     await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);
+    await runPhase("9P attached frame limit", exerciseP9AttachedFrameLimit);
     await runPhase("9P attached write failure", exerciseP9AttachedWriteFailure);
     await runPhase("S3 exercise", exerciseS3);
     await runPhase("WebDAV exercise", exerciseWebdav);
