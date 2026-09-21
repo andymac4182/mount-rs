@@ -2180,7 +2180,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   reverified locally. This is hosted target qualification only; no candidate
   tag, protected-environment approval, release registry publication, canary,
   rollback or production GO evidence is claimed. *(Hosted/provider
-  qualification; production release gates remain external.)*
+  qualification; production release gates remain external.)* The evidence
+  capture was committed as `ad45bf06` and published in merge tip
+  `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

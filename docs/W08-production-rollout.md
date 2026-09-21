@@ -69,7 +69,9 @@ x86_64 and macOS arm64 builds, downloaded bundles, provenance attestations,
 CycloneDX SBOM attestations and final identity verifiers passed; the two target
 bundles were independently rechecked after download. This remains target
 qualification, not a production-candidate tag release, registry acceptance,
-canary, rollback or GO decision.
+canary, rollback or GO decision. The evidence capture was committed as
+`ad45bf06` and published in merge tip
+`d68f14de3c13c0510237e9a88c615c1a8e74c9a3`.
 
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
