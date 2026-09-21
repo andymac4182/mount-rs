@@ -22,8 +22,9 @@ fid ordering, qid identity/cursor helpers, detached clunk snapshots, and
 retained open-handle enumeration, with focused hardlink/release and live-open
 evidence. The session now also exposes its retained `Filesystem` driver,
 debug-gated assertion readback/counters, and request-error/assertion callbacks
-with Node error/header semantics for attached and native sessions. Lock-table
-option injection, the property-shaped `clients` contract, and 9P mount helpers
+with Node error/header semantics for attached and native sessions. The server
+now exposes a live property-shaped `P9Server.clients` array combining native
+and attached connections. Lock-table option injection and 9P mount helpers
 remain open rather than being silently narrowed away. The `./9p` constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
 exports differentially checked. The transport
@@ -685,6 +686,7 @@ patch):
 | Main | W01 napi-rs FUSE GETLK/SETLK/SETLKW codecs | `integrations/mount-rs-napi/**` | Current packet: generated bindings/declarations, explicit ESM/CommonJS exports, typecheck, pinned-oracle request/reply/error-boundary differential, release build, focused locked FUSE tests and full oracle-enabled N-API suite passed; native FUSE session/mount remains open |
 | Main | W01 N-API 9P fid table/session parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: Rust-backed `FidTable`/live `P9Session.fids`, qid/cursor/open-handle views, hardlink/release and live-open coverage; generated typecheck, build, 124-constant/44-codec differentials, focused N-API tests, 30 ordinary 9P tests, and strict Clippy passed; driver/assertion/debug, lock-option, property-shaped clients, mount-helper and hosted revision gates remain open |
 | Main | W01 N-API 9P driver and observability parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: live `P9Session.driver`, debug-gated assertion readback/counters, request-error/assertion callbacks, Node error revival, and root/`./9p` factory identity; release build, generated typecheck, focused N-API tests, 31 ordinary 9P tests, formatting, and strict Clippy passed; lock-option, property-shaped clients, mount-helper, and hosted revision gates remain open |
+| Main | W01 N-API 9P property-shaped clients parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Server.clients` is now a generated/property-shaped live array combining native and attached connections; release build, generated typecheck, host-enabled server integration, P9 runtime checks, focused Rust tests, formatting, and strict Clippy passed; lock-option, mount-helper, and hosted revision gates remain open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
