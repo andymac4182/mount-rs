@@ -1500,6 +1500,7 @@ dependencies = [
  "mount-rs-persist",
  "mount-rs-s3",
  "object_store",
+ "sha2 0.10.9",
  "tokio",
 ]
 
