@@ -34,6 +34,26 @@ RUSTFS_COMBO_COMMAND='./scripts/test-foundationdb.sh' \
 ./scripts/test-rustfs.sh
 ```
 
+For a bounded repeated-composition qualification run, set
+`MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS` to a value from 1 through 100. Each round
+uses a unique FoundationDB/RustFS prefix, exercises the real multi-chunk
+composition, and cleans its own block prefix:
+
+```shell
+MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS=5 \
+RUSTFS_COMBO_NAME=foundationdb-metadata-rustfs-chunks \
+RUSTFS_COMBO_TIMEOUT_SECONDS=1800 \
+RUSTFS_COMBO_COMMAND='./scripts/test-foundationdb.sh' \
+MOUNT_RS_FOUNDATIONDB_TOPOLOGY=durable \
+./scripts/test-rustfs.sh
+```
+
+The harness emits `FOUNDATIONDB_SOAK_PASS` and includes the round count in
+`FOUNDATIONDB_TEST_PASS`. This is repeated provider/composition qualification,
+not a production capacity, cost, or multi-day soak claim; the production
+workload and duration must still be defined and accepted in
+`docs/foundationdb-production-rollout.md`.
+
 Set `MOUNT_RS_FOUNDATIONDB_TOPOLOGY=durable` for the three-node disposable
 cluster used by the hosted acceptance lane. It uses three pinned FoundationDB
 server containers, `double` redundancy, separate persistent Docker volumes,

@@ -29,7 +29,7 @@ const routes = [
     path: '/brand-lab',
     status: 200,
     contentType: 'text/html',
-    expected: ['Choose the visual system', 'mount-rs-brand-directions-v1.webp', 'mount-rs-logo-options-v2.webp', 'Brand directions 01–10', 'Logo explorations 01–20'],
+    expected: ['One logo, one project name, one colour system.', 'mount-rs-logo-board-a.webp', 'mount-rs-logo-board-b.webp', 'mount-rs-palette-board-a.webp', 'mount-rs-palette-board-b.webp', 'Forty logo systems', 'A01', 'B20', 'Peakline', 'Deepstore'],
   },
   { path: '/brand-lab/', status: 307, redirectTo: '/brand-lab' },
   {

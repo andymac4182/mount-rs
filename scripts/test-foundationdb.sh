@@ -39,6 +39,21 @@ case "$topology" in
     exit 2
     ;;
 esac
+soak_rounds=${MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS:-0}
+case "$soak_rounds" in
+  ''|*[!0-9]*)
+    echo "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+if [ "$soak_rounds" -gt 100 ]; then
+  echo "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS must not exceed 100" >&2
+  exit 2
+fi
+if [ "$soak_rounds" -gt 0 ] && [ -z "${R2_ENDPOINT:-}" ]; then
+  echo "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS requires the composed RustFS lane" >&2
+  exit 2
+fi
 provided_cluster_file=${MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE:-}
 external_network=${MOUNT_RS_FOUNDATIONDB_NETWORK:-}
 external_server=${MOUNT_RS_FOUNDATIONDB_SERVER_CONTAINER:-}
@@ -411,6 +426,25 @@ if [ "$run_napi" -eq 1 ]; then
   napi_build_prefix='cargo build --locked --release -p mount-rs-napi --features foundationdb && test -f /tmp/mount-rs-foundationdb-target/release/libmount_rs_napi.so && cp /tmp/mount-rs-foundationdb-target/release/libmount_rs_napi.so /fdb/mount-rs.linux-x64-gnu.node && '
   test_command="${napi_build_prefix}${test_command}"
 fi
+if [ "$soak_rounds" -gt 0 ]; then
+  # Each round gets an independent FoundationDB volume prefix and RustFS block
+  # prefix. The default composed lane deliberately defers cleanup until its
+  # post-restart client; the repeated qualification rounds clean themselves so
+  # a bounded soak cannot turn into unbounded test-bucket growth.
+  soak_test_command='round=1
+  while [ "$round" -le "$MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS" ]; do
+    round_prefix="${RUSTFS_COMBO_PREFIX}/soak-${round}"
+    round_authority_prefix="${round_prefix}/lease-authority"
+    env -u MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP \
+      RUSTFS_COMBO_PREFIX="$round_prefix" \
+      MOUNT_RS_FOUNDATIONDB_TEST_PREFIX="$round_prefix" \
+      MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX="$round_authority_prefix" \
+      cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture
+    round=$((round + 1))
+  done
+  echo "FOUNDATIONDB_SOAK_PASS rounds=$MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS"'
+  test_command="${test_command} && ${soak_test_command}"
+fi
 client_fdb_volume="$run_dir:/fdb:ro"
 if [ "$run_napi" -eq 1 ]; then
   client_fdb_volume="$run_dir:/fdb"
@@ -446,6 +480,7 @@ if [ -n "$rustfs_endpoint" ]; then
     --env "RUSTFS_COMBO_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS=$soak_rounds" \
     --env MOUNT_RS_FOUNDATIONDB_NATIVE_CLI \
     --env MOUNT_RS_FOUNDATIONDB_DEFER_CLEANUP=1 \
     "$rust_image" sh -c \
@@ -481,6 +516,7 @@ else
     --env CARGO_TARGET_DIR=/tmp/mount-rs-foundationdb-target \
     --env "MOUNT_RS_FOUNDATIONDB_TEST_PREFIX=$test_prefix" \
     --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS=$soak_rounds" \
     --env MOUNT_RS_FOUNDATIONDB_NATIVE_CLI \
     "$rust_image" sh -c \
     'export PATH=/usr/local/cargo/bin:$PATH
@@ -583,7 +619,7 @@ if [ -n "$rustfs_endpoint" ]; then
 fi
 
 if [ -n "$rustfs_endpoint" ]; then
-  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass"
+  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass soak_rounds=$soak_rounds"
 else
-  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifest=$test_manifest platform=$docker_platform"
+  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifest=$test_manifest platform=$docker_platform soak_rounds=$soak_rounds"
 fi

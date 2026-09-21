@@ -24,7 +24,7 @@ for a production deployment result.
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Open; SQLite is single-host evidence only |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open |
-| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open |
+| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; local default workspace tests and strict Clippy pass, but hosted and deployment evidence is absent |
 
 ## Deployment contract
 
@@ -54,6 +54,51 @@ audited. Decide explicitly whether versioning and SSE-KMS are enabled; if they
 are enabled, the cleanup, restore, key-policy, and cost procedures must cover
 object versions and KMS access rather than treating current-object deletion as
 complete cleanup.
+
+## Minimum IAM policy shapes
+
+The runtime role should be limited to the one volume prefix. Replace the
+placeholders during an approved infrastructure change; do not paste live
+values or credentials into this repository.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VolumeObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::<private-bucket>/<volume-prefix>/*"
+    },
+    {
+      "Sid": "VolumeListing",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<private-bucket>",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["<volume-prefix>", "<volume-prefix>/*"]
+        }
+      }
+    }
+  ]
+}
+```
+
+The cleanup/maintenance role should be separately approved and audited. If
+bucket versioning is enabled, its policy and runbook must explicitly cover
+object-version listing and deletion; a successful current-object delete is not
+proof that historical versions are gone. If SSE-KMS is selected, add only the
+required `kms:Encrypt`, `kms:Decrypt`, and `kms:GenerateDataKey` permissions
+on the named key and test the key policy with the runtime role.
+
+For the protected GitHub OIDC workflow, the trust policy should restrict the
+`token.actions.githubusercontent.com` subject to this repository and the
+`aws-s3-ci` environment, require the `sts.amazonaws.com` audience, and grant
+only the test bucket/prefix actions. The workflow intentionally references an
+environment role rather than embedding a long-lived AWS secret; configure and
+review that role before enabling hosted evidence.
 
 ## Rollout sequence
 

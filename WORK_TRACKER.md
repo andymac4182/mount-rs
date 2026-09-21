@@ -773,13 +773,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  The fresh post-fix run [35586624564](https://github.com/andymac4182/mount-rs/actions/runs/35586624564)
+  The latest published-revision run [35587575994](https://github.com/andymac4182/mount-rs/actions/runs/35587575994)
   is running on `bdfcb11`: Linux Node job
-  [106291476004](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476004),
+  [106294483397](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483397),
   macOS-latest Node job
-  [106291476024](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476024),
+  [106294483486](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483486),
   and macOS-15-intel Node job
-  [106291476265](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476265)
+  [106294483435](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483435)
   have started. The historical run [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894)
   is not closure evidence: macOS-latest passed its PGlite step, but
   macOS-15-intel failed earlier in `test-http-early-rejection.mjs` with
@@ -1565,7 +1565,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen,
   the public SDK and CLI configuration paths, nonce-owned cleanup and
   credential-safe validation, and a non-mutating sibling-prefix authorization
-  denial check. The harness emits the secret-free
+  denial check. The live packet also includes a bounded repeated write/read
+  workload sample; a production load/soak result remains a deployment gate.
+  The harness emits the secret-free
   `AWS_S3_TEST_BLOCKED` result when local credentials are absent, while the
   renewed `myroot` run above provides the live Rust acceptance.
 - [x] The harness accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that
@@ -1573,6 +1575,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   credentials for all S3 requests and cleanup. It does not create IAM resources
   or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
   run is now recorded above.
+- [x] Repository qualification after the AWS packet passed on 2026-09-21 at
+  local `4a72d85` (an ancestor of current `origin/main` `7488aa8`):
+  `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
+  --all-targets --locked --offline` and strict workspace Clippy with
+  `--all-targets --locked --offline -- -D warnings` both exited 0. The
+  all-features variant remains an explicit host prerequisite boundary because
+  this macOS runner does not provide native `libfdb_c`; the site typecheck also
+  needs a network-backed dependency install and is not claimed from the
+  offline run.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
