@@ -14,7 +14,9 @@ export function SiteHeader() {
   function toggleTheme() {
     const nextTheme: Theme = theme === 'dark' ? 'light' : 'dark'
     document.documentElement.dataset.theme = nextTheme
-    localStorage.setItem('mount-rs-theme', nextTheme)
+    try {
+      localStorage.setItem('mount-rs-theme', nextTheme)
+    } catch {}
     setTheme(nextTheme)
   }
 
