@@ -1505,6 +1505,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   tracked as **NO-GO** in
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
 
+- The production-facing Windows N-API server test was hardened after diagnostic
+  run `35650347479`, job `106500944953`, reproduced the exact
+  `S3 peer-fault callback (+19754ms)` timeout. Phase attribution was published
+  in `3705ad0`; the deterministic incomplete-request plus
+  `resetAndDestroy()` correction was published as `093565d9`. The rebuilt full
+  pinned-oracle N-API package suite passes locally, and fixed-tip hosted
+  requalification `35651055621`, Windows job `106503290630`, now passes the
+  repaired server, restart, structural, package-distribution, clean-consumer,
+  and artifact-aggregation checks. The overall qualification remains open with
+  separate Linux/ARM/native-FUSE/provider gates, so production remains NO-GO.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
