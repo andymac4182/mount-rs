@@ -1211,6 +1211,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `fecec0e`, `w08-release-policy` job `106356402785` was terminal success. This
   is a synthetic credential-free policy gate; real artifact signing, SBOM,
   canary, rollback and approval remain W08-P09 external gates.
+- [x] W08.12 **Release artifact manifest generation and CLI preview wiring:**
+  `scripts/write-w08-release-manifest.mjs` computes the actual artifact
+  SHA-256/size and records source/tag/target/workflow/run provenance. The
+  tag-triggered macOS CLI release workflow now generates/verifies
+  `release-manifest.json` before upload, publishes it beside `SHA256SUMS`, and
+  re-downloads/re-verifies it. Local locked CLI packaging and hosted run
+  `35609172786`, source `66544b5`, `w08-release-policy` job `106363893748`
+  passed. No tag publication, signing/SBOM, canary, rollback or approval is
+  claimed.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1306,9 +1315,12 @@ reproducible in a production-like environment.
   live SLO telemetry, rehearse rollback and record explicit approval. The
   credential-free W08.11 policy verifier and hosted job `106356402785` now
   reject placeholder source identity and require explicit verified signature,
-  SBOM and passed-canary states in strict mode; they do not create or verify a
-  real release. *(Release implementation + hosted; registry, signing, SBOM
-  tooling, deployment controller and approvers are external.)*
+  SBOM and passed-canary states in strict mode; W08.12 wires the same verifier
+  to the actual CLI preview artifact path and hosted generator policy job
+  `106363893748`. Neither slice creates signing/SBOM evidence or runs a real
+  tag release, canary, rollback or approval. *(Release implementation + hosted;
+  registry, signing, SBOM tooling, deployment controller and approvers are
+  external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
