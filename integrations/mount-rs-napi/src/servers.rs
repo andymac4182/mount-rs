@@ -364,6 +364,7 @@ pub struct NfsServerOptions {
     pub use_driver_ino: Option<bool>,
     #[napi(ts_type = "Uint8Array")]
     pub verifier: Option<Buffer>,
+    pub max_handles: Option<f64>,
     pub rtmax: Option<f64>,
     pub wtmax: Option<f64>,
     pub dtpref: Option<f64>,
@@ -392,6 +393,7 @@ fn nfs_options(
         max_in_flight: None,
         use_driver_ino: None,
         verifier: None,
+        max_handles: None,
         rtmax: None,
         wtmax: None,
         dtpref: None,
@@ -412,6 +414,10 @@ fn nfs_options(
         positive_number("maxInFlight", options.max_in_flight, output.max_in_flight)?;
     output.session.use_driver_ino = options.use_driver_ino.unwrap_or(true);
     output.session.verifier = verifier(options.verifier)?;
+    output.session.max_handles = options
+        .max_handles
+        .map(|value| number("maxHandles", Some(value), 0))
+        .transpose()?;
     output.session.rtmax = positive_number("rtmax", options.rtmax, output.session.rtmax)?;
     output.session.wtmax = positive_number("wtmax", options.wtmax, output.session.wtmax)?;
     output.session.dtpref = positive_number("dtpref", options.dtpref, output.session.dtpref)?;

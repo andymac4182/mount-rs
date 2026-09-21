@@ -26,6 +26,7 @@ struct Entry {
     fileid: u64,
     key: Option<String>,
     paths: BTreeSet<String>,
+    pins: usize,
 }
 
 #[derive(Debug)]
@@ -35,18 +36,22 @@ struct HandleState {
     by_id: HashMap<u64, Entry>,
     by_path: HashMap<String, u64>,
     by_key: HashMap<String, u64>,
+    lru: VecDeque<u64>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FileHandleTable {
     state: Arc<Mutex<HandleState>>,
     use_driver_ino: bool,
+    max_handles: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct FileHandleTableOptions {
     pub use_driver_ino: bool,
     pub verifier: Option<[u8; 8]>,
+    /// Positive values bound the table with a soft LRU cap. Zero means no cap.
+    pub max_handles: Option<usize>,
 }
 
 impl Default for FileHandleTableOptions {
@@ -54,6 +59,7 @@ impl Default for FileHandleTableOptions {
         Self {
             use_driver_ino: true,
             verifier: None,
+            max_handles: None,
         }
     }
 }
@@ -66,6 +72,7 @@ impl FileHandleTable {
             fileid: ROOT_HANDLE_ID,
             key: None,
             paths: BTreeSet::from([String::from("/")]),
+            pins: 0,
         };
         let mut by_id = HashMap::new();
         by_id.insert(ROOT_HANDLE_ID, root);
@@ -76,8 +83,10 @@ impl FileHandleTable {
                 by_id,
                 by_path: HashMap::from([(String::from("/"), ROOT_HANDLE_ID)]),
                 by_key: HashMap::new(),
+                lru: VecDeque::new(),
             })),
             use_driver_ino: options.use_driver_ino,
+            max_handles: options.max_handles.filter(|value| *value > 0).unwrap_or(0),
         }
     }
 
@@ -135,7 +144,16 @@ impl FileHandleTable {
             return Err(stale("file handle is from a previous server instance"));
         }
         let id = u64::from_be_bytes(handle[12..20].try_into().unwrap());
-        self.entry(id).ok_or_else(|| stale("unknown file handle"))
+        let mut state = self.state.lock().expect("handle table lock");
+        let entry = state.by_id.get(&id).map(|entry| HandleEntry {
+            id: entry.id,
+            fileid: entry.fileid,
+            key: entry.key.clone(),
+            path: entry.paths.iter().next().cloned().unwrap_or_default(),
+        });
+        let entry = entry.ok_or_else(|| stale("unknown file handle"))?;
+        touch_locked(&mut state, id);
+        Ok(entry)
     }
 
     pub fn resolve(&self, handle: &[u8]) -> mount_rs_core::Result<String> {
@@ -144,17 +162,19 @@ impl FileHandleTable {
     }
 
     pub fn path_of(&self, entry: &HandleEntry) -> mount_rs_core::Result<String> {
-        let state = self.state.lock().expect("handle table lock");
+        let mut state = self.state.lock().expect("handle table lock");
         let current = state
             .by_id
             .get(&entry.id)
             .ok_or_else(|| stale("unknown file handle"))?;
-        current
+        let path = current
             .paths
             .iter()
             .find(|path| state.by_path.get(*path) == Some(&entry.id))
             .cloned()
-            .ok_or_else(|| stale("file handle names a removed file"))
+            .ok_or_else(|| stale("file handle names a removed file"))?;
+        touch_locked(&mut state, entry.id);
+        Ok(path)
     }
 
     pub fn entry(&self, id: u64) -> Option<HandleEntry> {
@@ -168,14 +188,16 @@ impl FileHandleTable {
     }
 
     pub fn at(&self, path: &str) -> Option<HandleEntry> {
-        let state = self.state.lock().expect("handle table lock");
+        let mut state = self.state.lock().expect("handle table lock");
         let id = *state.by_path.get(path)?;
-        state.by_id.get(&id).map(|entry| HandleEntry {
+        let entry = state.by_id.get(&id).map(|entry| HandleEntry {
             id: entry.id,
             fileid: entry.fileid,
             key: entry.key.clone(),
             path: path.to_owned(),
-        })
+        })?;
+        touch_locked(&mut state, id);
+        Some(entry)
     }
 
     pub fn bind(&self, path: &str, stats: &Stats) -> HandleEntry {
@@ -207,6 +229,7 @@ impl FileHandleTable {
                         fileid: if stats.ino > 0 { stats.ino } else { id },
                         key: key.clone(),
                         paths: BTreeSet::new(),
+                        pins: 0,
                     },
                 );
                 id
@@ -228,7 +251,32 @@ impl FileHandleTable {
         if let Some(key) = bound_key {
             state.by_key.insert(key, id);
         }
+        touch_locked(&mut state, id);
+        enforce_limit_locked(&mut state, self.max_handles, id);
         entry_locked(&state, id, path)
+    }
+
+    /// Hold an entry against LRU eviction while NFSv4 state refers to it.
+    ///
+    /// Pins are bookkeeping only: a removed path is still dropped immediately
+    /// and a missing entry makes this a no-op, which keeps teardown and error
+    /// paths safe to balance.
+    pub fn pin(&self, id: u64) {
+        let mut state = self.state.lock().expect("handle table lock");
+        if let Some(entry) = state.by_id.get_mut(&id) {
+            entry.pins = entry.pins.saturating_add(1);
+        }
+    }
+
+    /// Release one NFSv4 pin without allowing the count to underflow.
+    pub fn unpin(&self, id: u64) {
+        let mut state = self.state.lock().expect("handle table lock");
+        if let Some(entry) = state.by_id.get_mut(&id)
+            && entry.pins > 0
+        {
+            entry.pins -= 1;
+        }
+        enforce_limit_locked(&mut state, self.max_handles, ROOT_HANDLE_ID);
     }
 
     pub fn forget(&self, path: &str) {
@@ -266,6 +314,8 @@ impl FileHandleTable {
         if let Some(key) = key {
             state.by_key.remove(&key);
         }
+        touch_locked(&mut state, id);
+        enforce_limit_locked(&mut state, self.max_handles, id);
         state.by_id.get(&id).map(|entry| HandleEntry {
             id: entry.id,
             fileid: entry.fileid,
@@ -313,6 +363,7 @@ impl FileHandleTable {
                 entry.paths.insert(replacement.clone());
                 state.by_path.insert(replacement, id);
             }
+            touch_locked(&mut state, id);
         }
     }
 
@@ -323,6 +374,7 @@ impl FileHandleTable {
             fileid: ROOT_HANDLE_ID,
             key: None,
             paths: BTreeSet::from([String::from("/")]),
+            pins: 0,
         };
         let mut state = self.state.lock().expect("handle table lock");
         state.next_id = ROOT_HANDLE_ID + 1;
@@ -331,6 +383,7 @@ impl FileHandleTable {
         state.by_path.clear();
         state.by_path.insert("/".to_owned(), ROOT_HANDLE_ID);
         state.by_key.clear();
+        state.lru.clear();
         state.verifier = verifier;
     }
 }
@@ -351,17 +404,58 @@ fn entry_locked(state: &HandleState, id: u64, path: &str) -> HandleEntry {
     }
 }
 
+fn touch_locked(state: &mut HandleState, id: u64) {
+    if id == ROOT_HANDLE_ID || !state.by_id.contains_key(&id) {
+        return;
+    }
+    state.lru.retain(|candidate| *candidate != id);
+    state.lru.push_back(id);
+}
+
+fn drop_entry_locked(state: &mut HandleState, id: u64) {
+    let Some(entry) = state.by_id.remove(&id) else {
+        return;
+    };
+    for path in entry.paths {
+        if state.by_path.get(&path) == Some(&id) {
+            state.by_path.remove(&path);
+        }
+    }
+    if let Some(key) = entry.key
+        && state.by_key.get(&key) == Some(&id)
+    {
+        state.by_key.remove(&key);
+    }
+    state.lru.retain(|candidate| *candidate != id);
+}
+
+fn enforce_limit_locked(state: &mut HandleState, max_handles: usize, protected: u64) {
+    if max_handles == 0 {
+        return;
+    }
+    while state.by_id.len() > max_handles {
+        let victim = state.lru.iter().copied().find(|candidate| {
+            *candidate != protected
+                && state
+                    .by_id
+                    .get(candidate)
+                    .is_some_and(|entry| entry.pins == 0)
+        });
+        let Some(victim) = victim else {
+            break;
+        };
+        drop_entry_locked(state, victim);
+    }
+}
+
 fn detach_locked(state: &mut HandleState, id: u64, path: &str) {
     detach_preserve_locked(state, id, path);
     let remove = state
         .by_id
         .get(&id)
         .is_some_and(|entry| entry.paths.is_empty() && entry.id != ROOT_HANDLE_ID);
-    if remove
-        && let Some(entry) = state.by_id.remove(&id)
-        && let Some(key) = entry.key
-    {
-        state.by_key.remove(&key);
+    if remove && id != ROOT_HANDLE_ID {
+        drop_entry_locked(state, id);
     }
 }
 
@@ -559,6 +653,52 @@ mod tests {
         assert_eq!(entries[0], table.root());
         assert_eq!(entries[1].path, "/second");
         assert_eq!(entries[2].path, "/first");
+    }
+
+    #[test]
+    fn max_handles_evicts_oldest_entry_but_keeps_root_and_current_bind() {
+        let table = FileHandleTable::new(FileHandleTableOptions {
+            max_handles: Some(2),
+            ..FileHandleTableOptions::default()
+        });
+        let old = table.bind("/old", &stats(2));
+        let current = table.bind("/current", &stats(3));
+
+        assert_eq!(table.size(), 2);
+        assert!(table.at("/").is_some());
+        assert!(table.at("/old").is_none());
+        assert_eq!(table.at("/current").unwrap().id, current.id);
+        assert_eq!(
+            table.decode(&table.encode(&old)).unwrap_err().code,
+            ErrorCode::Estale
+        );
+    }
+
+    #[test]
+    fn max_handles_uses_access_recency_and_respects_pins() {
+        let table = FileHandleTable::new(FileHandleTableOptions {
+            max_handles: Some(3),
+            ..FileHandleTableOptions::default()
+        });
+        let first = table.bind("/first", &stats(2));
+        let _second = table.bind("/second", &stats(3));
+        assert!(table.at("/first").is_some());
+        let _third = table.bind("/third", &stats(4));
+
+        assert!(table.at("/first").is_some());
+        assert!(table.at("/third").is_some());
+        assert!(table.at("/second").is_none());
+
+        table.pin(first.id);
+        let fourth = table.bind("/fourth", &stats(5));
+        assert!(table.at("/first").is_some());
+        assert_eq!(table.at("/fourth").unwrap().id, fourth.id);
+        assert!(table.at("/third").is_none());
+
+        table.unpin(first.id);
+        let fifth = table.bind("/fifth", &stats(6));
+        assert_eq!(table.at("/fifth").unwrap().id, fifth.id);
+        assert!(table.at("/first").is_none());
     }
 
     #[test]

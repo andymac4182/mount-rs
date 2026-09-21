@@ -2125,6 +2125,7 @@ export interface NfsServerOptions {
   maxInFlight?: number
   useDriverIno?: boolean
   verifier?: Uint8Array
+  maxHandles?: number
   rtmax?: number
   wtmax?: number
   dtpref?: number

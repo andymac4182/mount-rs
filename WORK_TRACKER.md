@@ -998,6 +998,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   addon, generated typecheck, and live N-API server integration passed; native
   mount, hosted/provider, full v4 state, connection-object, crash, and
   durability gates remain open.
+- [x] The current NFS parity packet adds the shared `maxHandles` option with
+  LRU eviction, root/current-entry protection, and NFSv4 open-state pins so a
+  bounded table cannot silently split share reservations or byte-range state.
+  The pinned oracle upstream NFS gate passed 266 cases with 18 explicit
+  capability/root skips, the N-API NFS codec differential passed, and the
+  focused NFS target passed 33 unit, rootless wire 1, pipelined concurrency 1,
+  transport errors 4, v4 barrier 1, and v4 wire 4 tests; richer `onError` and
+  NFSv4 lease/ID-map/state-limit/reclaim knobs plus native/hosted/crash gates
+  remain explicitly open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

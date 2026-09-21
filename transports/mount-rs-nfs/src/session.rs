@@ -41,6 +41,8 @@ const S_IXGRP: u32 = 0o0010;
 pub struct NfsSessionOptions {
     pub use_driver_ino: bool,
     pub verifier: Option<[u8; 8]>,
+    /// Positive values bound the shared handle table with a soft LRU cap.
+    pub max_handles: Option<usize>,
     pub rtmax: usize,
     pub wtmax: usize,
     pub dtpref: usize,
@@ -53,6 +55,7 @@ impl Default for NfsSessionOptions {
         Self {
             use_driver_ino: true,
             verifier: None,
+            max_handles: None,
             rtmax: DEFAULT_RTMAX,
             wtmax: DEFAULT_WTMAX,
             dtpref: DEFAULT_DTPREF,
@@ -103,6 +106,7 @@ impl SharedNfsState {
             handles: FileHandleTable::new(FileHandleTableOptions {
                 use_driver_ino: options.use_driver_ino,
                 verifier: options.verifier,
+                max_handles: options.max_handles,
             }),
             stats: SharedStats::default(),
             path_lock: Arc::new(tokio::sync::RwLock::new(())),
