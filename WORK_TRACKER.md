@@ -1575,6 +1575,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   credentials for all S3 requests and cleanup. It does not create IAM resources
   or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
   run is now recorded above.
+- [x] Repository qualification after the AWS packet passed on 2026-09-21 at
+  local `4a72d85` (an ancestor of current `origin/main` `7488aa8`):
+  `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
+  --all-targets --locked --offline` and strict workspace Clippy with
+  `--all-targets --locked --offline -- -D warnings` both exited 0. The
+  all-features variant remains an explicit host prerequisite boundary because
+  this macOS runner does not provide native `libfdb_c`; the site typecheck also
+  needs a network-backed dependency install and is not claimed from the
+  offline run.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
