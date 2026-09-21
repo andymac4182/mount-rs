@@ -1023,6 +1023,7 @@ dependencies = [
 name = "mount-rs-fuse"
 version = "0.1.0"
 dependencies = [
+ "futures-util",
  "libc",
  "mount-rs-core",
  "tokio",

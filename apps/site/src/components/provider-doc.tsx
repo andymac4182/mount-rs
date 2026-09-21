@@ -887,13 +887,19 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         migration, cleanup/retention, and canary/rollback. It explicitly keeps
         production collector and alert routing, workload-identity rotation,
         approved metadata ownership, staging drills, canary, rollback, and
-        post-deploy smoke open.
+        post-deploy smoke open. The latest hosted qualification run
+        <code>35625592317</code> passed provenance and the four synthetic
+        contract suites, then failed closed at
+        <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code> before AWS
+        authentication; it is therefore not AWS identity or production
+        acceptance evidence.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
+      { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35625592317' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },

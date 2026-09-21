@@ -38,17 +38,15 @@ then safely refused the unconfigured protected environment with
 completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
-The current integrated repository boundary `75b900f3f25923eed5b30792dab08c7e9a748158`
+The latest tested integrated repository boundary `00d2b80277991a6d826874ad7e3e3c1593e34ae3`
 passed formatting, the full locked offline workspace test gate, and strict
 workspace Clippy with `-D warnings` on an explicitly isolated Cargo target
-after rebasing onto `origin/main`. The first unprivileged test attempt was
-refused only because the sandbox denied the 9P loopback listener; the same
-command rerun with the required local-network permission passed. The isolated
-target was used because concurrent worktrees share the normal Cargo target and
-can expose cross-worktree artifact races; this gate therefore binds to the
-checked-out source rather than another thread's compiled metadata. Ignored
-native/service rows remain explicit prerequisites and are not treated as
-production acceptance.
+after rebasing onto `origin/main`, with the required local loopback permission.
+The isolated target was used because concurrent worktrees share the normal
+Cargo target and can expose cross-worktree artifact races; this gate therefore
+binds to the checked-out source rather than another thread's compiled
+metadata. Ignored native/service rows remain explicit prerequisites and are
+not treated as production acceptance.
 
 ## Deployment contract
 

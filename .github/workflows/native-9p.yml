@@ -1,0 +1,46 @@
+name: Native 9P
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/native-9p.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/cargo-shared'
+      - 'scripts/cargo-shared-env.sh'
+      - 'transports/mount-rs-9p/**'
+  pull_request:
+    paths:
+      - '.github/workflows/native-9p.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'scripts/cargo-shared'
+      - 'scripts/cargo-shared-env.sh'
+      - 'transports/mount-rs-9p/**'
+
+concurrency:
+  group: native-9p-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  native-9p:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
+      - name: Verify the actual Linux 9P kernel client
+        run: |
+          sudo modprobe 9p
+          sudo modprobe 9pnet_fd
+          test -d /sys/module/9pnet_fd
+      - name: Build and run privileged native I/O and lifecycle tests
+        run: |
+          native_test=$(./scripts/cargo-shared test --locked -p mount-rs-9p --test native_mount --no-run --message-format=json | python3 -c 'import json,sys; print([x["executable"] for line in sys.stdin if (x:=json.loads(line)).get("executable")][0])')
+          test -x "$native_test"
+          sudo env MOUNT_RS_9P_NATIVE_TEST=1 timeout 180s "$native_test" --ignored --nocapture

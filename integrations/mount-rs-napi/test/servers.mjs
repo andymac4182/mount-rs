@@ -1311,6 +1311,56 @@ async function exerciseWebdav() {
     } finally {
       await authServer.close();
     }
+
+    const restartServer = createWebdavServer(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      readChunkBytes: 4 * 1024,
+    });
+    let restartListening;
+    try {
+      restartListening = (await listenLifecycle(restartServer, "WebDAV restart seed")).listening;
+      const restartObject = Buffer.from("survives same-driver WebDAV server recreation");
+      const restartPut = await restartServer.session.handleRequest(
+        { method: "PUT", target: "/restart-durable.txt", headers: [] },
+        restartObject,
+      );
+      assert.ok([200, 201, 204].includes(restartPut.status));
+      const restartLock = await restartServer.session.handleRequest(
+        {
+          method: "LOCK",
+          target: "/restart-lock.txt",
+          headers: [{ name: "depth", value: "0" }],
+        },
+        Buffer.from('<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>'),
+      );
+      assert.ok([200, 201].includes(restartLock.status));
+      assert.equal(restartServer.session.locks.length, 1);
+    } finally {
+      await closeLifecycle(restartServer, "WebDAV restart seed", restartListening);
+    }
+
+    const replacementServer = createWebdavServer(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      readChunkBytes: 4 * 1024,
+    });
+    let replacementListening;
+    try {
+      replacementListening = (await listenLifecycle(replacementServer, "WebDAV restart replacement")).listening;
+      assert.equal(replacementServer.session.locks.length, 0);
+      const replacementGet = await replacementServer.session.handleRequest(
+        { method: "GET", target: "/restart-durable.txt", headers: [] },
+        null,
+      );
+      assert.equal(replacementGet.status, 200);
+      assert.deepEqual(
+        replacementGet.body,
+        Buffer.from("survives same-driver WebDAV server recreation"),
+      );
+    } finally {
+      await closeLifecycle(replacementServer, "WebDAV restart replacement", replacementListening);
+    }
   } finally {
     if (faultSocket) {
       await runPhase("WebDAV cleanup: fault socket close", () =>
