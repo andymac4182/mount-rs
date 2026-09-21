@@ -12,6 +12,7 @@ if ! command -v aws >/dev/null 2>&1; then
 fi
 
 : "${AWS_S3_AUDIT_BUCKET:?AWS_S3_AUDIT_BUCKET must name the bucket to audit}"
+: "${AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID:?AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID must name the expected caller account}"
 region=${AWS_S3_AUDIT_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}
 : "${region:?AWS_S3_AUDIT_REGION or AWS_REGION must name the bucket region}"
 expected_prefix=${AWS_S3_AUDIT_LIFECYCLE_PREFIX:-mount-rs-tests/}
@@ -31,6 +32,16 @@ case "$region" in
     exit 2
     ;;
 esac
+case "$AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID" in
+  ''|*[!0-9]*)
+    echo "AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID must contain only digits" >&2
+    exit 2
+    ;;
+esac
+if [ "${#AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID}" -ne 12 ]; then
+  echo "AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID must contain 12 digits" >&2
+  exit 2
+fi
 case "$expected_prefix" in
   ''|/*|*//*|*/../*|*/..|*/./*|*/.)
     echo "AWS_S3_AUDIT_LIFECYCLE_PREFIX contains an unsafe path" >&2
@@ -47,6 +58,26 @@ fail() {
   exit 1
 }
 
+reject_endpoint_overrides() {
+  if [ -n "${AWS_ENDPOINT:-}" ] || [ -n "${AWS_ENDPOINT_URL:-}" ] || \
+    [ -n "${AWS_ENDPOINT_URL_S3:-}" ] || [ -n "${AWS_ENDPOINT_URL_STS:-}" ] || \
+    [ -n "${AWS_S3_ENDPOINT:-}" ]; then
+    echo "AWS_S3_RESOURCE_AUDIT_FAILED endpoint_override_detected" >&2
+    exit 2
+  fi
+
+  profile_name=${AWS_PROFILE:-${AWS_DEFAULT_PROFILE:-default}}
+  configured_endpoint=$(aws configure get endpoint_url --profile "$profile_name" 2>/dev/null || true)
+  configured_services=$(aws configure get services --profile "$profile_name" 2>/dev/null || true)
+  configured_s3_endpoint=$(aws configure get services.s3.endpoint_url --profile "$profile_name" 2>/dev/null || true)
+  configured_sts_endpoint=$(aws configure get services.sts.endpoint_url --profile "$profile_name" 2>/dev/null || true)
+  if [ -n "$configured_endpoint" ] || [ -n "$configured_services" ] || \
+    [ -n "$configured_s3_endpoint" ] || [ -n "$configured_sts_endpoint" ]; then
+    echo "AWS_S3_RESOURCE_AUDIT_FAILED profile_endpoint_override_detected" >&2
+    exit 2
+  fi
+}
+
 read_value() {
   aws_call s3api "$@" --bucket "$AWS_S3_AUDIT_BUCKET" --region "$region" --output text
 }
@@ -55,8 +86,22 @@ normalize_bool() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
 }
 
+reject_endpoint_overrides
+
+caller_account=$(aws_call sts get-caller-identity --region "$region" --query Account --output text) ||
+  fail "caller_identity_unavailable"
+[ "$caller_account" = "$AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID" ] ||
+  fail "unexpected_caller_account expected=$AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID value=$caller_account"
 caller_arn=$(aws_call sts get-caller-identity --region "$region" --query Arn --output text) ||
   fail "caller_identity_unavailable"
+
+bucket_region=$(read_value get-bucket-location --query LocationConstraint) ||
+  fail "bucket_location_unavailable"
+case "$bucket_region" in
+  None|none|'') bucket_region=us-east-1 ;;
+esac
+[ "$bucket_region" = "$region" ] ||
+  fail "unexpected_bucket_region expected=$region value=$bucket_region"
 
 for field in BlockPublicAcls IgnorePublicAcls BlockPublicPolicy RestrictPublicBuckets; do
   value=$(read_value get-public-access-block --query "PublicAccessBlockConfiguration.$field") ||

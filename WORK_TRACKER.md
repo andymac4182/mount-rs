@@ -501,7 +501,7 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
+| W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
 | W26 | Apache Ozone S3 backend | W26 qualification complete; customer-deployed Ozone integration track is open and currently NO-GO pending CI qualification for all feasible providers, 1,000 IOPS per drive, 99.99%/5-minute objective boundaries, security and end-to-end client coverage | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
@@ -1571,6 +1571,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `sdk-self-test --reopen` against a separate owned prefix, proving the
   configuration-driven consumer path. AWS S3 evidence does not replace
   Cloudflare R2 or RustFS acceptance.
+- [x] The 2026-09-21 rerun after hardening the qualification boundary passed
+  the read-only resource audit with expected caller account `922978963556`
+  and bucket-region verification, then passed the CLI, composed SDK, and
+  fresh-process reopen gates under owned prefix
+  `mount-rs-tests/aws-s3/20260921T110709Z-26488-cb5ea2ff3d0d69de816b63db34ef1806`.
+  Direct AWS tests now construct the public `AwsS3Config` path rather than a
+  parallel raw client, and version-aware cleanup completed with
+  `AWS_S3_TEST_PASS`.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -1610,7 +1618,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort; the W25 bucket and role are test resources, so
-  production resource review remains open.
+  production resource review remains open. The audit now fails closed on
+  inherited endpoint/service-profile overrides, requires an expected caller
+  account, and verifies the bucket location before reporting controls.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -1622,7 +1632,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
-  smoke. Do not place AWS secrets in the repository or CI logs.
+  smoke. The workflow action references are now pinned to verified full SHAs,
+  but hosted OIDC trust, the protected versioning-status input, and the
+  deployment evidence remain open. Do not place AWS secrets in the repository
+  or CI logs.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
