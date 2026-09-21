@@ -431,7 +431,11 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             link_path = &extended_link;
             continue;
         }
-        if std::ptr::eq(link_path, &extended_link) && error.raw_os_error() == Some(2) {
+        if std::ptr::eq(link_path, &extended_link)
+            && matches!(error.raw_os_error(), Some(2) | Some(3))
+        {
+            // ERROR_FILE_NOT_FOUND and ERROR_PATH_NOT_FOUND both occur when
+            // the long-link fallback is needed on hosted Windows runners.
             return create_long_symlink(path, target, directory);
         }
         return Err(error);
