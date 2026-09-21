@@ -380,7 +380,10 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         native/hosted benchmark and full release matrices remain separate from
         the authenticated live gate. The new main-only workflow admits at most
         20 runs per month under a worst-case $100 monthly envelope (up to $4 per
-        run); its hosted result is still revision-specific and pending.
+        run). Hosted run <code>35575940720</code> passed its budget gate but
+        failed the remote CLI graceful-shutdown/reopen check with
+        <code>ESTALE: stale file handle, metadata lease</code> after the
+        60-second watchdog; it is not a hosted acceptance pass.
       </>
     ),
     evidence: (
@@ -406,11 +409,13 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         wires a budget-gated <code>Live Cloudflare R2</code> workflow with
         pinned Rust/Node tooling, a pinned mountx checkout, AWS CLI cleanup,
         the full Rust/Node/CLI/PGlite/trace packet, and an uploaded benchmark
-        artifact. The budget gate passed for hosted run
-        <code>35575940720</code>; its live lane was still running at the latest
-        review, while the earlier replacement run was canceled before terminal
-        acceptance. The remote R2 trace is now bounded to one seed by default,
-        and no hosted pass is claimed until the complete workflow finishes.
+        artifact. Hosted run <code>35575940720</code> passed the budget gate,
+        the live Rust backend and PGlite SDK/CLI packet, and the bounded
+        one-seed R2 trace with <code>621</code> operations. It then failed at
+        <code>remote_cli_http_durable_reopen_after_graceful_shutdown</code>:
+        the CLI exited with <code>ESTALE: stale file handle, metadata
+        lease</code> after the 60-second watchdog. The workflow therefore
+        produced useful partial hosted evidence but no acceptance pass.
       </>
     ),
     sources: [
@@ -419,6 +424,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'Configuration-driven provider matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/config-pglite-r2.json' },
       { label: 'Budgeted live-R2 workflow', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cloudflare-r2.yml' },
       { label: 'R2 progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w05-progress-ledger.md' },
+      { label: 'Hosted R2 run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575940720' },
     ],
   },
   rustfs: {
