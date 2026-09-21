@@ -2900,6 +2900,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   protected-environment fixture (`AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`).
   These are credential-free fail-closed safeguards only; they do not approve
   the external GitHub environment, IAM trust, or production parameters.
+- [x] The current credential-free W25 rollout-contract fixtures at pushed
+  source `f950e5b87092504cc43a8f68a7fcc07098abc345` passed on 2026-09-22:
+  `AWS_S3_TEMPLATE_CONTRACT_PASS`, `AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`,
+  `AWS_S3_CI_CONFIG_TEST_PASS cases=7`, and
+  `AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`. These are fail-closed local
+  safeguards only; they do not approve the external GitHub environment, IAM
+  trust, or production parameters.
 - [x] The exact pushed S3 observability source
   `eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed on 2026-09-22:
   `cargo fmt --all -- --check`, the full locked offline workspace/all-target
