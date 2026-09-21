@@ -2027,8 +2027,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   checks the immutable GitHub subject, OIDC provider, exact role trust, protected
   environment, and required input names without mutating either system. The
   workflow now has a secret-safe preflight validator that blocks
-  before AWS authentication when those inputs are absent or malformed, and it
-  rejects a role ARN whose account does not match the protected
+  before AWS authentication when those inputs are absent or malformed. The
+  validator's secret-free six-case regression matrix covers valid, missing,
+  account-mismatch, endpoint, unsafe-prefix, and static-credential inputs;
+  it rejects a role ARN whose account does not match the protected
   `MOUNT_RS_AWS_S3_ACCOUNT_ID` value. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
