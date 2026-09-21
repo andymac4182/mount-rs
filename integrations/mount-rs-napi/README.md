@@ -89,7 +89,10 @@ otherwise it exercises the FoundationDB metadata path with in-memory blocks.
 The native feature build requires the host FoundationDB client library for
 linking, and a live cluster is required for the runtime gate. The repository
 CI lane builds that artifact from the pinned FoundationDB client image and
-runs this test in a Node 24 container on the same Docker network.
+runs this test in a Node 24 container on the same Docker network. That hosted
+lane publishes a shared authority sample first and selects `shared-provider`
+with the published `authorityPrefix`; local invocations default to the
+explicit persisted single-authority/test mode.
 
 ## Optional observability
 

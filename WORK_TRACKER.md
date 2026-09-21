@@ -932,8 +932,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   cluster, composing RustFS blocks when that lane is active. The same lane now
   has an explicit Linux FUSE prerequisite and runs the config-driven CLI native
   lifecycle/reopen test inside the client container with a separately
-  published shared-provider authority when `/dev/fuse` is available. Hosted
-  result and macOS NFS acceptance remain open.
+  published shared-provider authority when `/dev/fuse` is available. The live
+  Node gate uses that same published authority prefix. Hosted result and macOS
+  NFS acceptance remain open.
 - [ ] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.

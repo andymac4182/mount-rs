@@ -15,6 +15,14 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
 
   const suffix = `${process.pid}-${Date.now()}`
   const prefix = `mount-rs-napi/foundationdb/${suffix}`
+  const sharedProvider = process.env.MOUNT_RS_NAPI_FOUNDATIONDB_SHARED_PROVIDER === "1"
+  const authorityPrefix = process.env.MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX
+  if (sharedProvider) {
+    assert.ok(
+      authorityPrefix,
+      "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX is required for shared-provider mode",
+    )
+  }
   const blocks =
     process.env.R2_ENDPOINT &&
     process.env.R2_BUCKET &&
@@ -37,10 +45,39 @@ if (process.env.MOUNT_RS_NAPI_FOUNDATIONDB !== "1") {
       uri: clusterFile,
       key: prefix,
       durable: true,
-      leaseAuthority: "persisted-single-authority",
+      leaseAuthority: sharedProvider ? "shared-provider" : "persisted-single-authority",
     },
     blocks,
   }
+  if (sharedProvider) {
+    store.metadata.authorityPrefix = authorityPrefix
+  }
+  await assert.rejects(
+    () =>
+      createChunkedDriver({
+        metadata: {
+          ...store.metadata,
+          leaseAuthority: "shared-provider",
+          authorityPrefix: undefined,
+        },
+        blocks: { kind: "memory" },
+        chunkSize: 4096,
+      }),
+    /metadata\.authorityPrefix is required/,
+  )
+  await assert.rejects(
+    () =>
+      createChunkedDriver({
+        metadata: {
+          ...store.metadata,
+          leaseAuthority: "persisted-single-authority",
+          authorityPrefix: "not-valid-for-persisted-mode",
+        },
+        blocks: { kind: "memory" },
+        chunkSize: 4096,
+      }),
+    /metadata\.authorityPrefix is not valid for this backend/,
+  )
   const options = {
     ...store,
     chunkSize: 4096,
