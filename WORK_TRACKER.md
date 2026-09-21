@@ -2567,6 +2567,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `futures-util` dependency so the harness now passes its `--locked` gate.
   This remains qualification-account and local-metadata evidence, not
   production deployment acceptance.
+- [x] A fresh current-source scoped rerun at pushed source
+  `860492d8595b665361e8d9eff46498280fc8de1f` on 2026-09-22 passed the same
+  dedicated-role sibling-prefix denial, public SDK/CLI self-test, composed
+  AWS S3 filesystem, process reopen, independent-PGlite metadata, writer
+  fencing, PGlite backup/restore, fresh-server reopen, and exact owned-prefix
+  cleanup gates under
+  `mount-rs-tests/aws-s3/20260921T173952Z-67696-542c6ba2bf6552e46bc85e0c0873bf8c`.
+  Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+  refreshed qualification-account and local-metadata evidence only; production
+  metadata ownership, independent backup/restore, schema migration, failure
+  recovery, DR, and operational sign-off remain open.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed

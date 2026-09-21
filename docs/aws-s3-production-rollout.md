@@ -125,7 +125,16 @@ backup/restore and fresh-server reopen, and exact cleanup all passed. The
 standalone `tests/aws/Cargo.lock` was refreshed for the current
 `mount-rs-fuse` `futures-util` dependency, restoring the harness's `--locked`
 reproducibility. This remains qualification-account and local-metadata
-evidence only.
+evidence only. A fresh current-source scoped rerun at pushed source
+`860492d8595b665361e8d9eff46498280fc8de1f` on 2026-09-22 passed the same
+dedicated-role sibling-prefix denial, public SDK/CLI self-test, composed AWS
+S3 filesystem, process reopen, independent-PGlite metadata, writer fencing,
+PGlite backup/restore, fresh-server reopen, and exact cleanup gates under
+`mount-rs-tests/aws-s3/20260921T173952Z-67696-542c6ba2bf6552e46bc85e0c0873bf8c`.
+Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+refreshed qualification-account and local-metadata evidence only; production
+metadata ownership, independent backup/restore, schema migration, failure
+recovery, DR, and operational sign-off remain open.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership
