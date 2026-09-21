@@ -80,8 +80,8 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
   {
     printf '%s\n' '### Live R2 CI budget guard'
     printf '%s\n' ''
-    printf '%s\n' "- Accepted run: `$accepted_count/$run_limit` this billing month"
+    printf '%s\n' "- Accepted run: $accepted_count/$run_limit this billing month"
     printf '%s\n' "- Worst-case lane envelope: \$$envelope_usd per month"
-    printf '%s\n' "- Remaining run slots: `$remaining`"
+    printf '%s\n' "- Remaining run slots: $remaining"
   } >>"$GITHUB_STEP_SUMMARY"
 fi
