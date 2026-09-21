@@ -1877,6 +1877,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   it does not close live provider, native-kernel or W08-P01–P09 production
   gates. *(Implementation verification; provider, native and production
   environments remain external.)*
+- [x] W08.24 **Current published-main hosted target-attestation qualification:**
+  manual `workflow_dispatch` run `35631063978` completed successfully at
+  source `cf75835e5a4b00c1e9b31f4060093710df610ece`. Linux build/download/
+  attestation jobs `106437098891`, `106439285204`, `106439636662` and macOS
+  jobs `106437098611`, `106439285356`, `106439636979` all passed final target
+  verification. Linux tarball SHA-256 is
+  `54220877022f67640aa7b470a8eaa09b24df1d867e00463533642b6fa462182a`
+  (8,315,540 bytes); macOS arm64 is
+  `6df488c71a0eb65674af9adf7660b870424b4e47227d832028180947dbb83b39`
+  (6,918,800 bytes). Repository attestation records are `49001528`,
+  `49001543`, `49001531` and `49001545`; Rekor entries are `2906464391`,
+  `2906464436`, `2906464411` and `2906464449`. Both
+  `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed. This is hosted
+  published-main qualification, not an approved tag release, registry
+  acceptance, canary, rollback or owner approval. *(Hosted/provider
+  qualification; release approval and production deployment are external
+  gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1979,7 +1996,7 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.22's pinned attestation wiring,
+  target/download matrix and W08.17–W08.24's pinned attestation wiring,
   dispatch isolation, full-pin correction, verifier identity fix and terminal
   target qualification, but they do not run a real tag release or close the
   canary, rollback or approval gates.
