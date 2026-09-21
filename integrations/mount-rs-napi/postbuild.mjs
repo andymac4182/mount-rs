@@ -124,6 +124,19 @@ types = types.replace(
     return `export declare class P9Server {${body}\n}`
   },
 )
+if (!types.includes("export interface P9AttachOptions {")) {
+  types = types.replace(
+    "export interface P9ServerOptions {",
+    `export interface P9AttachOptions {
+  peer?: string
+  own?: boolean
+  maxFrame?: number
+  maxInFlight?: number
+}
+
+export interface P9ServerOptions {`,
+  )
+}
 // The FUSE postlude wraps the native async class with the public
 // mount-free/session facade. Keep generated declarations aligned with that
 // runtime layer after every clean `napi build`.
