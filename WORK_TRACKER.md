@@ -2534,6 +2534,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   without AWS credentials. The CloudFormation bucket-name constraint and the
   read-only resource audit now reject consecutive dots and invalid length or
   edge characters consistently with the hosted preflight.
+- [x] A fresh read-only resource audit at current source `32b0609` on
+  2026-09-22 again passed the selected `myroot` qualification bucket's
+  account/region binding, all four public-access blocks,
+  `BucketOwnerEnforced` ownership, AES256 encryption, `None` versioning,
+  seven-day `mount-rs-tests/` lifecycle, and one-day incomplete-multipart
+  abort. It did not mutate the bucket or rerun service acceptance; this is
+  qualification-account evidence only.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -2621,7 +2628,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   mutating either system; additional or broad GitHub federation trust
   statements fail closed. Its credential-free three-case environment fixture
   test is wired into the hosted preflight. The
-  fresh read-only audit on 2026-09-22 returned
+  fresh read-only audit at current source `32b0609` on 2026-09-22 returned
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
   non-self-approvable reviewer, protected-environment inputs and secret,
   missing GitHub OIDC provider, and missing immutable-subject role trust; it
