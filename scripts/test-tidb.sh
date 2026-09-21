@@ -557,6 +557,34 @@ wait_for_tidb() {
   return 1
 }
 
+start_tidb() {
+  tidb_container_name=$1
+  docker run --detach \
+    --platform "$docker_platform" \
+    --name "$tidb_container_name" \
+    --label "$resource_label" \
+    --network "$network_name" \
+    --ip "$tidb_ip" \
+    --network-alias tidb \
+    --publish 127.0.0.1::4000/tcp \
+    --publish 127.0.0.1::10080/tcp \
+    --volume "$tidb_config:/etc/tidb-test.toml:ro" \
+    "$tidb_image" \
+    --config=/etc/tidb-test.toml \
+    --store=tikv \
+    --path="$pd_endpoints" \
+    --host=0.0.0.0 \
+    --advertise-address="$tidb_ip" \
+    -P=4000 \
+    -L=warn \
+    --status=10080 \
+    >/dev/null
+  created_containers="$created_containers $tidb_container_name"
+  tidb_container="$tidb_container_name"
+  tidb_sql_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "4000/tcp") 0).HostPort}}' "$tidb_container")
+  tidb_status_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "10080/tcp") 0).HostPort}}' "$tidb_container")
+}
+
 begin_phase() {
   phase_name=$1
   startup_deadline=$(($(date +%s) + startup_timeout_seconds))
@@ -664,30 +692,7 @@ tidb_container="mount-rs-tidb-$run_id-tidb"
 # rebuilds optimizer statistics after a frontend restart. W08 validates the
 # provider and replicated-store durability, not optimizer warm-up; keep
 # readiness independent of that optional startup phase.
-docker run --detach \
-  --platform "$docker_platform" \
-  --name "$tidb_container" \
-  --label "$resource_label" \
-  --network "$network_name" \
-  --ip "$tidb_ip" \
-  --network-alias tidb \
-  --publish 127.0.0.1::4000/tcp \
-  --publish 127.0.0.1::10080/tcp \
-  --volume "$tidb_config:/etc/tidb-test.toml:ro" \
-  "$tidb_image" \
-  --config=/etc/tidb-test.toml \
-  --store=tikv \
-  --path="$pd_endpoints" \
-  --host=0.0.0.0 \
-  --advertise-address="$tidb_ip" \
-  -P=4000 \
-  -L=warn \
-  --status=10080 \
-  >/dev/null
-created_containers="$created_containers $tidb_container"
-tidb_container_name=$tidb_container
-tidb_sql_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "4000/tcp") 0).HostPort}}' "$tidb_container_name")
-tidb_status_port=$(docker inspect --format '{{(index (index .NetworkSettings.Ports "10080/tcp") 0).HostPort}}' "$tidb_container_name")
+start_tidb "$tidb_container"
 begin_phase "TiDB readiness"
 wait_for_tidb
 
@@ -711,10 +716,13 @@ if [ "$topology" = durable ]; then
   # a power-loss or host-fsync guarantee; the provider's durable flag remains
   # caller-owned.
   begin_phase "TiDB restart readiness"
-  # TiDB v8.5.7 drains clients and closes its DDL/domain state during a
-  # graceful signal; Docker's default ten-second grace can SIGKILL it before
-  # that cleanup completes and strand restart state in PD/TiKV.
-  docker restart --time 30 "$tidb_container" >/dev/null
+  # Keep the PD/TiKV-backed state while giving the frontend a fresh process and
+  # listener lifecycle. In-place Docker restart can leave TiDB v8.5.7 blocked
+  # in DDL/domain bootstrap after its graceful shutdown has completed.
+  docker stop --time 30 "$tidb_container" >/dev/null
+  docker rm "$tidb_container" >/dev/null
+  start_tidb "$tidb_container"
+  tidb_url="mysql://root@127.0.0.1:$tidb_sql_port/test"
   wait_for_tidb
   begin_phase "TiKV restart readiness"
   docker restart "mount-rs-tidb-$run_id-tikv1" >/dev/null
