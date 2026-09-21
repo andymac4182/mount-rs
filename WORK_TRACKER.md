@@ -231,6 +231,14 @@ harness covers the callback and state boundary. The macOS all-target FUSE
 suite, strict Clippy, formatting, and Linux-target test type-check passed;
 hosted Linux native fault/crash/restart, callback-event, concurrency, lock and
 durability evidence remain external, so W01 stays NO-GO.
+The follow-up cancellation packet makes the Linux loop observe `request_stop()`
+while a backend request is in flight. The cancellable request future is
+dropped, session cleanup runs, and lifecycle state closes without reporting an
+orderly stop as a transport error; a Linux-gated blocking-driver harness
+covers the bounded close. Local all-target FUSE tests, strict Clippy,
+formatting, and Linux-target test type-check pass, while hosted close races,
+concurrent request behavior, crash/restart, callback-event, lock and
+durability evidence remain external; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
