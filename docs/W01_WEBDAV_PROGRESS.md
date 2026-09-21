@@ -14,7 +14,7 @@ streaming APIs, connection faults, lifecycle, and provider/native boundaries.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Public WebDAV barrel and pure protocol behavior | Local PASS; oracle differential SKIP | `./webdav` barrel, generated declarations, pinned constants/path/header/XML/lock/document differential; `MOUNTX_SOURCE` is required for the oracle row |
+| Public WebDAV barrel and pure protocol behavior | Local PASS; pinned pure oracle differential PASS; broader session/server parity OPEN | `./webdav` barrel, generated declarations, pinned constants/path/header/XML/lock/document differential; the pinned pure differential passed with `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` at oracle `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` |
 | Session, lock, auth and streaming objects | Buffered/session, active-lock, direct-method, and direct-streaming slices PASS; member parity OPEN | N-API session view, driver/options/lock policy, active lock records, class 1/2/3 methods, auth challenge/acceptance, streamed bodies, cancellation, and typed errors |
 | Connection and server lifecycle | Rust and local host-enabled N-API listener/fault slices PASS; restart/native/hosted lifecycle OPEN | Rust HTTP lifecycle and connection-fault tests; local N-API listen/close and peer-reset evidence; restart and native/hosted lifecycle evidence remain required |
 | Live/provider/native qualification | External gate | Fresh supported backend and hosted/native results where applicable |
@@ -29,7 +29,8 @@ streaming APIs, connection faults, lifecycle, and provider/native boundaries.
   crash/power-loss boundaries where applicable.
 - Exercise cancellation, close, and crash/power-loss restart behavior through
   the N-API boundary.
-- Run the pinned oracle differential when `MOUNTX_SOURCE` is supplied.
+- Keep the pinned pure oracle differential green and add the broader
+  session/server differential when that harness is available.
 - Qualify supported provider/native/hosted paths; keep unavailable rows
   explicitly classified.
 
@@ -37,7 +38,8 @@ streaming APIs, connection faults, lifecycle, and provider/native boundaries.
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
-| 2026-09-22 | WebDAV pure barrel and buffered N-API session | `./scripts/cargo-shared test -p mount-rs-webdav --locked`: 13 passed, native mount probe explicitly ignored; isolated locked N-API check passed; release N-API build and generated declarations passed; direct buffered session/options/driver/auth check passed | Oracle differential needs `MOUNTX_SOURCE`; loopback N-API listener is blocked in this sandbox by `Operation not permitted`; streaming, peer-fault, restart/durability, provider, and native/hosted gates remain open |
+| 2026-09-22 | WebDAV pure barrel and buffered N-API session | `./scripts/cargo-shared test -p mount-rs-webdav --locked`: 13 passed, native mount probe explicitly ignored; isolated locked N-API check passed; release N-API build and generated declarations passed; direct buffered session/options/driver/auth check passed | Broader session/server parity, loopback N-API listener in this sandbox (`Operation not permitted` without host execution), streaming, peer-fault, restart/durability, provider, and native/hosted gates remain open |
+| 2026-09-22 | WebDAV pinned pure oracle differential | `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/webdav-codec.mjs` passed the complete pure constants/path/header/XML/lock/document differential at oracle `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; the same source-backed host-enabled `node test/servers.mjs` also passed | Full session/server member differential, native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open |
 | 2026-09-22 | WebDAV N-API streamed request/response bodies | Isolated N-API check and release addon build passed; generated declarations expose `handleRequestStream`; direct N-API probe passed three-chunk PUT, multi-chunk GET, early response-iterator return, and deliberate request-body failure mapping; the WebDAV stream facade accepts async iterables and Web ReadableStreams | Complete session/member parity, direct listener lifecycle on a host that permits loopback binds, peer-fault injection, oracle differential, restart/durability, provider, and native/hosted gates remain open |
 | 2026-09-22 | WebDAV N-API active lock records | Added generated `WebdavLockView` records and `WebdavSession.locks`; `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-test-target ./scripts/cargo-shared test -p mount-rs-webdav --locked` passed 13/13 with the native mount probe explicitly ignored, `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-check-target ./scripts/cargo-shared check -p mount-rs-napi --locked`, `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-napi-target pnpm build`, `node test/servers.mjs`, and `node test/typecheck.mjs` passed; direct LOCK exposed token/path/depth/exclusive/timeout state and UNLOCK reduced the session view to zero | Complete session/member parity, direct listener lifecycle on a host that permits loopback binds, peer-fault injection, oracle differential, restart/durability, provider, and native/hosted gates remain open |
 | 2026-09-22 | WebDAV direct N-API method matrix | Host-enabled `node test/servers.mjs` passed direct `OPTIONS`/`MKCOL`/`PUT`/`HEAD`/`GET`, `PROPFIND`/`PROPPATCH`, `COPY`/`MOVE`, `LOCK`/`UNLOCK`, `DELETE`, and explicit `PATCH` refusal at the session boundary | Complete session/member parity, direct listener lifecycle on a host that permits loopback binds, peer-fault injection, oracle differential, restart/durability, provider, and native/hosted gates remain open |

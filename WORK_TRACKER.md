@@ -726,13 +726,16 @@ transport-hook plumbing. The Rust WebDAV target passed 13/13 tests; the
 isolated locked N-API check, release addon, generated declarations, and direct
 N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
 return, and deliberate body failure. The oracle differential is explicitly
-skipped without `MOUNTX_SOURCE`, the sandbox blocks the live N-API loopback
-bind with `Operation not permitted`, and complete member parity, provider,
-hosted, native, network-client concurrency, and restart/durability gates
-remain open. The host-enabled WebDAV session packet also completes eight
-parallel unique-file PUTs and GETs through one direct session with exact
-byte-for-byte readback; that is same-process same-driver evidence only. W01
-and production status remain **NO-GO**.
+skipped without `MOUNTX_SOURCE`; with the pinned source at
+`/private/tmp/mountx-source-w01-20260921` (oracle
+`85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
+differential and source-backed host-enabled server phase pass. The sandbox
+blocks the live N-API loopback bind with `Operation not permitted`, and full
+session/member parity, provider, hosted, native, network-client concurrency,
+and restart/durability gates remain open. The host-enabled WebDAV session
+packet also completes eight parallel unique-file PUTs and GETs through one
+direct session with exact byte-for-byte readback; that is same-process
+same-driver evidence only. W01 and production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
