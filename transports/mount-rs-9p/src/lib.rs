@@ -42,5 +42,8 @@ pub use server::{
     P9AttachOptions, P9Connection, P9Server, P9ServerHooks, P9ServerOptions, P9TransportError,
     P9TransportErrorHook, P9TransportErrorKind,
 };
-pub use session::{P9Session, P9SessionOptions, P9SessionStats, P9User};
+pub use session::{
+    P9AssertionHook, P9Session, P9SessionErrorHook, P9SessionHooks, P9SessionOptions,
+    P9SessionStats, P9User,
+};
 pub use wire::{P9Error, P9Qid, P9Reader, P9Writer};

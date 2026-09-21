@@ -575,6 +575,11 @@ export declare class P9Session {
   handleCall(bytes: Buffer): Promise<Buffer | null>
   /** Tear down the session and release every driver handle it owns. */
   destroy(): Promise<void>
+  /**
+   * Read-only N-API wrapper for the session-owned filesystem driver. The
+   * server retains the authoritative driver lifetime.
+   */
+  get driver(): Filesystem
   /** The scalar policy used when this session was created. */
   get options(): P9SessionOptions
   /** The attach identity recorded for a live fid, if any. */
@@ -595,6 +600,7 @@ export declare class P9Session {
   get destroyed(): boolean
   get inflight(): number
   get stats(): P9SessionStats
+  get assertions(): Array<string>
 }
 
 /**
@@ -2356,7 +2362,10 @@ export interface P9ServerOptions {
   useDriverIno?: boolean
   readOnly?: boolean
   claimOwnership?: boolean
+  debug?: boolean
   onTransportError?: (error: unknown, peer: string | undefined) => void
+  onError?: (error: unknown, header: NativeP9Header | undefined) => void
+  onAssertion?: (message: string) => void
 }
 
 /**
@@ -2368,6 +2377,7 @@ export interface P9SessionOptions {
   useDriverIno: boolean
   readOnly: boolean
   claimOwnership: boolean
+  debug: boolean
 }
 
 export interface P9SessionStats {
@@ -2376,6 +2386,7 @@ export interface P9SessionStats {
   errors: number
   dropped: number
   flushed: number
+  assertions: number
   messages: Record<string, number>
 }
 

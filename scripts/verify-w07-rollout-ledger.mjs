@@ -103,8 +103,29 @@ if (noGo) {
     /- \[x\] W07\.7 \*\*Production rollout readiness and go\/no-go:/u,
     "go-requires-complete-w07.7",
   );
+  for (const gate of nestedGates) {
+    const escaped = gate.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+    requireMatch(
+      tracker,
+      new RegExp(`- \\[x\\] \\*\\*${escaped}:\\*\\*`, "u"),
+      `go-requires-complete-${gate.toLowerCase().replaceAll(" ", "-")}`,
+    );
+  }
+  requireMatch(
+    runbook,
+    /current rollout decision remains \*\*GO\*\*/u,
+    "go-requires-runbook-go",
+  );
+  if (/No P0–P14 gate is currently terminally accepted\./u.test(rollout)) {
+    fail("go-cannot-retain-open-p0-p14-ledger");
+  }
   const p14 = rollout.match(/^\| P14[^\n]*$/mu)?.[0] ?? "";
-  requireMatch(p14, /\|\s*(?:Complete|GO|Accepted)\b/iu, "go-requires-p14-acceptance");
+  const p14Status = p14.split("|")[2]?.trim() ?? "";
+  requireMatch(
+    p14Status,
+    /^(?:Complete|GO|Accepted)\b/iu,
+    "go-requires-p14-acceptance",
+  );
 }
 
 console.log(

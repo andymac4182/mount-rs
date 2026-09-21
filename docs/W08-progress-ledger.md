@@ -1,8 +1,15 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 04:51 AEST**
+Status snapshot: **2026-09-22 05:36 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: W08.29 evidence commit `ad45bf06` was reconciled into
+Publication snapshot: W08.31 evidence documentation commit `d293fe5b` was
+reconciled into public merge tip `682d2441`; the final pointer-sync commit
+`7dbe0ce3` is the current public ref
+`7dbe0ce3aa3758e4e84ba2b105f1ea17a61ac296` (verified at **05:36 AEST**).
+W08.30 source-verification documentation commit
+`8b4fac35` was reconciled into public merge tip
+`d4de2e75623ebfe730166bec696f4f43b25ea4fc` (the ref verified at **04:51
+AEST**). W08.29 evidence commit `ad45bf06` was previously reconciled into
 public merge tip `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`; the subsequent
 pointer-synchronized ledger and rollout notes were published in merge tip
 `3cd43779a8f440b47278e5112f9ec48b12f43e23` (the ref verified at **04:47
@@ -15,6 +22,11 @@ Hosted W08.29 run
 `35638433010` qualified source `9d3a6e502eccec9ba54c00e80c98e6e1da175177`;
 the target artifacts, manifests, SBOMs and attestations were independently
 reverified after download.
+The latest W08.31 manual target qualification run `35641555767` completed
+successfully from current-main-at-dispatch source
+`2bbd0266a094b06bf97d51baafe0d3a8800bfec5`; both target builds, both
+download-verification jobs and both provenance/SBOM-attestation jobs passed,
+and the downloaded artifacts were independently reverified below.
 The protected production-candidate admission workflow remains implementation
 evidence only: no candidate tag, protected-environment approval, published
 production-candidate release, registry acceptance, canary, rollback or owner
@@ -22,7 +34,8 @@ approval was executed in this session.
 Authoritative W08 hosted evidence includes CI runs `35624385556`, source
 `2ab3cf1`, `35627761501`, source `50a33ac`, `35631063978`, source `cf75835`,
 and `35633841116`, source `56aae0c`, plus `35638005702`, source `ad0dd81`,
-and `35638433010`, source `9d3a6e5`, with terminal Linux/macOS build,
+and `35638433010`, source `9d3a6e5`, plus `35641555767`, source
+`2bbd0266`, with terminal Linux/macOS build,
 download-verification and
 provenance/SBOM-attestation jobs, plus the functional, HTTP-contract,
 release-policy, SBOM and asset-integrity jobs recorded below. Earlier candidate
@@ -45,6 +58,9 @@ by terminal hosted jobs. The aggregate workflow was later cancelled by
 failures; those are separate workstreams and are not converted into W08
 failures. Local Docker capacity and local native-device/credential gaps remain
 environment boundaries, not open W08 acceptance actions.
+W08.31 adds a fresh hosted Linux x86_64/macOS arm64 target-package,
+download, runtime, checksum, SBOM and attestation qualification; it does not
+change the separate production rollout decision.
 
 The headline percentage uses this deliberately simple weighting of the five
 top-level tracker items; it is not a line-count metric:
@@ -113,6 +129,26 @@ checksums, manifests, 288-component SBOMs and tar contents. This does not
 replace the protected candidate-tag release, registry publication, canary,
 rollback or owner approval.
 
+W08.31 requalified the target path in hosted run `35641555767`, source
+`2bbd0266a094b06bf97d51baafe0d3a8800bfec5`. Build jobs
+`106471833712` (Linux x86_64) and `106471833967` (macOS arm64), downloaded
+asset jobs `106473358964` and `106473359006`, and attestation jobs
+`106475107803` and `106475108148` all reached terminal success. The Linux
+tarball SHA-256 is
+`6a3de0a607ffafcedf6bd3385c3849a30208df0345120061061821109a09ac79`
+(8,373,376 bytes); the macOS arm64 tarball SHA-256 is
+`75a031c4e439ede07f0fa1a09db050b15c45f6d802a703d90b67cde52b4a941d`
+(6,958,388 bytes). Hosted logs emitted both target-build, downloaded-target
+and `W08_RELEASE_TARGET_ATTESTATION_PASS` markers. Local rechecks returned
+three checksum `OK` lines per target, manifest-policy PASS, SBOM PASS with
+`components=288`, expected `mount-rs` archive contents, and `mount-rs 0.1.0`
+from the extracted macOS arm64 binary. Independent `gh attestation verify`
+calls passed for both the default provenance and CycloneDX predicates with
+exact repository, signer-workflow, source-digest, `refs/heads/main` and
+`--deny-self-hosted-runners` constraints. This remains hosted target
+qualification, not a production-candidate tag release, registry acceptance,
+canary, rollback or release-owner approval.
+
 ### Production go/no-go rule
 
 The rollout remains **NO-GO** while any P01–P09 item is open, skipped,
@@ -161,6 +197,7 @@ P01–P05; P06–P09 then gate canary and production approval.
 | **W08.29** Current published-main hosted target and attestation qualification | **Hosted target qualification passed — 100%; P09 publication/canary/approval gates open** | The existing `workflow_dispatch` `attest=true` target path ran from source `9d3a6e502eccec9ba54c00e80c98e6e1da175177`, which is in the current published-main ancestry. It built/download-verified both supported targets, generated and verified provenance plus CycloneDX SBOM attestations, and passed final identity checks. The evidence capture was committed as `ad45bf06` and published in merge tip `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`. | Run `35638433010` completed with `success`: Linux build `106461545303`, macOS build `106461544977`, downloaded Linux verification `106463019865`, downloaded macOS verification `106463019693`, Linux attestation `106463113298` and macOS attestation `106463113247` all passed. Linux artifact SHA-256 `29130f9d1a753bdcf7dbd2412146585bfc4bdce55c5ddbb4946a79a653696c20` (8,347,688 bytes); macOS arm64 SHA-256 `1530afd0325416db239776c843343e6c99e37406a0cc82be27490d26060ba27c` (6,943,737 bytes). Both `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed. Public downloaded assets were locally rechecked with `SHA256SUMS`, the manifest verifier, the 288-component SBOM verifier and tar-content checks. This remains hosted qualification, not a candidate-tag release, registry acceptance, canary, rollback or approval. | Configure and approve the `w08-production` environment, run the immutable candidate-tag workflow, retain its final release assets and evidence, then execute canary, rollback and owner approval. | **~0.25 engineer-day** hosted evidence capture and independent re-verification; **~4m45s** hosted run plus download/attestation observation, excluding queue; remaining release/canary/rollback work is **~1–2 engineer-days** provisionally, excluding external waits. | Protected environment policy, candidate tag, OIDC/attestation/release permissions, release registry, deployment controller, canary topology, rollback target and named owners/approvers remain external. |
 
 | **W08.30** Current public-tip Rust source verification | **Source-level verification passed — 100%; provider/native and P01–P09 gates remain open** | Source `76c2b1a863c23afe71c0591d0a480433e1b9078d` was verified with `CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-final-cargo-target ./scripts/cargo-shared test --workspace --all-targets --locked --offline` and the matching strict workspace Clippy command with `-D warnings`. The bounded target was outside the worktree. | The locked workspace test gate completed successfully with all executed tests passing; strict Clippy completed successfully in 34.72s with `-D warnings` and no diagnostics. TiDB/RustFS/PGlite/R2 credentialed rows and FUSE/NFS/native-service rows remained explicit ignored prerequisites. No live-provider, native-host or production evidence is claimed. | No implementation action remains from this source gate. Preserve the explicit provider/native prerequisites and close P01–P09 only with production-like evidence, named owners and a GO decision. | **~0.15 engineer-day** test/Clippy execution and evidence capture; **~46s** test execution after compilation plus **~35s** Clippy execution, excluding setup | TiDB/RustFS/PGlite/R2 credentials/services, native mount capabilities and all production rollout owners/environments remain external. |
+| **W08.31** Latest hosted target, artifact and attestation qualification plus production-policy negative check | **Hosted target qualification passed — 100%; P09 candidate-tag/canary/approval gates remain open** | Node syntax checks for the W08 release/config verifiers and Ruby YAML parsing for the release workflows remained clean. The positive policy-only fixture passed with `config_shape=splitstore durable_metadata=true durable_blocks=true blocks_tls=https tidb_tls=require_ssl secrets=external`; the insecure fixture failed closed with `config.driver.storage.blocks.secret_access_key-must-not-be-inline`, and a shell assertion recorded `W08_PRODUCTION_CONFIG_NEGATIVE_PASS`. The missing-TLS-env fail-closed path was also rechecked; no credential or provider connection was used. | Hosted run `35641555767`, source `2bbd0266a094b06bf97d51baafe0d3a8800bfec5`, completed successfully. Build jobs `106471833712` (Linux) and `106471833967` (macOS), downloaded verification jobs `106473358964` and `106473359006`, and attestation jobs `106475107803` and `106475108148` all passed. Linux artifact SHA-256 `6a3de0a607ffafcedf6bd3385c3849a30208df0345120061061821109a09ac79` (8,373,376 bytes); macOS arm64 SHA-256 `75a031c4e439ede07f0fa1a09db050b15c45f6d802a703d90b67cde52b4a941d` (6,958,388 bytes). Local downloads passed all three checksum entries, both manifest verifiers, both 288-component SBOM verifiers, archive-content checks and the macOS extracted runtime version check. Independent provenance and CycloneDX `gh attestation verify` calls passed with exact source/workflow/ref and `--deny-self-hosted-runners` constraints. | Configure and approve `w08-production`, create and run the approved immutable candidate tag, retain final registry assets and target-specific evidence, then execute staged canary, rollback and release-owner approval. | **~0.15 engineer-day** policy/hosted evidence capture and independent re-verification; **~9 min** hosted build/download/attestation execution plus queue/remote observation; remaining release/canary/rollback work **~1–2 engineer-days** provisionally, excluding external waits. | Protected environment policy, candidate tag, OIDC/attestation/release permissions, release registry, deployment controller, canary topology, rollback target, production credentials and named owners/approvers remain external. |
 
 ## Evidence ledger
 
@@ -182,8 +219,10 @@ P01–P05; P06–P09 then gate canary and production approval.
 | CI `35638433010`, source `9d3a6e502eccec9ba54c00e80c98e6e1da175177`, jobs `106461545303`, `106461544977`, `106463019865`, `106463019693`, `106463113298`, `106463113247` | PASS — W08.29 current published-main hosted target build/download/provenance/SBOM-attestation qualification | Linux x86_64 and macOS arm64 build/package jobs, downloaded-asset verification, provenance attestation generation, CycloneDX SBOM attestation generation and strict final `gh attestation verify` all passed. Linux tarball SHA-256 `29130f9d1a753bdcf7dbd2412146585bfc4bdce55c5ddbb4946a79a653696c20` (8,347,688 bytes); macOS arm64 SHA-256 `1530afd0325416db239776c843343e6c99e37406a0cc82be27490d26060ba27c` (6,943,737 bytes). Both `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed; independent local checks returned three checksum `OK` lines, `W08_RELEASE_MANIFEST_POLICY_PASS`, `W08_RELEASE_SBOM_PASS` with `components=288`, and tar-content PASS for each target. `gh attestation verify --format json` independently verified SLSA provenance and CycloneDX predicates for both artifacts with Rekor transparency timestamps. No candidate-tag release, registry, canary, rollback or approval evidence is claimed. |
 
 | Local source `76c2b1a863c23afe71c0591d0a480433e1b9078d`, bounded target `/private/tmp/mount-rs-w08-final-cargo-target` | PASS — W08.30 current public-tip locked workspace test and strict Clippy verification | `./scripts/cargo-shared test --workspace --all-targets --locked --offline` completed successfully with all executed tests passing. The matching `./scripts/cargo-shared clippy --workspace --all-targets --locked --offline -- -D warnings` completed successfully in 34.72s with no diagnostics. Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE, NFS or other host capabilities remained explicitly ignored; no live-provider or production claim is added. |
+| CI `35641555767`, source `2bbd0266a094b06bf97d51baafe0d3a8800bfec5`, jobs `106471833712`, `106471833967`, `106473358964`, `106473359006`, `106475107803`, `106475108148` | PASS — W08.31 latest current-main-at-dispatch hosted target build/download/provenance/SBOM-attestation qualification | Linux x86_64 and macOS arm64 build/package, downloaded-asset verification, provenance attestation, CycloneDX SBOM attestation and final identity-verifier jobs all passed. Linux tarball SHA-256 `6a3de0a607ffafcedf6bd3385c3849a30208df0345120061061821109a09ac79` (8,373,376 bytes); macOS arm64 tarball SHA-256 `75a031c4e439ede07f0fa1a09db050b15c45f6d802a703d90b67cde52b4a941d` (6,958,388 bytes). Both target-build/download/attestation PASS markers passed; local downloads returned all checksum entries `OK`, manifest and 288-component SBOM verification passed for both targets, archive contents were correct, and the extracted macOS binary reported `mount-rs 0.1.0`. Independent SLSA and CycloneDX attestation verification passed with exact repository, signer-workflow, source-digest, `refs/heads/main` and `--deny-self-hosted-runners` constraints. No candidate-tag release, registry, canary, rollback or approval evidence is claimed. |
 
-The W08.29 evidence row above was published in merge tip
+The W08.29 and W08.31 evidence rows above are hosted qualification evidence;
+the W08.29 evidence row was published in merge tip
 `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`; the row's hosted run and local
 checks remain qualification evidence only, not a candidate-tag release,
 registry acceptance, canary, rollback or approval.
@@ -258,7 +297,7 @@ the evidence counted here.
 ## Remaining action plan
 
 1. No required W08 functional implementation or hosted acceptance action
-   remains for the defined scope. W08.6 and W08.11–W08.29 add credential-free
+   remains for the defined scope. W08.6 and W08.11–W08.31 add credential-free
    or artifact-path policy gates, but none is a production deployment or
    published release result. Preserve the exact terminal job IDs above; do not
    replace them with a later queued/cancelled aggregate status.
@@ -272,7 +311,7 @@ the evidence counted here.
 5. Configure the protected `w08-production` environment and run the approved
    production-candidate tag workflow; retain its actual Linux/macOS artifacts,
    target-specific manifests/SBOMs, aggregate `SHA256SUMS` and verified
-   attestations. Then use W08.17–W08.29's hosted
+   attestations. Then use W08.17–W08.31's hosted
    attestation path and close P09 with signed
    provenance/SBOM, canary telemetry, rollback evidence and an explicit
    go/no-go approval. W08.12–W08.27's local and hosted artifact-policy
@@ -367,6 +406,9 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 04:21–04:35 AEST | Followed publication-side policy run `35638005702` to terminal success, classified push target run `35638005694` as cancelled with `jobs=[]` before execution, dispatched and followed `attest=true` target run `35638433010`, extracted its six terminal job IDs and target digests, downloaded both public bundles, independently verified checksums/manifests/288-component SBOMs/tar contents, and verified both SLSA and CycloneDX attestations with exact source identity. | ~14 min | ~5 min hosted build/download/attestation observation plus ~2 min artifact/attestation re-verification and ~2 min remote synchronization | W08.29 hosted target qualification passed. The cancellation created no evidence and remains separate; candidate-tag publication, protected environment approval, registry acceptance, canary, rollback and owner approval remain open. |
 | 2026-09-22 04:35–04:47 AEST | Reconciled the W08.29 evidence commit with concurrent `origin/main`, pushed the public merge tip, synchronized the ledger and rollout notes to the publication baseline, reconciled one further concurrent mainline update, and verified the resulting public ref. | ~7 min | ~4 min remote fetch/merge/push wait | W08.29 evidence is publicly integrated; pointer-synchronized documentation is present in verified merge tip `3cd43779a8f440b47278e5112f9ec48b12f43e23`. Production candidate publication, canary, rollback and approval remain open. |
 | 2026-09-22 04:47–04:51 AEST | Ran the locked offline workspace test and strict workspace Clippy with `-D warnings` on public source `76c2b1a863c23afe71c0591d0a480433e1b9078d`, using bounded target `/private/tmp/mount-rs-w08-final-cargo-target`. | ~0.15 engineer-day | ~46s test execution after compilation plus ~35s Clippy execution | W08.30 source verification passed. Explicit provider/native prerequisites and all production P01–P09 gates remain open; no live-provider or production claim is added. |
+| 2026-09-22 04:51–05:11 AEST | Rechecked the production-config policy with a policy-only TLS URL: the positive fixture passed, the insecure fixture failed closed and the negative assertion passed. Followed hosted run `35641555767` to terminal success, downloaded both target bundles, independently verified checksums/manifests/288-component SBOMs/archive contents and the extracted macOS runtime, and ran exact-identity SLSA/CycloneDX attestation verification. | ~0.15 engineer-day | ~9 min hosted build/download/attestation execution plus queue/remote observation | W08.31 hosted target qualification passed. Candidate-tag publication, protected-environment approval, registry acceptance, staging/provider operations, canary, rollback, on-call and release-owner approval remain open. |
+| 2026-09-22 05:11–05:34 AEST | Committed the W08.31 tracker, ledger and rollout evidence as `d293fe5b`, reconciled concurrent `origin/main` changes twice, handled one non-fast-forward push rejection without force, and published the reconciled result. | ~0.1 engineer-day | ~0.15 engineer-day concurrent-main fetch/merge/push wait | The W08.31 evidence is publicly integrated at `682d2441`; `HEAD` and `origin/main` match and the worktree is clean. |
+| 2026-09-22 05:34–05:36 AEST | Added the exact public-pointer reference, committed the pointer sync as `7dbe0ce3`, pushed it, refreshed `origin/main` and verified the clean equal refs. | ~0.03 engineer-day | ~2 min remote push/fetch | The final W08.31 ledger pointer is public at `7dbe0ce3`; no production gate was changed or inferred as passed. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

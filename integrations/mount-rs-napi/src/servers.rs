@@ -18,11 +18,13 @@ use bytes::Bytes;
 use mount_rs_9p::{
     DirCursor as TransportP9DirCursor, FidCursorView as TransportP9FidCursorView,
     FidOpenState as TransportP9FidOpenState, FidOpenView as TransportP9FidOpenView,
-    FidTable as TransportP9FidTable, FidView as TransportP9FidView, P9Lock as TransportP9Lock,
+    FidTable as TransportP9FidTable, FidView as TransportP9FidView,
+    P9AssertionHook as TransportP9AssertionHook, P9Lock as TransportP9Lock,
     P9LockClient as TransportP9LockClient, P9LockHolder as TransportP9LockHolder,
     P9LockRequest as TransportP9LockRequest, P9LockTable as TransportP9LockTable,
     P9LockTableOptions as TransportP9LockTableOptions, P9Server as TransportP9Server,
     P9ServerHooks as TransportP9ServerHooks, P9ServerOptions as TransportP9ServerOptions,
+    P9SessionErrorHook as TransportP9SessionErrorHook, P9SessionHooks as TransportP9SessionHooks,
     P9TransportError as TransportP9Error, P9TransportErrorHook as TransportP9ErrorHook,
 };
 use mount_rs_core::{ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, OpenFlags, Stats};
@@ -70,7 +72,7 @@ use napi::{Error, Status, sys};
 use napi_derive::napi;
 
 use super::nfs_codec::{NfsRpcCall, from_call as from_nfs_call};
-use super::p9_codec::NativeP9Qid;
+use super::p9_codec::{NativeP9Header, NativeP9Qid};
 use super::{FileHandle, FileHandle as JsFileHandle, Filesystem, MountDriver};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
@@ -408,6 +410,180 @@ impl Drop for NfsErrorCallback {
     }
 }
 
+pub(crate) type JsP9SessionErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type P9SessionErrorCall = FnArgs<(Error, Option<NativeP9Header>)>;
+type P9SessionErrorTsfn = ThreadsafeFunction<
+    P9SessionErrorEvent,
+    Unknown<'static>,
+    P9SessionErrorCall,
+    Status,
+    false,
+    false,
+>;
+
+#[derive(Clone)]
+struct P9SessionErrorEvent {
+    error: FsError,
+    header: Option<NativeP9Header>,
+}
+
+/// Owns the JavaScript callback for request-level 9P errors.
+pub(crate) struct P9SessionErrorCallback {
+    callback: Mutex<Option<Arc<P9SessionErrorTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl P9SessionErrorCallback {
+    pub(crate) fn new(function: JsP9SessionErrorCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<P9SessionErrorEvent>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| {
+                let event = context.value;
+                Ok(FnArgs::from((
+                    super::to_js_error(event.error),
+                    event.header,
+                )))
+            })?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn report(&self, error: FsError, header: Option<NativeP9Header>) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        let _ = callback.call_with_return_value(
+            P9SessionErrorEvent { error, header },
+            ThreadsafeFunctionCallMode::NonBlocking,
+            |result, _env| {
+                let _ = result;
+                Ok(())
+            },
+        );
+    }
+
+    pub(crate) fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for P9SessionErrorCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub(crate) type JsP9AssertionCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+type P9AssertionCall = FnArgs<(String,)>;
+type P9AssertionTsfn =
+    ThreadsafeFunction<String, Unknown<'static>, P9AssertionCall, Status, false, false>;
+
+/// Owns the JavaScript callback for debug-mode 9P assertion failures.
+pub(crate) struct P9AssertionCallback {
+    callback: Mutex<Option<Arc<P9AssertionTsfn>>>,
+    closed: AtomicBool,
+}
+
+impl P9AssertionCallback {
+    pub(crate) fn new(function: JsP9AssertionCallback) -> napi::Result<Arc<Self>> {
+        let callback = function
+            .build_threadsafe_function::<String>()
+            .weak::<false>()
+            .callee_handled::<false>()
+            .build_callback(|context| Ok(FnArgs::from((context.value,))))?;
+        Ok(Arc::new(Self {
+            callback: Mutex::new(Some(Arc::new(callback))),
+            closed: AtomicBool::new(false),
+        }))
+    }
+
+    fn report(&self, message: String) {
+        if self.closed.load(Ordering::Acquire) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(callback) => callback.as_ref().cloned(),
+            Err(poisoned) => poisoned.into_inner().as_ref().cloned(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        let _ = callback.call_with_return_value(
+            message,
+            ThreadsafeFunctionCallMode::NonBlocking,
+            |result, _env| {
+                let _ = result;
+                Ok(())
+            },
+        );
+    }
+
+    pub(crate) fn release(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let callback = match self.callback.lock() {
+            Ok(mut callback) => callback.take(),
+            Err(poisoned) => poisoned.into_inner().take(),
+        };
+        let Some(callback) = callback else {
+            return;
+        };
+        callback.handle.with_write_aborted(|mut aborted| {
+            if !*aborted {
+                // SAFETY: the raw TSFN is owned by `callback.handle`; the
+                // write guard serializes this abort with calls and Drop.
+                let _ = unsafe {
+                    sys::napi_release_threadsafe_function(
+                        callback.handle.get_raw(),
+                        sys::ThreadsafeFunctionReleaseMode::abort,
+                    )
+                };
+                *aborted = true;
+            }
+        });
+    }
+}
+
+impl Drop for P9AssertionCallback {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 pub(crate) fn nfs_hooks(
     transport_callback: Option<&Arc<TransportErrorCallback>>,
     session_callback: Option<&Arc<NfsErrorCallback>>,
@@ -435,6 +611,31 @@ pub(crate) fn p9_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> Transp
             let callback = Arc::clone(callback);
             Arc::new(move |error: TransportP9Error| callback.report(error.into()))
                 as TransportP9ErrorHook
+        }),
+    }
+}
+
+pub(crate) fn p9_session_hooks(
+    error: Option<&Arc<P9SessionErrorCallback>>,
+    assertion: Option<&Arc<P9AssertionCallback>>,
+) -> TransportP9SessionHooks {
+    TransportP9SessionHooks {
+        on_error: error.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(
+                move |error: FsError, header: Option<mount_rs_9p::P9Header>| {
+                    let header = header.map(|header| NativeP9Header {
+                        size: header.size,
+                        type_: header.type_,
+                        tag: header.tag,
+                    });
+                    callback.report(error, header);
+                },
+            ) as TransportP9SessionErrorHook
+        }),
+        on_assertion: assertion.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(move |message: String| callback.report(message)) as TransportP9AssertionHook
         }),
     }
 }
@@ -582,10 +783,16 @@ fn valid_s3_bucket_name(bucket: &str) -> bool {
     !bucket.is_empty()
         && bucket != "."
         && bucket != ".."
-        && bucket.len() <= 255
+        // The pinned JavaScript oracle measures the public string as UTF-16
+        // code units, not UTF-8 bytes. Keep the native preflight identical so
+        // non-ASCII bucket names do not diverge at the N-API boundary.
+        && bucket.encode_utf16().count() <= 255
         && bucket
             .chars()
-            .all(|character| !character.is_control() && character != '/' && character != '\\')
+            .all(|character| {
+                let code = character as u32;
+                code >= 0x20 && code != 0x7f && character != '/' && character != '\\'
+            })
 }
 
 fn verifier(value: Option<Buffer>) -> Result<Option<[u8; 8]>, Error> {
@@ -1994,8 +2201,13 @@ pub struct P9ServerOptions {
     pub use_driver_ino: Option<bool>,
     pub read_only: Option<bool>,
     pub claim_ownership: Option<bool>,
+    pub debug: Option<bool>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
+    #[napi(ts_type = "(error: unknown, header: NativeP9Header | undefined) => void")]
+    pub on_error: Option<JsP9SessionErrorCallback>,
+    #[napi(ts_type = "(message: string) => void")]
+    pub on_assertion: Option<JsP9AssertionCallback>,
 }
 
 /// Read-only scalar session policy exposed to Node callers. The transport's
@@ -2006,19 +2218,19 @@ pub struct P9SessionOptions {
     pub use_driver_ino: bool,
     pub read_only: bool,
     pub claim_ownership: bool,
+    pub debug: bool,
 }
 
-fn p9_options(
-    options: Option<P9ServerOptions>,
-) -> Result<
-    (
-        String,
-        u16,
-        TransportP9ServerOptions,
-        Option<JsTransportErrorCallback>,
-    ),
-    Error,
-> {
+type P9OptionValues = (
+    String,
+    u16,
+    TransportP9ServerOptions,
+    Option<JsTransportErrorCallback>,
+    Option<JsP9SessionErrorCallback>,
+    Option<JsP9AssertionCallback>,
+);
+
+fn p9_options(options: Option<P9ServerOptions>) -> Result<P9OptionValues, Error> {
     let options = options.unwrap_or(P9ServerOptions {
         port: None,
         host: None,
@@ -2032,9 +2244,14 @@ fn p9_options(
         use_driver_ino: None,
         read_only: None,
         claim_ownership: None,
+        debug: None,
         on_transport_error: None,
+        on_error: None,
+        on_assertion: None,
     });
     let on_transport_error = options.on_transport_error;
+    let on_error = options.on_error;
+    let on_assertion = options.on_assertion;
     if options.path.is_some() && (options.host.is_some() || options.port.is_some()) {
         return Err(config_error(
             "a 9P server uses either path or host/port, not both",
@@ -2061,7 +2278,15 @@ fn p9_options(
     output.use_driver_ino = options.use_driver_ino.unwrap_or(true);
     output.read_only = options.read_only.unwrap_or(false);
     output.claim_ownership = options.claim_ownership.unwrap_or(true);
-    Ok((host, port, output, on_transport_error))
+    output.debug = options.debug.unwrap_or(output.debug);
+    Ok((
+        host,
+        port,
+        output,
+        on_transport_error,
+        on_error,
+        on_assertion,
+    ))
 }
 
 type P9ServeFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
@@ -2087,6 +2312,7 @@ fn p9_session_options(options: &TransportP9ServerOptions) -> P9SessionOptions {
         use_driver_ino: options.use_driver_ino,
         read_only: options.read_only,
         claim_ownership: options.claim_ownership,
+        debug: options.debug,
     }
 }
 
@@ -2112,6 +2338,7 @@ pub struct P9SessionStats {
     pub errors: f64,
     pub dropped: f64,
     pub flushed: f64,
+    pub assertions: f64,
     pub messages: HashMap<String, f64>,
 }
 
@@ -2123,6 +2350,7 @@ impl From<mount_rs_9p::P9SessionStats> for P9SessionStats {
             errors: stats.errors as f64,
             dropped: stats.dropped as f64,
             flushed: stats.flushed as f64,
+            assertions: stats.assertions as f64,
             messages: stats
                 .messages
                 .into_iter()
@@ -2151,6 +2379,13 @@ impl P9Session {
         self.inner.destroy().await;
     }
 
+    /// Read-only N-API wrapper for the session-owned filesystem driver. The
+    /// server retains the authoritative driver lifetime.
+    #[napi(getter)]
+    pub fn driver(&self) -> Filesystem {
+        Filesystem::from_driver(self.inner.driver(), None, None)
+    }
+
     /// The scalar policy used when this session was created.
     #[napi(getter)]
     pub fn options(&self) -> P9SessionOptions {
@@ -2159,6 +2394,7 @@ impl P9Session {
             use_driver_ino: self.options.use_driver_ino,
             read_only: self.options.read_only,
             claim_ownership: self.options.claim_ownership,
+            debug: self.options.debug,
         }
     }
 
@@ -2213,6 +2449,11 @@ impl P9Session {
     pub fn stats(&self) -> P9SessionStats {
         self.inner.stats().into()
     }
+
+    #[napi(getter)]
+    pub fn assertions(&self) -> Vec<String> {
+        self.inner.assertions()
+    }
 }
 
 #[napi]
@@ -2232,6 +2473,7 @@ impl P9Connection {
                 use_driver_ino: self.options.use_driver_ino,
                 read_only: self.options.read_only,
                 claim_ownership: self.options.claim_ownership,
+                debug: self.options.debug,
             },
         }
     }
@@ -2276,6 +2518,8 @@ pub struct P9Server {
     binding: AtomicBool,
     closed: AtomicBool,
     transport_error: Option<Arc<TransportErrorCallback>>,
+    session_error: Option<Arc<P9SessionErrorCallback>>,
+    assertion: Option<Arc<P9AssertionCallback>>,
 }
 
 #[napi]
@@ -2287,9 +2531,10 @@ impl P9Server {
     #[napi(js_name = "_createAttachedSession")]
     pub fn create_attached_session(&self) -> P9Session {
         P9Session {
-            inner: mount_rs_9p::P9Session::with_options(
+            inner: mount_rs_9p::P9Session::with_options_and_hooks(
                 Arc::clone(&self.driver),
                 self.options.session_options(),
+                p9_session_hooks(self.session_error.as_ref(), self.assertion.as_ref()),
             ),
             options: p9_session_options(&self.options),
         }
@@ -2318,7 +2563,10 @@ impl P9Server {
             use_driver_ino: Some(self.options.use_driver_ino),
             read_only: Some(self.options.read_only),
             claim_ownership: Some(self.options.claim_ownership),
+            debug: Some(self.options.debug),
             on_transport_error: None,
+            on_error: None,
+            on_assertion: None,
         }
     }
 
@@ -2404,10 +2652,11 @@ impl P9Server {
         {
             return Err(transport_error("9P listen", "server is already starting"));
         }
-        let result = TransportP9Server::bind_arc_with_hooks(
+        let result = TransportP9Server::bind_arc_with_hooks_and_session_hooks(
             Arc::clone(&self.driver),
             self.options.clone(),
             p9_hooks(self.transport_error.as_ref()),
+            p9_session_hooks(self.session_error.as_ref(), self.assertion.as_ref()),
         )
         .await
         .map(Arc::new)
@@ -2460,6 +2709,12 @@ impl P9Server {
         if let Some(callback) = &self.transport_error {
             callback.release();
         }
+        if let Some(callback) = &self.session_error {
+            callback.release();
+        }
+        if let Some(callback) = &self.assertion {
+            callback.release();
+        }
         let (server, task) = {
             let mut state = self.state.lock().expect("9P state lock");
             (state.server.take(), state.serve_task.take())
@@ -2482,7 +2737,8 @@ pub fn create_p9_server(
     driver: &Filesystem,
     options: Option<P9ServerOptions>,
 ) -> napi::Result<P9Server> {
-    let (host, requested_port, mut options, on_transport_error) = p9_options(options)?;
+    let (host, requested_port, mut options, on_transport_error, on_error, on_assertion) =
+        p9_options(options)?;
     // The native listener and the JavaScript attach seam must share byte-range
     // lock ownership when they are used on the same public server object.
     if options.locks.is_none() {
@@ -2491,6 +2747,8 @@ pub fn create_p9_server(
     let transport_error = on_transport_error
         .map(TransportErrorCallback::new)
         .transpose()?;
+    let session_error = on_error.map(P9SessionErrorCallback::new).transpose()?;
+    let assertion = on_assertion.map(P9AssertionCallback::new).transpose()?;
     Ok(P9Server {
         driver: Arc::clone(&driver.driver),
         options,
@@ -2503,6 +2761,8 @@ pub fn create_p9_server(
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         transport_error,
+        session_error,
+        assertion,
     })
 }
 

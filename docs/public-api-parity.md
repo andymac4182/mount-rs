@@ -247,8 +247,10 @@ Current focused behavior:
   focused tests cover the oracle lifecycle, hardlink/release identity,
   large-inode input, and a real opened session fid. Direct table mutation is a
   low-level inspection/testing seam; protocol clunk or session destroy remains
-  the orderly production teardown path. The upstream `driver`, assertion/debug
-  callbacks, lock-table injection through session/server option bags, the
+  the orderly production teardown path. The N-API session also exposes its live
+  `driver`, debug-gated assertion readback/statistics, and request-error and
+  assertion callbacks with Node error/header shapes across attached and native
+  sessions. Lock-table injection through session/server option bags, the
   server's property-shaped `clients` contract, and the 9P mount helpers remain
   unresolved rather than being treated as intentionally out of scope.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
@@ -281,8 +283,12 @@ focused two-bucket PUT/GET isolation coverage; see
 [`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L458-L501).
 
 The JavaScript facade now adapts structural drivers in mixed bucket maps before
-the native extractor, with real server isolation coverage. Invalid-name and empty-map behavior
-also needs oracle-backed coverage before this item can be promoted.
+the native extractor, with real server isolation coverage. It now also performs
+the oracle's construction-time source and bucket-name validation, including
+oracle-compatible `TypeError` messages, empty maps, single-bucket options, and
+the UTF-16 bucket-name boundary. The pinned structural-factory differential
+covers those cases; close/restart, native/hosted lifecycle, and complete S3
+session parity remain open.
 
 ### P2 — S3 low-level and streaming parity: PARTIAL
 
@@ -354,6 +360,9 @@ Rust clock boundary is covered by
 `./scripts/cargo-shared test -p mount-rs-webdav --test webdav --locked injected_session_clock_controls_lock_expiry_deterministically`.
 These are accepted supported-scope decisions for N-API; broader session/server
 differential, listener, provider/native, restart, and hosted gates remain open.
+The Rust listener lifecycle itself is locally qualified by concurrent
+`listen()` serialization and an immediate `listen()`/`close()` shutdown-wakeup
+regression; N-API network/hosted concurrency and hosted lifecycle remain open.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full

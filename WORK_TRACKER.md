@@ -20,9 +20,11 @@ attach/runtime lock checks; the public Rust-backed `FidTable` alias and live
 `P9Session.fids` now cover mutable path/open/iounit/cursor views, deterministic
 fid ordering, qid identity/cursor helpers, detached clunk snapshots, and
 retained open-handle enumeration, with focused hardlink/release and live-open
-evidence. The upstream driver/assertion/debug graphs, lock-table option
-injection, property-shaped `clients` contract, and 9P mount helpers remain open
-rather than being silently narrowed away. The `./9p` constants/message-name
+evidence. The session now also exposes its retained `Filesystem` driver,
+debug-gated assertion readback/counters, and request-error/assertion callbacks
+with Node error/header semantics for attached and native sessions. Lock-table
+option injection, the property-shaped `clients` contract, and 9P mount helpers
+remain open rather than being silently narrowed away. The `./9p` constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
 exports differentially checked. The transport
 now also broadcasts shutdown safely
@@ -682,6 +684,7 @@ patch):
 | Pasteur the 2nd | W01 napi-rs FUSE BMAP codecs | `integrations/mount-rs-napi/**` | Integrated as `387940b`; published sequentially through `091ddcf`; Rust/N-API release build, typecheck, protocol-minor/truncation/trailing/wrong-shape oracle differentials, and the full oracle-enabled N-API suite passed |
 | Main | W01 napi-rs FUSE GETLK/SETLK/SETLKW codecs | `integrations/mount-rs-napi/**` | Current packet: generated bindings/declarations, explicit ESM/CommonJS exports, typecheck, pinned-oracle request/reply/error-boundary differential, release build, focused locked FUSE tests and full oracle-enabled N-API suite passed; native FUSE session/mount remains open |
 | Main | W01 N-API 9P fid table/session parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: Rust-backed `FidTable`/live `P9Session.fids`, qid/cursor/open-handle views, hardlink/release and live-open coverage; generated typecheck, build, 124-constant/44-codec differentials, focused N-API tests, 30 ordinary 9P tests, and strict Clippy passed; driver/assertion/debug, lock-option, property-shaped clients, mount-helper and hosted revision gates remain open |
+| Main | W01 N-API 9P driver and observability parity | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: live `P9Session.driver`, debug-gated assertion readback/counters, request-error/assertion callbacks, Node error revival, and root/`./9p` factory identity; release build, generated typecheck, focused N-API tests, 31 ordinary 9P tests, formatting, and strict Clippy passed; lock-option, property-shaped clients, mount-helper, and hosted revision gates remain open |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -808,6 +811,12 @@ transport tracker together.
 | W01-NFS | [`docs/W01_NFS_PROGRESS.md`](docs/W01_NFS_PROGRESS.md) | Delegated task; thread `01a0c456-a28e-7cb3-9b48-a3d23e7ec8c0` |
 | W01-S3 | [`docs/W01_S3_PROGRESS.md`](docs/W01_S3_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
 | W01-WebDAV | [`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md) | Delegated task; thread id to be recorded after dispatch |
+
+Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
+`listen()`/`close()` lifecycle transitions and guards the accept loop against
+an immediate-close shutdown lost wakeup; focused WebDAV tests pass 17/17.
+N-API network/hosted concurrency, crash/power-loss restart, provider
+durability, and broader hosted session/member lifecycle remain open.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
@@ -1275,7 +1284,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] The S3 structural-factory packet now differentially covers empty maps,
   valid structural-driver maps, and empty/dot/dot-dot/slash/backslash/control/
   overlong bucket-name refusal at construction time against the pinned oracle;
+  the N-API facade preserves the oracle's `TypeError` class/message and the
+  native preflight matches its UTF-16 length/control-character boundary;
   hosted/native lifecycle and complete S3 session parity remain separate.
+- [x] The S3 multipart lifecycle packet now proves staged state survives a
+  replacement session, close sweeps every bucket idempotently while the
+  session remains usable, and Complete/Abort has one terminal winner across
+  concurrent session calls; the filesystem-visible exclusive finalization
+  marker returns `NoSuchUpload` to the loser and late part writes, while a
+  validation-failing Complete releases the marker so a correct retry succeeds.
+- [x] The same multipart replacement flow is exercised through the generated
+  N-API S3 facade: release build/declarations, direct session create/part/list/
+  complete/GET, streamed traffic, cancellation, bucket isolation, connection
+  cleanup, and a typed peer-fault callback all pass in the host-enabled server
+  integration; this remains non-native and non-provider evidence.
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
@@ -1913,6 +1935,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
   production gates or external-drill boundary. This is an internal tracking
   invariant, not production acceptance.
+  `scripts/test-w07-rollout-ledger.mjs` runs six regression cases for the
+  current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
+  complete-GO states; these cases validate the tracking control only.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
@@ -2324,6 +2349,28 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   remained explicit ignored prerequisites; this is source-level verification,
   not live-provider or production-rollout evidence. *(Implementation
   verification; provider, native and production gates remain external.)*
+- [x] W08.31 **Latest hosted target, artifact and attestation qualification:**
+  manual `workflow_dispatch` with `attest=true` run `35641555767` completed
+  successfully from current-main-at-dispatch source
+  `2bbd0266a094b06bf97d51baafe0d3a8800bfec5`. Linux build job
+  `106471833712`, macOS arm64 build job `106471833967`, downloaded-asset jobs
+  `106473358964` and `106473359006`, and attestation jobs `106475107803` and
+  `106475108148` all passed. Linux SHA-256 is
+  `6a3de0a607ffafcedf6bd3385c3849a30208df0345120061061821109a09ac79`
+  (8,373,376 bytes); macOS arm64 SHA-256 is
+  `75a031c4e439ede07f0fa1a09db050b15c45f6d802a703d90b67cde52b4a941d`
+  (6,958,388 bytes). Both hosted target/download/attestation markers passed;
+  downloaded checksums, manifests, 288-component SBOMs, archive contents and
+  the extracted macOS `mount-rs 0.1.0` runtime were independently rechecked,
+  and exact-identity SLSA/CycloneDX attestation verification passed with the
+  `main` source ref and `--deny-self-hosted-runners`. The production-config
+  positive policy fixture passed and the insecure fixture failed closed with
+  `secret_access_key-must-not-be-inline`; this is policy evidence only. No
+  production-candidate tag, protected-environment approval, registry
+  publication, canary, rollback or GO evidence is claimed. *(Hosted/provider
+  qualification and implementation policy; production gates remain external.)*
+  The evidence documentation commit `d293fe5b` was reconciled into public
+  merge tip `682d2441` for other workstreams to consume.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -2430,7 +2477,11 @@ reproducible in a production-like environment.
   dispatch isolation, full-pin correction, verifier identity fix and terminal
   target qualification. W08.29's current published-main run `35638433010`,
   source `9d3a6e5`, passed both target builds/downloads and both final
-  provenance/SBOM attestation verifiers. W08.28 adds the protected
+  provenance/SBOM attestation verifiers. W08.31's current-main-at-dispatch
+  run `35641555767`, source `2bbd0266`, passed both target builds/downloads
+  and both final provenance/SBOM attestation verifiers; the downloaded assets,
+  checksums, manifests, 288-component SBOMs and macOS runtime were independently
+  rechecked. W08.28 adds the protected
   `v*-cli-production-candidate*` workflow, which builds both targets, verifies
   final release assets and attestations, and requires the `w08-production`
   environment before publishing a prerelease. It has not been run from an
