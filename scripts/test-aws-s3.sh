@@ -88,6 +88,7 @@ role_credential_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-role-credentials.
 fixture_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-restart.XXXXXX")
 metadata_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-metadata.XXXXXX")
 owner_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-owner.XXXXXX")
+cli_config_file=$(mktemp "${TMPDIR:-/tmp}/mount-rs-aws-s3-cli-config.XXXXXX")
 printf '%s\n' "$run_nonce" >"$owner_file"
 cleanup_required=0
 cleanup_done=0
@@ -148,6 +149,7 @@ cleanup() {
     "$fixture_file" \
     "$metadata_file" \
     "$owner_file" \
+    "$cli_config_file" \
     "${metadata_file}-journal" \
     "${metadata_file}-shm" \
     "${metadata_file}-wal"
@@ -251,6 +253,22 @@ if ! AWS_EC2_METADATA_DISABLED=true aws sts get-caller-identity \
   exit 3
 fi
 
+# Prove the assumed role cannot list a sibling namespace. This is a
+# non-mutating authorization check: the role is expected to fail before any
+# test object is created, and the check never relies on a sentinel outside the
+# harness-owned prefix.
+denied_prefix="mount-rs-tests/aws-s3-denied/$run_nonce/"
+if AWS_EC2_METADATA_DISABLED=true aws s3api list-objects-v2 \
+  --bucket "${AWS_S3_TEST_BUCKET}" \
+  --prefix "$denied_prefix" \
+  --max-keys 1 \
+  --region "$region" \
+  --output text >/dev/null 2>&1; then
+  echo "AWS_S3_AUTHORIZATION_SCOPE_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$denied_prefix" >&2
+  exit 2
+fi
+echo "AWS_S3_AUTHORIZATION_SCOPE_PASS bucket=${AWS_S3_TEST_BUCKET}"
+
 if ! existing=$(AWS_EC2_METADATA_DISABLED=true aws s3api list-objects-v2 \
   --bucket "${AWS_S3_TEST_BUCKET}" \
   --prefix "$prefix/" \
@@ -285,6 +303,26 @@ if ! AWS_EC2_METADATA_DISABLED=true aws s3api put-object \
 fi
 
 echo "AWS_S3_TEST_START bucket=${AWS_S3_TEST_BUCKET} region=$region prefix=$prefix"
+
+# Exercise the real Rust CLI consumer against the same first-class AWS S3
+# provider and the same scoped credentials before the lower-level acceptance
+# processes run. The config contains no credentials; AmazonS3Builder resolves
+# the exported short-lived workload credentials from the environment.
+printf '{\n  "version": 1,\n  "driver": {\n    "kind": "splitstore",\n    "storage": {\n      "metadata": {"kind": "sqlite", "path": "%s"},\n      "blocks": {"kind": "aws-s3", "bucket": "%s", "region": "%s", "prefix": "%s/cli", "durable": true},\n      "chunk_size_bytes": 4096,\n      "owner": "aws-s3-cli"\n    }\n  }\n}\n' \
+  "$metadata_file" \
+  "$AWS_S3_TEST_BUCKET" \
+  "$region" \
+  "$prefix" >"$cli_config_file"
+
+CARGO_NET_OFFLINE=true ./scripts/cargo-shared run \
+  --quiet \
+  --locked \
+  -p mount-rs-cli \
+  -- \
+  sdk-self-test \
+  --config "$cli_config_file" \
+  --reopen
+echo "AWS_S3_CLI_PASS prefix=$prefix"
 
 cargo test \
   --manifest-path "$repo_dir/tests/aws/Cargo.toml" \

@@ -783,14 +783,14 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     slug: 'aws-s3',
     name: 'AWS S3',
     eyebrow: 'Provider / remote object storage',
-    maturity: 'Planned',
-    maturityNote: 'AWS API/SDK service-side checks now cover immutable publication, ranges, conditional behavior, concurrency, and owned-prefix cleanup; Rust provider, least-privilege, and composed acceptance remain pending.',
+    maturity: 'Validated',
+    maturityNote: 'The first-class Rust SDK/CLI AWS S3 block provider passed the live myroot private-bucket gate with a prefix-scoped assumed role, composed SQLite metadata, process reopen, and owned-prefix cleanup. Deployment-specific metadata, backup/DR, monitoring, and hosted release gates remain separate.',
     summary: (
       <>
-        AWS S3 is the next remote object-store target for the S3-compatible
-        block path. An authenticated AWS API/SDK probe now covers an owned
-        prefix and service-side object behavior, but that is not a completed
-        Rust integration gate.
+        AWS S3 is a first-class block provider using the actual AWS region and
+        the standard AWS workload credential chain. It is qualified through a
+        private bucket and prefix-scoped role; the provider does not silently
+        treat an S3-compatible endpoint as AWS evidence.
       </>
     ),
     metadata: (
@@ -802,10 +802,10 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     ),
     blocks: (
       <>
-        The intended layout is an owned prefix containing one immutable object
-        per fixed-size chunk, inspected through S3 GET/HEAD/LIST and ranged
-        reads. Conditional create and delete must be verified against the
-        actual AWS endpoint before the label changes.
+        The layout is an owned prefix containing one immutable object per
+        fixed-size chunk, inspected through S3 GET/HEAD/LIST and ranged reads.
+        Conditional create, ETag CAS, and cleanup are verified against the
+        actual AWS endpoint by the W25 gate.
       </>
     ),
     layout: (
@@ -819,22 +819,23 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     consistency: (
       <>
         S3's service durability and visibility behavior belong to the selected
-        AWS deployment. The adapter's completed upload barrier is necessary but
-        not sufficient evidence for AWS-specific crash, IAM, retry, or
-        multi-writer acceptance.
+        AWS deployment. The adapter uses signed requests, create-only
+        immutable publication, conditional updates, and completed upload
+        barriers. Multi-writer scope and metadata-provider durability still
+        belong to the selected deployment.
       </>
     ),
     inspectLabel: 'Inspect an AWS-owned prefix without exposing credentials',
     inspectCode: `export AWS_REGION='ap-southeast-2'
-export S3_BUCKET='mount-rs-integration-...'
-export S3_PREFIX='mount-rs-tests/owned-run'
+export AWS_S3_BUCKET='private-bucket'
+export AWS_S3_PREFIX='mount-rs/volume-a'
 
-aws s3api list-objects-v2 --bucket "$S3_BUCKET" \
-  --prefix "$S3_PREFIX/"
-aws s3api head-object --bucket "$S3_BUCKET" \
-  --key "$S3_PREFIX/<block-id>"
-aws s3api get-object --bucket "$S3_BUCKET" \
-  --key "$S3_PREFIX/<block-id>" --range bytes=0-63 /tmp/block-prefix.bin`,
+aws s3api list-objects-v2 --bucket "$AWS_S3_BUCKET" \
+  --prefix "$AWS_S3_PREFIX/"
+aws s3api head-object --bucket "$AWS_S3_BUCKET" \
+  --key "$AWS_S3_PREFIX/<block-id>"
+aws s3api get-object --bucket "$AWS_S3_BUCKET" \
+  --key "$AWS_S3_PREFIX/<block-id>" --range bytes=0-63 /tmp/block-prefix.bin`,
     cleanup: (
       <>
         Use the private test bucket, a least-privilege role/profile, and a
@@ -845,26 +846,30 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     ),
     limitations: (
       <>
-        AWS S3 Rust integration, restart/reopen, composed metadata providers,
-        least-privilege authorization, and cleanup evidence remain open in the
-        tracker. The service-side probe used an account-root caller and a
-        bucket without a bucket policy; it is not a deployment authorization
-        or passing Rust-backend result.
+        AWS S3 is block-only: choose an independent metadata provider, and do
+        not infer multi-writer or power-loss guarantees from the SQLite test
+        composition. Production deployments still need explicit metadata
+        durability, backup/restore, monitoring, cost/retention, and hosted
+        release qualification. Use the AWS workload identity chain rather than
+        committing long-lived access keys.
       </>
     ),
     evidence: (
       <>
-        The maturity label is Planned because current AWS evidence is limited
-        to an API/SDK probe: immutable create and duplicate rejection, byte
-        ranges, stale conditional/CAS rejection, current-ETag CAS, a 65,537-byte
-        boundary read, four concurrent writers, scoped deletion, and empty-
-        prefix verification passed. Rust provider, least-privilege, and
-        composed acceptance remain open; Cloudflare R2 and RustFS results do
-        not substitute for AWS S3.
+        The 2026-09-21 W25 gate used the private
+        <code>myroot</code> bucket in <code>ap-southeast-2</code> and a
+        short-lived prefix-scoped role. It passed the Rust SDK and Rust CLI
+        public configuration paths, immutable create and duplicate rejection,
+        byte ranges, stale conditional/CAS rejection, current-ETag CAS, a
+        65,537-byte boundary read, four concurrent writers, multi-chunk
+        overwrite/truncate/extend/sparse-tail behavior, fresh-process reopen,
+        and owner-verified cleanup with zero remaining objects. Cloudflare R2
+        and RustFS results remain separate providers.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
+      { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3-compatible block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
     ],
   },

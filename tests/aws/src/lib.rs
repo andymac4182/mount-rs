@@ -12,12 +12,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
-use mount_rs_core::driver::FsDriver;
 use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::{Loopback, MkdirOptions};
 use mount_rs_r2::R2BlockStore;
-use mount_rs_sqlite::SqliteMetadataStore;
+use mount_rs_sdk::{Filesystem, SplitOptions, StoreConfig};
 use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
@@ -38,6 +36,34 @@ fn restart_fixture() -> PathBuf {
 
 fn metadata_fixture() -> PathBuf {
     PathBuf::from(required_env("AWS_S3_METADATA_FIXTURE"))
+}
+
+fn aws_s3_store_config(prefix: impl Into<String>) -> StoreConfig {
+    StoreConfig::AwsS3 {
+        bucket: required_env("AWS_S3_TEST_BUCKET"),
+        region: required_env("AWS_S3_TEST_REGION"),
+        prefix: prefix.into(),
+        durable: true,
+    }
+}
+
+fn aws_s3_split_options(
+    metadata_path: PathBuf,
+    prefix: impl Into<String>,
+    owner: &str,
+    chunk_size_bytes: usize,
+) -> SplitOptions {
+    SplitOptions {
+        metadata: StoreConfig::Sqlite {
+            path: metadata_path,
+        },
+        blocks: aws_s3_store_config(prefix),
+        chunk_size_bytes,
+        owner: owner.to_owned(),
+        uid: 0,
+        gid: 0,
+        umask: 0,
+    }
 }
 
 fn object_path(prefix: &str, name: &str) -> ObjectPath {
@@ -290,18 +316,16 @@ async fn actual_aws_s3_block_and_composed_filesystem() {
 
         let metadata_path = metadata_fixture();
         let composed_prefix = format!("{prefix}/composed/blocks");
-        let composed_blocks =
-            R2BlockStore::new(aws_store(), composed_prefix.clone(), true).unwrap();
-        let filesystem = ChunkedFs::open(
-            SqliteMetadataStore::open(&metadata_path).unwrap(),
-            composed_blocks,
-            ChunkedOptions::fixed("aws-s3-compose", 4096).unwrap(),
-        )
+        let filesystem = Filesystem::split(aws_s3_split_options(
+            metadata_path.clone(),
+            composed_prefix.clone(),
+            "aws-s3-compose",
+            4096,
+        ))
         .await
         .unwrap();
-        assert!(filesystem.capabilities().durable_writes);
-
-        let loopback = Loopback::new(filesystem.clone());
+        let loopback = Loopback::from_arc(filesystem.driver());
+        assert!(loopback.capabilities.durable_writes);
         loopback
             .mkdir("/composed", MkdirOptions::default())
             .await
@@ -341,14 +365,15 @@ async fn actual_aws_s3_block_and_composed_filesystem() {
         // is persisted locally; the immutable bytes are fetched from a new
         // signed AWS S3 client, so this cannot be satisfied by an in-process
         // object-store cache.
-        let reopened = ChunkedFs::open(
-            SqliteMetadataStore::open(&metadata_path).unwrap(),
-            R2BlockStore::new(aws_store(), composed_prefix, true).unwrap(),
-            ChunkedOptions::fixed("aws-s3-compose-reopen", 65_536).unwrap(),
-        )
+        let reopened = Filesystem::split(aws_s3_split_options(
+            metadata_path,
+            composed_prefix,
+            "aws-s3-compose-reopen",
+            65_536,
+        ))
         .await
         .unwrap();
-        let reopened_loopback = Loopback::new(reopened.clone());
+        let reopened_loopback = Loopback::from_arc(reopened.driver());
         assert_eq!(
             reopened_loopback.read_file("/composed/file").await.unwrap(),
             expected
@@ -407,14 +432,17 @@ async fn actual_aws_s3_reopen_after_process_restart() {
         // connection, and signed S3 client. This is the cross-process
         // boundary for the independent metadata and block providers.
         let composed_prefix = format!("{prefix}/composed/blocks");
-        let reopened = ChunkedFs::open(
-            SqliteMetadataStore::open(metadata_fixture()).unwrap(),
-            R2BlockStore::new(aws_store(), composed_prefix, true).unwrap(),
-            ChunkedOptions::fixed("aws-s3-process-reopen", 65_536).unwrap(),
+        let reopened = Filesystem::split(
+            aws_s3_split_options(
+                metadata_fixture(),
+                composed_prefix,
+                "aws-s3-process-reopen",
+                65_536,
+            ),
         )
         .await
         .unwrap();
-        let reopened_loopback = Loopback::new(reopened.clone());
+        let reopened_loopback = Loopback::from_arc(reopened.driver());
         let expected = composed_expected();
         assert_eq!(
             reopened_loopback.read_file("/composed/file").await.unwrap(),

@@ -72,7 +72,13 @@ cargo run --locked -p mount-rs-cli -- \
 ```
 
 The Node counterpart is `examples/node-cli/index.mjs --sdk-self-test`; both
-commands are exercised by the CLI integration tests and provider matrix.
+commands are exercised by the CLI integration tests and provider matrix. For
+first-class AWS S3 blocks, start from
+`examples/config-sqlite-aws-s3.json`: keep metadata independent, set the real
+bucket and region, and provide short-lived AWS workload credentials through
+the environment or deployment identity. The AWS provider deliberately does
+not accept an endpoint or long-lived secret fields; use the `r2` provider for
+S3-compatible endpoints.
 
 The top-level version is currently 1. The driver object is discriminated and
 strict: memory accepts only kind; host accepts kind and root; sqlite accepts

@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native, hosted acceptance and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -502,7 +502,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
-| W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite and durable FoundationDB composition gates added, hosted result pending; durable TiDB mixed store remains open | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification complete within documented scope: local and hosted Ozone gateway, SQLite/PGlite composition, durable FoundationDB, and Ozone-backed durable TiDB gates passed; post-demo production rollout track is open and currently NO-GO | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -773,27 +773,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
 - [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  Hosted run [35493696795](https://github.com/andymac4182/mount-rs/actions/runs/35493696795),
-  job [106032856390](https://github.com/andymac4182/mount-rs/actions/runs/35493696795/job/106032856390),
-  checked out `c6e6060` on `macos-26-arm64` and failed
-  `storage::tests::bounded_server_close_is_shared_cancellation_safe_and_reusable`
-  at the first `connect_with_key(connection_string, "close-reopened")` after
-  both providers had closed: `FsError { code: Eio, message: Some("error
-  communicating with the server") }`. This is pre-fix evidence; `571aa8a`
-  adds the graceful half-close detach path, tracked cleanup barrier and listener
-  restoration that target the race.
-
-  Tested current-tree revision `747b160` (the fetched `origin/main` before this
-  evidence commit) passes the deterministic Node slot-release and
-  injected-failure suites, the readiness and split-store Rust gates, the bounded
-  close/reopen regression 10/10 consecutive times, real-server versioned
-  snapshot/history reconnect, mount-free SQLite VFS reconnect, scoped Clippy,
-  formatting and `git diff --check`. Recent `ci.yml` runs were still queued when
-  inspected (including `35551786116` at `6f1ab93` and later `35552136578` at
-  `44cef6e`); no completed post-`571aa8a` hosted macOS/Linux rerun is available.
-  W04.2 remains open. Close it only after the post-fix macOS and Linux `node`
-  jobs complete and their `Verify PGlite integration and restart recovery` logs
-  pass; reproduce with `gh run view <run-id> --job <job-id> --log`.
+  The fresh post-fix run [35586624564](https://github.com/andymac4182/mount-rs/actions/runs/35586624564)
+  is running on `bdfcb11`: Linux Node job
+  [106291476004](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476004),
+  macOS-latest Node job
+  [106291476024](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476024),
+  and macOS-15-intel Node job
+  [106291476265](https://github.com/andymac4182/mount-rs/actions/runs/35586624564/job/106291476265)
+  have started. The historical run [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894)
+  is not closure evidence: macOS-latest passed its PGlite step, but
+  macOS-15-intel failed earlier in `test-http-early-rejection.mjs` with
+  `EPIPE`; the published `bdfcb11` fixture-shutdown fix is being requalified.
+  Close W04.2 only after all three fresh Node jobs complete successfully and
+  their exact `Verify PGlite integration and restart recovery` logs pass;
+  queued, skipped, cancelled, partial, or pre-fix evidence does not count.
+  Production rollout remains separately tracked in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and is NO-GO
+  until its artifact, persistence/rollback, provider, and operational gates
+  also close.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
@@ -979,6 +976,48 @@ Evidence landed without closing the remaining W01 acceptance gates:
   published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
   fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
   handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
+- [ ] W07.7 **Production rollout readiness and go/no-go:** the demo and local
+  Docker evidence are not production acceptance. Before enabling any production
+  consumer, close every gate below with a linked revision, test/run result,
+  environment identity and accountable owner:
+  - [ ] **Identity and least privilege:** document and deploy one
+    write-capable authority identity per authority prefix, read-only consumer
+    identities, secret injection/rotation and no shared credentials. Prove
+    with the actual production credential/tenant/ACL policy that a consumer
+    cannot publish or overwrite the authority record.
+  - [ ] **Time and authority failure policy:** enforce the authority-host
+    clock-skew bound and alerting; publish more frequently than the shortest
+    lease TTL; republish after authority restart before admitting readers; fail
+    closed during authority loss; and test the reviewed failover and recovery
+    procedure.
+  - [ ] **FoundationDB durability and recovery:** prove the production
+    cluster's replication/storage policy, backup/restore, service
+    restart/failover, keyspace/version compatibility and a recovery drill.
+    The single-node pinned Docker harness is not this evidence.
+  - [ ] **Production-like workload and soak:** run multi-chunk reads/writes,
+    partial writes, truncate/extend, concurrent publication, stale-writer
+    fencing, maybe-committed reconciliation, lease renewal/expiry, reconnect
+    and fresh-client reopen at production-like duration and load. Record
+    latency, retry, capacity and error-budget results.
+  - [ ] **Observability and operations:** expose and alert on cluster health,
+    authority publication age/errors, reader failures, lease-fence/ESTALE,
+    transaction retries/maybe-committed EIO and cleanup/space pressure.
+    Publish the dashboards, on-call runbook, escalation thresholds and
+    incident/recovery ownership.
+  - [ ] **Rollout and rollback:** stage a canary with a holdback, define
+    go/no-go and abort criteria, verify backward/forward compatibility of the
+    keyspace and configuration, rehearse rollback/authority recovery and
+    record owner sign-off.
+  - [ ] **Hosted and platform evidence:** obtain green hosted
+    FoundationDB/RustFS, Node, CLI/native Linux and macOS/Linux build/native
+    acceptance runs. Record the actual runner, cluster/image, revision and
+    result; failed, skipped, cancelled or unavailable evidence remains open.
+
+  W07.7 remains open until every nested gate has concrete production-like
+  evidence. No demo, local qualification, queued CI run or installation-only
+  result may be promoted to a production PASS.
+  The production gate ledger, deployment contract and rollout sequence are
+  tracked in [`docs/foundationdb-production-rollout.md`](docs/foundationdb-production-rollout.md).
 
 ## W08 — TiDB
 
@@ -1511,18 +1550,49 @@ listing a source does not mean it has been reviewed or its code can be reused.
   immutable blocks, ranges, conditional/CAS behavior, multi-chunk writes and
   overwrite/truncate/extend/sparse-tail behavior, SQLite metadata composition,
   fresh-process reopen, and exact owner-verified prefix cleanup with zero
-  remaining objects. AWS S3 evidence does not replace Cloudflare R2 or RustFS
-  acceptance.
+  remaining objects. The same run also passed the real Rust CLI
+  `sdk-self-test --reopen` against a separate owned prefix, proving the
+  configuration-driven consumer path. AWS S3 evidence does not replace
+  Cloudflare R2 or RustFS acceptance.
+- [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
+  public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
+  accepts only bucket, region, prefix, and durable fields, resolves signed
+  workload credentials from the AWS environment/role chain, rejects custom
+  endpoints, and remains block-only. The live gate now runs the CLI
+  `sdk-self-test` plus the SDK composition against the same scoped role; the
+  public AWS path is no longer only a direct integration-test construction.
 - [x] The live AWS packet is present in the provider/test crates: immutable
   block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen,
-  nonce-owned cleanup and credential-safe validation. The harness emits the
-  secret-free `AWS_S3_TEST_BLOCKED` result when local credentials are absent,
-  while the renewed `myroot` run above provides the live Rust acceptance.
+  the public SDK and CLI configuration paths, nonce-owned cleanup and
+  credential-safe validation, and a non-mutating sibling-prefix authorization
+  denial check. The harness emits the secret-free
+  `AWS_S3_TEST_BLOCKED` result when local credentials are absent, while the
+  renewed `myroot` run above provides the live Rust acceptance.
 - [x] The harness accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that
   caller-provided role with a one-hour session, and uses the resulting temporary
   credentials for all S3 requests and cleanup. It does not create IAM resources
-  or access keys; W25.2 is provisioned in `myroot`, and W25.3 still requires the
-  live local Rust run.
+  or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
+  run is now recorded above.
+- [ ] W25.5 Define and approve the production rollout contract: AWS account,
+  region and bucket ownership; IaC or an equivalent reviewable change; bucket
+  policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
+  retention/lifecycle, prefix ownership, runtime/maintenance roles, and no
+  long-lived credentials. The W25 bucket and role are test resources.
+- [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
+  metadata provider and pass multi-writer/fencing, restart, backup/restore,
+  schema-migration, and failure-recovery tests with actual AWS S3 blocks.
+  The current SQLite composition is single-host reopen evidence only.
+- [ ] W25.7 Add deployment observability and operations: S3 latency/error and
+  retry metrics, conditional-conflict and orphan/cleanup signals, credential
+  expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
+  canary/rollback procedures.
+- [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
+  approved OIDC or equivalent short-lived role credentials, security scan,
+  load/soak/fault/restore drills, staged canary, rollback, and post-deploy
+  smoke. Do not place AWS secrets in the repository or CI logs.
+- [ ] W25.9 Production sign-off: record the exact released commit/image,
+  reviewed configuration, live smoke result, rollback owner, and evidence for
+  every W25.5-W25.8 gate before calling the AWS workstream production-ready.
 
 ## W26 — Apache Ozone S3 backend
 
@@ -1530,7 +1600,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   an Ubuntu CI gate. Main's real Linux-arm64 Docker run passed immutable
   blocks, conditional create/read/write and CAS, concurrent publication,
   service restart/reopen, and owned-resource cleanup. Hosted Linux-amd64
-  results and mixed metadata-provider/Node/CLI coverage remain open. The
+  run `35585066458` passed the Ozone gateway, mixed metadata-provider/Node/CLI,
+  and Ozone-backed durable TiDB jobs. The
   all-in-one non-secure test deployment is loopback-only, not production auth
   or replicated-durability acceptance.
 - [x] W26.1 Pin Apache Ozone 2.2.1 and architecture-specific container digests;
@@ -1565,7 +1636,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   real multi-node restart evidence, but remains loopback/non-secure test
   deployment evidence rather than production auth, TLS or power-loss proof;
   hosted CI remains revision-specific and pending.
-- The hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
+- Historical hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
   Linux-amd64 Ozone gateway (`ozone`, job `106274147767`) and the mixed
   SQLite/PGlite Ozone composition (`ozone-compositions`, job
   `106274147763`). Its durable TiDB job (`tidb`, `106274147942`) passed the
@@ -1580,13 +1651,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   durable restart/reopen so the restart gate is not contaminated by that
   test's intentionally unknown client outcome. Its first rerun
   `35582936271` was canceled when concurrent main commit `210c9cd` landed;
-  replacement run `35583109781` is the active W26 acceptance attempt and no
-  result from the canceled run is treated as evidence.
-- [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
+  replacement run `35583109781` was superseded before terminal completion and
+  no result from the canceled runs is treated as evidence. Final W26
+  acceptance is recorded below.
+- [x] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
   revision CAS and stale-writer fencing. SQLite, PGlite, single-node TiDB and
-  durable three-node FoundationDB are covered above; durable multi-node TiDB
-  remains open.
+  durable three-node FoundationDB are covered above. Final run `35585066458`
+  on `9c098e5` passed hosted `ozone-compositions` job `106286459622` and
+  Ozone-backed durable `ozone-tidb` job `106286459540`; the latter emitted
+  `TIDB_ACCEPTANCE evidence=durable-multinode-restart`, Ozone integration and
+  cleanup markers. Generic durable TiDB job `106286459436` also passed.
 - [x] W26.4 Cover Node factories and CLI configuration; add required CI gates
   and document verified versions, limitations and platform evidence. The
   2026-09-21 arm64 live Ozone run passed the Node provider matrix (including
@@ -1595,6 +1670,37 @@ listing a source does not mean it has been reviewed or its code can be reused.
   skip=1 fail=0`. The CI job now builds the NAPI addon and installs PGlite;
   hosted results remain revision-specific. Ozone remains loopback-only,
   non-secure and not production replicated-durability acceptance.
+
+### W26 production-rollout readiness (post-demo; currently NO-GO)
+
+W26 qualification is complete, but production rollout is a separate open
+track. The detailed evidence ledger, provisional estimates and blockers are in
+[`docs/w26-progress-ledger.md`](docs/w26-progress-ledger.md). Do not mark a
+production gate complete from the demo or from the hosted qualification packet
+alone.
+
+| Gate | Status | Completion | Exit evidence / primary blocker |
+| --- | --- | ---: | --- |
+| P0 — scope, support matrix, SLO/RPO/RTO, ownership | Open | 10% | Approved production target and non-goals; product/operations decisions required |
+| P1 — secure production Ozone topology and rehearsal | Not started | 0% | Multi-node persistent production-like deployment; Ozone/cluster infrastructure required |
+| P2 — production metadata-provider matrix | Qualification only | 10% | Selected supported providers and secure staging matrix; managed-provider/version access required |
+| P3 — authentication, TLS, secrets and redaction | Not started | 0% | Certificate/identity/secret rotation and negative tests; security/platform access required |
+| P4 — replicated durability and storage failure protection | Not started | 0% | Storage/node/power-loss boundary and integrity recovery; production storage/fault controls required |
+| P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 25% | Secure multi-node failure/retry evidence; distributed fault tooling required |
+| P6 — backup, restore and DR | Not started | 0% | Clean-environment restore with measured RPO/RTO; backup/KMS/second failure domain required |
+| P7 — observability, alerting and runbooks | Not started | 0% | SLO telemetry, alerts and tested operator procedures; monitoring/on-call ownership required |
+| P8 — load, capacity, soak and cost envelope | Not started | 0% | Production-shaped performance/soak evidence; dedicated capacity and budget required |
+| P9 — upgrade, rollback and compatibility | Not started | 0% | Rehearsed migration and rollback on retained data; release/change-window approval required |
+| P10 — security, privacy, tenancy and audit | Not started | 0% | Security review and closed findings/approved exceptions; security/compliance owner required |
+| P11 — native client/mount/platform matrix | Not started | 0% | Every advertised native platform passes; native runners, facilities and signing required |
+| P12 — signed release, promotion, canary and rollback automation | Qualification CI only | 10% | Production promotion controls and canary evidence; CI/CD/artifact/signing access required |
+| P13 — incident, failover and recovery rehearsal | Not started | 0% | Timed operator exercise meets RTO and integrity criteria; on-call/incident participation required |
+| P14 — final launch evidence audit and GO/NO-GO | Not started | 0% | One-revision evidence packet and release-owner decision; all upstream gates required |
+
+The production track is **0/15 terminal gates accepted**. Its current
+provisional planning range is **31–76 engineering days plus external waits**;
+this is not a delivery commitment and must be refined after P0 fixes the
+advertised provider/platform scope.
 
 ## W27 — Native Windows support and CI
 

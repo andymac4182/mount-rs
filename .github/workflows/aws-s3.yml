@@ -1,0 +1,63 @@
+name: Live AWS S3
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/aws-s3.yml'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+      - 'crates/mount-rs-cli/**'
+      - 'crates/mount-rs-sdk/**'
+      - 'integrations/mount-rs-r2/**'
+      - 'scripts/cargo-shared*'
+      - 'scripts/test-aws-s3.sh'
+      - 'tests/aws/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-aws-s3
+  cancel-in-progress: false
+
+jobs:
+  live-aws-s3:
+    name: Rust SDK, CLI, and service acceptance
+    # Configure this protected environment with the bucket/region variables
+    # and an OIDC-trusted short-lived role before enabling the job.
+    environment: aws-s3-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_S3_TEST_BUCKET: ${{ vars.MOUNT_RS_AWS_S3_TEST_BUCKET }}
+      AWS_S3_TEST_REGION: ${{ vars.MOUNT_RS_AWS_S3_TEST_REGION }}
+      AWS_DEFAULT_REGION: ${{ vars.MOUNT_RS_AWS_S3_TEST_REGION }}
+      AWS_EC2_METADATA_DISABLED: 'true'
+      MOUNT_RS_RUN_AWS_S3: '1'
+      MOUNT_RS_AWS_S3_TEST_PREFIX: mount-rs-tests/aws-s3/ci/${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Configure short-lived AWS workload credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: ${{ vars.MOUNT_RS_AWS_S3_TEST_REGION }}
+          role-to-assume: ${{ secrets.MOUNT_RS_AWS_S3_CI_ROLE_ARN }}
+          role-session-name: mount-rs-aws-s3-${{ github.run_id }}
+
+      - name: Verify AWS identity and CLI
+        run: |
+          aws --version
+          aws sts get-caller-identity
+
+      - name: Run bounded AWS S3 acceptance
+        run: ./scripts/test-aws-s3.sh
