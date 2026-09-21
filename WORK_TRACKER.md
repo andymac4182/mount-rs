@@ -969,6 +969,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   owned FoundationDB service restart, a separate post-restart authority
   republish, and fresh-client RustFS reopen; hosted result remains pending until
   CI runs. No emulated acceptance.
+  The local arm64 durable qualification run on 2026-09-21 used the
+  `foundationdb-soak-durable` composition name, three pinned FoundationDB
+  7.4.7 server containers with `double`/SSD configuration, one bounded soak
+  round, a replicated-node restart, authority republish and a fresh-client
+  reopen. It emitted `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`,
+  `FOUNDATIONDB_SOAK_PASS rounds=1`,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
+  `FOUNDATIONDB_TEST_PASS topology=durable`; the tested tree was `3b64a98`,
+  published on main as `39a20b6`. This is local loopback/non-secure
+  qualification evidence only: hosted acceptance, production identity/TLS,
+  power-loss/backup recovery, capacity and operational gates remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
