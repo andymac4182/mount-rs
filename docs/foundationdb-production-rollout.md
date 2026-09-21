@@ -25,6 +25,7 @@ CI job, installation-only evidence, or a local qualification report.
 | Run | Result | Boundary |
 | --- | --- | --- |
 | `foundationdb-soak-durable`, 2026-09-21, arm64, tested tree `3b64a98` (published as `39a20b6`) | **PASS** — three pinned FoundationDB 7.4.7 servers with `double`/SSD configuration; one bounded composition soak round; replicated-node restart; authority republish; fresh-client RustFS reopen; owned cleanup | Disposable loopback/non-secure Docker qualification only. It does not prove production identity/ACL/TLS, power-loss or backup recovery, capacity/cost, multi-day soak, hosted CI, native platform support or operator readiness. |
+| `foundationdb-network-cleanup`, 2026-09-21, arm64, tested tree `65b521c` (published as `6d2a5d4`) | **PASS** — shared RustFS/FDB client-network endpoint, endpoint reachability probe, durable composition, FoundationDB node restart/reopen and owned network disconnect/cleanup | Local disposable Docker qualification only; it does not prove hosted CI, production identity/ACL/TLS, capacity, backup/restore or operator readiness. |
 | Hosted attempt `35591729423`, revision `1ea183e`, Linux `foundationdb-rustfs` | **NO HOSTED PASS** — FoundationDB configured/readiness/image-match markers passed, then the client failed to reach the published RustFS endpoint at `host.docker.internal:32768`; the workflow was later superseded | This is a recorded blocker, not acceptance. The endpoint portability fix is in `6d2a5d4`; a terminal rerun is still required. |
 
 The run is retained as qualification evidence for the restart/fencing and
@@ -32,6 +33,12 @@ harness gates, not as production acceptance. Its markers were
 `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=1`,
 `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
 `FOUNDATIONDB_TEST_PASS topology=durable`.
+
+The follow-up network-cleanup run also emitted
+`FOUNDATIONDB_RUSTFS_NETWORK_READY`,
+`FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403`,
+`FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/arm64 service_restart=pass soak_rounds=0`,
+`RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS` with exit 0.
 
 The hosted failure identified the Linux container-network boundary rather than
 an FDB transaction failure. The fix attaches the owned RustFS container to the

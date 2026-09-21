@@ -987,6 +987,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   exposed the Linux loopback-publish portability gap fixed in `6d2a5d4`, which
   now attaches the owned RustFS container to the FoundationDB client network;
   a terminal hosted rerun of that fix remains required.
+  The follow-up local arm64 durable run `foundationdb-network-cleanup` tested
+  the fix before commit `65b521c` (published as `6d2a5d4`) and exited 0 with
+  `FOUNDATIONDB_RUSTFS_NETWORK_READY`,
+  `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403`,
+  `FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/arm64 service_restart=pass soak_rounds=0`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; owned network disconnect
+  and cleanup also completed. This remains local qualification evidence only.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
