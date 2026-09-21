@@ -256,8 +256,10 @@ hardlink/release identity, large inode values, and a real opened session fid.
 The next bounded packet adds the direct `./9p` probe/refusal/option helpers,
 strict named `mount9p` delegation, 9P live-mount filtering/cleanup, and
 mounted transport/server/connection/closed views. Its Rust/N-API local gates
-pass, while richer oracle mount options and hosted N-API native-mount lifecycle
-evidence remain explicit; production remains **NO-GO**.
+pass. A dedicated `Native 9P` workflow now builds the public addon and runs
+automatic, direct `./9p`, and structural-driver N-API mounted-I/O/cleanup
+checks on a privileged Linux runner; the exact-SHA hosted result remains
+pending, so production remains **NO-GO**.
 
 ## Detailed work items
 
@@ -545,6 +547,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-9P | Closed the lock-table option-injection slice: `P9ServerOptions.locks` accepts a `P9LockTable`, and injected ranges are visible through server and connection-session option handles while remaining shared with protocol lock state; release build, generated typecheck, host-enabled server integration, focused P9 runtime checks, 31 Rust tests, and strict Clippy passed | — | 65% W01.1 planning view | 9P mount helpers, fresh hosted native execution at this revision, crash/reset/half-close recovery, and broader W01 gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-9P | Added the bounded direct `./9p` mount-helper facade: Linux-client probe, Unix/TCP refusal and option-string helpers, strict named `mount9p` delegation, 9P live-mount filtering/cleanup, nested auto 9P fields, and mounted transport/server/connection/closed views; release build, generated typecheck, focused P9 runtime regressions, host-enabled server integration, `mount-rs-napi --lib` 17/17, 35 ordinary 9P tests, formatting, and warning-denied Clippy passed | — | 65% W01.1 planning view | Oracle shared-server/signal/extended server-policy mount options, hosted N-API native-mount lifecycle at this revision, crash/reset/half-close recovery, and broader W01 gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-9P | Added configured shared-server adoption to the native `./9p` mount option: `mount9p` starts a supplied server only when the Linux client probe is usable, and the Rust adapter passes its exact bound transport to the native adoption path; N-API compile/build, generated typecheck, helper validation, syntax, and diff checks passed | — | 65% W01.1 planning view | Oracle signal/extended server-policy/session controls, hosted N-API native-mount lifecycle at this revision, crash/reset/half-close recovery, and broader W01 gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-9P | Added the opt-in direct `./9p` native lifecycle test and a dedicated hosted N-API Linux job covering automatic, direct, and structural-driver 9P mounted I/O and cleanup after `9p`/`9pnet_fd` probing; local syntax/diff checks pass | — | 65% W01.1 planning view | The exact-SHA hosted N-API result is pending; automatic cross-transport signal ownership, remaining mount controls, crash/reset/half-close recovery, and broader W01 gates remain open; W01 stays NO-GO |
 
 | 2026-09-22 | W01-FUSE | Added fail-closed validation for caller-supplied native FUSE mount option tokens and transport-owned overrides; focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS | — | 35% W01.4 planning view | Hosted Linux `/dev/fuse`, callback-event, crash/concurrency/durability, and signed/activated FSKit evidence remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Added active NFS socket-task accounting with abort-safe close draining and read-only sorted BigInt shared-handle snapshots on both the v3 and v4 N-API views. Rust NFS tests passed 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; the release addon, generated typecheck, and live N-API server integration passed | — | 72% W01.1 planning view | Full v3/v4 stateful matrix, remaining upstream session/member parity, hosted lifecycle, Linux NFSv4.1 and crash/durability gates remain open; W01 stays NO-GO |

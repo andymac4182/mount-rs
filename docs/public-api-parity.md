@@ -274,9 +274,9 @@ Current focused behavior:
   policy, lock table, callbacks, and client set rather than creating a second
   listener. Mount-created listeners now receive the scalar server-policy
   fields, lock table, and direct session `onError`/`onAssertion` callbacks from
-  the same option bag. This is not full oracle mount parity: signals and the
-  automatic cross-transport signal ownership and the remaining mount controls
-  are explicitly unsupported in this packet, and
+  the same option bag. This is not full oracle mount parity: automatic
+  cross-transport signal ownership and the remaining mount controls are
+  explicitly unsupported in this packet, and
   hosted N-API native mount lifecycle evidence remains unverified.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
