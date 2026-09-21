@@ -1082,8 +1082,10 @@ evidence is terminal, owned and reproducible in a production-like environment.
 - [ ] **W08-P01 (20%) — deployment contract/topology:** choose and document the
   managed or self-hosted TiDB/PD/TiKV and object-storage architecture, HA,
   regions, TLS/network policy, resource limits, versions, tenancy and IaC;
-  prove a staging deployment and smoke/restart gate. *(Implementation +
-  hosted/provider; target platform not supplied.)*
+  prove a staging deployment and smoke/restart gate. The hosted
+  `tidb-tls-compile` job `106298487587` in run `35588858142` confirms that the
+  public consumers can include the TLS client graph, but not a deployment or
+  handshake. *(Implementation + hosted/provider; target platform not supplied.)*
 - [ ] **W08-P02 (15%) — secrets/IAM/rotation:** bind production credentials
   through the approved secret manager; prove least privilege, rotation,
   revocation, audit and redaction without data loss. *(Implementation +
@@ -1107,7 +1109,8 @@ evidence is terminal, owned and reproducible in a production-like environment.
 - [ ] **W08-P07 (15%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
-  + implementation; security approval and network controls are external.)*
+  + implementation; the hosted TLS compile gate passed, while the actual
+  endpoint, certificates, security approval and network controls are external.)*
 - [ ] **W08-P08 (15%) — failure drills/runbooks/on-call:** exercise client and
   provider loss, stale leases, partitions, partial writes, rolling restart and
   restore; publish operator runbooks and complete an on-call tabletop/timed
