@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mount_rs_core::MemoryFs;
@@ -154,6 +155,46 @@ async fn session_errors_are_reported_once_with_the_request_head() {
     assert_eq!(reports[0].1.target, unsupported_head.target);
     assert_eq!(reports[1].1.method, unauthorized_head.method);
     assert_eq!(reports[1].1.target, unauthorized_head.target);
+}
+
+#[tokio::test]
+async fn injected_session_clock_controls_lock_expiry_deterministically() {
+    let now = Arc::new(AtomicI64::new(1_000));
+    let clock = Arc::clone(&now);
+    let options = WebdavSessionOptions {
+        now: Some(Arc::new(move || clock.load(Ordering::SeqCst))),
+        locks: mount_rs_webdav::DavLockTableOptions {
+            default_timeout_seconds: 1,
+            max_timeout_seconds: 1,
+            ..mount_rs_webdav::DavLockTableOptions::default()
+        },
+        ..WebdavSessionOptions::default()
+    };
+
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), options);
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/clocked".to_owned(),
+                headers: [("timeout".to_owned(), "Second-1".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#
+                .to_vec(),
+        )
+        .await;
+
+    assert_eq!(lock.status, 201);
+    assert_eq!(session.lock_count(), 1);
+    assert_eq!(session.lock_records()[0].expires_at, 2_000);
+
+    now.store(1_999, Ordering::SeqCst);
+    assert_eq!(session.lock_count(), 1);
+    now.store(2_000, Ordering::SeqCst);
+    assert_eq!(session.lock_count(), 0);
+    assert!(session.lock_records().is_empty());
 }
 
 async fn read_http_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {

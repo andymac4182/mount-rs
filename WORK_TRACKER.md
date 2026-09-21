@@ -850,9 +850,14 @@ cancelled, while [Live Cloudflare R2 run
 failed; no hosted WebDAV acceptance is claimable from that tip.
 The remaining N-API session member boundary is also explicit: scalar options,
 snapshot lock records, assertion readback, Map-shaped method counters, and
-request-level `onError(error, head)` are implemented, while the oracle's
-injectable `now`, `onAssertion`, and live `DavLockTable` methods remain OPEN
-rather than being treated as accepted scope.
+request-level `onError(error, head)` are implemented. The oracle's injectable
+`now`, `onAssertion`, and live `DavLockTable` methods are explicitly outside
+the supported N-API scope: the Rust transport retains deterministic clock
+injection, current Rust request paths have no externally triggerable assertion
+site, and the N-API lock view is intentionally expiry-aware but read-only so
+request token/ownership checks remain authoritative. Broader member parity,
+hosted/native lifecycle, provider, restart/durability, and concurrency remain
+open rather than being silently accepted.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run
@@ -1254,6 +1259,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
+- [x] The WebDAV N-API scope decision now records the oracle-only clock,
+  assertion-callback, and live-lock-table boundaries explicitly. The focused
+  Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
+  --locked injected_session_clock_controls_lock_expiry_deterministically`
+  passed 1/1 and proves the native injected clock expires a lock at the exact
+  millisecond boundary. N-API keeps serializable options, empty assertion
+  readback, and expiry-aware `WebdavLockView[]` snapshots; broader session/
+  server parity and the external W01 gates remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
