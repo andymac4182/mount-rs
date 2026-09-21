@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "sqlite",
+        "path": "/var/lib/mount-rs/metadata.sqlite"
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "https://ozone-policy.invalid",
+        "bucket": "mount-rs-production-w26",
+        "prefix": "volumes/sqlite",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 4194304,
+      "owner": "mount-rs-production-w26-sqlite"
+    }
+  }
+}
