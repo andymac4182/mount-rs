@@ -46,6 +46,14 @@ FoundationDB client network under `mount-rs-rustfs` and disconnects it during
 owned cleanup; until a terminal hosted rerun passes the composition, N-API,
 native CLI and restart phases, hosted acceptance remains open.
 
+The repository now also contains the manually dispatched
+`.github/workflows/foundationdb-production.yml` gate. It uses non-cancelling
+concurrency, runs the durable composition with one bounded soak round plus
+Node, Linux native CLI/FUSE, restart and fresh-client checks, and retains a
+redacted terminal log artifact. This makes the hosted qualification result
+auditable despite unrelated mainline pushes; it remains qualification evidence
+and cannot close the production gates below.
+
 ## Production gate ledger
 
 | Gate | Status | Required exit evidence |

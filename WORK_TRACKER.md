@@ -994,6 +994,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/arm64 service_restart=pass soak_rounds=0`,
   `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; owned network disconnect
   and cleanup also completed. This remains local qualification evidence only.
+  The dedicated manually dispatched
+  [W07 hosted qualification workflow](.github/workflows/foundationdb-production.yml)
+  now runs this durable composition, one bounded soak round, the live Node
+  addon, the Linux native CLI/FUSE lifecycle and the service-restart/fresh-
+  client checks with non-cancelling concurrency. It retains the terminal
+  redacted log as a run artifact so a long W07 result is not invalidated by an
+  unrelated mainline push; its result is still qualification evidence only.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
