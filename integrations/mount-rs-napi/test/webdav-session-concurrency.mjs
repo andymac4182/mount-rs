@@ -4,7 +4,9 @@ import { Filesystem, createWebdavServer } from "../index.js"
 
 const filesystem = Filesystem.memory()
 const server = createWebdavServer(filesystem, { readChunkBytes: 4 * 1024 })
-const objects = Array.from({ length: 64 }, (_, index) =>
+const concurrency = Number(process.env.MOUNT_RS_WEBDAV_CONCURRENCY ?? 64)
+assert.ok(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 256)
+const objects = Array.from({ length: concurrency }, (_, index) =>
   Buffer.alloc(64 * 1024 + index, index),
 )
 
@@ -39,11 +41,11 @@ try {
     assert.deepEqual(body, expected)
   }
 
-  assert.equal(server.session.stats.methods.get("PUT"), 64)
-  assert.equal(server.session.stats.methods.get("GET"), 64)
+  assert.equal(server.session.stats.methods.get("PUT"), concurrency)
+  assert.equal(server.session.stats.methods.get("GET"), concurrency)
 } finally {
   await server.close().catch(() => {})
   await filesystem.shutdown()
 }
 
-console.log("mount-rs N-API WebDAV direct-session concurrency: PASS (64 concurrent PUT/GET pairs)")
+console.log(`mount-rs N-API WebDAV direct-session concurrency: PASS (${concurrency} concurrent PUT/GET pairs)`)

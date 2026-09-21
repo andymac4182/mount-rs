@@ -134,6 +134,24 @@ fn blocking_server(entered: &Arc<Notify>, cancelled: &Arc<AtomicUsize>) -> NfsSe
     )
 }
 
+fn blocking_server_with_window(
+    entered: &Arc<Notify>,
+    cancelled: &Arc<AtomicUsize>,
+    max_in_flight: usize,
+) -> NfsServer {
+    NfsServer::new(
+        BlockingStatDriver {
+            inner: MemoryFs::empty(),
+            entered: Arc::clone(entered),
+            cancelled: Arc::clone(cancelled),
+        },
+        NfsServerOptions {
+            max_in_flight,
+            ..NfsServerOptions::default()
+        },
+    )
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_close_cancels_a_blocked_nfs_request() {
     let entered = Arc::new(Notify::new());
@@ -199,4 +217,41 @@ async fn server_close_cancels_a_blocked_nfs_request() {
     assert_eq!(server.connections(), 0);
 
     let _ = peer.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn connection_close_cancels_a_queued_request_waiting_for_a_slot() {
+    let entered = Arc::new(Notify::new());
+    let cancelled = Arc::new(AtomicUsize::new(0));
+    let server = blocking_server_with_window(&entered, &cancelled, 1);
+    let address = server.listen().await.expect("listen NFS server");
+    let mut peer = TcpStream::connect(address)
+        .await
+        .expect("connect NFS client");
+    wait_for_connections(&server, 1).await;
+
+    let mut requests = mount_request();
+    requests.extend(mount_request());
+    peer.write_all(&requests)
+        .await
+        .expect("send blocked and queued MOUNT requests");
+    timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("first MOUNT request reaches the blocked backend");
+
+    let connection = server
+        .clients()
+        .expect("list NFS clients")
+        .pop()
+        .expect("blocked NFS client remains visible");
+    timeout(Duration::from_millis(250), connection.close())
+        .await
+        .expect("connection close cancels a queued semaphore wait")
+        .expect("connection close succeeds");
+    assert!(connection.is_closed());
+    assert_eq!(cancelled.load(Ordering::Acquire), 1);
+    wait_for_connections(&server, 0).await;
+
+    let _ = peer.shutdown().await;
+    server.close().await.expect("close NFS server");
 }

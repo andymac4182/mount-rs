@@ -256,7 +256,9 @@ async fn real_ozone_block_contract() {
 
         let mut cleanup_ids = concurrent_ids;
         cleanup_ids.push(first_id);
-        if second_id != *cleanup_ids.last().expect("first block ID is retained") {
+        // The second identical put reuses first_id. Check the complete cleanup
+        // set so a concurrent ID cannot make us delete that object twice.
+        if !cleanup_ids.contains(&second_id) {
             cleanup_ids.push(second_id);
         }
         for id in cleanup_ids {

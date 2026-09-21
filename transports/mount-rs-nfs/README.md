@@ -22,15 +22,19 @@ filesystem-backed attributes exposed by `FsDriver`. `NfsServer::clients()`
 returns live accepted `NfsConnection` objects in arrival order; each exposes a
 stable id, peer, shared v3/v4 sessions, and bounded `close`/`wait_closed`
 lifecycle operations. Closing one connection tears down only its TCP serving
-task; the server-owned protocol state remains available to other clients. The
-rootless wire suite also proves that a v4.1 session can be used again after an
+task; the server-owned protocol state remains available to other clients. Close
+also interrupts a reader waiting for an in-flight slot, so a queued RPC cannot
+hold connection teardown behind a blocked earlier request. The rootless wire
+suite also proves that a v4.1 session can be used again after an
 orderly TCP transport reconnect while this server process remains alive, and
 that multiple v3 calls can be pipelined on one connection within the configured
 in-flight bound. Two independent v4.1 sessions also complete concurrent
 distinct-file OPEN/WRITE/READ round trips. This is rootless in-process
 userspace concurrency evidence. A restart-boundary test reuses the backend
 with a replacement server and confirms that the old v4 session is rejected
-with `NFS4ERR_BADSESSION`.
+with `NFS4ERR_BADSESSION`; both halves of the eight-byte write verifier
+contribute to its session identity, avoiding the observed rapid-replacement
+alias.
 
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
@@ -39,9 +43,10 @@ The replacement also rejects the pre-crash file handle with `NFS3ERR_STALE`,
 making the boundary explicit: backend data is recoverable, while handles remain
 process-local. A companion NFSv4.1 child-process case establishes a session,
 force-terminates the child, and verifies that a replacement rejects the old
-session with `NFS4ERR_BADSESSION`. These are process-crash classification
-checks; they do not claim power-loss durability or persistent NFSv4 lease,
-replay, or file-handle state.
+session with `NFS4ERR_BADSESSION` and the old root handle with
+`NFS4ERR_STALE`. These are process-crash classification checks; they do not
+claim power-loss durability or persistent NFSv4 lease, replay, or file-handle
+state.
 
 The shared file-handle table accepts `max_handles` through
 `NfsSessionOptions`/`NfsServerOptions` (and `maxHandles` through the N-API

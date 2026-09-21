@@ -203,7 +203,10 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         Hosted native-FUSE runs <code>35657075892</code> and
         <code>35659287961</code> still timed out both unmount cases at the
         15-second bound, including the corrected descriptor-drain path, so no
-        hosted native-FUSE acceptance is claimed.
+        hosted native-FUSE acceptance is claimed. The subsequent manual run
+        <code>35662415701</code> passed ordinary round-trip and backend-panic
+        close but still timed out blocked-read unmount and kernel read, so the
+        latest stop-aware terminal-reply fix also remains unaccepted.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
         The no-reply <code>FORGET</code> path follows the pinned session
@@ -341,9 +344,9 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         before jobs were created, so it supplies no hosted concurrency result.
         The pinned oracle passes 266 NFSv3/MOUNT and NFSv4.1 TCP cases with 18
         capability/root skips; bounded <code>maxHandles</code> LRU and NFSv4
-        open-state pinning are covered. Native Linux NFSv4.1, the full
-        stateful/member matrix, hosted lifecycle, and
-        crash/concurrency/durability remain external gates.
+        open-state pinning are covered. The full stateful/member matrix,
+        hosted lifecycle, and crash/concurrency/durability remain external
+        gates.
       </>
     ),
     sources: [
@@ -360,7 +363,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
     name: '9P2000.L',
     eyebrow: 'Transport / lightweight TCP filesystem protocol',
     maturity: 'Experimental',
-    maturityNote: 'Rootless protocol/server, attached Node Duplex, and a hosted Linux lifecycle qualification now pass for the supported scope; public parity remains partial, and crash/reset/half-close recovery is supervisor-owned rather than a library guarantee.',
+    maturityNote: 'Rootless protocol/server, attached Node Duplex, and hosted Rust plus N-API Linux lifecycle qualifications now pass for the supported scope; public parity remains partial, and crash/reset/half-close recovery is supervisor-owned rather than a library guarantee.',
     summary: (
       <>
         9P is a mount-free-friendly transport: the server and per-connection
@@ -413,9 +416,11 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
     ),
     limitations: (
       <>
-        There is no native mount wrapper and no built-in macOS client. The
-        protocol does not claim legacy 9P families, xattrs, authentication, or
-        full upstream parity; rootless success is not a kernel mount result.
+        The bounded <code>./9p</code>/<code>mount9p</code> helper is a native
+        Linux mount seam, but it requires the host kernel client and mount
+        privilege; there is no built-in macOS client. The protocol does not
+        claim legacy 9P families, xattrs, authentication, or full upstream
+        parity; rootless success is not a kernel mount result.
       </>
     ),
     evidence: (
@@ -429,7 +434,11 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         connection release, ordinary mount/unmount, and external umount. This
         closes the supported Linux lifecycle scope; automatic recovery after a
         process crash, arbitrary kernel reset, or half-close remains outside
-        the library contract and needs supervisor-level evidence. The current packet adds live <code>P9Session.driver</code>,
+        the library contract and needs supervisor-level evidence. Exact SHA
+        <code>1dcf4dee</code> also passed hosted N-API run
+        <code>35664614270</code>, including automatic, direct
+        <code>./9p</code>, and structural-driver mounted I/O/cleanup. The
+        current packet adds live <code>P9Session.driver</code>,
         debug-gated assertion readback/counters, request-error and assertion
         callbacks with Node error revival, and root/<code>./9p</code> factory
         identity. Release build, generated typecheck, focused N-API tests,
@@ -443,9 +452,8 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         exposes probe/refusal/option helpers plus named <code>mount9p</code>
         delegation and mounted server/connection views. A configured
         <code>P9Server</code> can be adopted when the Linux client probe is
-        usable. These local declarations, helper, and runtime checks do not
-        close hosted N-API native-mount lifecycle or broader upstream parity;
-        overall production status remains NO-GO.
+        usable. Automatic signal ownership and broader upstream parity remain
+        open; overall production status remains NO-GO.
       </>
     ),
     sources: [
@@ -454,6 +462,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
       { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35628187344' },
+      { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35664614270' },
     ],
   },
   fskit: {
@@ -633,7 +642,7 @@ curl -H 'Authorization: Bearer demo-memory' \
     name: 'WebDAV',
     eyebrow: 'Transport / HTTP filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, 32-request network and same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
+    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, 64-request network and same-session concurrency, local macOS mounting, and scoped hosted macOS/Linux native jobs pass; full member parity, restart/durability, provider, and hosted lifecycle gates remain open.',
     summary: (
       <>
         WebDAV makes the filesystem contract available through standard HTTP
@@ -701,13 +710,14 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         stays open. N-API network/hosted concurrency,
         crash/power-loss restart, and provider durability remain open.
         The latest host-enabled N-API network packet also passes one
-        <code>MKCOL</code>, 32 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
-        pairs with 33 PUT/33 GET method counters, chunked stream I/O, Basic
+        <code>MKCOL</code>, 64 concurrent 64 KiB-plus <code>PUT</code>/<code>GET</code>
+        pairs with 65 PUT/65 GET method counters, chunked stream I/O, Basic
         authentication, and a live unsupported
         <code>PATCH</code> that returns <code>405</code> and calls
-        <code>onError</code> once. A child-process <code>SIGKILL</code> and
-        SQLite reopen recovered file bytes with zero replacement-session locks;
-        these are local N-API/provider checks, not hosted or power-loss proof.
+        <code>onError</code> once. Child-process <code>SIGKILL</code> probes
+        for SQLite and rooted NodeFs recovered exact file bytes with zero
+        replacement-session locks; these are local N-API/provider checks, not
+        hosted or power-loss proof.
         The direct streaming facade passes a three-chunk PUT, multi-chunk GET,
         early response-iterator return, and deliberate request-body failure
         mapping for async iterables and Web ReadableStreams. Active
@@ -719,8 +729,11 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         typed transport callback with the accepted loopback peer. A malformed
         HTTP request produces one typed callback and clean socket/server
         teardown. Same-driver recreation preserves file bytes while resetting
-        session locks, and 32 parallel direct-session PUTs followed by GETs
-        all return matching bodies. A rooted NodeFs replacement-provider test
+        session locks, and 64 parallel direct-session PUTs followed by GETs
+        all return matching bodies. The 64-pair implementation packet had no
+        terminal hosted WebDAV result because its exact-SHA workflow was
+        cancelled by subsequent mainline publication. A rooted NodeFs
+        replacement-provider test
         also reopens exact bytes with zero replacement-session locks. The
         N-API listener remains blocked in this
         sandbox by its loopback bind prerequisite. The current postlude also

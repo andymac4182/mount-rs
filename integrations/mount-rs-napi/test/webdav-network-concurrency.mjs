@@ -12,7 +12,9 @@ const server = createWebdavServer(filesystem, {
     requestErrors.push({ error, head })
   },
 })
-const objects = Array.from({ length: 64 }, (_, index) =>
+const concurrency = Number(process.env.MOUNT_RS_WEBDAV_CONCURRENCY ?? 64)
+assert.ok(Number.isInteger(concurrency) && concurrency >= 1 && concurrency <= 256)
+const objects = Array.from({ length: concurrency }, (_, index) =>
   Buffer.alloc(64 * 1024 + index, index),
 )
 let authServer
@@ -86,8 +88,8 @@ try {
   })
   assert.equal(streamedGet.status, 200)
   assert.deepEqual(Buffer.from(await streamedGet.arrayBuffer()), streamedObject)
-  assert.equal(server.session.stats.methods.get("PUT"), 65)
-  assert.equal(server.session.stats.methods.get("GET"), 65)
+  assert.equal(server.session.stats.methods.get("PUT"), concurrency + 1)
+  assert.equal(server.session.stats.methods.get("GET"), concurrency + 1)
 
   const unsupported = await fetch(`${server.url}/concurrent-http/streamed.bin`, {
     method: "PATCH",
@@ -130,4 +132,4 @@ try {
   await filesystem.shutdown()
 }
 
-console.log("mount-rs N-API WebDAV network concurrency/auth/streaming: PASS (64 concurrent HTTP PUT/GET pairs)")
+console.log(`mount-rs N-API WebDAV network concurrency/auth/streaming: PASS (${concurrency} concurrent HTTP PUT/GET pairs)`)

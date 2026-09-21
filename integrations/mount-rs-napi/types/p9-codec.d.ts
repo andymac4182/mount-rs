@@ -213,6 +213,12 @@ export declare const P9_VERSION_DOTL: "9P2000.L"
 export declare const P9_VERSION_UNKNOWN: "unknown"
 export declare const P9_MIN_MSIZE: 4096
 export declare const V9FS_MAGIC: 0x01021997
+export declare const DEFAULT_P9_PORT: 564
+export declare const DEFAULT_SOCKET_MODE: 384
+export declare const DEFAULT_MAX_IN_FLIGHT: 16
+export declare const DEFAULT_MSIZE: 1048576
+export declare const P9_LOCK_EOF_END: 0x10000000000000000n
+export declare const DEFAULT_MAX_LOCKS_PER_FILE: 1024
 
 export declare const P9_DEFAULT_MOUNT_MSIZE: 131096
 export declare const P9_MAX_MOUNT_MSIZE: 1048576

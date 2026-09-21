@@ -34,12 +34,15 @@ transport/server/connection/closed views. It accepts a configured native
 client set. Direct and automatic mount-created listeners now also receive the
 bounded scalar policy and direct session `onError`/`onAssertion` callbacks from
 the mount option bag; injected shared servers retain their own hooks. It
-deliberately does not claim automatic cross-transport signal ownership,
-remaining mount controls, or unsupported native platforms. Exact SHA
-`1dcf4dee4d01fb5e3807335579659b54efd74351` passed hosted Linux automatic,
+deliberately does not claim automatic cross-transport signal ownership or
+unsupported native platforms. The pinned direct-option audit found no
+additional unrepresented `MountP9Options` fields, and `P9Mount.source` is now
+string-qualified and runtime-checked in the hosted direct mount. Exact SHA
+`3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed hosted Linux automatic,
 direct `./9p`, and structural-driver N-API mounted I/O/cleanup in Native 9P
-run `35664614270`, job `106547449823`; the direct `./9p` facade now owns the
-bounded `signals` teardown option.
+run `35665824215`, N-API job `106552944097`, with Rust job `106552944349` also
+passing; the direct `./9p` facade now owns the bounded `signals` teardown
+option.
 The `./9p`
 constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
@@ -75,17 +78,26 @@ W01 gates and unresolved public parity.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
-client objects with peer/shared-session views plus abort-safe close/wait state.
+client objects with peer/shared-session views plus abort-safe close/wait state,
+including cancellation while a queued request waits for an in-flight slot.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
-NFSv3 calls under bounded in-flight dispatch. A restart-boundary test also
-proves that a replacement server rejects the old v4 session with
-`NFS4ERR_BADSESSION`, classifying session/lease/replay state as process-local.
-The opt-in macOS native NFSv3
-loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
-remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
-stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-backend durability, crash injection, and durable-restart qualification. The
+NFSv3 calls under bounded in-flight dispatch. The forced-crash boundary tests
+now reject a pre-crash NFSv3 file handle with `NFS3ERR_STALE`, a pre-crash v4
+session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
+`NFS4ERR_STALE`; the v4 session identity folds both write-verifier halves to
+avoid the observed replacement alias. Two independent v4 sessions also
+complete concurrent distinct-file OPEN/WRITE/READ round trips. Multiple server
+processes sharing one backend remain explicitly outside the supported scope.
+The pinned current-tip NFS conformance refresh passed 266 tests with 18
+explicit capability/root skips and zero mismatches. The opt-in macOS native
+NFSv3 loopback mount gate passed 1/1 in 0.11s, and hosted run
+`35658285441` passed the named macOS and Ubuntu native-NFS jobs; the overall
+workflow was not green because unrelated jobs failed. Production remains
+NO-GO pending complete v3/v4 stateful/member parity, a green hosted release
+qualification, automatic reconnect/backend durability, crash injection,
+durable-restart qualification, and native-client concurrency beyond the
+bounded in-process scope. The
 new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
 session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
@@ -100,9 +112,9 @@ safe N-API bridges, with a live v4.1 owner/clock sequence. Rust
 `NfsSessionHooks` and N-API `NfsServerOptions.onError` now report decoded
 request failures with panic isolation; the malformed-v4 callback test,
 complete NFS target, release addon/typecheck, live N-API harness, and strict
-affected Clippy pass. Native Linux/hosted lifecycle and crash/durability gates
-remain open.
-Deterministic seeded identities are covered.
+affected Clippy pass. Named native-NFS hosted jobs are accepted platform
+evidence, but complete hosted qualification and crash/durability gates remain
+open. Deterministic seeded identities are covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -759,6 +771,7 @@ patch):
 | Main | W01 N-API 9P mount-created session callbacks | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options carry `onError`/`onAssertion` into mount-created listeners through the existing Rust session-hook path, while configured shared servers retain their own callbacks; debug build, generated typecheck, focused runtime checks, host-enabled server integration, N-API/Rust tests, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 N-API 9P direct-facade signal teardown | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct `./9p` mounts support `signals` with process-wide `SIGINT`/`SIGTERM` cleanup, unmount-all dispatch, last-mount handler removal, and default-signal re-raise; the signal and mount-helper regressions plus syntax/diff checks passed; automatic cross-transport signal ownership, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
+| Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -803,7 +816,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest mainline Linux Node/CLI/native-FUSE qualification is green at `35663914822`/`147c53a8` with six hosted rollout-ledger and four qualification-log regression cases plus the NO-GO guard; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 39,516µs p95/p99 and five-round soak p95/p99 ranged 21,487–24,210µs with throughput 91.97–106.58 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the current mainline Linux Node/CLI/native-FUSE qualification is green at `35666991514`/`5b9af323` with six hosted rollout-ledger and four qualification-log regression cases plus the NO-GO guard; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 35,120µs p95/p99 at 105.73 ops/s and five-round soak p95/p99 ranged 20,100–21,587µs with throughput 107.93–119.84 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -822,7 +835,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
-| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; the published tip `229a9cd5` includes lazy-atime/EOF reduction, R2 content-addressing/cache, metadata batching, queue cancellation safety, the corrected Ozone content-addressed contract and deduplicated cleanup. The customer-deployed Ozone integration track remains NO-GO after terminal run `35655276021` missed the hard 1,000-IOPS-per-drive target for SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2; cleanup-corrected hosted run `35664474430` is queued. Secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; current `origin/main` `76650bd1` includes lazy-atime/EOF reduction, R2 content-addressing/cache, metadata batching, queue cancellation safety, same-revision concurrent-create inode rebasing, the corrected Ozone content-addressed contract and deduplicated cleanup. The customer-deployed Ozone integration track remains NO-GO after terminal run `35655276021` missed the hard 1,000-IOPS-per-drive target for SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2; fresh hosted run `35665734382` targets exact SHA `8c53d2c9`, with TiDB failed, FoundationDB in progress, compositions/base queued and no aggregate yet. Secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -900,8 +913,8 @@ check with the transport lifecycle; the shared postbuild server facade now
 clears a failed close promise so a timed-out WebDAV close can be retried after
 the peer exits. The focused wrapper race test passes 40 alternating
 real-loopback iterations, its stalled-request timeout/retry regression passes,
-and the focused direct-session concurrency probe passes 64 concurrent PUT/GET
-requests, while the network-concurrency/auth test passes 64 concurrent HTTP
+and the focused direct-session concurrency probe passes 128 concurrent PUT/GET
+requests, while the network-concurrency/auth test passes 128 concurrent HTTP
 PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 opt-in
@@ -948,22 +961,26 @@ return, and deliberate body failure. The oracle differential is explicitly
 skipped without `MOUNTX_SOURCE`; with the pinned source at
 `/private/tmp/mountx-source-w01-20260921` (oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
-differential and source-backed host-enabled server phase pass. The supported
-N-API session/server callable-member differential also passes with explicit
-buffered/streamed session and server lifecycle member assertions, using
+differential and source-backed host-enabled server phase pass. The full supported
+N-API server/session prototype-member differential also passes with explicit
+string/public-symbol prototype audits plus buffered/streamed session and server
+lifecycle member assertions, using
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node
 test/webdav-session-parity.mjs`, covering effective credentials/lock/session
 options, driver and lifecycle members, Map-shaped method counters, the full
 supported WebDAV class 1/2/3 direct-method set, recursive owner lock snapshots,
-and request/reply/error/assertion counters. Its XML comparisons normalize only
-dynamic timestamps, and COPY/MOVE destination reads plus DELETE-missing readback
-verify side effects. The sandbox blocks the live N-API loopback bind with
+and request/reply/error/assertion counters. Native-only `handleRequestStream` and
+`lockCount` are explicit supported additions, while internal wrapper symbols are
+filtered from the oracle comparison; three repeated parity runs pass. Its XML
+comparisons normalize dynamic HTTP/ISO timestamps and opaque ETags, and COPY/MOVE
+destination reads plus DELETE-missing readback verify side effects. The sandbox
+blocks the live N-API loopback bind with
 `Operation not permitted`, while provider, hosted, network-client concurrency,
 and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
 `/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
 acceptance. The host-enabled WebDAV session
-packet also completes 64 parallel unique-file PUTs and GETs through one
+packet also completes 128 parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
@@ -1003,6 +1020,15 @@ request token/ownership checks remain authoritative. The injectable `now`,
 `onAssertion`, and live `DavLockTable` remain explicit outside-scope controls.
 Hosted/native lifecycle, provider, restart/durability, and broader concurrency
 remain open rather than being silently accepted.
+At the exact published WebDAV implementation packet
+`5c6716a201cdcbc1feeac9d2c245d113250f3bc3`, read-only status showed [CI run
+35667576642](https://github.com/andymac4182/mount-rs/actions/runs/35667576642),
+[W08 release targets run 35667576687](https://github.com/andymac4182/mount-rs/actions/runs/35667576687),
+[Fault injection run 35667576587](https://github.com/andymac4182/mount-rs/actions/runs/35667576587),
+and [W08 release policy run 35667576738](https://github.com/andymac4182/mount-rs/actions/runs/35667576738)
+pending, while [Live Cloudflare R2 run 35667576677](https://github.com/andymac4182/mount-rs/actions/runs/35667576677)
+and [W04 production policy run 35667576848](https://github.com/andymac4182/mount-rs/actions/runs/35667576848)
+were queued; no hosted WebDAV PASS is claimable from this implementation packet.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run
@@ -1451,9 +1477,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   records after LOCK and observes zero records after UNLOCK. Direct Node
   socket-reset tests now produce exactly one typed
   peer-aware callback event for both S3 and WebDAV. The supported WebDAV
-  session/member differential and full direct class 1/2/3 method matrix now
-  pass; the oracle-only controls remain outside scope. Active lock-record readback and
-  post-UNLOCK cleanup, 64 parallel unique-file direct-session PUT/GET
+  full supported server/session prototype-member differential and full direct
+  class 1/2/3 method matrix now pass; the oracle-only controls remain outside
+  scope. Active lock-record readback and
+  post-UNLOCK cleanup, 128 parallel unique-file direct-session PUT/GET
   requests, recursive owner XML readback, plus the session-owned driver
   wrapper, are verified. The parallel packet is limited to in-process
   same-driver concurrency.
@@ -1660,6 +1687,33 @@ Evidence landed without closing the remaining W01 acceptance gates:
   backup/rollback, provider scope/performance, observability, runbook,
   ownership, and release approval gates.
 
+- Current W04 recovery chunks: WebDAV session parity now pins native/oracle
+  directory and file mtimes before exact PROPFIND XML comparison; the focused
+  parity test passed 30 repetitions, `node --check`, formatting, and
+  `git diff --check`. Ozone cleanup now deduplicates the repeated block ID;
+  the local `mount-rs-r2` suite passed 18/18 and the standalone Ozone workspace
+  compiled with `--locked`. These changes were published as `9b2dabd7` and
+  `23c0ba7e` respectively. The first full run `35664315098` remained queued
+  after its macOS runner failed to materialize and was canceled after its
+  pre-fix WebDAV `PROPFIND`, Ozone cleanup `block object` ENOENT, and
+  pre-`bc292709` Ubuntu FUSE failures were diagnosed. Recovery run
+  `35666527609` is active from `9b2dabd7`, before the Ozone fix; Windows and
+  ARM Node have started while Linux/macOS/provider jobs remain queued at the
+  ledger snapshot. No queued, partial, or pre-fix result is promoted to W04
+  or production acceptance; production remains **NO-GO**.
+
+- Recovery run `35666527609` has produced partial but useful evidence on its
+  pre-Ozone-fix head: ARM Node job `106553420990` passed the exact PGlite
+  integration/restart-recovery step and fragmented HTTP early-rejection step;
+  Windows Node job `106553420495` passed package and consumer checks. Ozone /
+  TiDB job `106553420645` reached the functional block contract but failed the
+  hard 1,000-IOPS target at 30.34 IOPS, while Ozone/FoundationDB job
+  `106553422646` passed durable chunk/reopen and cleanup markers but failed the
+  same target at 56.72 IOPS. Intel macOS remains in progress and macOS-latest,
+  Linux Node, and Ubuntu Rust remain queued at the current snapshot. This is
+  not W04 or production acceptance; a current-main run containing `23c0ba7e`
+  is still required for Ozone requalification and the complete Node matrix.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -1855,6 +1909,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   deployment-level authority credentials, monitored clock/cadence telemetry
   and failover evidence remain pending, so this item is not yet marked
   complete.
+  Fresh mainline requalification
+  [35665547966](https://github.com/andymac4182/mount-rs/actions/runs/35665547966)
+  (job `106550374750`, revision `1b98ed04`) completed green in 9m47s from the
+  published `origin/main` tip and re-ran the lease-publication policy,
+  authority/consumer, service-restart and fresh-client paths. Deployment-level
+  authority credentials, monitored clock/cadence telemetry and failover
+  evidence remain pending, so this item is not yet marked complete.
+  Current-tip requalification
+  [35666991514](https://github.com/andymac4182/mount-rs/actions/runs/35666991514)
+  (job `106554849953`, revision `5b9af323`) completed green in 11m23s after
+  concurrent mainline reintegration and re-ran the lease-publication policy,
+  authority/consumer, service-restart and fresh-client paths. Deployment-level
+  authority credentials, monitored clock/cadence telemetry and failover
+  evidence remain pending, so this item is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -1895,6 +1963,26 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and RustFS restart/fault-recovery paths; the retained artifact is
   `foundationdb-production-qualification-35663914822-1` with SHA-256
   `098ab3a4bb1fd6ae84971cebbb67baf2e50d9cb271accdaa9351ec28e49c3042`.
+  Live macOS service/cluster acceptance, the complete advertised
+  platform/package matrix and production owner gates remain open.
+  Fresh mainline requalification
+  [35665547966](https://github.com/andymac4182/mount-rs/actions/runs/35665547966)
+  (job `106550374750`, revision `1b98ed04`) completed green in 9m47s and
+  passed the live Node/N-API, Linux CLI/FUSE mount and reopen, FoundationDB
+  service restart/authority republish and RustFS restart/fault-recovery paths.
+  Its retained artifact is
+  `foundationdb-production-qualification-35665547966-1` with SHA-256
+  `f37951fa1e20ce86bdc031d9529c1ace3506b03a9f2027b72b7186118eccbd02`.
+  Live macOS service/cluster acceptance, the complete advertised
+  platform/package matrix and production owner gates remain open.
+  Current-tip requalification
+  [35666991514](https://github.com/andymac4182/mount-rs/actions/runs/35666991514)
+  (job `106554849953`, revision `5b9af323`) completed green in 11m23s and
+  passed the live Node/N-API, Linux CLI/FUSE mount and reopen, FoundationDB
+  service restart/authority republish and RustFS restart/fault-recovery paths.
+  Its retained artifact is
+  `foundationdb-production-qualification-35666991514-1` with SHA-256
+  `7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12`.
   Live macOS service/cluster acceptance, the complete advertised
   platform/package matrix and production owner gates remain open.
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
@@ -2340,6 +2428,36 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provenance records runner `GitHub Actions 1000023111`; this remains
   bounded hosted Linux qualification, not production capacity or rollout
   acceptance.
+  Fresh mainline requalification
+  [35665547966](https://github.com/andymac4182/mount-rs/actions/runs/35665547966)
+  (job `106550374750`, revision `1b98ed04`) completed green in 9m47s. It
+  emitted `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_NAPI_PASS`, `FOUNDATIONDB_CLI_PASS`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; base latency was
+  `operations=15 p50_us=26199 p95_us=321373 p99_us=321373 total_ms=1273
+  throughput_ops_per_sec=11.78`, with five soak-round p95/p99 values from
+  16,527µs to 34,188µs and throughput from 53.87 to 136.00 ops/s. The
+  artifact digest is
+  `f37951fa1e20ce86bdc031d9529c1ace3506b03a9f2027b72b7186118eccbd02` and
+  provenance records runner `GitHub Actions 1000023256`; this remains
+  bounded hosted Linux qualification, not production capacity or rollout
+  acceptance.
+  Current-tip requalification
+  [35666991514](https://github.com/andymac4182/mount-rs/actions/runs/35666991514)
+  (job `106554849953`, revision `5b9af323`) completed green in 11m23s. It
+  emitted `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_NAPI_PASS`, `FOUNDATIONDB_CLI_PASS`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; base latency was
+  `operations=15 p50_us=8101 p95_us=35120 p99_us=35120 total_ms=141
+  throughput_ops_per_sec=105.73`, with five soak-round p95/p99 values from
+  20,100µs to 21,587µs and throughput from 107.93 to 119.84 ops/s. The
+  artifact digest is
+  `7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12` and
+  provenance records runner `GitHub Actions 1000023347`; this remains
+  bounded hosted Linux qualification, not production capacity or rollout
+  acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -2397,11 +2515,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35663914822` recorded base
-    `operations=15 p50_us=9564 p95_us=39516 p99_us=39516 total_ms=163
-    throughput_ops_per_sec=91.71` at revision `147c53a8`; its five soak-round
-    p95/p99 values ranged from 21,487µs to 24,210µs and throughput ranged
-    from 91.97 to 106.58 ops/s. This remains bounded
+    latency and throughput; latest hosted run `35666991514` recorded base
+    `operations=15 p50_us=8101 p95_us=35120 p99_us=35120 total_ms=141
+    throughput_ops_per_sec=105.73` at revision `5b9af323`; its five soak-round
+    p95/p99 values ranged from 20,100µs to 21,587µs and throughput ranged
+    from 107.93 to 119.84 ops/s. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -2414,9 +2532,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `147c53a8` in run
-    `35663914822` on `ubuntu-24.04`, with the retained
-    `foundationdb-production-qualification-35663914822-1` artifact and
+    Node, CLI/native Linux checkpoint is green for revision `5b9af323` in run
+    `35666991514` on `ubuntu-24.04`, with the retained
+    `foundationdb-production-qualification-35666991514-1` artifact and
     provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
@@ -2935,13 +3053,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `b7d77432` was freshly reverified after the concurrent NFS/9P/WebDAV/
-  provider and Ozone updates with the full locked workspace test suite (exit 0)
-  and strict workspace Clippy with `-D warnings` (exit 0). This is
-  source-health evidence only and does not close W08-P01–P09.
-  Provider/native tests requiring TiDB, RustFS, PGlite, R2, FUSE or NFS
-  remained explicit opt-in skips; this is source-health evidence only and does
-  not close W08-P01–P09.
+  Source `7f964ca3` was freshly reverified after the concurrent NFS/9P/WebDAV/
+  HTTP/provider, Ozone, FUSE, chunked, 9P parity, bounded teardown and NFS
+  restart-fencing updates with the full locked workspace test suite (exit 0)
+  and strict workspace Clippy with `-D warnings` (exit 0). Provider/
+  native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit
+  opt-in skips. This is source-health evidence only and does not close
+  W08-P01–P09.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -3070,6 +3188,12 @@ reproducible in a production-like environment.
   the protected workflow file is present on remote mainline (blob
   `9cacf0f19c8fc475df508684cf0ffcc591c96625`). This is an external hosted
   environment/tag/execution blocker, not missing repository implementation.
+  A repeat read-only audit at 09:25 AEST returned the same repository,
+  environment and secret-surface HTTP 404s; release/workflow API queries were
+  still unavailable, no production-candidate tag was found, and the workflow
+  file remained present on public `origin/main`. The last successful release
+  observation remains the 08:38 AEST preview-only result. This is still an
+  external hosted boundary, not a W08 implementation pass.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
@@ -4019,16 +4143,18 @@ listing a source does not mean it has been reviewed or its code can be reused.
 ### W26 current authoritative status — 2026-09-22
 
 The current W26 source of truth is the detailed [progress ledger](docs/w26-progress-ledger.md).
-`origin/main` is `229a9cd5d1c79c6f13c7144f66d648e5eead0dd9`, including the
+`origin/main` is `76650bd1ac580a668f22a727946702c08778ca9a`, including the
 published R2 content-addressed cache, metadata mutation batching and queue
-cancellation hardening plus the corrected Ozone content-addressed block test
-and deduplicated content-addressed cleanup.
+cancellation hardening, same-revision concurrent-create inode rebasing, plus
+the corrected Ozone content-addressed block test and deduplicated
+content-addressed cleanup.
 The W26-owned code is locally green: focused
-`ChunkedFs` tests 18/18, full locked workspace tests, strict workspace Clippy
+`ChunkedFs` tests 19/19, full locked workspace tests, strict workspace Clippy
 and diff checks pass, and the Ozone test crate compile-check passes. Security
 scans `6d5a7665-d8cd-46b7-a9bd-73fec54f5431`,
 `46d4cf32-9d57-4f7e-975f-2616ddc53dc5` and
-`85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8` found zero reportable findings within
+`85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8` and
+`b8f6e846-e497-4ae6-b972-7ae3701ec722` found zero reportable findings within
 their local scopes; hosted Ozone TLS/IAM, customer isolation, capacity, 99.99%
 availability, five-minute RPO/RTO, backup/DR, native and release gates remain
 external.
@@ -4042,11 +4168,13 @@ all below the hard 1,000-IOPS target; aggregate job `106522172018` failed
 closed. Its FoundationDB lane exposed a stale content-addressed-ID assertion
 before benchmarking and then a duplicate cleanup delete after the assertion
 was corrected; both test assumptions are now corrected. Fresh manual run
-`35664474430` is queued on the current SHA, with W26 producer jobs
-`106547013193` (`ozone`), `106547013256` (`ozone-compositions`),
-`106547013137` (`ozone-tidb`) and `106547013296` (`ozone-foundationdb`).
-Queued, canceled, failed or partial jobs are not acceptance evidence. Do not
-lower the target or convert failed rows to skips.
+`35665734382` selected exact SHA
+`8c53d2c926137fba6034bf0edcb662999c71d426` and has W26 producer jobs
+`106550958998` (`ozone`, queued), `106550958843` (`ozone-compositions`,
+queued), `106550958877` (`ozone-tidb`, in progress) and `106550958697`
+(`ozone-foundationdb`, queued); the aggregate job is not yet present.
+Queued, in-progress, canceled, failed or partial jobs are not acceptance
+evidence. Do not lower the target or convert failed rows to skips.
 
 - [x] Land isolated, digest-pinned Apache Ozone 2.2.1 gateway harness and
   an Ubuntu CI gate. Main's real Linux-arm64 Docker run passed immutable
@@ -4262,16 +4390,19 @@ lower the target or convert failed rows to skips.
   across remote block I/O and full namespace publication. W26-owned remediation
   now includes atomic `FsDriver::write_file` publication (`96a25f17`), lazy
   atime/EOF handling (`d1bc8fb9`), content-addressed R2 blocks/cache, metadata
-  mutation batching (`c4e9a253`, published through `a1cb4ca9`) and queue
-  hardening (`d152fa1a`, included in current `origin/main` `229a9cd5`). The
-  batcher publishes eligible whole-file/unlink mutations once under the lease,
-  bounds pending requests at 1,024, drains canceled-runner requests with
-  `EIO`, and skips closed replies before applying a queued mutation. Focused
-  `ChunkedFs` tests pass 18/18; full locked workspace tests, strict workspace
-  Clippy and diff checks pass. Security scan
-  `6d5a7665-d8cd-46b7-a9bd-73fec54f5431` and cleanup-fix scan
-  `85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8` found zero reportable findings within
-  the local diff and explicitly defers hosted/customer gates. Terminal run
+  mutation batching (`c4e9a253`, published through `a1cb4ca9`), queue
+  hardening (`d152fa1a`) and same-revision concurrent-create inode rebasing
+  (`d3d6299e`, published through `059f801e` and included in current origin
+  descendants). The batcher publishes eligible whole-file/unlink mutations once
+  under the lease, bounds pending requests at 1,024, drains canceled-runner
+  requests with `EIO`, skips closed replies before applying a queued mutation,
+  rebases new-file mutations to unique inodes in one publication and preserves
+  conflicts for stale existing-file mutations. Focused `ChunkedFs` tests pass
+  19/19; full locked workspace tests, strict workspace Clippy and diff checks
+  pass. Security scan `6d5a7665-d8cd-46b7-a9bd-73fec54f5431`, cleanup-fix scan
+  `85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8` and concurrent-create scan
+  `b8f6e846-e497-4ae6-b972-7ae3701ec722` found zero reportable findings within
+  their local scopes and explicitly defer hosted/customer gates. Terminal run
   `35655276021` on exact revision `4efec58c` remains diagnostic: SQLite/R2
   20.35, PGlite/R2 205.48, TiDB/R2 18.09 and FoundationDB/R2 40.50 IOPS;
   every row completed 1,200/1,200 operations with zero timeout/cleanup
@@ -4281,12 +4412,13 @@ lower the target or convert failed rows to skips.
   content-addressed ID; `tests/ozone/src/lib.rs` now asserts same-content ID
   reuse, different-content ID separation and one cleanup delete per distinct
   ID. The test corrections are `edb6a43e` and `0282df64`, included in current
-  `origin/main` `229a9cd5`; the Ozone compile-check and security scans
-  `46d4cf32-9d57-4f7e-975f-2616ddc53dc5` and
-  `85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8` pass with zero reportable findings.
-  Fresh manual rerun `35664474430` is queued on exact revision `229a9cd5`; preserve fencing, revision CAS, immutable-block
-  ordering, POSIX semantics, cleanup and fail-closed artifact verification. Do
-  not lower the 1,000 target or convert failed rows into skips.
+  origin. Fresh manual run `35665734382` selected exact revision
+  `8c53d2c9`; `106550958877` has completed with failure, `106550958697` is in
+  progress, `106550958843` and `106550958998` are queued, and the aggregate is
+  not yet present. Preserve fencing,
+  revision CAS, immutable-block ordering, POSIX semantics, cleanup and
+  fail-closed artifact verification. Do not lower the 1,000 target or convert
+  failed rows into skips.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
@@ -4363,14 +4495,14 @@ PASS is declaration-only. W26 has CI only and no staging environment.
 | P5 — fencing, ambiguous commit and failover recovery | Lease-protected reconciliation implemented; failover matrix open | 35% | Reconciliation renews the writer lease and never runs implicitly on shutdown; concurrent/retry/failover evidence across feasible Ozone/provider CI lanes remains open |
 | P6 — backup, restore and DR | External Ozone/customer dependency; prerequisites documented | 10% W26 contract / 0% W26 DR evidence | The rollout contract requires customer-owned backup/restore, a 30-day restore-drill cadence and measured RPO/RTO evidence; W26 does not build or operate a competing backup system |
 | P7 — integration observability and error contract | Local HTTP/OTLP and provider-boundary evidence passed; production integration open | 45% | `mount-rs-http` passed 8 unit and 12 integration tests; OTLP-enabled HTTP passed 11 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection/listing behavior; `reconcileBlocks` returns scanned/protected/recent/deleted counts and fails closed when unsupported, `readdir_bounded` is forwarded through observability/CLI wrappers, and N-API unstorage preserves `EOVERFLOW`; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
-| P8 — 1,000 IOPS per-drive CI workload | Per-provider hard-threshold gates implemented; latest terminal packet failed hosted qualification; cleanup-corrected rerun queued | 55% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider. The generic Ozone composition requests SQLite/R2 and PGlite/R2 with 4 KiB payloads, 400 iterations, concurrency 64, `--min-iops 1000` and `--require-configured`; dedicated TiDB/FoundationDB Ozone jobs request their own rows with the same strict mode. Wrapper settings cannot lower the target below 1,000 or weaken the fixed profile. The verifier requires the exact provider set, zero skipped/configuration-failed rows, successful cleanup, per-size lifecycle success and a valid retained JSON artifact before a pass marker is emitted. Terminal run `35655276021` on exact revision `4efec58c` recorded SQLite/R2 20.35, PGlite/R2 205.48, TiDB/R2 18.09 and FoundationDB/R2 40.50 IOPS with 1,200/1,200 successful lifecycle operations and zero timeout/cleanup failures, but every row failed the hard target and aggregate `106522172018` failed closed. Published R2 content addressing/cache, mutation batching, queue hardening, corrected Ozone block contract and deduplicated cleanup are now on `229a9cd5`; manual run `35664474430` is queued against that exact SHA. Local live Ozone evidence outside hosted CI remains unavailable. |
+| P8 — 1,000 IOPS per-drive CI workload | Per-provider hard-threshold gates implemented; latest terminal packet failed hosted qualification; concurrent-create qualification in progress | 60% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider. The generic Ozone composition requests SQLite/R2 and PGlite/R2 with 4 KiB payloads, 400 iterations, concurrency 64, `--min-iops 1000` and `--require-configured`; dedicated TiDB/FoundationDB Ozone jobs request their own rows with the same strict mode. Wrapper settings cannot lower the target below 1,000 or weaken the fixed profile. The verifier requires the exact provider set, zero skipped/configuration-failed rows, successful cleanup, per-size lifecycle success and a valid retained JSON artifact before a pass marker is emitted. Terminal run `35655276021` on exact revision `4efec58c` recorded SQLite/R2 20.35, PGlite/R2 205.48, TiDB/R2 18.09 and FoundationDB/R2 40.50 IOPS with 1,200/1,200 successful lifecycle operations and zero timeout/cleanup failures, but every row failed the hard target and aggregate `106522172018` failed closed. Published R2 content addressing/cache, mutation batching, queue hardening, concurrent-create inode rebasing, corrected Ozone block contract and deduplicated cleanup are now on current `origin/main` `76650bd1`; manual run `35665734382` targets exact SHA `8c53d2c9` with TiDB failed, FoundationDB in progress, compositions/base queued and no aggregate job yet. Local live Ozone evidence outside hosted CI remains unavailable. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
-| P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 82% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`. The credential-free Ozone policy gate covers all four metadata-provider shapes, HTTPS R2, scoped prefixes, durable settings, external secret references and TiDB TLS options with local positive/negative execution; expanded fixtures independently reject inline credentials, unsafe FoundationDB authority and TLS verification downgrade. The latest lazy-atime diff scan `5c0c59fb-a2c6-4e03-be6c-c334ca7cf0e7` and prior scans found zero reportable findings within their stated scopes; the six-surface review explicitly records the atime crash boundary and defers hosted/provider/customer security. The artifact verifier rejects malformed/weak profiles without printing artifact contents, and missing IOPS artifacts now fail CI. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred. |
+| P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 84% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`. The credential-free Ozone policy gate covers all four metadata-provider shapes, HTTPS R2, scoped prefixes, durable settings, external secret references and TiDB TLS options with local positive/negative execution; expanded fixtures independently reject inline credentials, unsafe FoundationDB authority and TLS verification downgrade. The latest lazy-atime diff scan `5c0c59fb-a2c6-4e03-be6c-c334ca7cf0e7`, cleanup scan `85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8` and concurrent-create scan `b8f6e846-e497-4ae6-b972-7ae3701ec722` plus prior scans found zero reportable findings within their stated scopes; the six-surface reviews explicitly record the atime and mutation crash boundaries and defer hosted/provider/customer security. The artifact verifier rejects malformed/weak profiles without printing artifact contents, and missing IOPS artifacts now fail CI. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred. |
 | P11 — end-to-end client/platform matrix | HTTP path and built-in/KV/durable-provider bounded-listing contracts added to Ozone CI; full matrix open | 46% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition tests assert provider-backed bounded success and `EOVERFLOW`; the feature-built FoundationDB and TiDB Node/N-API Ozone lanes from `b80c19c` and `ef6a876` assert the same contract with scoped cleanup prefixes; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; TiDB test compilation/Clippy and FoundationDB `cargo check --tests` pass locally, but live provider/Ozone execution is hosted-only and FoundationDB local linking lacks `libfdb_c`; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
 | P11 follow-up — complete-surface packet enforcement | Implemented; terminal hosted packet remains open | 60% W26-owned implementation/qualification | Published `20a06b8` at `0e0454d`; the aggregate verifier now requires the currently wired Ozone gateway, composition, Rust/Node/HTTP CLI, TiDB N-API and FoundationDB N-API/restart markers. This closes the local evidence-contract gap but not hosted execution, native mounts or customer runtime proof |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
-| P14 — final W26 integration-readiness review | NO-GO review active; W26.15 remains open; cleanup-corrected rerun queued | 33% | Terminal run `35655276021` is audited: base Ozone passed, all four provider lifecycles completed with zero timeout/cleanup failures but missed the hard IOPS target, and aggregate `106522172018` failed closed. Mutation batching/cache/queue hardening, the corrected Ozone block-contract test and deduplicated cleanup are locally tested, security-scanned with zero reportable findings within scope, and included in current `origin/main` `229a9cd5`; manual run `35664474430` is queued on that exact SHA. A terminal one-revision all-provider/performance/security/end-to-end audit is required before an integration-ready handoff. |
+| P14 — final W26 integration-readiness review | NO-GO review active; W26.15 remains open; concurrent-create qualification in progress | 35% | Terminal run `35655276021` is audited: base Ozone passed, all four provider lifecycles completed with zero timeout/cleanup failures but missed the hard IOPS target, and aggregate `106522172018` failed closed. Mutation batching/cache/queue hardening, same-revision concurrent-create rebasing, the corrected Ozone block-contract test and deduplicated cleanup are locally tested, security-scanned with zero reportable findings within scope, and included in current `origin/main` `76650bd1`; manual run `35665734382` targets exact SHA `8c53d2c9` with a failed TiDB producer, one in progress, two queued and no aggregate yet. A terminal one-revision all-provider/performance/security/end-to-end audit is required before an integration-ready handoff. |
 
 The production/integration track is **0/15 terminal gates accepted**. Its
 current provisional W26 planning range is **31–82 engineering/contract days

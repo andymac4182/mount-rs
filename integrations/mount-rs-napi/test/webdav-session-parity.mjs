@@ -80,6 +80,30 @@ function oracleHeaders(response) {
   return Object.fromEntries(Object.entries(response.headers).map(([name, value]) => [name.toLowerCase(), value]))
 }
 
+function memberNames(value) {
+  const names = []
+  let current = value
+  while (current && current !== Object.prototype) {
+    names.push(...Object.getOwnPropertyNames(current))
+    current = Object.getPrototypeOf(current)
+  }
+  return [...new Set(names)].sort()
+}
+
+function publicSymbolNames(value) {
+  const internal = new Set(["mountRsServerLifecycleWrapped", "mountRsWebdavStreamWrapped"])
+  const names = []
+  let current = value
+  while (current && current !== Object.prototype) {
+    for (const symbol of Object.getOwnPropertySymbols(current)) {
+      const name = symbol === Symbol.asyncDispose ? "Symbol.asyncDispose" : symbol.description
+      if (name && !internal.has(name)) names.push(name)
+    }
+    current = Object.getPrototypeOf(current)
+  }
+  return [...new Set(names)].sort()
+}
+
 async function responseBody(response) {
   if (response.body === undefined || response.body === null) return null
   if (typeof response.body[Symbol.asyncIterator] === "function") {
@@ -104,6 +128,10 @@ function normalizeXmlBody(body, headers) {
       .replace(
         /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\b/g,
         "<dynamic-iso-date>",
+      )
+      .replace(
+        /(<(?:[A-Za-z_][\w.-]*:)?getetag>)[\s\S]*?(<\/(?:[A-Za-z_][\w.-]*:)?getetag>)/gi,
+        "$1<dynamic-etag>$2",
       ),
   )
 }
@@ -147,6 +175,25 @@ try {
   assert.equal(typeof oracleServer[Symbol.asyncDispose], "function", "oracle asyncDispose member")
   assert.equal(typeof oracleSession.handleRequest, "function", "oracle buffered session member")
 
+  assert.deepEqual(memberNames(nativeServer), memberNames(oracleServer), "server prototype members")
+  assert.deepEqual(
+    publicSymbolNames(nativeServer),
+    publicSymbolNames(oracleServer),
+    "server public symbol members",
+  )
+  const nativeSessionMembers = memberNames(nativeSession)
+  const oracleSessionMembers = memberNames(oracleSession)
+  assert.deepEqual(
+    nativeSessionMembers.filter((name) => !["handleRequestStream", "lockCount"].includes(name)),
+    oracleSessionMembers,
+    "session prototype members within supported scope",
+  )
+  assert.deepEqual(
+    publicSymbolNames(nativeSession),
+    publicSymbolNames(oracleSession),
+    "session public symbol members",
+  )
+
   for (const key of ["driver", "options", "stats", "assertions", "locks"]) {
     assert.ok(key in nativeSession, `native session member ${key}`)
     assert.ok(key in oracleSession, `oracle session member ${key}`)
@@ -180,6 +227,16 @@ try {
     [],
     Buffer.from("method differential"),
   )
+  // The oracle and native memory drivers allocate their nodes independently.
+  // Pin the writable metadata before comparing the exact XML document so a
+  // millisecond boundary cannot make the derived ETag differ by platform.
+  const parityTime = 1_700_000_000
+  await Promise.all([
+    nativeFilesystem.utimes("/method-parity", parityTime, parityTime),
+    nativeFilesystem.utimes("/method-parity/source.txt", parityTime, parityTime),
+    oracleDriver.utimes("/method-parity", parityTime, parityTime),
+    oracleDriver.utimes("/method-parity/source.txt", parityTime, parityTime),
+  ])
   await pair(
     "PROPFIND",
     "PROPFIND",
