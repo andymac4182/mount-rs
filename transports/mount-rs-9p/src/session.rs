@@ -50,6 +50,22 @@ pub struct P9User {
     pub aname: String,
 }
 
+/// Reports one request-level error or malformed frame to an embedding facade.
+/// The header is absent when framing failed before a trustworthy tag existed.
+pub type P9SessionErrorHook = Arc<dyn Fn(FsError, Option<P9Header>) + Send + Sync + 'static>;
+
+/// Reports one debug-mode reply-exactly-once assertion failure.
+pub type P9AssertionHook = Arc<dyn Fn(String) + Send + Sync + 'static>;
+
+/// Optional request/assertion hooks for a [`P9Session`]. Kept separate from
+/// [`P9SessionOptions`] so callback ownership stays separate from scalar
+/// session policy.
+#[derive(Clone, Default)]
+pub struct P9SessionHooks {
+    pub on_error: Option<P9SessionErrorHook>,
+    pub on_assertion: Option<P9AssertionHook>,
+}
+
 #[derive(Clone)]
 pub struct P9SessionOptions {
     /// Server-side ceiling for version negotiation. `None` uses 1 MiB.
@@ -57,6 +73,8 @@ pub struct P9SessionOptions {
     pub use_driver_ino: bool,
     pub read_only: bool,
     pub claim_ownership: bool,
+    /// Run reply-exactly-once assertions. Defaults to debug builds.
+    pub debug: bool,
     pub locks: Option<P9LockTable>,
 }
 
@@ -67,6 +85,7 @@ impl Default for P9SessionOptions {
             use_driver_ino: true,
             read_only: false,
             claim_ownership: true,
+            debug: cfg!(debug_assertions),
             locks: None,
         }
     }
@@ -79,6 +98,7 @@ pub struct P9SessionStats {
     pub errors: u64,
     pub dropped: u64,
     pub flushed: u64,
+    pub assertions: u64,
     pub messages: HashMap<String, u64>,
 }
 
@@ -104,6 +124,8 @@ struct SessionInner {
     path_lock: RwLock<()>,
     locks: P9LockClient,
     stats: Mutex<P9SessionStats>,
+    hooks: P9SessionHooks,
+    assertions: Mutex<Vec<String>>,
 }
 
 #[derive(Clone)]
@@ -130,6 +152,14 @@ impl P9Session {
     }
 
     pub fn with_options(driver: Arc<dyn FsDriver>, options: P9SessionOptions) -> Self {
+        Self::with_options_and_hooks(driver, options, P9SessionHooks::default())
+    }
+
+    pub fn with_options_and_hooks(
+        driver: Arc<dyn FsDriver>,
+        options: P9SessionOptions,
+        hooks: P9SessionHooks,
+    ) -> Self {
         let locks = options
             .locks
             .clone()
@@ -150,8 +180,15 @@ impl P9Session {
                 path_lock: RwLock::new(()),
                 locks,
                 stats: Mutex::new(P9SessionStats::default()),
+                hooks,
+                assertions: Mutex::new(Vec::new()),
             }),
         }
+    }
+
+    /// Return the authoritative driver shared by this session.
+    pub fn driver(&self) -> Arc<dyn FsDriver> {
+        Arc::clone(&self.inner.driver.driver)
     }
 
     pub fn msize(&self) -> Option<u32> {
@@ -195,6 +232,15 @@ impl P9Session {
             .stats
             .lock()
             .expect("9P session mutex poisoned")
+            .clone()
+    }
+
+    /// Return debug-mode assertion failures in occurrence order.
+    pub fn assertions(&self) -> Vec<String> {
+        self.inner
+            .assertions
+            .lock()
+            .expect("9P assertions mutex poisoned")
             .clone()
     }
 
@@ -414,8 +460,12 @@ impl P9Session {
         self.count_request(None);
         let (header, body) = match decode_message(bytes) {
             Ok(value) => value,
-            Err(_error) => {
+            Err(error) => {
                 self.count_dropped();
+                self.report_error(
+                    FsError::new(ErrorCode::Eproto).with_message(error.to_string()),
+                    None,
+                );
                 return None;
             }
         };
@@ -438,6 +488,12 @@ impl P9Session {
                 .lock()
                 .expect("9P session mutex poisoned");
             if inflight.contains_key(&header.tag) {
+                let message = format!(
+                    "tag {} is already in flight ({})",
+                    header.tag,
+                    message_name(header.type_)
+                );
+                self.assertion(message);
                 return Some(
                     self.error_reply(
                         header,
@@ -494,7 +550,9 @@ impl P9Session {
         }
         self.inner.locks.release_all();
         for (_, handle) in handles {
-            let _ = handle.close().await;
+            if let Err(error) = handle.close().await {
+                self.report_error(error, None);
+            }
         }
     }
 
@@ -679,6 +737,7 @@ impl P9Session {
     }
 
     fn error_reply(&self, header: P9Header, error: FsError) -> Vec<u8> {
+        self.report_error(error.clone(), Some(header));
         self.count_reply(true);
         // Rlerror is a fixed eleven-byte frame. Build it directly so an
         // internal encoding fallback can never replace the driver's errno
@@ -714,6 +773,30 @@ impl P9Session {
         stats.replies += 1;
         if error {
             stats.errors += 1;
+        }
+    }
+
+    fn report_error(&self, error: FsError, header: Option<P9Header>) {
+        if let Some(hook) = &self.inner.hooks.on_error {
+            hook(error, header);
+        }
+    }
+
+    fn assertion(&self, message: String) {
+        if !self.inner.options.debug {
+            return;
+        }
+        {
+            let mut stats = self.inner.stats.lock().expect("9P stats mutex poisoned");
+            stats.assertions += 1;
+        }
+        self.inner
+            .assertions
+            .lock()
+            .expect("9P assertions mutex poisoned")
+            .push(message.clone());
+        if let Some(hook) = &self.inner.hooks.on_assertion {
+            hook(message);
         }
     }
 
@@ -1869,5 +1952,71 @@ mod tests {
         let (header, _) = decode_message(&response).expect("destroyed-session response decodes");
         assert_eq!(header.type_, P9_RLERROR);
         assert_eq!(session.inflight(), 0);
+    }
+
+    #[tokio::test]
+    async fn debug_duplicate_tag_records_assertion_and_reports_error() {
+        let assertions = Arc::new(Mutex::new(Vec::new()));
+        let errors = Arc::new(Mutex::new(Vec::new()));
+        let assertion_sink = Arc::clone(&assertions);
+        let error_sink = Arc::clone(&errors);
+        let session = P9Session::with_options_and_hooks(
+            Arc::new(MemoryFs::empty()),
+            P9SessionOptions {
+                debug: true,
+                ..P9SessionOptions::default()
+            },
+            P9SessionHooks {
+                on_error: Some(Arc::new(move |error, header| {
+                    error_sink
+                        .lock()
+                        .expect("error sink mutex")
+                        .push((error.code, header.map(|header| (header.type_, header.tag))));
+                })),
+                on_assertion: Some(Arc::new(move |message| {
+                    assertion_sink
+                        .lock()
+                        .expect("assertion sink mutex")
+                        .push(message);
+                })),
+            },
+        );
+        session
+            .inner
+            .inflight
+            .lock()
+            .expect("9P session mutex poisoned")
+            .insert(
+                7,
+                Arc::new(Pending {
+                    result: tokio::sync::Mutex::new(None),
+                    cancelled: AtomicBool::new(false),
+                    notify: Notify::new(),
+                }),
+            );
+        let request = encode_message(P9_TVERSION, 7, 256, |writer| {
+            write_tversion(
+                writer,
+                &Tversion {
+                    msize: 8192,
+                    version: P9_VERSION_DOTL.to_owned(),
+                },
+            )
+        })
+        .expect("Tversion encodes");
+
+        let response = session
+            .handle_call(&request)
+            .await
+            .expect("duplicate tag gets an error reply");
+        let (header, _) = decode_message(&response).expect("error response decodes");
+        assert_eq!(header.type_, P9_RLERROR);
+        assert_eq!(session.stats().assertions, 1);
+        assert_eq!(session.assertions().len(), 1);
+        assert_eq!(assertions.lock().expect("assertion sink mutex").len(), 1);
+        assert_eq!(
+            errors.lock().expect("error sink mutex").as_slice(),
+            &[(ErrorCode::Eproto, Some((P9_TVERSION, 7)),)]
+        );
     }
 }

@@ -247,8 +247,10 @@ Current focused behavior:
   focused tests cover the oracle lifecycle, hardlink/release identity,
   large-inode input, and a real opened session fid. Direct table mutation is a
   low-level inspection/testing seam; protocol clunk or session destroy remains
-  the orderly production teardown path. The upstream `driver`, assertion/debug
-  callbacks, lock-table injection through session/server option bags, the
+  the orderly production teardown path. The N-API session also exposes its live
+  `driver`, debug-gated assertion readback/statistics, and request-error and
+  assertion callbacks with Node error/header shapes across attached and native
+  sessions. Lock-table injection through session/server option bags, the
   server's property-shaped `clients` contract, and the 9P mount helpers remain
   unresolved rather than being treated as intentionally out of scope.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`

@@ -116,7 +116,19 @@ function installStructuralFactories(binding) {
       if (name === "createS3Server") validateS3FactoryInput(source, args[0])
       const { value, release, owned } = inputs(source, name === "createS3Server")
       try {
-        const server = factory(value, ...args)
+        const callArgs = args.slice()
+        if (name === "createP9Server" && callArgs[0] && typeof callArgs[0] === "object") {
+          const options = callArgs[0]
+          if (typeof options.onError === "function") {
+            callArgs[0] = {
+              ...options,
+              onError(error, header) {
+                return p9SessionError(binding, { p9Options: options }, error, header)
+              },
+            }
+          }
+        }
+        const server = factory(value, ...callArgs)
         if (name === "createP9Server") {
           serverState(server).p9Options = args[0] ?? {}
         }
@@ -175,6 +187,37 @@ function p9PeerOf(stream, fallback) {
 
 function p9ErrorCode(error) {
   return error && typeof error === "object" ? error.code : undefined
+}
+
+function reviveP9Error(binding, error) {
+  const message = String(error?.message ?? error)
+  const fields = message.split("|")
+  if (fields[0] !== "__mount_rs_error_v1__" || fields.length !== 7) return error
+  const [, code, errno, syscall, path, dest, encodedMessage] = fields
+  const decode = (value) => value === "-" ? undefined : Buffer.from(value, "hex").toString("utf8")
+  const options = { message: decode(encodedMessage) }
+  const decodedSyscall = decode(syscall)
+  const decodedPath = decode(path)
+  const decodedDest = decode(dest)
+  if (decodedSyscall !== undefined) options.syscall = decodedSyscall
+  if (decodedPath !== undefined) options.path = decodedPath
+  if (decodedDest !== undefined) options.dest = decodedDest
+  if (typeof binding.fsError === "function") return binding.fsError(code, options)
+  const revived = new Error(options.message)
+  revived.code = code
+  if (errno !== "-") revived.errno = Number(errno)
+  return revived
+}
+
+function p9SessionError(binding, state, error, header) {
+  const callback = state.p9Options && state.p9Options.onError
+  if (typeof callback !== "function") return
+  try {
+    callback(reviveP9Error(binding, error), header ?? undefined)
+  } catch {
+    // Request-error notifications are observational and must not change the
+    // exactly-once protocol reply or transport teardown path.
+  }
 }
 
 class AttachedP9Connection {
