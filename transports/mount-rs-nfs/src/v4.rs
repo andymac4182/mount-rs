@@ -475,7 +475,6 @@ struct OpenArgs {
     _seqid: u32,
     share_access: u32,
     share_deny: u32,
-    owner_clientid: u64,
     owner: Vec<u8>,
     open_type: u32,
     create_mode: Option<u32>,
@@ -1005,7 +1004,7 @@ fn read_open(reader: &mut XdrReader<'_>) -> Result<OpenArgs, XdrError> {
     let seqid = reader.u32("OPEN.seqid")?;
     let share_access = reader.u32("OPEN.share_access")?;
     let share_deny = reader.u32("OPEN.share_deny")?;
-    let owner_clientid = reader.u64("OPEN.owner.clientid")?;
+    let _owner_clientid = reader.u64("OPEN.owner.clientid")?;
     let owner = reader.var_opaque(NFS4_OPAQUE_LIMIT, "OPEN.owner.owner")?;
     let open_type = reader.u32("OPEN.openhow")?;
     let mut create_mode = None;
@@ -1050,7 +1049,6 @@ fn read_open(reader: &mut XdrReader<'_>) -> Result<OpenArgs, XdrError> {
         _seqid: seqid,
         share_access,
         share_deny,
-        owner_clientid,
         owner,
         open_type,
         create_mode,
@@ -2569,6 +2567,85 @@ impl Nfs4Session {
         }
     }
 
+    /// Translate a uid/gid into the RFC 8881 owner string representation.
+    /// Numeric output is the deliberate fallback when the configured map has
+    /// no name for this id.
+    fn owner_name(&self, id: u32, group: bool) -> String {
+        let Some(map) = self.options.nfs4.idmap.as_ref() else {
+            return id.to_string();
+        };
+        let Some(name) = map.name_of(id, group) else {
+            return id.to_string();
+        };
+        if name.is_empty() {
+            return id.to_string();
+        }
+        match map.domain() {
+            Some(domain) if !domain.is_empty() && !name.contains('@') => {
+                format!("{name}@{domain}")
+            }
+            _ => name.to_owned(),
+        }
+    }
+
+    /// Translate an incoming RFC 8881 owner string into a uid/gid.
+    /// Numeric values are accepted first, including when a map is configured,
+    /// so a client can echo the server's numeric fallback representation.
+    fn owner_id(&self, owner: &str, group: bool) -> Result<u32, u32> {
+        if let Some(id) = parse_numeric_owner(owner) {
+            return Ok(id);
+        }
+        let Some(map) = self.options.nfs4.idmap.as_ref() else {
+            return Err(NFS4ERR_BADOWNER);
+        };
+        let mut name = owner;
+        if let Some(domain) = map.domain().filter(|domain| !domain.is_empty()) {
+            let Some((local, suffix)) = owner.rsplit_once('@') else {
+                return Err(NFS4ERR_BADOWNER);
+            };
+            if suffix != domain {
+                return Err(NFS4ERR_BADOWNER);
+            }
+            name = local;
+        }
+        map.id_of(name, group).ok_or(NFS4ERR_BADOWNER)
+    }
+
+    fn attrs_equal(&self, stats: &Stats, attrs: &Fattr4) -> bool {
+        bitmap_bits(&attrs.mask).all(|bit| match bit {
+            FATTR4_TYPE => attrs.values.file_type == Some(type_of(stats)),
+            FATTR4_SIZE => attrs.values.size == Some(stats.size),
+            FATTR4_MODE => attrs
+                .values
+                .mode
+                .is_some_and(|mode| stats.mode & 0o7777 == mode & 0o7777),
+            FATTR4_OWNER => attrs
+                .values
+                .owner
+                .as_deref()
+                .is_some_and(|owner| owner == self.owner_name(stats.uid, false)),
+            FATTR4_OWNER_GROUP => attrs
+                .values
+                .owner_group
+                .as_deref()
+                .is_some_and(|group| group == self.owner_name(stats.gid, true)),
+            FATTR4_RAWDEV => {
+                attrs.values.rawdev == Some(((stats.rdev >> 32) as u32, stats.rdev as u32))
+            }
+            FATTR4_CHANGE => attrs.values.change == Some(stat_change(stats)),
+            FATTR4_FILEID => attrs.values.fileid == Some(stats.ino),
+            FATTR4_TIME_ACCESS => attrs
+                .values
+                .time_access
+                .is_some_and(|(seconds, nanos)| nfstime_ms(seconds, nanos) == stats.atime_ms),
+            FATTR4_TIME_MODIFY => attrs
+                .values
+                .time_modify
+                .is_some_and(|(seconds, nanos)| nfstime_ms(seconds, nanos) == stats.mtime_ms),
+            _ => true,
+        })
+    }
+
     fn current_path(&self, cursor: &Cursor) -> Result<String, FsError> {
         cursor
             .current
@@ -2657,8 +2734,8 @@ impl Nfs4Session {
                 FATTR4_MAXWRITE => values.u64(DEFAULT_MAX_WRITE as u64),
                 FATTR4_MODE => values.u32(stats.mode & 0o7777),
                 FATTR4_NUMLINKS => values.u32(stats.nlink.min(u32::MAX as u64) as u32),
-                FATTR4_OWNER => values.string(&stats.uid.to_string()),
-                FATTR4_OWNER_GROUP => values.string(&stats.gid.to_string()),
+                FATTR4_OWNER => values.string(&self.owner_name(stats.uid, false)),
+                FATTR4_OWNER_GROUP => values.string(&self.owner_name(stats.gid, true)),
                 FATTR4_RAWDEV => {
                     values.u32((stats.rdev >> 32) as u32);
                     values.u32(stats.rdev as u32);
@@ -3225,29 +3302,20 @@ impl Nfs4Session {
             applied.push(FATTR4_MODE);
         }
         if attrs.values.owner.is_some() || attrs.values.owner_group.is_some() {
-            let uid = attrs
-                .values
-                .owner
-                .as_deref()
-                .and_then(parse_numeric_owner)
-                .unwrap_or(current.uid);
-            if attrs.values.owner.is_some()
-                && parse_numeric_owner(attrs.values.owner.as_deref().unwrap_or_default()).is_none()
-            {
-                return AppliedAttrs::with_status(NFS4ERR_BADOWNER, applied);
-            }
-            let gid = attrs
-                .values
-                .owner_group
-                .as_deref()
-                .and_then(parse_numeric_owner)
-                .unwrap_or(current.gid);
-            if attrs.values.owner_group.is_some()
-                && parse_numeric_owner(attrs.values.owner_group.as_deref().unwrap_or_default())
-                    .is_none()
-            {
-                return AppliedAttrs::with_status(NFS4ERR_BADOWNER, applied);
-            }
+            let uid = match attrs.values.owner.as_deref() {
+                Some(owner) => match self.owner_id(owner, false) {
+                    Ok(uid) => uid,
+                    Err(status) => return AppliedAttrs::with_status(status, applied),
+                },
+                None => current.uid,
+            };
+            let gid = match attrs.values.owner_group.as_deref() {
+                Some(group) => match self.owner_id(group, true) {
+                    Ok(gid) => gid,
+                    Err(status) => return AppliedAttrs::with_status(status, applied),
+                },
+                None => current.gid,
+            };
             let result = match self.driver.lchown(path, uid, gid).await {
                 Ok(()) => Ok(()),
                 Err(error) if error.code == ErrorCode::Enosys => {
@@ -3366,7 +3434,7 @@ impl Nfs4Session {
                 );
             }
         };
-        let same = attrs_equal(&stats, attrs);
+        let same = self.attrs_equal(&stats, attrs);
         let status = if negated {
             if same { NFS4ERR_NOT_SAME } else { NFS4_OK }
         } else if same {
@@ -3720,6 +3788,18 @@ impl Nfs4Session {
         if args.share_deny > OPEN4_SHARE_DENY_BOTH {
             return V4OpResult::new(OP_OPEN, NFS4ERR_INVAL);
         }
+        let Some(clientid) = cursor.clientid else {
+            return V4OpResult::new(OP_OPEN, NFS4ERR_OP_NOT_IN_SESSION);
+        };
+        {
+            let state = self.state.lock().expect("NFSv4 state lock");
+            let Some(client) = state.clients.get(&clientid) else {
+                return V4OpResult::new(OP_OPEN, NFS4ERR_STALE_CLIENTID);
+            };
+            if self.options.nfs4.require_reclaim_complete && !client.reclaim_complete {
+                return V4OpResult::new(OP_OPEN, NFS4ERR_GRACE);
+            }
+        }
         let path = if args.claim == CLAIM_NULL {
             let directory = match self.current_path(cursor) {
                 Ok(path) => path,
@@ -3841,7 +3921,6 @@ impl Nfs4Session {
         // Pin before taking the state lock: a concurrent v3 lookup may bind
         // more names while this OPEN is checking share conflicts.
         self.handles.pin(entry.id);
-        let clientid = cursor.clientid.unwrap_or(args.owner_clientid);
         let share_conflict = self
             .state
             .lock()
@@ -4208,41 +4287,6 @@ fn requested_time(value: Option<(u32, Option<(i64, u32)>)>) -> Result<Option<i64
     }
 }
 
-fn attrs_equal(stats: &Stats, attrs: &Fattr4) -> bool {
-    bitmap_bits(&attrs.mask).all(|bit| match bit {
-        FATTR4_TYPE => attrs.values.file_type == Some(type_of(stats)),
-        FATTR4_SIZE => attrs.values.size == Some(stats.size),
-        FATTR4_MODE => attrs
-            .values
-            .mode
-            .is_some_and(|mode| stats.mode & 0o7777 == mode & 0o7777),
-        FATTR4_OWNER => attrs
-            .values
-            .owner
-            .as_deref()
-            .is_some_and(|owner| owner == stats.uid.to_string()),
-        FATTR4_OWNER_GROUP => attrs
-            .values
-            .owner_group
-            .as_deref()
-            .is_some_and(|group| group == stats.gid.to_string()),
-        FATTR4_RAWDEV => {
-            attrs.values.rawdev == Some(((stats.rdev >> 32) as u32, stats.rdev as u32))
-        }
-        FATTR4_CHANGE => attrs.values.change == Some(stat_change(stats)),
-        FATTR4_FILEID => attrs.values.fileid == Some(stats.ino),
-        FATTR4_TIME_ACCESS => attrs
-            .values
-            .time_access
-            .is_some_and(|(seconds, nanos)| nfstime_ms(seconds, nanos) == stats.atime_ms),
-        FATTR4_TIME_MODIFY => attrs
-            .values
-            .time_modify
-            .is_some_and(|(seconds, nanos)| nfstime_ms(seconds, nanos) == stats.mtime_ms),
-        _ => true,
-    })
-}
-
 fn nfstime_ms(seconds: i64, nanos: u32) -> i64 {
     let millis = i128::from(seconds)
         .saturating_mul(1000)
@@ -4434,7 +4478,49 @@ fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{SeqidOrdering, bump_stateid_seq, compare_stateid_seqid};
+    use mount_rs_core::MemoryFs;
+
+    use super::{Nfs4Session, SeqidOrdering, bump_stateid_seq, compare_stateid_seqid};
+    use crate::{Nfs4IdMap, NfsSessionOptions};
+
+    #[test]
+    fn id_map_uses_numeric_fallback_and_separate_user_group_namespaces() {
+        let map = Nfs4IdMap::new(Some("example.test".to_owned()))
+            .with_user("alice", 1000)
+            .with_group("staff", 1000);
+
+        assert_eq!(map.domain(), Some("example.test"));
+        assert_eq!(map.name_of(1000, false), Some("alice"));
+        assert_eq!(map.name_of(1000, true), Some("staff"));
+        assert_eq!(map.id_of("alice", false), Some(1000));
+        assert_eq!(map.id_of("staff", true), Some(1000));
+        assert_eq!(map.name_of(1001, false), None);
+        assert_eq!(map.id_of("staff", false), None);
+    }
+
+    #[test]
+    fn owner_translation_qualifies_names_and_rejects_other_domains() {
+        let mut options = NfsSessionOptions::default();
+        options.nfs4.idmap = Some(
+            Nfs4IdMap::new(Some("example.test".to_owned()))
+                .with_user("alice", 1000)
+                .with_group("staff", 1000),
+        );
+        let session = Nfs4Session::new(MemoryFs::empty(), options);
+
+        assert_eq!(session.owner_name(1000, false), "alice@example.test");
+        assert_eq!(session.owner_name(1001, false), "1001");
+        assert_eq!(session.owner_id("alice@example.test", false), Ok(1000));
+        assert_eq!(session.owner_id("1000", false), Ok(1000));
+        assert_eq!(
+            session.owner_id("alice@other.test", false),
+            Err(super::NFS4ERR_BADOWNER)
+        );
+        assert_eq!(
+            session.owner_id("missing@example.test", false),
+            Err(super::NFS4ERR_BADOWNER)
+        );
+    }
 
     #[test]
     fn stateid_seqids_use_serial_arithmetic_at_wrap() {

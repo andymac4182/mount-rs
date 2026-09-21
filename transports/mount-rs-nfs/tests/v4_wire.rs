@@ -10,12 +10,12 @@ use std::time::Duration;
 use mount_rs_core::MemoryFs;
 use mount_rs_nfs::v4::{
     CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME, NFS4ERR_BADSESSION,
-    NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL,
-    UNSTABLE4,
+    NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS,
+    NFS4ERR_TOOSMALL, UNSTABLE4,
 };
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
-    decode_reply, encode_call, frame_record,
+    NFS_V4, NFS4_PROGRAM, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler, XdrReader,
+    XdrWriter, decode_reply, encode_call, frame_record,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -308,6 +308,11 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                 .block_on(async {
                     let mut options = NfsServerOptions::default();
                     options.session.nfs4.max_locks_per_file = 1;
+                    options.session.nfs4.idmap = Some(
+                        Nfs4IdMap::new(Some("example.test".to_owned()))
+                            .with_user("root", 0)
+                            .with_group("root", 0),
+                    );
                     let server = NfsServer::new(MemoryFs::empty(), options);
                     let address = server.listen().await.expect("listen rootless NFS server");
                     let mut stream = TcpStream::connect(address)
@@ -358,8 +363,8 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                                 op(OP_PUTROOTFH, |_| {}),
                                 op(OP_GETATTR, |writer| {
                                     writer.u32(2);
-                                    writer.u32(1 << 1);
-                                    writer.u32((1 << 9) | (1 << 23));
+                                    writer.u32((1 << 1) | (1 << 10));
+                                    writer.u32((1 << 4) | (1 << 5) | (1 << 9) | (1 << 23));
                                 }),
                             ],
                         ),
@@ -379,12 +384,23 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                         response
                             .array(16, "getattr mask", |reader| reader.u32("mask word"))
                             .unwrap(),
-                        vec![2, 1 << 9]
+                        vec![(1 << 1) | (1 << 10), (1 << 4) | (1 << 5) | (1 << 9)]
+                    );
+                    let values = response.var_opaque(128, "getattr values").unwrap();
+                    let mut values = XdrReader::new(&values);
+                    assert_eq!(values.u32("fh expire type").unwrap(), 2);
+                    assert_eq!(values.u32("lease value").unwrap(), 90);
+                    assert_eq!(
+                        values.string(128, "owner value").unwrap(),
+                        "root@example.test"
                     );
                     assert_eq!(
-                        response.var_opaque(128, "getattr values").unwrap().len(),
-                        12
+                        values.string(128, "owner group value").unwrap(),
+                        "root@example.test"
                     );
+                    let _ = values.u32("rawdev major").unwrap();
+                    let _ = values.u32("rawdev minor").unwrap();
+                    values.end("getattr values").unwrap();
                     response.end("getattr response").unwrap();
 
                     client.sequence += 1;
@@ -422,6 +438,86 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     response.end("backchannel response").unwrap();
 
                     client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        60,
+                        compound(
+                            "open-before-reclaim",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_OPEN, |writer| {
+                                    writer.u32(0);
+                                    writer.u32(3);
+                                    writer.u32(0);
+                                    writer.u64(client.clientid);
+                                    writer.var_opaque(b"open-before-reclaim");
+                                    writer.u32(1);
+                                    writer.u32(0);
+                                    empty_attrs(writer);
+                                    writer.u32(0);
+                                    writer.string("wire-file");
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 3), NFS4ERR_GRACE);
+                    consume_sequence_result(&mut response, "open before reclaim");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    assert_eq!(parse_result_status(&mut response, OP_OPEN), NFS4ERR_GRACE);
+                    response.end("open before reclaim response").unwrap();
+
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        61,
+                        compound(
+                            "lock-before-reclaim",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOCK, |writer| {
+                                    writer.u32(1);
+                                    writer.bool(false);
+                                    writer.u64(0);
+                                    writer.u64(4);
+                                    writer.bool(true);
+                                    writer.u32(0);
+                                    writer.fixed_opaque(&[0; 16], 16);
+                                    writer.u32(0);
+                                    writer.u64(client.clientid);
+                                    writer.var_opaque(b"lock-before-reclaim");
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 3), NFS4ERR_GRACE);
+                    consume_sequence_result(&mut response, "lock before reclaim");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    assert_eq!(parse_result_status(&mut response, OP_LOCK), NFS4ERR_GRACE);
+                    response.end("lock before reclaim response").unwrap();
+
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        6,
+                        compound(
+                            "reclaim-complete",
+                            &[
+                                sequence(&client),
+                                op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 2);
+                    consume_sequence_result(&mut response, "reclaim");
+                    parse_result_header(&mut response, OP_RECLAIM_COMPLETE);
+                    response.end("reclaim response").unwrap();
+
+                    client.sequence += 1;
                     let open = op(OP_OPEN, |writer| {
                         // OPEN's owner seqid is independent from the returned
                         // stateid seqid. Linux starts a new owner at zero,
@@ -440,7 +536,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     });
                     let mut response = rpc(
                         &mut stream,
-                        6,
+                        7,
                         compound(
                             "open",
                             &[
@@ -608,24 +704,6 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                         b"nfs v4.1 wire\n"
                     );
                     response.end("read response").unwrap();
-
-                    client.sequence += 1;
-                    let mut response = rpc(
-                        &mut stream,
-                        9,
-                        compound(
-                            "reclaim-complete",
-                            &[
-                                sequence(&client),
-                                op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
-                            ],
-                        ),
-                    )
-                    .await;
-                    parse_compound_header(&mut response, 2);
-                    consume_sequence_result(&mut response, "reclaim");
-                    parse_result_header(&mut response, OP_RECLAIM_COMPLETE);
-                    response.end("reclaim response").unwrap();
 
                     client.sequence += 1;
                     let lock_one = op(OP_LOCK, |writer| {
@@ -1361,6 +1439,24 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
                     );
 
                     client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        100,
+                        compound(
+                            "reclaim-complete",
+                            &[
+                                sequence(&client),
+                                op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 2);
+                    consume_sequence_result(&mut response, "reclaim");
+                    parse_result_header(&mut response, OP_RECLAIM_COMPLETE);
+                    response.end("reclaim response").unwrap();
+
+                    client.sequence += 1;
                     let open = op(OP_OPEN, |writer| {
                         writer.u32(0);
                         writer.u32(1);
@@ -1495,6 +1591,24 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
                         )
                         .await,
                     );
+
+                    client_two.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream_two,
+                        200,
+                        compound(
+                            "reclaim-complete-two",
+                            &[
+                                sequence(&client_two),
+                                op(OP_RECLAIM_COMPLETE, |writer| writer.bool(false)),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 2);
+                    consume_sequence_result(&mut response, "reclaim-two");
+                    parse_result_header(&mut response, OP_RECLAIM_COMPLETE);
+                    response.end("reclaim-two response").unwrap();
 
                     client_two.sequence += 1;
                     let cross_client_open = op(OP_OPEN, |writer| {
