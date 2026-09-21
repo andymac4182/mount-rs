@@ -68,12 +68,14 @@ is built with its opt-in native feature:
 
     cargo check -p mount-rs-napi --features foundationdb
 
-Use uri for the cluster-file path, key for the volume prefix, and require
-leaseAuthority: "persisted-single-authority". This is an owned
-single-authority/test mode; it is not the protected shared provider-time
-authority required for independent production writers. The provider retains
-the process-scoped FoundationDB client network until its filesystem handles
-are dropped.
+Use uri for the cluster-file path and key for the volume prefix. The owned
+single-authority/test mode uses `leaseAuthority: "persisted-single-authority"`.
+For independent production writers, use
+`leaseAuthority: "shared-provider"` with an `authorityPrefix` naming the
+protected provider-time record. Each worker must have read-only access to that
+record; only the authority service may publish provider time. The provider
+retains the process-scoped FoundationDB client network until its filesystem
+handles are dropped.
 
 The live Node gate is intentionally opt-in:
 

@@ -35,7 +35,10 @@ use mount_rs_core::{
         all(target_os = "macos", target_arch = "aarch64"),
     )
 ))]
-use mount_rs_foundationdb::{FoundationDbStorage, FoundationDbStorageOptions};
+use mount_rs_foundationdb::{
+    FoundationDbLimits, FoundationDbSharedLeaseOracle, FoundationDbStorage,
+    FoundationDbStorageOptions,
+};
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 #[cfg(feature = "observability")]
@@ -1146,12 +1149,13 @@ pub struct JsMountFailure {
 pub struct JsChunkedStoreOptions {
     /// Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2
     /// (blocks only). FoundationDB requires the native feature and an
-    /// explicit persisted-single-authority lease authority.
+    /// explicit persisted-single-authority or shared-provider authority.
     pub kind: String,
     pub uri: Option<String>,
     pub key: Option<String>,
     pub durable: Option<bool>,
     pub lease_authority: Option<String>,
+    pub authority_prefix: Option<String>,
     pub endpoint: Option<String>,
     pub bucket: Option<String>,
     pub access_key_id: Option<String>,
@@ -1663,11 +1667,6 @@ fn open_foundationdb_storage(
     let uri = required_string(&options.uri, &format!("{role}.uri"))?;
     let key = required_string(&options.key, &format!("{role}.key"))?;
     let authority = required_string(&options.lease_authority, &format!("{role}.leaseAuthority"))?;
-    if authority != "persisted-single-authority" {
-        return Err(config_error(format!(
-            "{role}.leaseAuthority must be 'persisted-single-authority'"
-        )));
-    }
     reject_set(&options.endpoint, &format!("{role}.endpoint"))?;
     reject_set(&options.bucket, &format!("{role}.bucket"))?;
     reject_set(&options.access_key_id, &format!("{role}.accessKeyId"))?;
@@ -1675,9 +1674,35 @@ fn open_foundationdb_storage(
         &options.secret_access_key,
         &format!("{role}.secretAccessKey"),
     )?;
-    let storage = FoundationDbStorageOptions::new(key)
-        .with_durable(options.durable.unwrap_or(false))
-        .with_persisted_lease_oracle();
+    let storage =
+        FoundationDbStorageOptions::new(key).with_durable(options.durable.unwrap_or(false));
+    let storage = match authority.as_str() {
+        "persisted-single-authority" => {
+            reject_set(
+                &options.authority_prefix,
+                &format!("{role}.authorityPrefix"),
+            )?;
+            storage.with_persisted_lease_oracle()
+        }
+        "shared-provider" => {
+            let authority_prefix = required_string(
+                &options.authority_prefix,
+                &format!("{role}.authorityPrefix"),
+            )?;
+            let oracle = FoundationDbSharedLeaseOracle::connect(
+                uri.as_str(),
+                authority_prefix,
+                FoundationDbLimits::default(),
+            )
+            .map_err(to_js_error)?;
+            storage.with_production_lease_oracle(oracle)
+        }
+        _ => {
+            return Err(config_error(format!(
+                "{role}.leaseAuthority must be 'persisted-single-authority' or 'shared-provider'"
+            )));
+        }
+    };
     FoundationDbStorage::connect(uri, storage).map_err(to_js_error)
 }
 
@@ -1721,6 +1746,7 @@ async fn build_metadata_store(
 ) -> Result<(Arc<dyn MetadataStore>, Option<ChunkedProviderResource>), Error> {
     if options.kind != "foundationdb" {
         reject_set(&options.lease_authority, "metadata.leaseAuthority")?;
+        reject_set(&options.authority_prefix, "metadata.authorityPrefix")?;
     }
     match options.kind.as_str() {
         "memory" => {
@@ -1825,6 +1851,7 @@ async fn build_block_store(
 ) -> Result<(Arc<dyn BlockStore>, Option<ChunkedProviderResource>), Error> {
     if options.kind != "foundationdb" {
         reject_set(&options.lease_authority, "blocks.leaseAuthority")?;
+        reject_set(&options.authority_prefix, "blocks.authorityPrefix")?;
     }
     match options.kind.as_str() {
         "memory" => {

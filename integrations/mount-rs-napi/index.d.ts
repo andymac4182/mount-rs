@@ -859,8 +859,10 @@ export interface JsChunkedStoreOptions {
   uri?: string
   key?: string
   durable?: boolean
-  /** FoundationDB only: currently persisted-single-authority. */
+  /** FoundationDB only: persisted-single-authority or shared-provider. */
   leaseAuthority?: string
+  /** FoundationDB shared-provider only: the authority record key prefix. */
+  authorityPrefix?: string
   endpoint?: string
   bucket?: string
   accessKeyId?: string

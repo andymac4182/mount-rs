@@ -920,7 +920,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   separate acceptance work.
 - [ ] W07.5 Add Node, CLI, native-mount and macOS/Linux acceptance coverage. Rust
   SDK/CLI and the Node chunked factory now expose FoundationDB selection behind
-  opt-in native features with an explicit persisted single-authority/test mode.
+  opt-in native features with explicit persisted single-authority/test and
+  protected shared-provider modes. The latter requires an authority prefix and
+  keeps consumer workers read-only with respect to provider-time publication.
   The hosted FDB lane now builds the feature-enabled addon in the pinned
   libfdb_c client image and runs the live Node chunked factory against the real
   cluster, composing RustFS blocks when that lane is active. The same lane now

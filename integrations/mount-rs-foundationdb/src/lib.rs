@@ -392,6 +392,7 @@ impl FoundationDbLeaseAuthority {
             db: Arc::clone(&self.db),
             key: self.key.clone(),
             limits: self.limits,
+            _network: None,
         }
     }
 }
@@ -408,6 +409,7 @@ pub struct FoundationDbSharedLeaseOracle {
     db: Arc<Database>,
     key: Vec<u8>,
     limits: FoundationDbLimits,
+    _network: Option<Arc<NetworkAutoStop>>,
 }
 
 impl FoundationDbSharedLeaseOracle {
@@ -418,7 +420,29 @@ impl FoundationDbSharedLeaseOracle {
         limits: FoundationDbLimits,
     ) -> Result<Self> {
         let (db, key, limits) = lease_oracle_parts(db, prefix, limits)?;
-        Ok(Self { db, key, limits })
+        Ok(Self {
+            db,
+            key,
+            limits,
+            _network: None,
+        })
+    }
+
+    /// Boot the process-wide FoundationDB client network and connect a
+    /// read-only shared-provider oracle from a cluster file.
+    pub fn connect(
+        path: impl AsRef<Path>,
+        prefix: impl AsRef<[u8]>,
+        limits: FoundationDbLimits,
+    ) -> Result<Self> {
+        let network = client_network()?;
+        let path = path.as_ref().to_str().ok_or_else(|| {
+            FsError::new(ErrorCode::Einval).with_message("cluster path is not UTF-8")
+        })?;
+        let db = Database::from_path(path).map_err(fdb_error)?;
+        let mut oracle = Self::from_database(Arc::new(db), prefix, limits)?;
+        oracle._network = Some(network);
+        Ok(oracle)
     }
 }
 

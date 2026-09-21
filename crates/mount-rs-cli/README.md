@@ -118,11 +118,14 @@ FoundationDB; r2 is supported for blocks only because the current integration
 exposes no R2 metadata store. PGlite and TiDB connection URLs plus R2
 credentials are environment references such as
 {"env":"R2_SECRET_ACCESS_KEY"}, never plaintext values. FoundationDB uses a
-resolved cluster_file path and requires the explicit
-lease_authority: "persisted-single-authority" setting for the owned
-single-authority/test path. Enable the CLI's foundationdb feature on a
-supported native target; the default CLI remains portable and fails closed
-when that native provider is selected without the feature. See
+resolved cluster_file path and requires the explicit `lease_authority` setting.
+Use `"persisted-single-authority"` only for an owned single-authority/test
+path. Production consumers should use `"shared-provider"` together with an
+`authority_prefix`, and grant the CLI read-only access to that authority
+record; the authority service alone may publish provider time. Enable the
+CLI's foundationdb feature on a supported native target; the default CLI
+remains portable and fails closed when that native provider is selected
+without the feature. See
 examples/config-pglite-r2.json for the block-only R2 shape,
 examples/config-tidb-rustfs.json for the TiDB metadata/RustFS block shape, and
 examples/config-foundationdb-rustfs.json for FoundationDB metadata with

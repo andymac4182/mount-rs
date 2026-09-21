@@ -24,7 +24,10 @@ use mount_rs_core::{FsError, MemoryFs, backend_error};
         all(target_os = "macos", target_arch = "aarch64"),
     )
 ))]
-use mount_rs_foundationdb::{FoundationDbStorage, FoundationDbStorageOptions};
+use mount_rs_foundationdb::{
+    FoundationDbLimits, FoundationDbSharedLeaseOracle, FoundationDbStorage,
+    FoundationDbStorageOptions,
+};
 use mount_rs_host::{HostFs, HostFsOptions};
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_pglite::{PgliteBlockStore, PgliteMetadataStore, PgliteStorageOptions};
@@ -87,12 +90,13 @@ pub enum StoreConfig {
 /// Lease authority choices exposed by consumer configuration.
 ///
 /// The persisted choice is intentionally named as a single-authority mode:
-/// it is suitable for an owned test cluster or one trusted writer authority,
-/// but it is not a substitute for a protected shared provider-time authority
-/// in a multi-host production deployment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// it is suitable for an owned test cluster or one trusted writer authority.
+/// Production consumers should select [`Self::SharedProvider`] with the
+/// authority prefix published by a protected shared time authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FoundationDbLeaseAuthority {
     PersistedSingleAuthority,
+    SharedProvider { authority_prefix: String },
 }
 
 /// Options for a filesystem with independent metadata and block providers.
@@ -614,12 +618,8 @@ async fn open_metadata(
                 )
             ))]
             {
-                let storage = open_foundationdb_storage(
-                    cluster_file,
-                    volume_key,
-                    *durable,
-                    *lease_authority,
-                )?;
+                let storage =
+                    open_foundationdb_storage(cluster_file, volume_key, *durable, lease_authority)?;
                 let store = storage.metadata();
                 Ok((
                     Arc::new(store),
@@ -700,12 +700,8 @@ async fn open_blocks(
                 )
             ))]
             {
-                let storage = open_foundationdb_storage(
-                    cluster_file,
-                    volume_key,
-                    *durable,
-                    *lease_authority,
-                )?;
+                let storage =
+                    open_foundationdb_storage(cluster_file, volume_key, *durable, lease_authority)?;
                 let store = storage.blocks();
                 Ok((
                     Arc::new(store),
@@ -762,12 +758,20 @@ fn open_foundationdb_storage(
     cluster_file: &Path,
     volume_key: &str,
     durable: bool,
-    lease_authority: FoundationDbLeaseAuthority,
+    lease_authority: &FoundationDbLeaseAuthority,
 ) -> Result<FoundationDbStorage> {
     let options = FoundationDbStorageOptions::new(volume_key).with_durable(durable);
     let options = match lease_authority {
         FoundationDbLeaseAuthority::PersistedSingleAuthority => {
             options.with_persisted_lease_oracle()
+        }
+        FoundationDbLeaseAuthority::SharedProvider { authority_prefix } => {
+            let oracle = FoundationDbSharedLeaseOracle::connect(
+                cluster_file,
+                authority_prefix,
+                FoundationDbLimits::default(),
+            )?;
+            options.with_production_lease_oracle(oracle)
         }
     };
     FoundationDbStorage::connect(cluster_file, options)

@@ -566,18 +566,28 @@ fn parse_provider(
                     "volume_key",
                     "durable",
                     "lease_authority",
+                    "authority_prefix",
                 ],
                 path,
             )?;
             let lease_authority = required_nonempty_string(object, "lease_authority", path)?;
             let lease_authority = match lease_authority.as_str() {
                 "persisted-single-authority" => {
+                    if object.get("authority_prefix").is_some() {
+                        return Err(ConfigError::at(
+                            &format!("{path}.authority_prefix"),
+                            "is only valid with lease_authority 'shared-provider'",
+                        ));
+                    }
                     mount_rs_sdk::FoundationDbLeaseAuthority::PersistedSingleAuthority
                 }
+                "shared-provider" => mount_rs_sdk::FoundationDbLeaseAuthority::SharedProvider {
+                    authority_prefix: required_nonempty_string(object, "authority_prefix", path)?,
+                },
                 _ => {
                     return Err(ConfigError::at(
                         &format!("{path}.lease_authority"),
-                        "expected 'persisted-single-authority'",
+                        "expected 'persisted-single-authority' or 'shared-provider'",
                     ));
                 }
             };
@@ -1435,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn foundationdb_storage_requires_an_explicit_single_authority_mode() {
+    fn foundationdb_storage_requires_an_explicit_supported_authority_mode() {
         let spec = parse_config_str(
             r#"{
                 "version": 1,
@@ -1481,6 +1491,44 @@ mod tests {
         assert_eq!(
             lease_authority,
             mount_rs_sdk::FoundationDbLeaseAuthority::PersistedSingleAuthority
+        );
+
+        let shared_spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {
+                            "kind": "foundationdb",
+                            "cluster_file": "fdb.cluster",
+                            "volume_key": "cli-fdb-rustfs",
+                            "lease_authority": "shared-provider",
+                            "authority_prefix": "mount-rs/lease-authority"
+                        },
+                        "blocks": {"kind": "memory"}
+                    }
+                }
+            }"#,
+            Path::new("/tmp/config"),
+        )
+        .unwrap();
+        let Some(SplitStorageConfig {
+            metadata:
+                StorageProvider::FoundationDb {
+                    lease_authority, ..
+                },
+            blocks: StorageProvider::Memory,
+            ..
+        }) = shared_spec.storage
+        else {
+            panic!("expected shared-provider FoundationDB metadata and memory blocks");
+        };
+        assert_eq!(
+            lease_authority,
+            mount_rs_sdk::FoundationDbLeaseAuthority::SharedProvider {
+                authority_prefix: "mount-rs/lease-authority".to_owned(),
+            }
         );
 
         let missing_authority = parse_config_str(
