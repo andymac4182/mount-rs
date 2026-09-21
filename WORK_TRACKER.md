@@ -1392,16 +1392,29 @@ listing a source does not mean it has been reviewed or its code can be reused.
   results and mixed metadata-provider/Node/CLI coverage remain open. The
   all-in-one non-secure test deployment is loopback-only, not production auth
   or replicated-durability acceptance.
-- [ ] W26.1 Pin an Apache Ozone release and container digests; provide isolated
-  local/CI orchestration, readiness, authentication and bounded cleanup on
-  macOS/Linux. Record service topology, replication and durability settings.
-- [ ] W26.2 Run the immutable block contract through its actual S3 gateway:
-  conditional publication, concurrent writers, full/range reads, missing objects,
-  binary multi-chunk content, restart/reopen and injected failures. Verify
-  conditional semantics explicitly; never emulate away unsupported guarantees.
-- [ ] W26.3 Test Ozone blocks with independent SQLite, PGlite, TiDB and
-  FoundationDB metadata through ChunkedFs, including partial writes/truncation,
-  revision CAS and stale-writer fencing.
+- [x] W26.1 Pin Apache Ozone 2.2.1 and architecture-specific container digests;
+  the isolated macOS/Linux harness owns loopback readiness, SigV4 bucket
+  bootstrap, bounded Docker/test actions, restart/failure windows and
+  ownership-checked cleanup. Its single all-in-one service has anonymous
+  volumes and no replication, Kerberos/TLS or power-loss durability claim.
+- [x] W26.2 Run the immutable block contract through its actual S3 gateway:
+  the 2026-09-21 arm64 run passed create-only publication and duplicate
+  rejection, ETag stale-read/stale-write rejection and successful CAS,
+  concurrent writers, full/range reads, missing objects, binary payloads,
+  bounded stopped-gateway failure, service restart/reopen and cleanup via
+  `./scripts/test-ozone.sh`. The hosted Linux result remains a separate,
+  revision-specific evidence boundary.
+- W26.3 partial evidence: SQLite and disk-backed PGlite compositions passed
+  on 2026-09-21
+  through the real Ozone gateway with seven-byte ChunkedFs chunks, partial
+  writes, shrink/extend truncation, ranges, revision CAS, stale-writer
+  fencing, fresh reopen and scoped block/metadata cleanup. Real TiDB and
+  FoundationDB compositions remain explicit manual gates and are not implied
+  by this result.
+- [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
+  TiDB and FoundationDB metadata, including partial writes/truncation,
+  revision CAS and stale-writer fencing. SQLite and PGlite are covered above;
+  the distributed-provider runs remain explicit manual gates.
 - [ ] W26.4 Cover Node factories and CLI configuration; add required CI gates
   and document verified versions, limitations and platform evidence. Ozone is
   requested support, not yet a verified supported backend.
