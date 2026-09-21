@@ -73,6 +73,16 @@ worktree artifact races; this gate therefore binds to the checked-out source
 rather than another thread's compiled metadata. Ignored native/service rows
 remain explicit prerequisites and are not treated as production acceptance.
 
+The current shared `origin/main` boundary at
+`31e122bc2e5790bb3568c01aaea4b236d89dce96` passed on 2026-09-22 after the
+security-evidence rebase: formatting, the full locked offline workspace/all-
+target test gate with the required local loopback permission, and strict
+workspace Clippy with `-D warnings` on the isolated Cargo target
+`/private/tmp/mount-rs-w25-current-main-gate`. The credential-free template,
+bucket-policy, CI-config, and CI-environment contract fixtures also passed.
+Explicitly ignored native/service rows and all production deployment gates
+remain separate prerequisites.
+
 ## Deployment contract
 
 The production configuration must contain only non-secret provider identity:
@@ -170,6 +180,16 @@ recovery, DR, and operational sign-off remain open.
   passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted.
   This remains qualification-account and local-metadata evidence only, not
   production deployment acceptance.
+The current shared-mainline qualification at pushed source
+`0d017f09453af530517a2dfef5dc251c1a827932` passed on 2026-09-22 under `myroot`
+and the dedicated test role. The scoped packet passed sibling-prefix denial,
+public SDK/CLI self-test, composed AWS S3 filesystem, process reopen,
+independent PGlite metadata, writer fencing, PGlite backup/restore,
+fresh-server reopen, and exact owned-prefix cleanup under
+`mount-rs-tests/aws-s3/20260921T190207Z-39577-3e389412508fea6c7c806b9477ffaf8f`.
+Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+current qualification-account and local-metadata evidence only; production
+resource, metadata, DR, hosted release, and operational gates remain open.
 This is provider-pairing qualification only: the PGlite process is an
 isolated test service, and production multi-writer fencing, independent
 backup/restore, schema migration, failure recovery, and operational ownership

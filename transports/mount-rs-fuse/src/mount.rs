@@ -578,6 +578,18 @@ impl MountState {
         if let Some(task) = self.task.lock().expect("mount task lock poisoned").take() {
             task.abort();
         }
+        // Aborting the owner task drops the device descriptor without giving
+        // `run_session` a chance to publish its normal terminal state. Keep
+        // wait_closed() and lifecycle observers from waiting forever on that
+        // bounded fallback path.
+        self.mark_closed();
+    }
+
+    fn mark_closed(&self) {
+        self.active.store(false, Ordering::Release);
+        self.closed.store(true, Ordering::Release);
+        self.closed_notify.notify_waiters();
+        self.ready_notify.notify_waiters();
     }
 
     async fn wait_ready(&self) -> Result<(), String> {
@@ -639,8 +651,12 @@ impl MountState {
                 }
             }
         }
+        // A normal task exit publishes this state from `run_session`; the
+        // timeout/cancellation branches above do not necessarily get there.
+        // Make the terminal state idempotent so wait_closed() is guaranteed
+        // to complete after every bounded teardown path.
+        self.mark_closed();
         self.mounted.store(false, Ordering::Release);
-        self.active.store(false, Ordering::Release);
         result
     }
 
@@ -684,10 +700,7 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
     if let Some(error) = failure {
         state.record_transport_error(error);
     }
-    state.active.store(false, Ordering::Release);
-    state.closed.store(true, Ordering::Release);
-    state.closed_notify.notify_waiters();
-    state.ready_notify.notify_waiters();
+    state.mark_closed();
 }
 
 #[cfg(target_os = "linux")]
@@ -1774,6 +1787,34 @@ mod tests {
                 .as_deref(),
             Some(observed[0].message.as_str())
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn aborting_session_task_marks_mount_closed() {
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-abort-close-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks::default(),
+        ));
+        state.set_task(tokio::spawn(std::future::pending::<()>()));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-abort-close-test"),
+        };
+
+        state.abort_task();
+        tokio::time::timeout(Duration::from_secs(1), mount.wait_closed())
+            .await
+            .expect("aborted session should publish closed state");
+        assert!(!mount.is_active());
+        assert!(state.closed.load(Ordering::Acquire));
+
+        // The test did not create a real native mount. Prevent Drop from
+        // attempting the production unmount fallback for this synthetic state.
+        state.mounted.store(false, Ordering::Release);
     }
 
     #[cfg(target_os = "linux")]

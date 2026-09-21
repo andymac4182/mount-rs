@@ -50,12 +50,14 @@ node scripts/verify-w04-pglite-production-config.mjs \
 The policy requires an absolute normalized mountpoint, a `splitstore` driver
 whose metadata and blocks are both PGlite, durable metadata and blocks,
 distinct scoped volume keys, an external `MOUNT_RS_PGLITE_URL` reference,
-bounded chunking, an owner field, and—when supplied—a positive safe-integer
+bounded chunking, an owner field, and an explicit positive safe-integer
 `driver.storage.lease_ttl_ms` no greater than 24 hours. The checked fixture
-uses `120000` ms as a provisional example. The CLI defaults to 30 seconds for
-backward compatibility; production must record the selected value and show
-that it covers observed provider latency without making stale-writer recovery
-unacceptably slow. The policy rejects inline secret values and unknown fields.
+uses `120000` ms as a provisional example. The general CLI runtime defaults to
+30 seconds for
+backward compatibility, but a production configuration that omits the field
+is rejected. The selected value must cover observed provider latency without
+making stale-writer recovery unacceptably slow. The policy rejects inline
+secret values and unknown fields.
 The checked fixture under
 `tests/pglite/production-config-policy.json` is a shape test, not an approved
 deployment configuration. Its negative fixtures prove fail-closed behavior.

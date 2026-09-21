@@ -263,6 +263,14 @@ pinned mountx oracle still classifies `SYNCFS` as unimplemented, so no oracle
 differential is claimed for this operation; hosted kernel syncfs behavior and
 the remaining native lifecycle, callback, crash/restart and durability gates
 remain open, and W01 stays NO-GO.
+The latest FUSE teardown packet makes forced session-task cancellation a
+terminal lifecycle transition: bounded unmount-timeout and post-runtime
+destructor fallbacks now mark the mount inactive/closed and wake
+`wait_closed()` observers. A Linux-gated regression covers the lifecycle
+contract; host FUSE tests, host/Linux-target strict Clippy, Linux-target test
+check, formatting and diff checks pass, while actual Linux `/dev/fuse`
+forced-unmount, callback, crash/restart and durability execution remain
+external, so W01 stays NO-GO.
 The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
 session destroy in unwind isolation. A backend or cleanup panic now becomes
 one owned `Task` transport error, still closes the session, marks the mount
@@ -851,7 +859,11 @@ hosted/native acceptance. At exact scope-packet SHA
 successful `native-webdav (macos-latest)` job `106469172312` and
 `native-webdav (ubuntu-latest)` job `106469172419`; this qualifies hosted
 native WebDAV I/O for that packet only, not the overall CI run or production
-acceptance. A read-only status check for the published tip
+acceptance. The focused N-API SQLite provider/reopen probe now also preserves
+exact file bytes across orderly provider/server recreation and observes zero
+replacement-session locks, classifying bytes as durable and locks as
+process-local for that provider; it does not qualify crash/power-loss or live
+remote-provider durability. A read-only status check for the published tip
 `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
 and [fault-injection run
@@ -1278,6 +1290,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   millisecond boundary. N-API keeps serializable options, empty assertion
   readback, and expiry-aware `WebdavLockView[]` snapshots; broader session/
   server parity and the external W01 gates remain open.
+- [x] The focused N-API SQLite WebDAV provider/reopen probe is now part of the
+  package test sequence: `node test/typecheck.mjs && node
+  test/webdav-sqlite.mjs` passed exact PUT-byte readback after orderly
+  server/provider shutdown and a replacement-session zero-lock check. This
+  classifies local SQLite byte persistence and process-local WebDAV locks only;
+  crash/power-loss and live-provider durability remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -1408,6 +1426,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   preserves the 30-second default, and validates the W04 policy value as a
   positive safe integer no greater than 24 hours. Focused CLI/SDK/provider-
   matrix tests and positive/negative credential-free policy fixtures pass;
+  current-tip hosted policy run `35641832862`, job `106472745045`, also passed
+  the bounded-TTL positive fixture and all three expected rejection markers;
   the deployment-specific TTL, provider-scope, persistence/rollback,
   observability, ownership, and release decision remain tracked as **NO-GO**
   in [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
@@ -2904,6 +2924,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   passed. Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted;
   this remains qualification-account and local-metadata evidence only, not
   production deployment acceptance.
+- [x] The current shared-mainline qualification at pushed source
+  `0d017f09453af530517a2dfef5dc251c1a827932` passed on 2026-09-22 under
+  `myroot` and the dedicated test role. The scoped packet passed sibling-prefix
+  denial, public SDK/CLI self-test, composed AWS S3 filesystem, process reopen,
+  independent PGlite metadata, writer fencing, PGlite backup/restore,
+  fresh-server reopen, and exact owned-prefix cleanup under
+  `mount-rs-tests/aws-s3/20260921T190207Z-39577-3e389412508fea6c7c806b9477ffaf8f`.
+  Both `AWS_S3_TEST_PASS` and `AWS_S3_PGLITE_TEST_PASS` were emitted. This is
+  current qualification-account and local-metadata evidence only; production
+  resource, metadata, DR, hosted release, and operational gates remain open.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -3047,6 +3077,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   bounded block-store diagnostics test, the 18-case S3 gateway suite, and all
   other non-ignored workspace rows. Explicitly ignored native/service rows
   remain separate prerequisites and are not production acceptance.
+- [x] The current shared `origin/main` boundary at
+  `31e122bc2e5790bb3568c01aaea4b236d89dce96` passed on 2026-09-22 after the
+  security-evidence rebase: `./scripts/cargo-shared fmt --all -- --check`,
+  the full locked offline workspace/all-target test gate with the required
+  local loopback permission, and strict workspace Clippy with `-D warnings`
+  on the isolated Cargo target `/private/tmp/mount-rs-w25-current-main-gate`.
+  The credential-free template, bucket-policy, CI-config, and CI-environment
+  contract fixtures also passed. Explicitly ignored native/service rows and
+  all production deployment gates remain separate prerequisites.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -3764,6 +3803,7 @@ cross-drive isolation.
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
+| `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |
 | `a31880d` (published as `1e45692`) | Seeded Rust SDK, Node SDK and CLI provider lifecycle matrix | Positional write, truncate, flush and reopen passed across 5 Rust SDK, 4 Node SDK and 9 CLI rows; PGlite/R2 remain explicit skips |

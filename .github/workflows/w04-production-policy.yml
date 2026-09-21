@@ -43,3 +43,8 @@ jobs:
             echo 'W04 PGlite production config policy accepted an invalid lease TTL fixture' >&2
             exit 1
           fi
+          if node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy-missing-ttl.invalid.json; then
+            echo 'W04 PGlite production config policy accepted a missing lease TTL fixture' >&2
+            exit 1
+          fi
