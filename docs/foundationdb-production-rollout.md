@@ -69,7 +69,7 @@ and cannot close the production gates below.
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification; local and hosted durable restart evidence | Secure multi-node tests covering stale writers, lease expiry/renewal, maybe-committed reconciliation, network delay/partition, authority loss, reviewed failover and no split-brain publication |
 | P6 — backup, restore and disaster recovery | Not started | Consistent metadata/authority/block backup definition, encrypted retention, clean-environment restore, hash/revision verification, measured RPO/RTO and provider/region-loss procedure |
 | P7 — observability, alerts and runbooks | Not started | Metrics and alerts for cluster health, authority publication age/errors, lease-fence/ESTALE, transaction retry/maybe-committed EIO, block errors, latency, capacity and cleanup/space pressure; tested on-call runbook |
-| P8 — load, capacity, soak and cost envelope | Harness + one-round local and hosted qualification; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and one durable round passed locally and on hosted Linux; production-shaped workload, concurrency, duration, p50/p95/p99 latency, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
+| P8 — load, capacity, soak and cost envelope | Harness + one-round local and hosted qualification; latency marker added; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and now emits p50/p95/p99 operation-latency and throughput markers for future rounds; one durable round passed locally and on hosted Linux; production-shaped workload, concurrency, duration, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
 | P9 — upgrade, rollback and compatibility | Not started | Forward/backward keyspace and configuration compatibility, rolling provider/client upgrade, failed-upgrade rollback, retained-data downgrade boundary, lockfile/image/artifact provenance |
 | P10 — security, privacy, tenancy and audit | Not started | Threat-model review, prefix/tenant isolation, data classification, encryption, audit retention, dependency/image review, abuse/rate limits, closed findings or approved exceptions |
 | P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI evidence | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
@@ -107,6 +107,13 @@ The dedicated hosted qualification workflow runs both fixtures. A
 evidence: the verifier does not open FoundationDB or RustFS, cannot prove
 ACLs, certificate trust, replication, backups, capacity, monitoring or owner
 approval, and does not change the **NO-GO** decision.
+
+The real composition test now emits
+`FOUNDATIONDB_LATENCY_PASS workload=composition` with operation count,
+p50/p95/p99 microsecond latency, total duration and aggregate operation
+throughput. This makes later staging/load runs retain measurable workload
+evidence; the existing hosted run predates this marker and is not retroactively
+upgraded.
 
 The operational execution template is
 [`W07-operations-runbook.md`](W07-operations-runbook.md). It defines the

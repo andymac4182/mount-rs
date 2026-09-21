@@ -1056,7 +1056,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
     partial writes, truncate/extend, concurrent publication, stale-writer
     fencing, maybe-committed reconciliation, lease renewal/expiry, reconnect
     and fresh-client reopen at production-like duration and load. Record
-    latency, retry, capacity and error-budget results.
+    latency, retry, capacity and error-budget results. The real composition
+    harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
+    latency and throughput for future retained runs; this does not convert
+    the prior one-round qualification into production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -1772,7 +1775,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
   evidence. The workflow now has a secret-safe preflight validator that blocks
-  before AWS authentication when those inputs are absent or malformed. The
+  before AWS authentication when those inputs are absent or malformed, and it
+  rejects a role ARN whose account does not match the protected
+  `MOUNT_RS_AWS_S3_ACCOUNT_ID` value. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
