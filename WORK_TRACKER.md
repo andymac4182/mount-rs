@@ -1916,6 +1916,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
   This remains qualification-account and isolated-metadata evidence, not
   production deployment acceptance.
+- [x] The integrated W25 evidence boundary `e168315` passed
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings` on 2026-09-22. This rerun
+  covered the AWS provider, public SDK/CLI, S3 gateway, and the other
+  workstream changes already on that commit; the later unrelated `de6514c`
+  N-API test-only change landed after the gate and requires a post-rebase
+  verification before it can be included in current-head release evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -1926,7 +1933,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
   role are test resources, so production resource review remains open. The
-  A fresh read-only resource audit rerun on 2026-09-22 at current pushed head
+  A fresh read-only resource audit rerun on 2026-09-22 at audit commit
   `2f13354` also passed the account/region binding, all four public-access
   blocks, BucketOwnerEnforced ownership, AES256 encryption, seven-day
   lifecycle, and one-day incomplete-multipart abort checks for that
@@ -2001,7 +2008,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `2f13354`; it therefore cannot be used as current-head release
+  audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
   `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
   and partial 606-file inventory; the issue is remediated on current pushed
@@ -2157,6 +2164,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   assert provider-backed bounded success and `EOVERFLOW`; locked compilation,
   test discovery and strict Clippy pass. The KV adapter forwards the exact
   caller limit and its 13-test regression records provider limits `[2, 3]`.
+  The published follow-up `d1c9e44` adds provider-backed bounded success and
+  overflow assertions to the TiDB/RustFS and FoundationDB/RustFS composition
+  seed/reopen paths. TiDB locked test compilation and strict Clippy passed;
+  FoundationDB `cargo check --tests` passed, while local test-binary linking
+  is blocked by missing `libfdb_c`. Current hosted results at `44b01a7` are
+  canceled/failed and are not promoted; a terminal Ozone/provider marker is
+  still required.
   `MOUNTX_SOURCE` parity and live hosted provider results remain
   environment-gated checks.
 
@@ -2174,7 +2188,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | --- | --- | ---: | --- |
 | P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
 | P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
-| P2 — all-feasible-provider Ozone CI matrix | Ozone provider matrix expanded; KV/N-API contract added; terminal evidence pending | 45% | Benchmark rows cover SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with configuration-gated skips; the optional key-value bounded-listing contract is locally tested, and the SQLite/PGlite Ozone composition now contains provider-backed bounded-listing assertions, but hosted provider parity and each configured row still need terminal retained evidence |
+| P2 — all-feasible-provider Ozone CI matrix | Ozone provider matrix expanded; KV/N-API contract added; terminal evidence pending | 50% | Benchmark rows cover SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with configuration-gated skips; the optional key-value bounded-listing contract is locally tested, and the SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition paths contain provider-backed bounded-listing assertions, but hosted provider parity and each configured row still need terminal retained evidence |
 | P3 — authentication, TLS, secrets and redaction | Local transport boundary hardened; secure integration open | 50% | Static and runtime R2/Ozone validation rejects malformed, credential-bearing and remote plaintext-HTTP endpoints before client construction; HTTP config/runtime now reject non-loopback binds and require a TLS reverse proxy for remote clients; secure endpoint/auth, least privilege, rotation and full negative-path evidence remain open |
 | P4 — durability/storage failure contract | Lifecycle protection implemented; durability qualification open | 35% | Lease-protected root reconciliation and R2/Ozone scoped cleanup are locally tested; CI client recovery/error evidence plus customer Ozone replication/storage requirements remain open |
 | P5 — fencing, ambiguous commit and failover recovery | Lease-protected reconciliation implemented; failover matrix open | 35% | Reconciliation renews the writer lease and never runs implicitly on shutdown; concurrent/retry/failover evidence across feasible Ozone/provider CI lanes remains open |
@@ -2182,8 +2196,8 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P7 — integration observability and error contract | Local HTTP/OTLP and provider-boundary evidence passed; production integration open | 45% | `mount-rs-http` passed 8 unit and 12 integration tests; OTLP-enabled HTTP passed 11 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection/listing behavior; `reconcileBlocks` returns scanned/protected/recent/deleted counts and fails closed when unsupported, `readdir_bounded` is forwarded through observability/CLI wrappers, and N-API unstorage preserves `EOVERFLOW`; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
 | P8 — 1,000 IOPS per-drive CI workload | Per-provider CI gate implemented; hosted result pending | 25% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider; Ozone CI requests SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live Ozone evidence is blocked by missing service credentials/provider topologies. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
-| P10 — security, privacy, tenancy and audit | Current-revision local security review complete; hosted/customer security remains open | 65% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`; standard scan `70af8d4e-9fb3-4d2c-b688-54a9b6535739` completed against current revision `3fca802` with zero reportable local findings across 16 surfaces. The result is intentionally partial: customer Ozone TLS/IAM/rotation, provider-native bounded allocation, dependency provenance, 99.99%/recovery drills and production operations remain deferred; current CI run `35612976567` is non-terminal |
-| P11 — end-to-end client/platform matrix | HTTP path and built-in/KV bounded-listing contracts added to Ozone CI; full matrix open | 35% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite Ozone composition tests now assert provider-backed bounded success and `EOVERFLOW`; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
+| P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 68% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`; standard scan `5ad61e60-20e3-4223-885a-d4b516d49bb1` completed against published revision `44b01a7` with zero reportable findings across 16 W26-relevant surfaces. Semantic coverage is explicitly partial because independently launched workers did not return within bounded waits and parent fallback was used. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred; current CI/Fault/W08 runs are canceled and Live Cloudflare R2 failed |
+| P11 — end-to-end client/platform matrix | HTTP path and built-in/KV/durable-provider bounded-listing contracts added to Ozone CI; full matrix open | 40% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition tests assert provider-backed bounded success and `EOVERFLOW`; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; TiDB test compilation/Clippy and FoundationDB `cargo check --tests` pass locally, but live provider/Ozone execution is hosted-only and FoundationDB local linking lacks `libfdb_c`; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
 | P14 — final W26 integration-readiness review | Not started | 0% | One-revision all-provider/performance/security/end-to-end audit and explicit handoff decision |
