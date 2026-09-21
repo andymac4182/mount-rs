@@ -3546,7 +3546,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   optimistic immutable-block writes with revision/base checks and serialized
   conflict fallback; commit `c4378dc1` extends the same safe overlap to remote
   reads, adds orphan-atime handling and a lifecycle read barrier for shutdown,
-  and adds a blocked-read gate-release/shutdown regression. The 8-test
+  and adds blocked-read gate-release/shutdown plus stale-read-versus-concurrent-
+  write regressions. The 8-test
   concurrency suite, 14 chunked unit tests, full locked workspace tests and
   strict workspace Clippy pass. Fresh hosted qualification run
   `35641941218` on merged `origin/main` tip `88b707ba` is active and is not yet
