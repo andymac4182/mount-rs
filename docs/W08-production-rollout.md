@@ -38,7 +38,7 @@ planning result.
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
 | P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
-| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact, unsigned-SBOM, all-asset-integrity, target-matrix and manual attestation slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. Both release workflows create `SHA256SUMS` after the manifest and unsigned SBOM, cover all three assets and verify every entry; the preview workflow then re-downloads and verifies them. The tag release invokes pinned GitHub `actions/attest@v4.2.2` for provenance and CycloneDX SBOM, verifies repository/signer-workflow/source-commit/tag identity with `gh attestation verify`, and finalizes the manifest's signature/SBOM controls; the target matrix exposes an explicit `workflow_dispatch` `attest=true` path. Dedicated `.github/workflows/w08-release-policy.yml` proves the Ubuntu artifact path. `.github/workflows/w08-release-targets.yml` builds/tests Linux x86_64 and macOS arm64, uploads each four-file asset set and verifies each downloaded set. Hosted run `35624385556`, source `2ab3cf1`, reached terminal success for both target builds, both download-verification jobs and both target attestation jobs; the latter verified provenance and CycloneDX SBOM attestations for both target assets. The approved tag-triggered release has not run. Exit still requires that publication, target-platform package/SBOM checks in the release registry, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
+| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact, unsigned-SBOM, all-asset-integrity, target-matrix and current-main manual-attestation slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. Both release workflows create `SHA256SUMS` after the manifest and unsigned SBOM, cover all three assets and verify every entry; the preview workflow then re-downloads and verifies them. The tag release invokes pinned GitHub `actions/attest@v4.2.2` for provenance and CycloneDX SBOM, verifies repository/signer-workflow/source-commit/tag identity with `gh attestation verify`, and finalizes the manifest's signature/SBOM controls; the target matrix exposes an explicit `workflow_dispatch` `attest=true` path. Dedicated `.github/workflows/w08-release-policy.yml` proves the Ubuntu artifact path. `.github/workflows/w08-release-targets.yml` builds/tests Linux x86_64 and macOS arm64, uploads each four-file asset set and verifies each downloaded set. Hosted runs `35624385556`, source `2ab3cf1`, and `35627761501`, source `50a33ac` at dispatch, reached terminal success for both target builds, both download-verification jobs and both target attestation jobs; the latter verified provenance and CycloneDX SBOM attestations for both target assets. The approved tag-triggered release has not run. Exit still requires that publication, target-platform package/SBOM checks in the release registry, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
 
 No P01–P09 item is terminally accepted. P01/P02/P07 implementation progress is
 also covered locally by
@@ -121,8 +121,8 @@ The first live target qualification (`35620932700`, source `11a7b22`) passed
 both target builds and both downloaded-asset checks. Its two attestation jobs
 failed during setup because GitHub rejected the shortened action ref; no action
 step, OIDC token or Sigstore bundle was created. The workflow now uses the
-full verified v4.2.2 SHA and requires a rerun before treating the attestation
-path as hosted-qualified.
+full verified v4.2.2 SHA; the later terminal reruns are recorded in W08.21 and
+W08.22 below.
 
 The corrected qualification (`35622899242`, source `2f43721`) then passed both
 target builds, both downloaded-asset checks and both attestation-generation
@@ -143,6 +143,19 @@ Repository attestation records `48984689`, `48984696`, `48984678` and
 `48984687` were created, with Rekor entries `2906371944`, `2906371970`,
 `2906371892` and `2906371927`. This qualifies the hosted target-attestation
 path; it is not a published tag release, canary, rollback or approval.
+
+The current-main manual retest (`35627761501`, source `50a33ac` at dispatch)
+again passed both target builds, both downloaded-asset checks, both provenance
+attestations, both CycloneDX SBOM attestations and both final
+`gh attestation verify` steps. The Linux tarball was SHA-256
+`432049a39cd648bda95a9aeaaf81d5bb2933267c467f69b617e6e3f718d5303b`
+(8,306,821 bytes); the macOS arm64 tarball was SHA-256
+`647f4d0fe7cb7f8446ed6eba3a2c1ad4b4f7413ad59afa10d68617b86ec10421`
+(6,926,739 bytes). Repository attestation records `48993605`, `48993613`,
+`48993668` and `48993679` were created, with Rekor entries `2906426581`,
+`2906426592`, `2906426797` and `2906426824`. This is a current-main-at-
+dispatch hosted qualification retest; it is not a published tag release,
+canary, rollback or approval.
 
 The first explicit target-matrix dispatch (`35620392878`, source `0a4de6f`)
 was accepted but cancelled before job creation because concurrent `main` pushes

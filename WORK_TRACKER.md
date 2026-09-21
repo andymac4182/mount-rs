@@ -1738,10 +1738,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   downloaded-asset PASS jobs, but both attestation jobs failed during setup
   because GitHub rejected the shortened action ref; no action step, OIDC token
   or Sigstore bundle was created. The full v4.2.2 SHA correction is now in the
-  workflow and requires a rerun. No attestation ID/URL, release-registry
-  result, canary, rollback or approval is claimed. *(Release implementation
-  slice; GitHub OIDC/attestation availability, release owner and production
-  approvers are external gates.)*
+  workflow; later terminal reruns are recorded in W08.21 and W08.22. This
+  implementation row does not itself claim an attestation ID/URL,
+  release-registry result, canary, rollback or approval. *(Release
+  implementation slice; GitHub OIDC/attestation availability, release owner
+  and production approvers are external gates.)*
 - [x] W08.18 **Attestation dispatch concurrency isolation:**
   `.github/workflows/w08-release-targets.yml` now keys its concurrency group by
   event type and ref, separating the explicit manual `workflow_dispatch`
@@ -1790,6 +1791,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   release-registry acceptance, canary, rollback and owner approval remain
   W08-P09 gates. *(Hosted/provider qualification; release approval and
   production deployment are external gates.)*
+- [x] W08.22 **Current-main hosted target-attestation retest:** manual
+  `workflow_dispatch` run `35627761501` completed successfully at source
+  `50a33ace3880632bec514ed9f163b84906376f5e`. Linux build/download/attestation
+  jobs `106426208811`, `106427912681`, `106428371158` and macOS jobs
+  `106426208445`, `106427912698`, `106428371145` all passed final target
+  verification. Linux tarball SHA-256 is
+  `432049a39cd648bda95a9aeaaf81d5bb2933267c467f69b617e6e3f718d5303b`
+  (8,306,821 bytes); macOS arm64 is
+  `647f4d0fe7cb7f8446ed6eba3a2c1ad4b4f7413ad59afa10d68617b86ec10421`
+  (6,926,739 bytes). Repository attestation records are `48993605`,
+  `48993613`, `48993668` and `48993679`; Rekor entries are `2906426581`,
+  `2906426592`, `2906426797` and `2906426824`. Both
+  `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed. This is a
+  current-main-at-dispatch hosted retest, not an approved tag release,
+  registry acceptance, canary, rollback or owner approval. *(Hosted/provider
+  qualification; release approval and production deployment are external
+  gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1892,7 +1910,7 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.21's pinned attestation wiring,
+  target/download matrix and W08.17–W08.22's pinned attestation wiring,
   dispatch isolation, full-pin correction, verifier identity fix and terminal
   target qualification, but they do not run a real tag release or close the
   canary, rollback or approval gates.
