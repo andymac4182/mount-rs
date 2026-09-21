@@ -2,6 +2,14 @@ import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
 import * as fuse from "../fuse.cjs";
 import {
+  decodeRequest,
+  encodeRequest,
+  decodeReply,
+  encodeReplyFor,
+  decodeRequestBody,
+  encodeRequestBody,
+  decodeReplyBody,
+  encodeReplyBody,
   decodeOpenIn as namedDecodeOpenIn,
   encodeOpenIn as namedEncodeOpenIn,
   decodeOpenOut as namedDecodeOpenOut,
@@ -109,6 +117,14 @@ import {
 } from "../fuse.cjs";
 
 for (const [name, value] of [
+  ["decodeRequest", decodeRequest],
+  ["encodeRequest", encodeRequest],
+  ["decodeReply", decodeReply],
+  ["encodeReplyFor", encodeReplyFor],
+  ["decodeRequestBody", decodeRequestBody],
+  ["encodeRequestBody", encodeRequestBody],
+  ["decodeReplyBody", decodeReplyBody],
+  ["encodeReplyBody", encodeReplyBody],
   ["decodeOpenIn", namedDecodeOpenIn],
   ["encodeOpenIn", namedEncodeOpenIn],
   ["decodeOpenOut", namedDecodeOpenOut],
@@ -221,6 +237,53 @@ assert.equal(fuse.FUSE_KERNEL_VERSION, 7);
 assert.equal(fuse.FUSE_KERNEL_MINOR_VERSION, 41);
 assert.equal(fuse.FUSE_ROOT_ID, 1n);
 
+// Every public wire constant must be available through both CommonJS and
+// Node's CommonJS-to-ESM named-export bridge. The binding installs the values
+// in a loop, so this catches regressions where the runtime value exists but a
+// static `module.exports.NAME` assignment was omitted.
+const publicWireConstants = [
+  "FUSE_KERNEL_VERSION", "FUSE_KERNEL_MINOR_VERSION", "FUSE_ROOT_ID",
+  "FUSE_MIN_READ_BUFFER", "FUSE_PAGE_SIZE", "FUSE_MAX_MAX_PAGES", "FUSE_DEFAULT_MAX_PAGES_PER_REQ",
+  "FUSE_LOOKUP", "FUSE_FORGET", "FUSE_GETATTR", "FUSE_SETATTR", "FUSE_READLINK", "FUSE_SYMLINK",
+  "FUSE_MKNOD", "FUSE_MKDIR", "FUSE_UNLINK", "FUSE_RMDIR", "FUSE_RENAME", "FUSE_LINK", "FUSE_OPEN",
+  "FUSE_READ", "FUSE_WRITE", "FUSE_STATFS", "FUSE_RELEASE", "FUSE_FSYNC", "FUSE_SETXATTR",
+  "FUSE_GETXATTR", "FUSE_LISTXATTR", "FUSE_REMOVEXATTR", "FUSE_FLUSH", "FUSE_INIT", "FUSE_OPENDIR",
+  "FUSE_READDIR", "FUSE_RELEASEDIR", "FUSE_FSYNCDIR", "FUSE_GETLK", "FUSE_SETLK", "FUSE_SETLKW",
+  "FUSE_ACCESS", "FUSE_CREATE", "FUSE_INTERRUPT", "FUSE_BMAP", "FUSE_DESTROY", "FUSE_IOCTL", "FUSE_POLL",
+  "FUSE_NOTIFY_REPLY", "FUSE_BATCH_FORGET", "FUSE_FALLOCATE", "FUSE_READDIRPLUS", "FUSE_RENAME2",
+  "FUSE_LSEEK", "FUSE_COPY_FILE_RANGE", "FUSE_SETUPMAPPING", "FUSE_REMOVEMAPPING", "FUSE_SYNCFS",
+  "FUSE_TMPFILE", "FUSE_STATX", "CUSE_INIT", "FUSE_NOTIFY_POLL", "FUSE_NOTIFY_INVAL_INODE",
+  "FUSE_NOTIFY_INVAL_ENTRY", "FUSE_NOTIFY_STORE", "FUSE_NOTIFY_RETRIEVE", "FUSE_NOTIFY_DELETE",
+  "FUSE_NOTIFY_RESEND", "FUSE_NOTIFY_UNIQUE", "FATTR_MODE", "FATTR_UID", "FATTR_GID", "FATTR_SIZE",
+  "FATTR_ATIME", "FATTR_MTIME", "FATTR_FH", "FATTR_ATIME_NOW", "FATTR_MTIME_NOW", "FATTR_LOCKOWNER",
+  "FATTR_CTIME", "FATTR_KILL_SUIDGID", "FOPEN_DIRECT_IO", "FOPEN_KEEP_CACHE", "FOPEN_NONSEEKABLE",
+  "FOPEN_CACHE_DIR", "FOPEN_STREAM", "FOPEN_NOFLUSH", "FOPEN_PARALLEL_DIRECT_WRITES", "FOPEN_PASSTHROUGH",
+  "FUSE_ASYNC_READ", "FUSE_POSIX_LOCKS", "FUSE_FILE_OPS", "FUSE_ATOMIC_O_TRUNC", "FUSE_EXPORT_SUPPORT",
+  "FUSE_BIG_WRITES", "FUSE_DONT_MASK", "FUSE_SPLICE_WRITE", "FUSE_SPLICE_MOVE", "FUSE_SPLICE_READ",
+  "FUSE_FLOCK_LOCKS", "FUSE_HAS_IOCTL_DIR", "FUSE_AUTO_INVAL_DATA", "FUSE_DO_READDIRPLUS",
+  "FUSE_READDIRPLUS_AUTO", "FUSE_ASYNC_DIO", "FUSE_WRITEBACK_CACHE", "FUSE_NO_OPEN_SUPPORT",
+  "FUSE_PARALLEL_DIROPS", "FUSE_HANDLE_KILLPRIV", "FUSE_POSIX_ACL", "FUSE_ABORT_ERROR", "FUSE_MAX_PAGES",
+  "FUSE_CACHE_SYMLINKS", "FUSE_NO_OPENDIR_SUPPORT", "FUSE_EXPLICIT_INVAL_DATA", "FUSE_MAP_ALIGNMENT",
+  "FUSE_SUBMOUNTS", "FUSE_HANDLE_KILLPRIV_V2", "FUSE_SETXATTR_EXT", "FUSE_INIT_EXT", "FUSE_INIT_RESERVED",
+  "FUSE_SECURITY_CTX", "FUSE_HAS_INODE_DAX", "FUSE_CREATE_SUPP_GROUP", "FUSE_HAS_EXPIRE_ONLY",
+  "FUSE_DIRECT_IO_ALLOW_MMAP", "FUSE_PASSTHROUGH", "FUSE_NO_EXPORT_SUPPORT", "FUSE_HAS_RESEND",
+  "FUSE_ALLOW_IDMAP", "FUSE_RELEASE_FLUSH", "FUSE_RELEASE_FLOCK_UNLOCK", "FUSE_GETATTR_FH",
+  "FUSE_WRITE_CACHE", "FUSE_WRITE_LOCKOWNER", "FUSE_WRITE_KILL_SUIDGID", "FUSE_READ_LOCKOWNER",
+  "FUSE_POLL_SCHEDULE_NOTIFY", "FUSE_ATTR_SUBMOUNT", "FUSE_ATTR_DAX", "FUSE_OPEN_KILL_SUIDGID",
+  "FUSE_EXPIRE_ONLY", "FUSE_UNIQUE_RESEND", "FUSE_INVALID_UIDGID", "FUSE_MAX_NR_SECCTX", "FUSE_EXT_GROUPS",
+  "DT_UNKNOWN", "DT_FIFO", "DT_CHR", "DT_DIR", "DT_BLK", "DT_REG", "DT_LNK", "DT_SOCK", "O_ACCMODE",
+  "O_RDONLY", "O_WRONLY", "O_RDWR", "O_CREAT", "O_EXCL", "O_TRUNC", "O_APPEND", "SEEK_SET", "SEEK_CUR",
+  "SEEK_END", "SEEK_DATA", "SEEK_HOLE", "F_RDLCK", "F_WRLCK", "F_UNLCK", "XATTR_CREATE", "XATTR_REPLACE",
+  "FUSE_IN_HEADER_SIZE", "FUSE_OUT_HEADER_SIZE", "FUSE_DIRENT_HEADER_SIZE", "FUSE_INIT_OUT_SIZE",
+  "FUSE_COMPAT_INIT_OUT_SIZE", "FUSE_COMPAT_22_INIT_OUT_SIZE", "FUSE_COMPAT_ENTRY_OUT_SIZE",
+  "FUSE_COMPAT_ATTR_OUT_SIZE", "FUSE_COMPAT_STATFS_SIZE", "FUSE_COMPAT_WRITE_IN_SIZE",
+  "FUSE_COMPAT_MKNOD_IN_SIZE", "FUSE_COMPAT_SETXATTR_IN_SIZE",
+];
+for (const name of publicWireConstants) {
+  assert.ok(Object.hasOwn(fuse, name), `FUSE ESM named export ${name}`);
+  assert.equal(fuse[name], fuse.default[name], `FUSE CommonJS/ESM parity ${name}`);
+}
+
 const request = {
   len: 40,
   opcode: fuse.FUSE_GETATTR,
@@ -245,6 +308,57 @@ assert.deepEqual(fuse.decodeTranscript(transcript.encode()), [
 assert.equal(fuse.opcodeName(fuse.FUSE_GETATTR), "GETATTR");
 assert.equal(fuse.nameByteLength("é"), 2);
 assert.throws(() => fuse.decodeInHeader(Buffer.alloc(1)), fuse.ProtocolError);
+
+const genericLookup = { name: "generic-entry" };
+const genericLookupBody = encodeRequestBody(fuse.FUSE_LOOKUP, genericLookup);
+assert.deepEqual([...genericLookupBody], [...fuse.encodeLookupIn(genericLookup)]);
+const genericRequest = encodeRequest({
+  opcode: fuse.FUSE_LOOKUP,
+  unique: 43n,
+  nodeid: fuse.FUSE_ROOT_ID,
+  uid: 501,
+  gid: 20,
+  pid: 7,
+  body: genericLookup,
+});
+assert.deepEqual(decodeRequest(genericRequest), {
+  header: {
+    len: fuse.FUSE_IN_HEADER_SIZE + genericLookupBody.length,
+    opcode: fuse.FUSE_LOOKUP,
+    unique: 43n,
+    nodeid: fuse.FUSE_ROOT_ID,
+    uid: 501,
+    gid: 20,
+    pid: 7,
+    totalExtlen: 0,
+  },
+  name: "LOOKUP",
+  payload: genericLookupBody,
+  extensions: Buffer.alloc(0),
+  body: genericLookup,
+});
+assert.equal(fuse.OPCODES.get(fuse.FUSE_LOOKUP).hasReply, true);
+assert.equal(fuse.OPCODES.get(fuse.FUSE_FORGET).hasReply, false);
+const genericForget = encodeRequest({
+  opcode: fuse.FUSE_FORGET,
+  unique: 44n,
+  nodeid: 9n,
+  body: { nlookup: 3n },
+});
+assert.deepEqual(decodeRequest(genericForget).body, { nlookup: 3n });
+const genericAccessReply = encodeReplyFor(45n, fuse.FUSE_ACCESS, {});
+assert.deepEqual(decodeReply(genericAccessReply, fuse.FUSE_ACCESS).body, {});
+assert.deepEqual(decodeReplyBody(fuse.FUSE_ACCESS, encodeReplyBody(fuse.FUSE_ACCESS, {})), {});
+assert.equal(decodeReply(fuse.encodeErrorReply(46n, "ENOENT"), fuse.FUSE_ACCESS).body, undefined);
+assert.throws(
+  () => encodeRequest({ opcode: fuse.FUSE_ACCESS, unique: 47n, extensions: Buffer.alloc(1) }),
+  fuse.ProtocolError,
+);
+assert.throws(
+  () => decodeRequest(Buffer.concat([genericRequest, Buffer.from([0])]).subarray(0, genericRequest.length - 1)),
+  fuse.ProtocolError,
+);
+assert.throws(() => decodeRequestBody(fuse.FUSE_IOCTL, Buffer.alloc(0)), fuse.ProtocolError);
 
 const readContext = { minor: 41, setxattrExt: false };
 const readInput = {
@@ -313,9 +427,8 @@ for (const ctx of [getattrContext, { minor: 8, setxattrExt: false }]) {
 
 const openContext = { minor: 41, setxattrExt: false };
 const openInput = {
-  // Linux wire values; the FUSE barrel keeps the complete constant loop on
-  // require() but only its core constants are statically discoverable through
-  // Node's CommonJS-to-ESM bridge.
+  // Linux wire values; these are deliberately independent of the host's
+  // node:fs flag namespace.
   flags: 0o2 | 0o2000,
   openFlags: 1,
 };
@@ -816,6 +929,29 @@ if (source) {
     !Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(fuse.FUSE_IOCTL);
   const oracleSyncfsIsUnsupported = Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(
     fuse.FUSE_SYNCFS,
+  );
+
+  const oracleGenericRequest = oracle.encodeRequest({
+    opcode: fuse.FUSE_LOOKUP,
+    unique: 43n,
+    nodeid: fuse.FUSE_ROOT_ID,
+    uid: 501,
+    gid: 20,
+    pid: 7,
+    body: genericLookup,
+  });
+  assert.deepEqual([...genericRequest], [...oracleGenericRequest], "generic request framing matches oracle");
+  assert.deepEqual(
+    [...decodeRequest(genericRequest).payload],
+    [...oracle.decodeRequest(oracleGenericRequest).payload],
+    "generic request payload matches oracle",
+  );
+  const oracleGenericReply = oracle.encodeReply(45n);
+  assert.deepEqual([...genericAccessReply], [...oracleGenericReply], "generic reply framing matches oracle");
+  assert.deepEqual(
+    decodeReply(genericAccessReply, fuse.FUSE_ACCESS).body,
+    oracle.decodeReply(oracleGenericReply, fuse.FUSE_ACCESS).body,
+    "generic reply body matches oracle",
   );
 
   const typedRequestCases = [
