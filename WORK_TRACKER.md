@@ -10,15 +10,18 @@ retain detailed results. A passing component test is not end-to-end acceptance.
 
 Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
-attached connection identity/peer/stream/closed state, duplicate-attach and
+attached connection identity/peer/stream/closed state (including the native
+`null` versus attached-stream `undefined` peer boundary), duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
 coverage. The transport now also broadcasts shutdown safely across the accept
 loop and all connections, closes the active-connection accept-loop race, and
-reaps completed request tasks while reporting task failures. An ignored native
+reaps completed request tasks while reporting task failures; its in-flight
+permit acquisition now also observes connection/server shutdown instead of
+wedging close behind a slow request. An ignored native
 Linux harnesses now run eight concurrent mounted file write/read/rename/read
 round trips before a bounded unmount, and close the server side while verifying
 kernel-connection teardown. Session destruction also wakes and drains in-flight
-`Tflush` waiters. Local lifecycle 5/5, transport-error 8/8, the focused native
+`Tflush` waiters. Local lifecycle 6/6, transport-error 8/8, the focused native
 target, strict 9P Clippy and formatting pass. Hosted
 run `35616832528` / job `106389895603` passed the prior Linux kernel-client
 mount/read/write/unmount packet; a fresh run is required for this packet and

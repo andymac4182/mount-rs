@@ -879,9 +879,22 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     }
                 };
                 for frame in frames {
-                    let permit = match permits.clone().acquire_owned().await {
-                        Ok(permit) => permit,
-                        Err(_) => break 'read,
+                    let control_shutdown = control.shutdown.notified();
+                    tokio::pin!(control_shutdown);
+                    control_shutdown.as_mut().enable();
+                    let permit_shutdown = server_shutdown.notified();
+                    tokio::pin!(permit_shutdown);
+                    permit_shutdown.as_mut().enable();
+                    if server_shutdown_requested.load(Ordering::Acquire) {
+                        break 'read;
+                    }
+                    let permit = tokio::select! {
+                        _ = control_shutdown => break 'read,
+                        _ = permit_shutdown => break 'read,
+                        permit = permits.clone().acquire_owned() => match permit {
+                            Ok(permit) => permit,
+                            Err(_) => break 'read,
+                        },
                     };
                     let session = session.clone();
                     let writer = Arc::clone(&writer);
