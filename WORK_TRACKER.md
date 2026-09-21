@@ -398,6 +398,15 @@ and BMAP support remains unadvertised and unimplemented.
 The subsequent native read-interrupt packet is also compiled against this
 context-aware validator, so `FUSE_INTERRUPT` retains its fixed-body boundary
 while known read workers can be aborted independently.
+After that repair, the published-tip verification passed formatting and diff
+checks, the locked FUSE/N-API all-target tests, isolated warning-denied Clippy,
+and the `x86_64-unknown-linux-gnu` FUSE test-target compile. Rebuilding the
+debug N-API addon followed by generated typecheck, the mount-free FUSE session
+test, and the pinned codec and inode oracle tests also passed. Hosted CI run
+`35632382070` was cancelled by a later concurrent push, so it provides no
+Linux `/dev/fuse` evidence; native mount/callback, FSKit, close/crash/restart,
+mutation/write concurrency, locks, and durability remain open and W01 stays
+NO-GO.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
