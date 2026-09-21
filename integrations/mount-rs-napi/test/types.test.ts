@@ -25,6 +25,7 @@ import {
   resolvePath,
   splitPath,
   type JsCapabilities,
+  type JsAutoMountOptions,
   type JsChunkedOptions,
   type JsMemoryOptions,
   type JsReadResult,
@@ -113,6 +114,15 @@ function checkStructuralFactories(driver: FsDriver): void {
 const nodeStructural: FsDriver = nodeFs
 void nodeStructural
 void checkStructuralFactories
+
+const autoMountOptions: JsAutoMountOptions = {
+  transport: "fuse",
+  onTransportError: (error, peer) => {
+    void error
+    void peer
+  },
+}
+void autoMountOptions
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
   __napiBindingTarget

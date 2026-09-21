@@ -21,7 +21,10 @@ use mount_rs_9p::{
     P9TransportErrorHook as TransportP9ErrorHook,
 };
 use mount_rs_core::{ErrorCode, FileHandle, FsDriver, FsError};
-use mount_rs_fuse::{FuseTransportError, FuseTransportErrorHook};
+use mount_rs_fuse::{
+    FuseMountHooks as TransportFuseMountHooks, FuseTransportError as TransportFuseError,
+    FuseTransportErrorHook as TransportFuseErrorHook,
+};
 use mount_rs_nfs::{
     FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
     Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
@@ -71,7 +74,7 @@ type TransportErrorTsfn = ThreadsafeFunction<
 >;
 
 #[derive(Clone)]
-struct TransportErrorEvent {
+pub(crate) struct TransportErrorEvent {
     message: String,
     peer: Option<String>,
 }
@@ -97,11 +100,10 @@ impl From<TransportWebdavError> for TransportErrorEvent {
     }
 }
 
-impl From<FuseTransportError> for TransportErrorEvent {
-    fn from(error: FuseTransportError) -> Self {
-        let FuseTransportError { message, .. } = error;
+impl From<TransportFuseError> for TransportErrorEvent {
+    fn from(error: TransportFuseError) -> Self {
         Self {
-            message,
+            message: error.message,
             peer: None,
         }
     }
@@ -114,13 +116,13 @@ impl From<FuseTransportError> for TransportErrorEvent {
 /// than merely dropping the N-API wrapper. The closed flag also makes a hook
 /// callback racing with shutdown a no-op; the TSFN's aborted lock closes the
 /// remaining call-versus-release race.
-struct TransportErrorCallback {
+pub(crate) struct TransportErrorCallback {
     callback: Mutex<Option<Arc<TransportErrorTsfn>>>,
     closed: AtomicBool,
 }
 
 impl TransportErrorCallback {
-    fn new(function: JsTransportErrorCallback) -> napi::Result<Arc<Self>> {
+    pub(crate) fn new(function: JsTransportErrorCallback) -> napi::Result<Arc<Self>> {
         let callback = function
             .build_threadsafe_function::<TransportErrorEvent>()
             .weak::<false>()
@@ -164,7 +166,7 @@ impl TransportErrorCallback {
         );
     }
 
-    fn release(&self) {
+    pub(crate) fn release(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -197,19 +199,7 @@ impl Drop for TransportErrorCallback {
     }
 }
 
-pub(crate) fn fuse_hook(
-    function: Option<JsTransportErrorCallback>,
-) -> napi::Result<Option<FuseTransportErrorHook>> {
-    let Some(function) = function else {
-        return Ok(None);
-    };
-    let callback = Arc::new(TransportErrorCallback::new(function)?);
-    Ok(Some(Arc::new(move |error: FuseTransportError| {
-        callback.report(error.into());
-    }) as FuseTransportErrorHook))
-}
-
-fn nfs_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportNfsServerHooks {
+pub(crate) fn nfs_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportNfsServerHooks {
     TransportNfsServerHooks {
         on_transport_error: callback.map(|callback| {
             let callback = Arc::clone(callback);
@@ -219,7 +209,7 @@ fn nfs_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportNfsServ
     }
 }
 
-fn p9_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportP9ServerHooks {
+pub(crate) fn p9_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportP9ServerHooks {
     TransportP9ServerHooks {
         on_transport_error: callback.map(|callback| {
             let callback = Arc::clone(callback);
@@ -229,12 +219,26 @@ fn p9_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportP9Server
     }
 }
 
-fn webdav_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportWebdavServerHooks {
+pub(crate) fn webdav_hooks(
+    callback: Option<&Arc<TransportErrorCallback>>,
+) -> TransportWebdavServerHooks {
     TransportWebdavServerHooks {
         on_transport_error: callback.map(|callback| {
             let callback = Arc::clone(callback);
             Arc::new(move |error: TransportWebdavError| callback.report(error.into()))
                 as TransportWebdavErrorHook
+        }),
+    }
+}
+
+pub(crate) fn fuse_hooks(
+    callback: Option<&Arc<TransportErrorCallback>>,
+) -> TransportFuseMountHooks {
+    TransportFuseMountHooks {
+        on_transport_error: callback.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(move |error: TransportFuseError| callback.report(error.into()))
+                as TransportFuseErrorHook
         }),
     }
 }

@@ -226,6 +226,13 @@ harness. The locked FUSE target, formatting and diff checks pass on macOS; the
 Linux-only hook harness and hosted `/dev/fuse` callback delivery remain
 external evidence, as do FSKit, cancellation, concurrency, crash/restart and
 durability.
+The automatic-mount follow-up now threads one owned N-API `onTransportError`
+callback through the FUSE, 9P, and NFS native mount paths, converts the
+JavaScript callback synchronously to a TSFN before spawning the async mount,
+and releases it on `Mounted` teardown. The scoped auto/NFS/N-API Rust tests,
+debug addon build, native-facade skip lane, generated typecheck, formatting
+and diff checks pass; hosted native fault-event delivery and the remaining
+native lifecycle gates remain open.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 

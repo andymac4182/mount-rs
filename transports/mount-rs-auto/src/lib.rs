@@ -28,12 +28,15 @@ use std::time::Duration;
 
 use mount_rs_core::FsDriver;
 
-pub use mount_rs_9p::{P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport, P9Platform};
+pub use mount_rs_9p::{
+    P9ClientProbe, P9Mount, P9MountOptions, P9MountTransport, P9Platform, P9ServerHooks,
+};
 pub use mount_rs_fuse::mount::{
     FuseMount, FuseMountHooks, MountError as FuseMountError, MountMode, MountOptions,
 };
 pub use mount_rs_nfs::{
-    NativeNfsMount, NfsClientProbe, NfsMountError, NfsMountOptions, NfsPlatform, NfsVersion,
+    NativeNfsMount, NfsClientProbe, NfsMountError, NfsMountOptions, NfsPlatform, NfsServerHooks,
+    NfsVersion,
 };
 
 /// A transport that the facade can select or be asked to use by name.
@@ -152,14 +155,17 @@ impl AutoMountOptions {
     }
 }
 
-/// Native lifecycle hooks for the automatic facade.
+/// Transport lifecycle hooks for the automatic facade.
 ///
-/// FUSE is the only hook currently owned by this facade; 9P and NFS server
-/// callbacks remain attached to their listener APIs. Keeping this separate
-/// from [`AutoMountOptions`] preserves existing option-bag struct literals.
+/// The hook object is separate from [`AutoMountOptions`] so existing option
+/// literals remain source-compatible. A supplied 9P or NFS hook replaces the
+/// hook set on a mount-created server; an omitted hook preserves the options'
+/// existing 9P hook and leaves the NFS hook unset.
 #[derive(Clone, Default)]
 pub struct AutoMountHooks {
     pub fuse: FuseMountHooks,
+    pub p9: Option<P9ServerHooks>,
+    pub nfs: Option<NfsServerHooks>,
 }
 
 /// A native mount error tagged with the transport that produced it.
@@ -641,7 +647,9 @@ where
     mount_with_hooks(driver, mountpoint, options, AutoMountHooks::default()).await
 }
 
-/// Mount through the automatic facade with transport lifecycle hooks.
+/// Mount `driver` through the automatic facade with transport lifecycle hooks.
+/// The selected transport is called once; no fallback is attempted after a
+/// named or automatically selected mount fails.
 pub async fn mount_with_hooks<D, P>(
     driver: D,
     mountpoint: P,
@@ -660,13 +668,19 @@ where
     let transport = choose_transport(options.transport, probe.as_ref())?;
     mark_loaded(transport);
     let requested_mountpoint = mountpoint.as_ref().to_owned();
+    let fuse_options = options.fuse_options();
+    let mut p9_options = options.p9_options();
+    if let Some(server_hooks) = hooks.p9 {
+        p9_options.server_hooks = server_hooks;
+    }
+    let nfs_options = options.nfs_options();
 
     let mounted = match transport {
         Transport::Fuse => {
             let mount = mount_rs_fuse::mount::mount_with_hooks(
                 Arc::new(driver),
                 &requested_mountpoint,
-                options.fuse_options(),
+                fuse_options,
                 hooks.fuse,
             )
             .await
@@ -678,7 +692,7 @@ where
             }
         }
         Transport::P9 => {
-            let mount = mount_rs_9p::mount_9p(driver, &requested_mountpoint, options.p9_options())
+            let mount = mount_rs_9p::mount_9p(driver, &requested_mountpoint, p9_options)
                 .await
                 .map_err(AutoMountError::P9)?;
             let mountpoint = mount.mountpoint.clone();
@@ -688,10 +702,14 @@ where
             }
         }
         Transport::Nfs => {
-            let mount =
-                mount_rs_nfs::mount_nfs(driver, &requested_mountpoint, options.nfs_options())
-                    .await
-                    .map_err(AutoMountError::Nfs)?;
+            let mount = mount_rs_nfs::mount_nfs_with_hooks(
+                driver,
+                &requested_mountpoint,
+                nfs_options,
+                hooks.nfs.unwrap_or_default(),
+            )
+            .await
+            .map_err(AutoMountError::Nfs)?;
             let mountpoint = mount.mountpoint().to_owned();
             AutoMount::Nfs { mount, mountpoint }
         }

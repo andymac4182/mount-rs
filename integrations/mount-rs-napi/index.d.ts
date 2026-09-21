@@ -1018,12 +1018,12 @@ export interface JsAutoMountOptions {
   transport?: string
   readOnly?: boolean
   unmountTimeoutMs?: number
+  onTransportError?: (error: unknown, peer: string | undefined) => void
   /**
    * Apply hard mounts and same-host locking when the selected transport is
    * NFS. This does not enable WAL or distributed SQLite locking.
    */
   nfsSqliteSingleHost?: boolean
-  onTransportError?: (error: unknown, peer: string | undefined) => void
 }
 
 export interface JsAutoProbe {
