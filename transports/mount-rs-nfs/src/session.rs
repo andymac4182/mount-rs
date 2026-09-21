@@ -77,11 +77,36 @@ pub struct NfsSessionStats {
 }
 
 #[derive(Debug, Clone)]
-struct SharedStats(Arc<Mutex<NfsSessionStats>>);
+pub(crate) struct SharedStats(pub(crate) Arc<Mutex<NfsSessionStats>>);
 
 impl Default for SharedStats {
     fn default() -> Self {
         Self(Arc::new(Mutex::new(NfsSessionStats::default())))
+    }
+}
+
+/// State that an NFS server shares between its v3 and v4 protocol sessions.
+///
+/// Standalone versioned sessions remain independently constructible for codec
+/// and protocol tests, while [`NfsServer`](crate::NfsServer) uses one table,
+/// path lock, and counter set for both versions.
+#[derive(Clone)]
+pub(crate) struct SharedNfsState {
+    pub(crate) handles: FileHandleTable,
+    pub(crate) stats: SharedStats,
+    pub(crate) path_lock: Arc<tokio::sync::RwLock<()>>,
+}
+
+impl SharedNfsState {
+    pub(crate) fn new(options: &NfsSessionOptions) -> Self {
+        Self {
+            handles: FileHandleTable::new(FileHandleTableOptions {
+                use_driver_ino: options.use_driver_ino,
+                verifier: options.verifier,
+            }),
+            stats: SharedStats::default(),
+            path_lock: Arc::new(tokio::sync::RwLock::new(())),
+        }
     }
 }
 
@@ -198,10 +223,16 @@ impl Nfs3Session {
     }
 
     pub fn from_loopback(driver: Loopback, options: NfsSessionOptions) -> Self {
-        let handles = FileHandleTable::new(FileHandleTableOptions {
-            use_driver_ino: options.use_driver_ino,
-            verifier: options.verifier,
-        });
+        let shared = SharedNfsState::new(&options);
+        Self::from_loopback_shared(driver, options, &shared)
+    }
+
+    pub(crate) fn from_loopback_shared(
+        driver: Loopback,
+        options: NfsSessionOptions,
+        shared: &SharedNfsState,
+    ) -> Self {
+        let handles = shared.handles.clone();
         let write_verifier = handles.verifier();
         Self {
             driver,
@@ -212,9 +243,17 @@ impl Nfs3Session {
             mounts: Arc::new(Mutex::new(Vec::new())),
             exclusive_creates: Arc::new(Mutex::new(ExclusiveCreates::default())),
             retained_handles: Arc::new(Mutex::new(HashMap::new())),
-            stats: SharedStats::default(),
+            stats: shared.stats.clone(),
             destroyed: Arc::new(Mutex::new(false)),
-            path_lock: Arc::new(tokio::sync::RwLock::new(())),
+            path_lock: Arc::clone(&shared.path_lock),
+        }
+    }
+
+    pub(crate) fn shared_state(&self) -> SharedNfsState {
+        SharedNfsState {
+            handles: self.handles.clone(),
+            stats: self.stats.clone(),
+            path_lock: Arc::clone(&self.path_lock),
         }
     }
 

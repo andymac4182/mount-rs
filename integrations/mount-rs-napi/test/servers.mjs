@@ -294,6 +294,9 @@ async function exerciseNfs() {
     assert.equal(directV4Reply.readUInt32BE(4), 1);
     assert.equal(directV4Reply.readUInt32BE(20), 0);
     assert.equal(server.session.v4.destroyed, false);
+    assert.equal(server.session.stats.requests, 2);
+    assert.equal(server.session.stats.procedures["NFS4:NULL"], 1);
+    assert.equal(server.session.v4.stats.requests, 2);
 
     ({ socket, reader: serverReader } = await connectLoopback(server.port));
     await writeSocket(socket, nfsRecord(nfsNullCall(41)), "NFS NULL call");

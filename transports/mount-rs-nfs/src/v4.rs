@@ -19,13 +19,15 @@ use mount_rs_core::{
 };
 
 use crate::handles::{
-    DirectorySnapshots, FileHandleTable, FileHandleTableOptions, HandleEntry, cookie_verifier,
-    same_verifier,
+    DirectorySnapshots, FileHandleTable, HandleEntry, cookie_verifier, same_verifier,
 };
 use crate::rpc::{
     AUTH_NONE, AUTH_SYS, AUTH_TOOWEAK, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH,
     RPC_PROG_UNAVAIL, RPC_VERSION, RpcCredentials, credentials_of, decode_call,
     encode_accept_error, encode_accepted_reply, encode_auth_error, encode_rpc_mismatch,
+};
+use crate::session::{
+    NfsRequestContext, NfsSessionOptions, NfsSessionStats, SharedNfsState, SharedStats,
 };
 use crate::xdr::{XdrError, XdrReader, XdrWriter};
 
@@ -1586,9 +1588,10 @@ fn offset(value: u64, syscall: &str) -> Result<u64, FsError> {
 #[derive(Clone)]
 pub struct Nfs4Session {
     pub driver: Loopback,
-    pub options: crate::session::NfsSessionOptions,
+    pub options: NfsSessionOptions,
     pub handles: FileHandleTable,
     pub write_verifier: [u8; 8],
+    stats: SharedStats,
     snapshots: DirectorySnapshots,
     state: Arc<Mutex<V4State>>,
     destroyed: Arc<Mutex<bool>>,
@@ -1596,28 +1599,35 @@ pub struct Nfs4Session {
 }
 
 impl Nfs4Session {
-    pub fn new<D>(driver: D, options: crate::session::NfsSessionOptions) -> Self
+    pub fn new<D>(driver: D, options: NfsSessionOptions) -> Self
     where
         D: FsDriver + 'static,
     {
         Self::from_loopback(Loopback::new(driver), options)
     }
 
-    pub fn from_arc(driver: Arc<dyn FsDriver>, options: crate::session::NfsSessionOptions) -> Self {
+    pub fn from_arc(driver: Arc<dyn FsDriver>, options: NfsSessionOptions) -> Self {
         Self::from_loopback(Loopback::from_arc(driver), options)
     }
 
-    pub fn from_loopback(driver: Loopback, options: crate::session::NfsSessionOptions) -> Self {
-        let handles = FileHandleTable::new(FileHandleTableOptions {
-            use_driver_ino: options.use_driver_ino,
-            verifier: options.verifier,
-        });
+    pub fn from_loopback(driver: Loopback, options: NfsSessionOptions) -> Self {
+        let shared = SharedNfsState::new(&options);
+        Self::from_loopback_shared(driver, options, &shared)
+    }
+
+    pub(crate) fn from_loopback_shared(
+        driver: Loopback,
+        options: NfsSessionOptions,
+        shared: &SharedNfsState,
+    ) -> Self {
+        let handles = shared.handles.clone();
         let write_verifier = handles.verifier();
         Self {
             driver,
             options: options.clone(),
             handles,
             write_verifier,
+            stats: shared.stats.clone(),
             snapshots: DirectorySnapshots::new(options.snapshot_cache),
             state: Arc::new(Mutex::new(V4State {
                 next_clientid: 1,
@@ -1625,8 +1635,12 @@ impl Nfs4Session {
                 ..V4State::default()
             })),
             destroyed: Arc::new(Mutex::new(false)),
-            path_lock: Arc::new(tokio::sync::RwLock::new(())),
+            path_lock: Arc::clone(&shared.path_lock),
         }
+    }
+
+    pub fn stats(&self) -> NfsSessionStats {
+        self.stats.0.lock().expect("NFS stats lock").clone()
     }
 
     pub fn destroyed(&self) -> bool {
@@ -1659,10 +1673,41 @@ impl Nfs4Session {
     /// Handle one unframed RPC message.  The v4 service accepts only the
     /// standard NULL and COMPOUND procedures and never treats a malformed RPC
     /// body as a filesystem operation.
-    pub async fn handle_call(
+    pub async fn handle_call(&self, message: &[u8], context: NfsRequestContext) -> Option<Vec<u8>> {
+        self.record_request(message);
+        let reply = self.handle_call_inner(message, context).await;
+        let mut stats = self.stats.0.lock().expect("NFS stats lock");
+        if reply.is_some() {
+            stats.replies = stats.replies.saturating_add(1);
+        } else {
+            stats.dropped = stats.dropped.saturating_add(1);
+        }
+        reply
+    }
+
+    fn record_request(&self, message: &[u8]) {
+        let mut stats = self.stats.0.lock().expect("NFS stats lock");
+        stats.requests = stats.requests.saturating_add(1);
+        let name = decode_call(message)
+            .ok()
+            .map(|(call, _)| match call.procedure {
+                NFSPROC4_NULL => "NFS4:NULL".to_owned(),
+                NFSPROC4_COMPOUND => "NFS4:COMPOUND".to_owned(),
+                procedure => format!("NFS4:{procedure}"),
+            });
+        if let Some(name) = name {
+            stats
+                .procedures
+                .entry(name)
+                .and_modify(|count| *count = count.saturating_add(1))
+                .or_insert(1);
+        }
+    }
+
+    async fn handle_call_inner(
         &self,
         message: &[u8],
-        context: crate::session::NfsRequestContext,
+        context: NfsRequestContext,
     ) -> Option<Vec<u8>> {
         let peer = context.peer.as_deref();
         let (call, mut args) = match decode_call(message) {

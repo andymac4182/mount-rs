@@ -380,7 +380,7 @@ pub struct NfsSessionStats {
     pub procedures: HashMap<String, f64>,
 }
 
-/// Read-only N-API view of the shared NFSv3 session owned by a server.
+/// Read-only N-API view of the versioned NFS sessions owned by a server.
 #[napi]
 impl NfsSession {
     /// Handle one unframed NFSv3 or NFSv4 RPC record. Malformed records return
@@ -452,6 +452,22 @@ impl Nfs4Session {
             .handle_call(bytes.as_ref(), TransportNfsRequestContext::default())
             .await
             .map(Buffer::from)
+    }
+
+    #[napi(getter)]
+    pub fn stats(&self) -> NfsSessionStats {
+        let stats = self.inner.stats();
+        NfsSessionStats {
+            requests: stats.requests as f64,
+            replies: stats.replies as f64,
+            errors: stats.errors as f64,
+            dropped: stats.dropped as f64,
+            procedures: stats
+                .procedures
+                .into_iter()
+                .map(|(name, count)| (name, count as f64))
+                .collect(),
+        }
     }
 
     #[napi(getter)]

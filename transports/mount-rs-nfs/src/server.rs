@@ -155,8 +155,12 @@ impl NfsServer {
         options: NfsServerOptions,
         hooks: NfsServerHooks,
     ) -> Self {
-        let v4_session =
-            Nfs4Session::from_loopback(session.driver.clone(), options.session.clone());
+        let shared = session.shared_state();
+        let v4_session = Nfs4Session::from_loopback_shared(
+            session.driver.clone(),
+            options.session.clone(),
+            &shared,
+        );
         Self {
             session,
             v4_session,

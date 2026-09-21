@@ -338,6 +338,7 @@ export declare class Nfs4Session {
    * decoded calls return one encoded RPC reply.
    */
   handleCall(bytes: Buffer): Promise<Buffer | null>
+  get stats(): NfsSessionStats
   get destroyed(): boolean
 }
 
