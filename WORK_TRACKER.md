@@ -1167,6 +1167,32 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   passed in run `35592902494`, `tidb-tls-compile` job `106311076905` at source
   `4326c54`; this is implementation evidence only. P01/P02/P07 remain open
   for real topology, IAM, certificates and provider/security sign-off.
+- [x] W08.7 **Production operator runbook and timed-drill matrix:** commit
+  `ea01338` added `docs/W08-operations-runbook.md` with deployment admission,
+  incident response, backup/restore, rollback, observability handoff and D01–D09
+  drill templates. The artifact is complete; execution, owners and on-call
+  acknowledgement remain P03–P08 gates.
+- [x] W08.8 **Bounded TiDB/RustFS load and soak harness:**
+  `tests/provider_matrix/tidb-rustfs-soak.mjs` and the hosted 64-operation
+  seed/reopen slice are implemented and retained in run `35595664981`,
+  `tidb-rustfs` job `106319766691`. This is bounded qualification, not a
+  production capacity/SLO result; P06 remains open.
+- [x] W08.9 **HTTP health/readiness contract:** `/healthz` and `/readyz` are
+  implemented and documented with local and terminal hosted all-features
+  contract evidence in `http-observability` job `106340034907`; collector,
+  provider-aware checks, SLOs, paging and alert execution remain P05 gates.
+- [x] W08.10 **Health response hardening:** `2f7919a` adds
+  `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` with local
+  regression coverage and hosted terminal evidence in run `35601990956`; this
+  remains HTTP contract evidence only.
+- [x] W08.11 **Release identity/provenance policy:**
+  `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository,
+  artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and
+  explicit signature/SBOM/canary states. Local pending/strict-accepted/invalid
+  fixtures passed their intended paths, and hosted run `35606873984`, source
+  `fecec0e`, `w08-release-policy` job `106356402785` was terminal success. This
+  is a synthetic credential-free policy gate; real artifact signing, SBOM,
+  canary, rollback and approval remain W08-P09 external gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1259,9 +1285,12 @@ reproducible in a production-like environment.
   incident tooling are open.)*
 - [ ] **W08-P09 (10%) — release/canary/go-no-go:** produce immutable signed
   artifacts and SBOM, verify target-platform packages, run a staged canary with
-  live SLO telemetry, rehearse rollback and record explicit approval. *(Release
-  implementation + hosted; registry, signing, deployment controller and
-  approvers are external.)*
+  live SLO telemetry, rehearse rollback and record explicit approval. The
+  credential-free W08.11 policy verifier and hosted job `106356402785` now
+  reject placeholder source identity and require explicit verified signature,
+  SBOM and passed-canary states in strict mode; they do not create or verify a
+  real release. *(Release implementation + hosted; registry, signing, SBOM
+  tooling, deployment controller and approvers are external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
