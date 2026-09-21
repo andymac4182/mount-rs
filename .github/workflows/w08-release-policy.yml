@@ -40,7 +40,6 @@ jobs:
           chmod 755 "$release_dir/mount-rs"
           COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" \
             -C "$release_dir" mount-rs
-          (cd "$release_dir" && sha256sum "$artifact" > SHA256SUMS)
           node scripts/write-w08-release-manifest.mjs \
             --artifact "$release_dir/$artifact" \
             --output "$release_dir/release-manifest.json" \
@@ -70,6 +69,7 @@ jobs:
             --package mount-rs-cli \
             --version 0.1.0 \
             --artifact "$release_dir/$artifact"
+          (cd "$release_dir" && sha256sum "$artifact" release-manifest.json release-sbom.json > SHA256SUMS)
           (cd "$release_dir" && sha256sum -c SHA256SUMS)
           test "$(tar -tzf "$release_dir/$artifact")" = "mount-rs"
           test "$("$release_dir/mount-rs" --version)" = "mount-rs 0.1.0"

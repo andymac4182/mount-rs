@@ -52,7 +52,7 @@ ledger in the same commit as an implementation/evidence chunk.
 | Track | Scope | Current boundary | Production-ready gate |
 | --- | --- | --- | --- |
 | W01-FUSE | FUSE protocol, mount-free session, native mount, callbacks and lifecycle | Focused Rust/N-API protocol/session evidence exists; native Linux, callback events, remaining session parity and lifecycle races remain | Hosted Linux native mount/read/write/unmount, callback-event and lifecycle evidence, plus the supported macOS/FSKit decision |
-| W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Focused raw-frame evidence exists; hosted/native lifecycle remains | Hosted Linux 9P lifecycle and stream/attach/connection evidence |
+| W01-9P | 9P protocol, session, connection, attach and mount lifecycle | Rust/N-API attached Node Duplex, direct session, ownership, duplicate-attach, bounded backpressure, write-fault, and server-teardown evidence passes; native Tokio listener connections intentionally expose no Node stream and use the supported `attach` seam | Fresh hosted Linux 9P lifecycle, native fault/race/crash evidence, and complete applicable stream/attach/connection decision |
 | W01-NFS | NFSv3/v4 router, sessions, handles, native mount and lifecycle | Direct routing and local lifecycle evidence exist; complete state and hosted/native qualification remain | Shared v3/v4 state, native macOS/Linux lifecycle and crash/close evidence |
 | W01-S3 | S3 protocol, session, streaming, providers and lifecycle | Local protocol and structural-driver evidence exists; live provider and complete member parity remain | Applicable API ledger, live AWS/R2, fault/restart and concurrency evidence |
 | W01-WebDAV | WebDAV protocol, locks, session, streaming and lifecycle | Local protocol/session evidence exists; provider/native lifecycle remains | Applicable API ledger, auth/lock durability and restart evidence |
@@ -66,6 +66,17 @@ observability while preserving the established durable `FLUSH` sync default.
 The package tests and strict scoped Clippy pass, but native Linux FUSE,
 macOS/FSKit activation, callbacks, cancellation, concurrency, crash/restart
 and durability remain open.
+
+The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
+Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
+direct `P9Session.handleCall`/`destroy`, attached connection stream/peer/closed
+state, shared byte-range lock state, ownership and duplicate-attach handling,
+bounded frame dispatch/backpressure, write-failure reporting, and server-close
+teardown. The focused Rust/N-API gates and pinned 44-case 9P codec differential
+pass. Native listener connections expose `stream: undefined` by deliberate
+supported-scope decision because their Tokio stream is not transferable to a
+Node `Duplex`; hosted Linux kernel-client and native fault/race/crash evidence
+remain external gates.
 
 ## Detailed work items
 
@@ -83,7 +94,7 @@ surfaces.
 | Rust-backed mount-free FUSE session | In progress | INIT, options, cache, negative lookup, flush, callbacks, counters, lifecycle readback, inode view, and plain RENAME2 pass; remaining operation/native-session parity is open | 80% | — |
 | Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
 | Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
-| NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with synchronized stats, mounts, and destroyed state plus a live server connection count and raw-v3 request method; 9P now exposes direct raw-frame handling alongside its session/connection view; the full upstream object/session/handle/attach surface plus native qualification remain | 55% | — |
+| NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with synchronized stats, mounts, and destroyed state plus a live server connection count and raw-v3 request method; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; hosted/native qualification and any remaining applicable object parity remain | 65% | — |
 | S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and the WebDAV subpath now exposes pinned constants/status tables; S3 Rust gateway connection/peer-fault coverage is green, while streaming N-API bodies, protocol/XML/lock helper barrels, direct JavaScript peer-fault injection, and complete option/member parity remain | 70% | — |
 | CLI parity and native consumer behavior | Partial | SDK-backed Rust/Node CLI and macOS NFS self-tests pass; exact oracle/native/hosted coverage remains | 65% | — |
 
@@ -211,7 +222,7 @@ it combines behavior verification with host and kernel prerequisites.
 | Rust CLI macOS NFS | Done | Independent Rust and Node clients passed mounted I/O and persistence |
 | Node SDK CLI macOS NFS | Done | Native self-test passed mount/read/write/unmount/persistence |
 | Linux FUSE native mount | External gate | Structural job and CI wiring exist; hosted `/dev/fuse` result is still required |
-| Linux 9P and native NFS | External gate | Prerequisite-gated; native client/kernel results remain unverified here |
+| Linux 9P and native NFS | External gate | Userspace Rust/N-API lifecycle and attached-stream evidence passes; the revision-matched privileged Linux 9P kernel-client mount/read/write/unmount and native fault/race/crash result remain unverified here |
 | macOS FSKit/macFUSE boundary | Open/external | Current implementation does not claim FSKit or macFUSE FUSE-protocol parity |
 | Hosted Windows runtime | External gate | Windows-target checks exist; hosted runtime evidence remains required |
 | Errors, paths, bytes, links, timestamps | In progress | Strong mount-free and macOS NFS evidence; cross-platform/native coverage remains |
@@ -255,6 +266,9 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-21 | W01.1 / W01.4 | Added live S3 TCP connection tracking through the Axum listener, including idle sockets and disconnect cleanup; Rust S3 gateway tests passed 13/13, release N-API build regenerated `S3Server.connections`, the host-enabled N-API server integration passed, generated typecheck/distribution checks passed, and strict S3/N-API Clippy passed | — | 66% planning view | S3 peer-level transport events, streaming direct-session bodies, S3 assertion retention, protocol/XML/lock helper exports, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
 | 2026-09-21 | W01.1 / W01.4 | Added peer-aware S3 connection transport errors on the tracked TCP boundary: a reset-on-close loopback fault produced one `Connection` event with the accepted peer, and the full Rust gateway target passed 14/14; strict S3/N-API Clippy, release N-API build, host-enabled server integration, generated typecheck, and distribution/export checks also passed | — | 77% W01.1 planning view | Direct JavaScript peer-fault injection remains unqualified; streaming direct-session bodies, S3 assertion retention, protocol/XML/lock helper exports, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-S3 | Reconciled the current `origin/main` S3 loopback-only hardening with the Rust peer-fault packet; bounded drain timeout, live TCP connection tracking, peer-aware transport hooks, and reset-on-close evidence passed in the locked S3 target (4 unit, 6 chunked, 17 gateway, 5 public-API tests) | — | 70% W01.1 planning view | S3 N-API streaming/member parity, direct JavaScript peer-fault evidence, live AWS/R2, and broader fault/restart/durability/concurrency/native gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-9P | Added the N-API attached Node Duplex contract, direct session `handleCall`/`destroy`, shared lock-table state, ownership/duplicate-attach/closed semantics, bounded dispatch/backpressure, hostile-write reporting, server-close teardown, generated declarations and explicit native-listener `stream: undefined` scope; focused 9P/auto Rust tests, strict Clippy, host-enabled server phases, typecheck, and the pinned oracle package gate passed | — | 65% W01.1 planning view | PGlite/R2/native-mount opt-ins remain explicit skips; fresh hosted Linux 9P kernel-client lifecycle, native fault/race/crash, and broader W01 gates remain open; W01 stays NO-GO |
+
+| 2026-09-22 | W01-FUSE | Added fail-closed validation for caller-supplied native FUSE mount option tokens and transport-owned overrides; focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS | — | 35% W01.4 planning view | Hosted Linux `/dev/fuse`, callback-event, crash/concurrency/durability, and signed/activated FSKit evidence remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 

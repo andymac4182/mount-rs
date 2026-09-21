@@ -72,7 +72,6 @@ jobs:
           cp target/release/mount-rs "$release_dir/mount-rs"
           chmod 755 "$release_dir/mount-rs"
           COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" -C "$release_dir" mount-rs
-          (cd "$release_dir" && shasum -a 256 "$artifact" > SHA256SUMS)
 
           node scripts/write-w08-release-manifest.mjs \
             --artifact "$release_dir/$artifact" \
@@ -103,6 +102,8 @@ jobs:
             --package mount-rs-cli \
             --version "$package_version" \
             --artifact "$release_dir/$artifact"
+          (cd "$release_dir" && shasum -a 256 "$artifact" release-manifest.json release-sbom.json > SHA256SUMS)
+          (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
 
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
           echo "manifest=release-manifest.json" >> "$GITHUB_OUTPUT"

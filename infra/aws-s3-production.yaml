@@ -16,8 +16,8 @@ Parameters:
     Description: >-
       The single object prefix owned by this mount-rs deployment. Do not use a
       leading slash, empty path components, or dot components.
-    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$'
-    ConstraintDescription: Must be a non-empty relative object prefix without a trailing slash.
+    AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?(?:/[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)*$'
+    ConstraintDescription: Must be a relative object prefix with non-empty, non-dot components and no trailing slash.
   RuntimeRoleArn:
     Type: String
     Description: >-

@@ -1,12 +1,24 @@
 # Workstream and task tracker
 
-Updated: 2026-09-21. Baseline: local commit `21803fd` plus the sequentially
+Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
 retain detailed results. A passing component test is not end-to-end acceptance.
+
+Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
+Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
+attached connection identity/peer/stream/closed state, duplicate-attach and
+ownership teardown, shared byte-range lock state, and backpressure/write-fault
+coverage. The focused Rust 9P tests, strict affected-crate checks, rebuilt
+declarations, host-enabled N-API server phases, and pinned-oracle package gate
+pass. Native accepted connections deliberately expose no Node stream because
+their Tokio stream is not transferable across the N-API boundary; `attach` is
+the supported Node Duplex seam. Production remains NO-GO pending a fresh
+revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
+native fault/race/crash evidence, and the remaining W01 gates.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -1256,6 +1268,29 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   the policy fixtures. This is stable hosted artifact-path evidence; tag
   publication, signing/SBOM, target-platform acceptance, canary, rollback and
   approval remain W08-P09 gates.
+- [x] W08.14 **Unsigned SBOM generation and release-artifact binding:**
+  `scripts/write-w08-release-sbom.mjs` derives the `mount-rs-cli` transitive
+  dependency closure from locked Cargo metadata and emits CycloneDX 1.5;
+  `scripts/verify-w08-release-sbom.mjs` checks the graph, source identity and
+  artifact SHA-256/size, including a local wrong-source negative test. The CLI
+  preview and dedicated policy workflows generate and verify the SBOM, with
+  the preview path publishing and re-downloading it beside the artifact,
+  manifest and `SHA256SUMS`. Hosted run `35614345209`, source `9c9d0e4`,
+  `w08-release-policy` job `106381893114` passed the real Ubuntu artifact path
+  with `components=288` and `W08_RELEASE_SBOM_PASS`. The SBOM is unsigned and
+  the manifest remains `sbom=pending`; signing/attestation, target-platform
+  parity, canary, rollback and approval remain W08-P07/P09 gates.
+- [x] W08.15 **All-release-asset checksum coverage:** both
+  `.github/workflows/cli-release.yml` and
+  `.github/workflows/w08-release-policy.yml` now generate `SHA256SUMS` only
+  after the tarball, `release-manifest.json` and `release-sbom.json` exist,
+  then verify all three entries. Hosted run `35615714935`, source `5116ded`,
+  `w08-release-policy` job `106386240669` passed the real Ubuntu path with
+  `mount-rs-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`,
+  `release-manifest.json: OK` and `release-sbom.json: OK`. This closes the
+  repository asset-integrity slice only; tag publication, downloaded-release
+  inspection, signing/attestation, target-platform parity, canary, rollback
+  and approval remain W08-P09 gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1355,10 +1390,13 @@ reproducible in a production-like environment.
   actual CLI preview artifact path and hosted generator policy job
   `106363893748`; W08.13 runs a real Ubuntu artifact path in dedicated
   non-cancelling hosted job `106372777281` from run `35611883547`, source
-  `f432441`. These slices do not create signing/SBOM evidence or run a real tag
-  release, canary, rollback or approval. *(Release implementation + hosted;
-  registry, signing, SBOM tooling, deployment controller and approvers are
-  external.)*
+  `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
+  job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
+  not create cryptographic signing/attestation evidence or run a real tag
+  release, and W08.15's hosted three-asset checksum pass does not close the
+  downloaded-release, canary, rollback or approval gates. *(Release
+  implementation + hosted; registry, signing/attestation, deployment
+  controller and approvers are external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
@@ -1870,6 +1908,21 @@ listing a source does not mean it has been reviewed or its code can be reused.
   confirms the current source and workflow head before rollout review; the
   explicitly ignored native/service rows and all production deployment gates
   remain separate and are not claimed by this local result.
+- [x] The current security-remediation head `3fca802` passed the full locked
+  offline workspace test gate and strict workspace Clippy with `-D warnings`.
+  The same source passed the authenticated `myroot` AWS S3 CLI/self-test,
+  composed filesystem, fresh-process reopen, independent PGlite metadata,
+  writer-fencing, restored-PGlite reopen, and exact cleanup gates under
+  `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
+  This remains qualification-account and isolated-metadata evidence, not
+  production deployment acceptance.
+- [x] The integrated W25 evidence boundary `e168315` passed
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings` on 2026-09-22. This rerun
+  covered the AWS provider, public SDK/CLI, S3 gateway, and the other
+  workstream changes already on that commit; the later unrelated `de6514c`
+  N-API test-only change landed after the gate and requires a post-rebase
+  verification before it can be included in current-head release evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -1880,12 +1933,20 @@ listing a source does not mean it has been reviewed or its code can be reused.
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
   role are test resources, so production resource review remains open. The
+  A fresh read-only resource audit rerun on 2026-09-22 at audit commit
+  `2f13354` also passed the account/region binding, all four public-access
+  blocks, BucketOwnerEnforced ownership, AES256 encryption, seven-day
+  lifecycle, and one-day incomplete-multipart abort checks for that
+  qualification bucket. The
   reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
   contract now expresses retained state, versioning, encryption choice,
   lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
   access, and separately governed maintenance access. AWS CloudFormation
   syntax validation passed on 2026-09-21 without creating a stack or change
-  set. The audit still fails closed on inherited endpoint/service-profile
+  set; after the `OwnedPrefix` regex was tightened to reject empty and dot
+  components, the revised template also passed the read-only validation API
+  on 2026-09-22 without creating a stack or change set. The audit still fails
+  closed on inherited endpoint/service-profile
   overrides, requires an expected caller account, and verifies bucket
   location before reporting controls; approved production parameters, role
   trust, change-set review, and live production audit remain open.
@@ -1908,6 +1969,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   fencing, and restore/reopen gates under
   `mount-rs-tests/aws-s3/20260921T141112Z-81269-ab3a599172244316234d1f3b23181dba`.
   This is local metadata backup/restore and restart evidence only.
+  A fresh current-source rerun at `3fca802` passed the same gates and exact
+  cleanup under
+  `mount-rs-tests/aws-s3/20260921T144535Z-15427-5ae13eaf019b31185a11d784fdfdcf52`.
   This does not close W25.6: production metadata ownership, multi-writer
   fencing, backup/restore, schema migration, failure recovery, and DR evidence
   remain open.
@@ -1944,9 +2008,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `428ce6d`; it therefore cannot be used as current-head release
-  evidence, regardless of its eventual result. The existing test
-  role trust policy allows only the selected SSO administrator role and does
+  audit boundary `2f13354`; it therefore cannot be used as current-head release
+  evidence, regardless of its result. The completed scan found one medium
+  `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
+  and partial 606-file inventory; the issue is remediated on current pushed
+  head `3fca802` by a redacting SDK `Debug` implementation and regression test,
+  and the later `1d63319` IaC prefix hardening is also outside the scan; the
+  scan itself remains stale for current-head security acceptance. The existing
+  test role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
   evidence. The read-only
@@ -2294,6 +2363,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |
 | `a31880d` (published as `1e45692`) | Seeded Rust SDK, Node SDK and CLI provider lifecycle matrix | Positional write, truncate, flush and reopen passed across 5 Rust SDK, 4 Node SDK and 9 CLI rows; PGlite/R2 remain explicit skips |
