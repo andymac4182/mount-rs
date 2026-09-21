@@ -888,7 +888,8 @@ Current W01-WebDAV packet (2026-09-22): the Rust HTTP server now serializes
 immediate-close shutdown lost wakeup, and retains a timed-out drain state so a
 second `close()` cannot report false success or rebind while a stalled
 connection remains active, and aborts tracked connection tasks when the
-drain deadline expires. On published tip `4bc10ad1`, the focused Rust target passes 18/18 with strict
+drain deadline expires. The preceding implementation packet `4bc10ad1`
+passed the focused Rust target 18/18 with strict
 Clippy and formatting. The N-API WebDAV wrapper serializes its closed-state
 check with the transport lifecycle; the shared postbuild server facade now
 clears a failed close promise so a timed-out WebDAV close can be retried after
@@ -904,7 +905,9 @@ host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
 Hosted network concurrency, power-loss/live-provider durability, and broader
 hosted session/member lifecycle remain open; local SQLite process-crash
-recovery is covered by the dedicated N-API probe.
+recovery is covered by the dedicated N-API probe. The callable/member packet
+`8f0e74138286a678cbc5868d3cc4a528fb1b9fe9` has exact-SHA CI and release lanes
+pending or queued, so no hosted WebDAV acceptance is claimable from that packet.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
