@@ -103,8 +103,9 @@ identity. Hosted run `35617415427`, source `b0ca8a9`, passed build jobs
 not tag publication, cryptographic signing/attestation, canary, rollback or
 approval.
 
-W08.17 wires the production-facing attestation path without claiming that it
-has executed. The tag-triggered CLI release job grants OIDC and attestation
+W08.17 wires the production-facing attestation path; the tag-triggered CLI
+release execution remains open and the manual target path is qualified below.
+The tag-triggered CLI release job grants OIDC and attestation
 permissions only at that release job, runs pinned `actions/attest@v4.2.2` for
 the exact tarball and CycloneDX SBOM, verifies both predicates with
 `gh attestation verify` against the repository, signer workflow, source commit,
@@ -112,9 +113,9 @@ tag ref and hosted-runner policy, then records `signature=verified` and
 `sbom=verified` in the finalized manifest before rebuilding `SHA256SUMS`. The
 target matrix has an explicit manual `attest=true` path that performs the same
 per-target qualification. Local YAML/embedded-Bash validation and the local
-GitHub CLI flag-surface check passed. No approved tag or successful manual
-attestation dispatch has run, so no Sigstore bundle, attestation ID/URL or
-production release signature is claimed.
+GitHub CLI flag-surface check passed. No approved tag has run, so the
+production release signature and registry acceptance remain unclaimed; the
+successful manual target qualification is recorded below.
 
 The first live target qualification (`35620932700`, source `11a7b22`) passed
 both target builds and both downloaded-asset checks. Its two attestation jobs
@@ -128,17 +129,28 @@ target builds, both downloaded-asset checks and both attestation-generation
 steps for provenance and CycloneDX SBOMs. Its final verification steps failed
 only because the workflow supplied the mutually exclusive `--signer-repo` and
 `--signer-workflow` options to `gh attestation verify`. W08.20 removes the
-redundant repository option from both workflows. No terminal verifier PASS,
-attestation acceptance, tag publication, canary, rollback or approval is
-claimed until the corrected manual dispatch completes.
+redundant repository option from both workflows; that run is not counted as a
+verification PASS.
+
+The corrected manual qualification (`35624385556`, source `2ab3cf1`) passed
+both target builds, both downloaded-asset checks, both provenance attestations,
+both CycloneDX SBOM attestations and both final `gh attestation verify` steps.
+The Linux tarball was SHA-256
+`5f7f3c6345013144d8889b107cde41c9e5b69d688e21a975ba6fbb33ce2507d6` and the
+macOS arm64 tarball was SHA-256
+`add8e365c0ab1c0390267531144b77b6c7cf7f338d03ce0a549a5783c834fc8e`.
+Repository attestation records `48984689`, `48984696`, `48984678` and
+`48984687` were created, with Rekor entries `2906371944`, `2906371970`,
+`2906371892` and `2906371927`. This qualifies the hosted target-attestation
+path; it is not a published tag release, canary, rollback or approval.
 
 The first explicit target-matrix dispatch (`35620392878`, source `0a4de6f`)
 was accepted but cancelled before job creation because concurrent `main` pushes
 occupied the old shared pending concurrency group. W08.18 now keys the target
 workflow by event type and ref so a manual attestation qualification does not
 compete with push-triggered runs. The cancelled run is recorded as a no-job
-boundary, not a PASS or a provider failure; the corrected workflow still needs
-a terminal manual attestation result.
+boundary, not a PASS or a provider failure; it is superseded by the terminal
+manual qualification `35624385556` documented above.
 
 ## Deployment contract
 

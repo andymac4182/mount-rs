@@ -1695,7 +1695,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   step because GitHub rejected the shortened ref; no OIDC token or Sigstore
   bundle was created. The correction is implementation-complete but requires a
   fresh `attest=true` hosted run; target attestation, tag publication, canary,
-  rollback and approval remain W08-P09 gates. *(Release implementation fix;
+  rollback and approval remain W08-P09 gates. The corrected run `35624385556`
+  later passed both target attestation jobs. *(Release implementation fix;
   GitHub action resolution and hosted attestation are external gates.)*
 - [x] W08.20 **Hosted attestation verifier identity-flag correction:** the
   target qualification `35622899242` at source `2f43721` passed both target
@@ -1705,9 +1706,24 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   options. Both release workflows now use the precise `--signer-workflow`
   identity without the redundant repository option. The correction is ready
   for a fresh `attest=true` run; terminal verifier acceptance, tag publication,
-  canary, rollback and approval remain W08-P09 gates. *(Release implementation
-  fix; hosted verifier behavior, OIDC/attestation availability and release
-  approval are external gates.)*
+  canary, rollback and approval remain W08-P09 gates. The corrected run
+  `35624385556` passed both target verifier jobs. *(Release implementation fix;
+  hosted verifier behavior, OIDC/attestation availability and release approval
+  are external gates.)*
+- [x] W08.21 **Terminal hosted target attestation qualification:** manual run
+  `35624385556` at source `2ab3cf1` passed Linux x86_64 and macOS arm64 build,
+  package and downloaded-asset verification, then generated and verified both
+  provenance and CycloneDX SBOM attestations for each target. Linux tarball
+  SHA-256 is `5f7f3c6345013144d8889b107cde41c9e5b69d688e21a975ba6fbb33ce2507d6`
+  (8,277,051 bytes); macOS arm64 is
+  `add8e365c0ab1c0390267531144b77b6c7cf7f338d03ce0a549a5783c834fc8e`
+  (6,910,097 bytes). Repository attestation records `48984689`, `48984696`,
+  `48984678` and `48984687` and Rekor entries `2906371944`, `2906371970`,
+  `2906371892` and `2906371927` are retained in the ledger. This closes the
+  hosted target-attestation qualification only; approved tag publication,
+  release-registry acceptance, canary, rollback and owner approval remain
+  W08-P09 gates. *(Hosted/provider qualification; release approval and
+  production deployment are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1810,9 +1826,9 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.20's pinned attestation wiring,
-  dispatch isolation, full-pin correction and verifier identity fix, but they do not create executed cryptographic
-  signing/attestation evidence or run a real tag release, and do not close the
+  target/download matrix and W08.17–W08.21's pinned attestation wiring,
+  dispatch isolation, full-pin correction, verifier identity fix and terminal
+  target qualification, but they do not run a real tag release or close the
   canary, rollback or approval gates.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
