@@ -22,10 +22,11 @@ Linux harnesses now run eight concurrent mounted file write/read/rename/read
 round trips before a bounded unmount, and close the server side while verifying
 kernel-connection teardown. Session destruction also wakes and drains in-flight
 `Tflush` waiters. Local lifecycle 6/6, transport-error 8/8, the focused native
-target, strict 9P Clippy and formatting pass. Hosted
-run `35616832528` / job `106389895603` passed the prior Linux kernel-client
-mount/read/write/unmount packet; a fresh run is required for this packet and
-the concurrent-I/O harness.
+target, strict 9P Clippy and formatting pass. Hosted run `35616832528` / job
+`106389895603` passed the prior Linux kernel-client mount/read/write/unmount
+packet; the current packet's CI run `35624869535` at `e5f4dda` was canceled
+before jobs materialized, so a fresh hosted run is still required for this
+packet and the concurrent-I/O harness.
 Native accepted connections deliberately expose no Node stream because their
 Tokio stream is not transferable across the N-API boundary; `attach` is the
 supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
