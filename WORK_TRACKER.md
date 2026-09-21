@@ -305,6 +305,9 @@ Malformed bodies return `EINVAL` without backend mutation. The complete locked
 FUSE target passed 14 unit, 6 INIT, 6 notify/record, 11 protocol, 20 session,
 and 3 sync-barrier tests, and strict warning-denied Clippy passed; native xattr
 and BMAP support remains unadvertised and unimplemented.
+The subsequent native read-interrupt packet is also compiled against this
+context-aware validator, so `FUSE_INTERRUPT` retains its fixed-body boundary
+while known read workers can be aborted independently.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -768,7 +771,14 @@ direct session with exact byte-for-byte readback; that is same-process
 same-driver evidence only. The active lock view now preserves a recursive
 namespaced owner XML tree, and bounded predefined/numeric XML references are
 accepted while DTD/custom entities remain refused. W01 and production status
-remain **NO-GO**.
+remain **NO-GO**. A read-only status check for the published tip
+`9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
+35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
+and [fault-injection run
+35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044)
+cancelled, while [Live Cloudflare R2 run
+35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
+failed; no hosted WebDAV acceptance is claimable from that tip.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1910,6 +1920,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   it does not close live provider, native-kernel or W08-P01–P09 production
   gates. *(Implementation verification; provider, native and production
   environments remain external.)*
+- [x] W08.24 **Current published-main hosted target-attestation qualification:**
+  manual `workflow_dispatch` run `35631063978` completed successfully at
+  source `cf75835e5a4b00c1e9b31f4060093710df610ece`. Linux build/download/
+  attestation jobs `106437098891`, `106439285204`, `106439636662` and macOS
+  jobs `106437098611`, `106439285356`, `106439636979` all passed final target
+  verification. Linux tarball SHA-256 is
+  `54220877022f67640aa7b470a8eaa09b24df1d867e00463533642b6fa462182a`
+  (8,315,540 bytes); macOS arm64 is
+  `6df488c71a0eb65674af9adf7660b870424b4e47227d832028180947dbb83b39`
+  (6,918,800 bytes). Repository attestation records are `49001528`,
+  `49001543`, `49001531` and `49001545`; Rekor entries are `2906464391`,
+  `2906464436`, `2906464411` and `2906464449`. Both
+  `W08_RELEASE_TARGET_ATTESTATION_PASS` markers passed. This is hosted
+  published-main qualification, not an approved tag release, registry
+  acceptance, canary, rollback or owner approval. *(Hosted/provider
+  qualification; release approval and production deployment are external
+  gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -2012,7 +2039,7 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
-  target/download matrix and W08.17–W08.22's pinned attestation wiring,
+  target/download matrix and W08.17–W08.24's pinned attestation wiring,
   dispatch isolation, full-pin correction, verifier identity fix and terminal
   target qualification, but they do not run a real tag release or close the
   canary, rollback or approval gates.
@@ -2718,47 +2745,33 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
-  smoke. The fresh targeted security scan at baseline `89992ce` identified
-  an AWS transport-override finding and mutable non-AWS workflow action
-  references. Both remediations and the secret-safe CI preflight are landed;
-  the earlier pushed head `227f819` is covered by Standard scan
-  `bb69ddae-798a-4387-bb87-f3e7acd496cb`, which reports zero reportable
-  findings in the 22 directly reviewed W25 surfaces, with partial repository
-  coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
-  versioning-status input, and the deployment evidence remain open. Latest
-  observed hosted run `35625592317` at `fb34d8b` passed provenance capture,
-  the seven-case validator, bucket-policy, CloudFormation, and environment
-  approval contract tests, then stopped
-  before AWS authentication with
-  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
-  skipped, so this is a successful safety refusal, not acceptance evidence.
-  The run uploaded the non-expired artifact
-  `aws-s3-qualification-35625592317-1` (6,836 bytes). The preceding hosted
-  runs `35625182517` at `6393b4c`, `35624389197` at `2a711e9`, `35623711876` at `8b7502a`,
-  `35622312798` at `4242c24`, and `35620404949` at `0010246` stopped at the same preflight boundary, as did
-  `35619552809` at `a84fa3e`. The provenance-hash expansion now binds the
-  policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
-  PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs
-  in this artifact; the workflow also validates the standalone AWS manifest
-  with `cargo metadata --locked` before any AWS authentication. This improves
-  evidence integrity but does not create AWS authentication or deployment
-  evidence. A fresh
-  hosted rerun `35629600687` at pushed head `62383df` passed the new root and
-  standalone AWS manifest provenance capture, including the standalone
+  smoke. The sealed current-source Standard scan
+  `02d2c6eb-66e1-41f8-be59-d14aab9fde87` targets exact source
+  `4ebba4926045de28e9f03ac75b938947f4487a4b` and reports zero reportable
+  findings across six W25 surfaces: AWS S3 credential/endpoint/transport,
+  block prefix/immutability, S3 gateway authentication/path handling,
+  gateway resource bounds/cleanup, the CI/production contract, and release/
+  supply-chain controls. Its canonical coverage is partial: six W25 review
+  rows closed against a 650-file repository inventory; unrelated non-W25
+  surfaces and live AWS/GitHub deployment state remain explicitly deferred.
+  This is current source security evidence, not a production approval. Hosted
+  OIDC trust, the protected versioning-status input, and the deployment
+  evidence remain open. The latest observed hosted run `35629600687` at
+  `62383df` passed root and standalone
+  AWS manifest provenance capture, including the standalone
   `tests/aws/Cargo.lock` hash, plus the seven-case validator, bucket-policy,
   CloudFormation, and environment-approval contract suites. It then stopped
   safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS credentials,
   identity, and acceptance were skipped. Its non-expired artifact is
   `aws-s3-qualification-35629600687-1` (7,649 bytes). This is a successful
   safety refusal and provenance-contract result, not hosted AWS acceptance.
-  Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  audit boundary `2f13354`; it therefore cannot be used as current-head release
-  evidence, regardless of its result. The completed scan found one medium
-  `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
-  and partial 606-file inventory; the issue is remediated on pushed head
-  `3fca802` by a redacting SDK `Debug` implementation and regression test,
-  and the later `1d63319` IaC prefix hardening is also outside the scan; the
-  scan itself remains stale for current-head security acceptance. The existing
+  The provenance-hash expansion now binds the
+  policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
+  PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs
+  in this artifact; the workflow also validates the standalone AWS manifest
+  with `cargo metadata --locked` before any AWS authentication. This improves
+  evidence integrity but does not create AWS authentication or deployment
+  evidence. The existing
   test role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
@@ -2788,8 +2801,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   same bounded cross-driver staging and atomic publication path. ListObjectsV2
   now uses bounded continuation-aware traversal with prefix pruning. Multipart
   and temporary staging now have a configured byte quota, request-boundary TTL
-  reaper, and backing-file-aware DeleteObjects behavior. Remaining repository-
-  coverage findings from the sealed review remain open. Do not place AWS
+  reaper, and backing-file-aware DeleteObjects behavior. The scan's deferred
+  non-W25 repository and external deployment coverage remain open. Do not place AWS
   secrets in the repository or CI logs. The hosted workflow now captures the
   exact source SHA, lockfile/template/script hashes, Rust toolchain metadata,
   and bounded acceptance log as a pinned 14-day artifact even when the
