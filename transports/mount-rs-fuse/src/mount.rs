@@ -794,6 +794,9 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
 const MAX_PARALLEL_READS: usize = 16;
 
 #[cfg(target_os = "linux")]
+const READ_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+
+#[cfg(target_os = "linux")]
 type ReadTaskResult = (u64, Result<(), FuseTransportError>);
 
 #[cfg(target_os = "linux")]
@@ -925,13 +928,12 @@ async fn run_session_loop(
             // FUSE_DESTROY is a terminal request with no reply. The kernel
             // waits for the userspace device to close, so continuing through
             // ordinary dispatch would leave fusermount blocked waiting for a
-            // frame that can never arrive. Abort and drain read workers here;
+            // frame that can never arrive. Abort read workers here; the
+            // bounded terminal drain below prevents an uncooperative backend
+            // future from keeping the device open forever, while
             // run_session() performs the final session-owned cleanup.
             for abort in in_flight.drain().map(|(_, abort)| abort) {
                 abort.abort();
-            }
-            if let Some(error) = drain_read_tasks(&mut read_tasks, &mut in_flight).await {
-                failure = Some(error);
             }
             state.request_stop();
             break;
@@ -976,9 +978,27 @@ async fn run_session_loop(
                         break;
                     }
                 }
-                if let Some(error) = drain_read_tasks(&mut read_tasks, &mut in_flight).await {
-                    failure = Some(error);
-                    break;
+                match tokio::time::timeout(
+                    READ_TASK_DRAIN_TIMEOUT,
+                    drain_read_tasks(&mut read_tasks, &mut in_flight),
+                )
+                .await
+                {
+                    Ok(Some(error)) => {
+                        failure = Some(error);
+                        break;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        failure = Some(FuseTransportError::from_message(
+                            FuseTransportErrorKind::Task,
+                            format!(
+                                "FUSE read worker did not cancel within {}ms",
+                                READ_TASK_DRAIN_TIMEOUT.as_millis()
+                            ),
+                        ));
+                        break;
+                    }
                 }
             }
             Err(error) => {
@@ -1019,21 +1039,19 @@ async fn run_session_loop(
         }
     }
     read_tasks.abort_all();
-    while let Some(task) = read_tasks.join_next().await {
-        if failure.is_none() {
-            match task {
-                Ok((unique, Ok(()))) => {
-                    in_flight.remove(&unique);
-                }
-                Ok((unique, Err(error))) => {
-                    in_flight.remove(&unique);
-                    failure = Some(error);
-                }
-                Err(error) if error.is_panic() => {
-                    in_flight.clear();
-                    failure = Some(read_task_join_error(error));
-                }
-                Err(_) => {}
+    if failure.is_none() {
+        match tokio::time::timeout(
+            READ_TASK_DRAIN_TIMEOUT,
+            drain_read_tasks(&mut read_tasks, &mut in_flight),
+        )
+        .await
+        {
+            Ok(Some(error)) => failure = Some(error),
+            Ok(None) | Err(_) => {
+                // Dropping the JoinSet aborts any worker that did not honor
+                // cancellation within the bound. The native device must be
+                // released even when a backend future is not cancellation
+                // cooperative.
             }
         }
     }
@@ -2643,6 +2661,37 @@ mod tests {
                 .expect("callback observation lock")
                 .is_empty()
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_read_drain_is_bounded_for_blocking_workers() {
+        let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
+        let (started_sender, started_receiver) = tokio::sync::oneshot::channel();
+        let abort = read_tasks.spawn_blocking(move || {
+            let _ = started_sender.send(());
+            std::thread::sleep(Duration::from_millis(1_250));
+            (7, Ok(()))
+        });
+        let mut in_flight = std::collections::HashMap::from([(7, abort)]);
+
+        started_receiver
+            .await
+            .expect("blocking read worker should start");
+        for abort in in_flight.drain().map(|(_, abort)| abort) {
+            abort.abort();
+        }
+
+        let result = tokio::time::timeout(
+            READ_TASK_DRAIN_TIMEOUT,
+            drain_read_tasks(&mut read_tasks, &mut in_flight),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "terminal cleanup must not wait indefinitely for a blocking worker"
+        );
+        drop(read_tasks);
     }
 
     #[test]
