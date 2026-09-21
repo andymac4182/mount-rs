@@ -999,7 +999,37 @@ fn validate_r2_endpoint(endpoint: &str, path: &str) -> Result<(), ConfigError> {
             "must be an absolute HTTP(S) endpoint without credentials, query, or fragment",
         ));
     }
+    if scheme == "http" && !is_local_http_authority(authority) {
+        return Err(ConfigError::at(
+            path,
+            "HTTP is only allowed for loopback or Docker test gateways; use HTTPS for remote services",
+        ));
+    }
     Ok(())
+}
+
+fn is_local_http_authority(authority: &str) -> bool {
+    let host = if let Some(bracketed) = authority.strip_prefix('[') {
+        bracketed
+            .split_once(']')
+            .map(|(host, _)| host)
+            .unwrap_or_default()
+    } else {
+        authority
+            .rsplit_once(':')
+            .map(|(host, port)| {
+                if port.chars().all(|character| character.is_ascii_digit()) {
+                    host
+                } else {
+                    authority
+                }
+            })
+            .unwrap_or(authority)
+    };
+    matches!(
+        host,
+        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
+    )
 }
 
 fn optional_nonempty_string(
@@ -1464,6 +1494,7 @@ mod tests {
             "https://account.example?signature=secret",
             "https://account.example#fragment",
             "https:///missing-authority",
+            "http://object-store.example",
         ] {
             let config = format!(
                 r#"{{
