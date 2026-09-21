@@ -251,7 +251,9 @@ result. The fresh read-only audit at pushed source `56ef9ab` on 2026-09-22 retur
 `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
 non-self-approvable reviewer, protected-environment inputs and secret, missing
 GitHub OIDC provider, and missing immutable-subject role trust; it made no
-changes.
+changes. A current-source rerun at pushed source
+`cf18d93d7fdd1656d853f208db81b8b133265fe5` returned the same blocked set and
+made no changes.
 
 ## Rollout sequence
 
