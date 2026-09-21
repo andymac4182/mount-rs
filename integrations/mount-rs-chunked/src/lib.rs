@@ -135,6 +135,7 @@ where
     blocks: Arc<B>,
     options: ChunkedOptions,
     gate: AsyncGate,
+    lifecycle: tokio::sync::RwLock<()>,
     state: Mutex<RuntimeState>,
     lease: Mutex<Option<WriterLease>>,
 }
@@ -221,6 +222,7 @@ where
                 blocks,
                 options,
                 gate: AsyncGate::new(),
+                lifecycle: tokio::sync::RwLock::new(()),
                 state: Mutex::new(RuntimeState {
                     namespace: namespace.clone(),
                     revision: loaded.revision,
@@ -254,6 +256,12 @@ where
     /// Release the provider lease. Handles become unusable after shutdown;
     /// callers should close handles before shutting down the filesystem.
     pub async fn shutdown(&self) -> Result<()> {
+        // Optimistic block I/O deliberately runs outside the operation gate.
+        // Take the lifecycle write lock first so an in-flight write can
+        // reacquire the operation gate and publish before shutdown fences and
+        // releases the writer lease. New optimistic operations are prevented
+        // from starting while this writer is queued.
+        let _lifecycle = self.inner.lifecycle.write().await;
         let _gate = self.inner.gate.lock().await;
         // Provider I/O can outlive the lease TTL (for example, a bounded
         // remote R2 write). Refresh our own lease before releasing it so a
@@ -606,6 +614,109 @@ where
         position: u64,
         append: bool,
     ) -> Result<(usize, u64)> {
+        let _lifecycle = self.inner.lifecycle.read().await;
+        let (layout, original, orphan, start, end, new_size) = {
+            let _gate = self.inner.gate.lock().await;
+            self.ensure_operation_lease().await?;
+            let (namespace, _) = self.snapshot()?;
+            let (node, orphan) = self.node_snapshot(&namespace, inode, "write", path)?;
+            let layout = match &node.data {
+                NodeData::File(layout) => layout.clone(),
+                NodeData::Directory { .. } => {
+                    return Err(error_with_path(ErrorCode::Eisdir, "write", path));
+                }
+                NodeData::Special => return Err(error_with_path(ErrorCode::Enxio, "write", path)),
+                NodeData::Symlink { .. } => {
+                    return Err(error_with_path(ErrorCode::Eio, "write", path));
+                }
+            };
+            let start = if append { node.stats.size } else { position };
+            let input_length = u64::try_from(buffer.len())
+                .map_err(|_| error_with_path(ErrorCode::Efbig, "write", path))?;
+            let end = start
+                .checked_add(input_length)
+                .ok_or_else(|| error_with_path(ErrorCode::Efbig, "write", path))?;
+            if buffer.is_empty() {
+                return Ok((0, start));
+            }
+            let new_size = node.stats.size.max(end);
+            (layout, node, orphan, start, end, new_size)
+        };
+
+        // Block reads/writes are immutable and can safely overlap while the
+        // metadata commit remains serialized below. The captured node is
+        // checked again before publication so an intervening truncate,
+        // replacement or unlink cannot be lost.
+        let new_layout = rewrite_layout(
+            &self.inner.blocks,
+            &layout,
+            original.stats.size,
+            start,
+            buffer,
+            new_size,
+            path,
+        )
+        .await?;
+        self.inner
+            .blocks
+            .flush()
+            .await
+            .map_err(|error| with_context(error, "block-flush", Some(path)))?;
+
+        let fast_commit = {
+            let _gate = self.inner.gate.lock().await;
+            self.ensure_operation_lease().await?;
+            if orphan {
+                let mut state = self.lock_state()?;
+                match state.orphans.get_mut(&inode) {
+                    Some(target) if write_base_unchanged(target, &original) => {
+                        target.data = NodeData::File(new_layout);
+                        set_file_size(&mut target.stats, new_size);
+                        touch_modified(&mut target.stats);
+                        Some((buffer.len(), end))
+                    }
+                    _ => None,
+                }
+            } else {
+                let (mut namespace, revision) = self.snapshot()?;
+                let unchanged = namespace
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|target| write_base_unchanged(target, &original));
+                if !unchanged {
+                    None
+                } else {
+                    let target = namespace
+                        .nodes
+                        .get_mut(&inode)
+                        .ok_or_else(|| error_with_path(ErrorCode::Estale, "write", path))?;
+                    target.data = NodeData::File(new_layout);
+                    set_file_size(&mut target.stats, new_size);
+                    touch_modified(&mut target.stats);
+                    self.publish_namespace(revision, namespace, true).await?;
+                    Some((buffer.len(), end))
+                }
+            }
+        };
+        if let Some(result) = fast_commit {
+            return Ok(result);
+        }
+
+        // Preserve the existing serialized semantics for a conflicting
+        // operation. The immutable blocks uploaded by the optimistic attempt
+        // are intentionally left for the explicit reconciliation grace window.
+        self.write_at_serial(inode, path, buffer, position, append)
+            .await
+    }
+
+    async fn write_at_serial(
+        &self,
+        inode: InodeId,
+        path: &str,
+        buffer: &[u8],
+        position: u64,
+        append: bool,
+    ) -> Result<(usize, u64)> {
         let _gate = self.inner.gate.lock().await;
         self.ensure_operation_lease().await?;
         let (mut namespace, revision) = self.snapshot()?;
@@ -879,6 +990,15 @@ where
         })
         .await
     }
+}
+
+fn write_base_unchanged(current: &NodeMetadata, original: &NodeMetadata) -> bool {
+    current.stats.ino == original.stats.ino
+        && current.stats.size == original.stats.size
+        && match (&current.data, &original.data) {
+            (NodeData::File(current), NodeData::File(original)) => current == original,
+            _ => false,
+        }
 }
 
 struct ChunkedHandle<M, B>
