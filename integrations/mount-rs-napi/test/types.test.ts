@@ -47,6 +47,7 @@ import {
 } from "@mount-rs/core/drivers/unstorage"
 import {
   createNfsServer,
+  type NfsConnection,
   type NfsServer,
   type NfsServerOptions,
 } from "@mount-rs/core/nfs"
@@ -332,8 +333,15 @@ function checkServerAndKvSubpaths(): void {
 
   const nfsHost: string = nfsServer.host
   const nfsPort: number = nfsServer.port
+  const nfsConnections: Array<NfsConnection> = nfsServer.clients()
   const nfsListen: Promise<NfsServer> = nfsServer.listen()
   const nfsClose: Promise<void> = nfsServer.close()
+  const nfsConnection: NfsConnection = nfsConnections[0]
+  const nfsConnectionId: number = nfsConnection.id
+  const nfsConnectionPeer: string | null = nfsConnection.peer
+  const nfsConnectionClosed: boolean = nfsConnection.isClosed
+  const nfsConnectionClose: Promise<void> = nfsConnection.close()
+  const nfsConnectionWaitClosed: Promise<void> = nfsConnection.waitClosed()
   const p9Address: string | null = p9Server.address()
   const p9Connections: Array<P9Connection> = p9Server.clients()
   const p9Path: string | null = p9Server.path
@@ -378,8 +386,15 @@ function checkServerAndKvSubpaths(): void {
   void kvFilesystem
   void nfsHost
   void nfsPort
+  void nfsConnections
   void nfsListen
   void nfsClose
+  void nfsConnection
+  void nfsConnectionId
+  void nfsConnectionPeer
+  void nfsConnectionClosed
+  void nfsConnectionClose
+  void nfsConnectionWaitClosed
   void p9Address
   void p9Path
   void p9Listen

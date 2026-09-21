@@ -19,6 +19,7 @@ expected_prefix=${AWS_S3_AUDIT_LIFECYCLE_PREFIX:-mount-rs-tests/}
 expected_expiration_days=${AWS_S3_AUDIT_EXPIRATION_DAYS:-7}
 expected_abort_days=${AWS_S3_AUDIT_ABORT_MULTIPART_DAYS:-1}
 expected_sse=${AWS_S3_AUDIT_EXPECTED_SSE:-AES256}
+expected_versioning=${AWS_S3_AUDIT_EXPECTED_VERSIONING_STATUS:-}
 
 case "$AWS_S3_AUDIT_BUCKET" in
   ''|*[!a-z0-9.-]*)
@@ -45,6 +46,13 @@ fi
 case "$expected_prefix" in
   ''|/*|*//*|*/../*|*/..|*/./*|*/.)
     echo "AWS_S3_AUDIT_LIFECYCLE_PREFIX contains an unsafe path" >&2
+    exit 2
+    ;;
+esac
+case "$expected_versioning" in
+  ''|None|Enabled|Suspended) ;;
+  *)
+    echo "AWS_S3_AUDIT_EXPECTED_VERSIONING_STATUS must be None, Enabled, or Suspended" >&2
     exit 2
     ;;
 esac
@@ -142,6 +150,8 @@ case "$versioning" in
   None|"") ;;
   *) fail "invalid_versioning_status value=$versioning" ;;
 esac
+[ -z "$expected_versioning" ] || [ "$versioning" = "$expected_versioning" ] ||
+  fail "unexpected_versioning_status expected=$expected_versioning value=$versioning"
 
 expiration_days=$(read_value get-bucket-lifecycle-configuration \
   --query "Rules[?Status=='Enabled' && Prefix=='$expected_prefix'].Expiration.Days | [0]") ||
@@ -160,4 +170,4 @@ abort_days=$(read_value get-bucket-lifecycle-configuration \
 [ "$abort_days" = "$expected_abort_days" ] ||
   fail "unexpected_multipart_abort expected=$expected_abort_days value=$abort_days"
 
-echo "AWS_S3_RESOURCE_AUDIT_PASS bucket=$AWS_S3_AUDIT_BUCKET region=$region caller=$caller_arn ownership=$ownership sse=$sse versioning=${versioning:-None} lifecycle_prefix=$expected_prefix expiration_days=$expiration_days noncurrent_expiration_days=${noncurrent_expiration_days:-not_applicable} abort_multipart_days=$abort_days"
+echo "AWS_S3_RESOURCE_AUDIT_PASS bucket=$AWS_S3_AUDIT_BUCKET region=$region caller=$caller_arn ownership=$ownership sse=$sse versioning=${versioning:-None} expected_versioning=${expected_versioning:-not_enforced} lifecycle_prefix=$expected_prefix expiration_days=$expiration_days noncurrent_expiration_days=${noncurrent_expiration_days:-not_applicable} abort_multipart_days=$abort_days"

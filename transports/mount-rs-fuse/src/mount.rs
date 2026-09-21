@@ -49,6 +49,54 @@ pub enum MountMode {
     Rootless,
 }
 
+/// The native FUSE transport phase that terminated a live session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FuseTransportErrorKind {
+    Read,
+    Protocol,
+    Write,
+    Task,
+}
+
+/// An owned terminal failure from the native FUSE device/session loop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FuseTransportError {
+    pub kind: FuseTransportErrorKind,
+    pub message: String,
+    pub raw_os_error: Option<i32>,
+}
+
+/// Synchronous callback invoked once for the first terminal native-session
+/// failure. The callback receives an owned value and never borrows the device,
+/// session, or mount lifecycle state.
+pub type FuseTransportErrorHook = Arc<dyn Fn(FuseTransportError) + Send + Sync + 'static>;
+
+/// Optional hooks for [`FuseMount`]. Kept separate from [`MountOptions`] so
+/// existing struct literals remain source-compatible.
+#[derive(Clone, Default)]
+pub struct FuseMountHooks {
+    pub on_transport_error: Option<FuseTransportErrorHook>,
+}
+
+#[cfg(target_os = "linux")]
+impl FuseTransportError {
+    fn from_io(kind: FuseTransportErrorKind, error: &io::Error) -> Self {
+        Self {
+            kind,
+            message: error.to_string(),
+            raw_os_error: error.raw_os_error(),
+        }
+    }
+
+    fn from_message(kind: FuseTransportErrorKind, message: String) -> Self {
+        Self {
+            kind,
+            message,
+            raw_os_error: None,
+        }
+    }
+}
+
 /// Options for a native Linux FUSE mount.
 #[derive(Debug, Clone)]
 pub struct MountOptions {
@@ -321,15 +369,25 @@ pub async fn mount(
     mountpoint: impl AsRef<Path>,
     options: MountOptions,
 ) -> Result<FuseMount, MountError> {
+    mount_with_hooks(driver, mountpoint, options, FuseMountHooks::default()).await
+}
+
+/// Mount a driver with native-session lifecycle hooks.
+pub async fn mount_with_hooks(
+    driver: Arc<dyn FsDriver>,
+    mountpoint: impl AsRef<Path>,
+    options: MountOptions,
+    hooks: FuseMountHooks,
+) -> Result<FuseMount, MountError> {
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = (driver, mountpoint, options);
+        let _ = (driver, mountpoint, options, hooks);
         Err(MountError::UnsupportedPlatform)
     }
 
     #[cfg(target_os = "linux")]
     {
-        mount_linux(driver, mountpoint.as_ref(), options).await
+        mount_linux(driver, mountpoint.as_ref(), options, hooks).await
     }
 }
 
@@ -338,6 +396,7 @@ async fn mount_linux(
     driver: Arc<dyn FsDriver>,
     mountpoint: &Path,
     options: MountOptions,
+    hooks: FuseMountHooks,
 ) -> Result<FuseMount, MountError> {
     use std::os::fd::AsRawFd;
 
@@ -408,6 +467,7 @@ async fn mount_linux(
         target.clone(),
         options.clone(),
         helper,
+        hooks,
     ));
     let task_state = Arc::clone(&state);
     let task = tokio::spawn(run_session(session, device, task_state));
@@ -454,6 +514,8 @@ struct MountState {
     unmount_notify: Notify,
     unmount_result: Mutex<Option<Result<(), String>>>,
     transport_error: Mutex<Option<String>>,
+    transport_error_reported: AtomicBool,
+    hooks: FuseMountHooks,
 }
 
 #[cfg(target_os = "linux")]
@@ -463,6 +525,7 @@ impl MountState {
         mountpoint: PathBuf,
         options: MountOptions,
         helper: Option<PathBuf>,
+        hooks: FuseMountHooks,
     ) -> Self {
         Self {
             mode,
@@ -482,6 +545,21 @@ impl MountState {
             unmount_notify: Notify::new(),
             unmount_result: Mutex::new(None),
             transport_error: Mutex::new(None),
+            transport_error_reported: AtomicBool::new(false),
+            hooks,
+        }
+    }
+
+    fn record_transport_error(&self, error: FuseTransportError) {
+        self.transport_error
+            .lock()
+            .expect("transport error lock poisoned")
+            .get_or_insert_with(|| error.message.clone());
+        if self.transport_error_reported.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        if let Some(hook) = &self.hooks.on_transport_error {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| hook(error)));
         }
     }
 
@@ -548,12 +626,10 @@ impl MountState {
             match tokio::time::timeout(timeout, &mut task).await {
                 Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    self.transport_error
-                        .lock()
-                        .expect("transport error lock poisoned")
-                        .get_or_insert_with(|| {
-                            format!("FUSE task failed during teardown: {error}")
-                        });
+                    self.record_transport_error(FuseTransportError::from_message(
+                        FuseTransportErrorKind::Task,
+                        format!("FUSE task failed during teardown: {error}"),
+                    ));
                 }
                 Err(_) => {
                     task.abort();
@@ -587,21 +663,30 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
             Ok(Some(frame)) => frame,
             Ok(None) => break,
             Err(error) => {
-                failure = Some(format!("FUSE device read failed: {error}"));
+                failure = Some(FuseTransportError::from_io(
+                    FuseTransportErrorKind::Read,
+                    &error,
+                ));
                 break;
             }
         };
         let reply = match session.handle(&frame).await {
             Ok(reply) => reply,
             Err(error) => {
-                failure = Some(error.to_string());
+                failure = Some(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Protocol,
+                    error.to_string(),
+                ));
                 break;
             }
         };
         if let Some(reply) = reply
             && let Err(error) = device.write_frame(&reply).await
         {
-            failure = Some(format!("FUSE device write failed: {error}"));
+            failure = Some(FuseTransportError::from_io(
+                FuseTransportErrorKind::Write,
+                &error,
+            ));
             break;
         }
         if session.negotiated.is_some() && !state.ready.swap(true, Ordering::AcqRel) {
@@ -610,10 +695,7 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
     }
     session.destroy().await;
     if let Some(error) = failure {
-        *state
-            .transport_error
-            .lock()
-            .expect("transport error lock poisoned") = Some(error);
+        state.record_transport_error(error);
     }
     state.active.store(false, Ordering::Release);
     state.closed.store(true, Ordering::Release);
@@ -1021,20 +1103,28 @@ fn mount_data(
         parts.push(format!("user_id={uid}"));
         parts.push(format!("group_id={gid}"));
     }
-    parts.push(format!("fsname={}", options.fsname));
+    // The helper consumes source metadata and generic mount flags from its
+    // option string. The privileged mount(2) path supplies the source and
+    // flags through its syscall arguments instead, so forwarding them as
+    // kernel data would make the FUSE driver reject the mount with EINVAL.
+    if privileged.is_none() {
+        parts.push(format!("fsname={}", options.fsname));
+    }
     if options.default_permissions {
         parts.push("default_permissions".to_owned());
     }
     if options.allow_other {
         parts.push("allow_other".to_owned());
     }
-    if options.read_only {
+    if privileged.is_none() && options.read_only {
         parts.push("ro".to_owned());
     }
     if let Some(max_read) = options.max_read {
         parts.push(format!("max_read={max_read}"));
     }
-    if let Some(subtype) = &options.subtype {
+    if privileged.is_none()
+        && let Some(subtype) = &options.subtype
+    {
         parts.push(format!("subtype={subtype}"));
     }
     parts.extend(options.mount_options.iter().cloned());
@@ -1370,6 +1460,90 @@ mod tests {
         assert_eq!(options.device, Path::new("/dev/fuse"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_mount_data_excludes_helper_metadata_and_flags() {
+        let options = MountOptions {
+            fsname: "mount-rs-test".to_owned(),
+            subtype: Some("mount-rs".to_owned()),
+            read_only: true,
+            ..MountOptions::default()
+        };
+
+        let privileged = mount_data(&options, Some((3, 0o040755, 1000, 1000)))
+            .expect("privileged mount data should be valid");
+        assert_eq!(
+            privileged.to_str().expect("mount data is UTF-8"),
+            "fd=3,rootmode=40000,user_id=1000,group_id=1000,default_permissions"
+        );
+
+        let helper = mount_data(&options, None).expect("helper mount data should be valid");
+        assert_eq!(
+            helper.to_str().expect("mount data is UTF-8"),
+            "fsname=mount-rs-test,default_permissions,ro,subtype=mount-rs"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn session_protocol_failure_reports_one_owned_transport_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-hook-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            device,
+            Arc::clone(&state),
+        ));
+
+        // A zero-length FUSE header is a protocol failure, not a peer EOF.
+        peer.write_all(&[0; crate::IN_HEADER_SIZE])
+            .await
+            .expect("send malformed FUSE frame");
+        task.await.expect("session task should finish");
+        state.record_transport_error(FuseTransportError::from_message(
+            FuseTransportErrorKind::Task,
+            "duplicate test failure".to_owned(),
+        ));
+
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Protocol);
+        assert!(observed[0].message.contains("FUSE"));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert_eq!(
+            state
+                .transport_error
+                .lock()
+                .expect("transport error lock")
+                .as_deref(),
+            Some(observed[0].message.as_str())
+        );
+    }
+
     #[test]
     fn mode_and_option_validation_have_no_native_side_effects() {
         #[cfg(target_os = "linux")]
@@ -1388,10 +1562,15 @@ mod tests {
             assert!(validate_mount_option(6, "fsname=caller-controlled").is_err());
             assert!(validate_mount_option(7, "fd=99").is_err());
 
-            let mut options = MountOptions::default();
-            options.mount_options = vec!["nodev".to_owned()];
+            let options = MountOptions {
+                mount_options: vec!["nodev".to_owned()],
+                ..MountOptions::default()
+            };
             assert!(validate_options(&options).is_ok());
-            options.mount_options = vec!["fsname=caller-controlled".to_owned()];
+            let options = MountOptions {
+                mount_options: vec!["fsname=caller-controlled".to_owned()],
+                ..MountOptions::default()
+            };
             assert!(validate_options(&options).is_err());
         }
     }

@@ -99,6 +99,13 @@ types = types.replace(
   },
 )
 types = types.replace(
+  /export declare class NfsConnection \{([\s\S]*?)\n\}/g,
+  (declaration, body) => {
+    if (!/\bclosed\s*:/.test(body)) body += "\n  readonly closed: Promise<void>"
+    return `export declare class NfsConnection {${body}\n}`
+  },
+)
+types = types.replace(
   /export declare class P9Session \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
     if (!/\bhandleCall\(/.test(body)) {

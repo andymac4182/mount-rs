@@ -83,4 +83,5 @@ module.exports.RecordAssembler = binding.RecordAssembler
 module.exports.NfsServer = rootBinding.NfsServer
 module.exports.NfsSession = rootBinding.NfsSession
 module.exports.Nfs4Session = rootBinding.Nfs4Session
+module.exports.NfsConnection = rootBinding.NfsConnection
 module.exports.createNfsServer = rootBinding.createNfsServer

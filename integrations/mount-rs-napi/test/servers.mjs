@@ -5,6 +5,7 @@ import { pathToFileURL } from "node:url";
 
 import {
   Filesystem,
+  NfsConnection,
   Nfs4Session,
   NfsSession,
   createNfsServer,
@@ -265,6 +266,7 @@ async function exerciseNfs() {
   let socket;
   let serverReader;
   let listening;
+  let nfsConnection;
   try {
     assert.equal(server.host, "127.0.0.1");
     assert.equal(server.port, 0);
@@ -314,6 +316,16 @@ async function exerciseNfs() {
     assert.equal(reply.readUInt32BE(4), 1);
     assert.equal(reply.readUInt32BE(20), 0);
     assert.ok(server.connections >= 1);
+    await waitUntil(() => server.clients().length === 1, "NFS client registration");
+    [nfsConnection] = server.clients();
+    assert.ok(nfsConnection instanceof NfsConnection);
+    assert.equal(nfsConnection.id, 1);
+    assert.match(nfsConnection.peer, /^127\.0\.0\.1:\d+$/);
+    assert.equal(nfsConnection.isClosed, false);
+    assert.ok(nfsConnection.session instanceof NfsSession);
+    assert.ok(nfsConnection.session.v4 instanceof Nfs4Session);
+    assert.ok(nfsConnection.closed instanceof Promise);
+    assert.strictEqual(nfsConnection.closed, nfsConnection.closed);
 
     // MOUNT '/' then GETATTR drives the filesystem stat callback over real
     // RPC, including when the input is a structural JavaScript driver.
@@ -340,8 +352,14 @@ async function exerciseNfs() {
     await new Promise((resolve) => setTimeout(resolve, 25));
     assert.deepEqual(reports, []);
 
-    // EOF is an ordinary disconnect. The second connection below is reserved
-    // for the actual record-framing failure that should be reported.
+    // A connection object can request transport teardown and await its closed
+    // state. The second connection below is reserved for the actual
+    // record-framing failure that should be reported.
+    await within(nfsConnection.close(), "NFS connection close");
+    await within(nfsConnection.closed, "NFS connection closed");
+    assert.equal(nfsConnection.isClosed, true);
+    assert.equal(server.connections, 0);
+    assert.equal(server.clients().length, 0);
     await closeSocket(socket, "NFS orderly disconnect");
     socket = undefined;
     await new Promise((resolve) => setTimeout(resolve, 25));

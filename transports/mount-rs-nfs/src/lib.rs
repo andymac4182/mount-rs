@@ -31,8 +31,8 @@ pub use rpc::{
     auth_sys, decode_call, decode_reply, encode_auth_sys, encode_call, frame_record,
 };
 pub use server::{
-    NfsServer, NfsServerHooks, NfsServerOptions, NfsTransportError, NfsTransportErrorHook,
-    NfsTransportErrorKind, create_nfs_server, create_nfs_server_with_hooks,
+    NfsConnection, NfsServer, NfsServerHooks, NfsServerOptions, NfsTransportError,
+    NfsTransportErrorHook, NfsTransportErrorKind, create_nfs_server, create_nfs_server_with_hooks,
 };
 pub use session::{Nfs3Session, NfsRequestContext, NfsSessionOptions, NfsSessionStats};
 pub use v4::{NFS_V4, NFS4_PROGRAM, Nfs4Session};

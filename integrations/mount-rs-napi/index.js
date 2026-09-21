@@ -793,6 +793,7 @@ module.exports.NativeP9FrameAssembler = nativeBinding.NativeP9FrameAssembler
 module.exports.NativeP9Reader = nativeBinding.NativeP9Reader
 module.exports.NativeP9Writer = nativeBinding.NativeP9Writer
 module.exports.Nfs4Session = nativeBinding.Nfs4Session
+module.exports.NfsConnection = nativeBinding.NfsConnection
 module.exports.NfsRecordAssembler = nativeBinding.NfsRecordAssembler
 module.exports.NfsServer = nativeBinding.NfsServer
 module.exports.NfsSession = nativeBinding.NfsSession

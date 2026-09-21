@@ -22,9 +22,10 @@ use mount_rs_core::{ErrorCode, FsDriver, FsError};
 use mount_rs_nfs::{
     FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
     Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
-    NfsRequestContext as TransportNfsRequestContext, NfsServer as TransportNfsServer,
-    NfsServerHooks as TransportNfsServerHooks, NfsServerOptions as TransportNfsServerOptions,
-    NfsTransportError as TransportNfsError, NfsTransportErrorHook as TransportNfsErrorHook,
+    NfsConnection as TransportNfsConnection, NfsRequestContext as TransportNfsRequestContext,
+    NfsServer as TransportNfsServer, NfsServerHooks as TransportNfsServerHooks,
+    NfsServerOptions as TransportNfsServerOptions, NfsTransportError as TransportNfsError,
+    NfsTransportErrorHook as TransportNfsErrorHook,
 };
 use mount_rs_s3::{
     Credentials as TransportS3Credentials, S3Server as TransportS3Server,
@@ -531,6 +532,52 @@ impl Nfs4Session {
     }
 }
 
+/// Read-only N-API view of one accepted NFS client connection.
+#[napi]
+pub struct NfsConnection {
+    inner: TransportNfsConnection,
+}
+
+#[napi]
+impl NfsConnection {
+    #[napi(getter)]
+    pub fn session(&self) -> NfsSession {
+        NfsSession {
+            inner: self.inner.session.clone(),
+            v4_inner: self.inner.v4_session.clone(),
+        }
+    }
+
+    #[napi(getter)]
+    pub fn id(&self) -> f64 {
+        self.inner.id() as f64
+    }
+
+    #[napi(getter)]
+    pub fn peer(&self) -> Option<String> {
+        self.inner.peer.clone()
+    }
+
+    #[napi(getter)]
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    #[napi]
+    pub async fn close(&self) -> napi::Result<()> {
+        self.inner
+            .close()
+            .await
+            .map_err(|error| transport_error("NFS connection close", error))
+    }
+
+    #[napi]
+    pub async fn wait_closed(&self) -> napi::Result<()> {
+        self.inner.wait_closed().await;
+        Ok(())
+    }
+}
+
 fn is_nfs_v4(bytes: &[u8]) -> bool {
     if bytes.len() < 20 {
         return false;
@@ -572,6 +619,19 @@ impl NfsServer {
     #[napi(getter)]
     pub fn connections(&self) -> u32 {
         self.inner.connections() as u32
+    }
+
+    #[napi]
+    pub fn clients(&self) -> napi::Result<Vec<NfsConnection>> {
+        self.inner
+            .clients()
+            .map(|clients| {
+                clients
+                    .into_iter()
+                    .map(|inner| NfsConnection { inner })
+                    .collect()
+            })
+            .map_err(|error| transport_error("NFS clients", error))
     }
 
     #[napi]

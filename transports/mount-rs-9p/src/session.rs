@@ -1,7 +1,10 @@
 //! A stateful 9P2000.L session over the core filesystem driver.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 use mount_rs_core::path::join_path;
 use mount_rs_core::{
@@ -89,6 +92,7 @@ struct SessionState {
 
 struct Pending {
     result: tokio::sync::Mutex<Option<Vec<u8>>>,
+    cancelled: AtomicBool,
     notify: Notify,
 }
 
@@ -224,6 +228,7 @@ impl P9Session {
 
         let pending = Arc::new(Pending {
             result: tokio::sync::Mutex::new(None),
+            cancelled: AtomicBool::new(false),
             notify: Notify::new(),
         });
         {
@@ -262,7 +267,7 @@ impl P9Session {
     }
 
     pub async fn destroy(&self) {
-        let handles = {
+        let (handles, pending) = {
             let mut state = self.inner.state.lock().expect("9P session mutex poisoned");
             if state.destroyed {
                 return;
@@ -273,8 +278,20 @@ impl P9Session {
             state.fids.clear();
             state.users.clear();
             state.msize = None;
-            handles
+            let pending = self
+                .inner
+                .inflight
+                .lock()
+                .expect("9P session mutex poisoned")
+                .drain()
+                .map(|(_, pending)| pending)
+                .collect::<Vec<_>>();
+            (handles, pending)
         };
+        for pending in pending {
+            pending.cancelled.store(true, Ordering::Release);
+            pending.notify.notify_waiters();
+        }
         self.inner.locks.release_all();
         for (_, handle) in handles {
             let _ = handle.close().await;
@@ -515,10 +532,18 @@ impl P9Session {
                 .expect("9P stats mutex poisoned")
                 .flushed += 1;
             loop {
-                if pending.result.lock().await.is_some() {
+                let notified = pending.notify.notified();
+                tokio::pin!(notified);
+                // Register before checking completion. Destruction and request
+                // completion use notify_waiters(), which does not retain a
+                // permit for a future created after the notification.
+                notified.as_mut().enable();
+                if pending.result.lock().await.is_some()
+                    || pending.cancelled.load(Ordering::Acquire)
+                {
                     break;
                 }
-                pending.notify.notified().await;
+                notified.await;
             }
         }
         self.frame(header, P9_RFLUSH, 8, |_| Ok(()))
@@ -1579,4 +1604,67 @@ fn child_of(parent: &str, name: &str, syscall: &str) -> FsResult<String> {
             .with_path(name));
     }
     Ok(join_path(&[parent, name]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mount_rs_core::MemoryFs;
+    use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn destroy_releases_flush_waiters_and_clears_inflight() {
+        let session = P9Session::new(MemoryFs::empty());
+        session
+            .inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .msize = Some(8192);
+        session
+            .inner
+            .inflight
+            .lock()
+            .expect("9P session mutex poisoned")
+            .insert(
+                41,
+                Arc::new(Pending {
+                    result: tokio::sync::Mutex::new(None),
+                    cancelled: AtomicBool::new(false),
+                    notify: Notify::new(),
+                }),
+            );
+        let request = encode_message(P9_TFLUSH, 42, 256, |writer| {
+            write_tflush(writer, Tflush { oldtag: 41 });
+            Ok(())
+        })
+        .expect("Tflush encodes");
+        let task_session = session.clone();
+        let task = tokio::spawn(async move {
+            task_session
+                .handle_call(&request)
+                .await
+                .expect("Tflush gets a response")
+        });
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if session.stats().flushed == 1 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Tflush reaches its wait point");
+
+        session.destroy().await;
+        let response = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("destroy wakes Tflush")
+            .expect("Tflush task joins");
+        let (header, _) = decode_message(&response).expect("destroyed-session response decodes");
+        assert_eq!(header.type_, P9_RLERROR);
+        assert_eq!(session.inflight(), 0);
+    }
 }

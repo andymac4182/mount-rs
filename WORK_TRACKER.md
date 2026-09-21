@@ -16,8 +16,9 @@ coverage. The transport now also broadcasts shutdown safely across the accept
 loop and all connections, closes the active-connection accept-loop race, and
 reaps completed request tasks while reporting task failures. An ignored native
 Linux harness now runs eight concurrent mounted file write/read/rename/read
-round trips before a bounded unmount. Local lifecycle 5/5, transport-error
-8/8, the focused native target, strict 9P Clippy and formatting pass. Hosted
+round trips before a bounded unmount. Session destruction also wakes and drains
+in-flight `Tflush` waiters. Local lifecycle 5/5, transport-error 8/8, the
+focused native target, strict 9P Clippy and formatting pass. Hosted
 run `35616832528` / job `106389895603` passed the prior Linux kernel-client
 mount/read/write/unmount packet; a fresh run is required for this packet and
 the concurrent-I/O harness.
@@ -28,12 +29,13 @@ rerun, native reset/half-close/concurrency/crash evidence, and the remaining
 W01 gates.
 
 Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
-shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
-connection teardown and awaited server close. The focused Rust/N-API checks
-pass, and the opt-in macOS native NFSv3 loopback mount gate passed 1/1 in
-0.09s. Production remains NO-GO pending the privileged Linux v4.1 lane, the
-full v3/v4 stateful and connection-object surface, hosted/native lifecycle
-evidence, and crash/concurrency/durability qualification.
+shared BigInt handle snapshots, live accepted-socket counts, and stable live
+client objects with peer/shared-session views plus abort-safe close/wait state.
+The focused Rust/N-API checks pass, and the opt-in macOS native NFSv3 loopback
+mount gate passed 1/1 in 0.14s on the exact published tree. Production remains NO-GO pending the
+privileged Linux v4.1 lane, the full v3/v4 stateful/member surface,
+hosted/native lifecycle evidence, and crash/concurrency/durability
+qualification.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -184,6 +186,13 @@ coverage. Its locked N-API check/Clippy, debug addon build, focused session/
 codec/typecheck tests, FUSE tests, formatting and diff checks pass; the full
 `MOUNTX_SOURCE` package suite, native Linux callback events, FSKit, cancellation,
 concurrency, crash/restart and durability remain open.
+The native transport follow-up adds owned `FuseTransportError` kinds,
+`FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
+callback-panic isolation, and a mount-free Unix-stream protocol-failure
+harness. The locked FUSE target, formatting and diff checks pass on macOS; the
+Linux-only hook harness and hosted `/dev/fuse` callback delivery remain
+external evidence, as do FSKit, cancellation, concurrency, crash/restart and
+durability.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -1586,6 +1595,33 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   artifact-boundary implementation evidence only; tag publication,
   signing/attestation, release-registry acceptance, canary, rollback and
   approval remain W08-P09 gates.
+- [x] W08.17 **Hosted cryptographic provenance and SBOM attestation wiring:**
+  `.github/workflows/cli-release.yml` now grants OIDC/attestation permissions
+  only to the tag-release job, invokes pinned
+  `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d` (`v4.2.2`) for the
+  exact CLI tarball and CycloneDX SBOM, and verifies both with
+  `gh attestation verify` against the repository, signer workflow, source
+  commit, tag ref and hosted-runner identity. After those checks it rewrites
+  the manifest with `signature=verified sbom=verified` and rebuilds the
+  three-entry `SHA256SUMS`. `.github/workflows/w08-release-targets.yml` also
+  exposes a manual `attest=true` path that performs the same per-target
+  provenance/SBOM qualification. Local YAML, embedded-Bash and `gh` flag
+  checks pass. The tag workflow and manual attestation dispatch have not yet
+  run; no Sigstore bundle, attestation ID/URL, release-registry result, canary,
+  rollback or approval is claimed. *(Release implementation slice; GitHub
+  OIDC/attestation availability, release owner and production approvers are
+  external gates.)*
+- [x] W08.18 **Attestation dispatch concurrency isolation:**
+  `.github/workflows/w08-release-targets.yml` now keys its concurrency group by
+  event type and ref, separating the explicit manual `workflow_dispatch`
+  attestation qualification from push-triggered target runs. The first
+  dispatch `35620392878` at source `0a4de6f` was accepted but cancelled before
+  job creation (`jobs=[]`) while the old shared pending group was occupied by
+  concurrent main pushes; it created no OIDC token or attestation and is not a
+  PASS or provider failure. Push the fix and rerun the manual qualification;
+  target attestations, tag publication, canary, rollback and approval remain
+  W08-P09 gates. *(Release workflow implementation; hosted concurrency and
+  GitHub OIDC/attestation service are external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1687,10 +1723,12 @@ reproducible in a production-like environment.
   non-cancelling hosted job `106372777281` from run `35611883547`, source
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
-  include W08.15's three-asset checksum pass and W08.16's Linux/macOS
-  target/download matrix, but they do not create cryptographic
-  signing/attestation evidence or run a real tag release, and do not close
-  the canary, rollback or approval gates. *(Release implementation + hosted;
+  include W08.15's three-asset checksum pass, W08.16's Linux/macOS
+  target/download matrix and W08.17–W08.18's pinned attestation wiring and
+  dispatch isolation, but they do not create executed cryptographic
+  signing/attestation evidence or run a real tag release, and do not close the
+  canary, rollback or approval gates.
+  *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
 
@@ -2250,7 +2288,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `2f13354` also passed the account/region binding, all four public-access
   blocks, BucketOwnerEnforced ownership, AES256 encryption, seven-day
   lifecycle, and one-day incomplete-multipart abort checks for that
-  qualification bucket. The
+  qualification bucket. The current pushed audit at `0010246` repeated the
+  same read-only checks and additionally enforced the reviewed versioning
+  status (`None`) before reporting pass; no production resource was changed.
+  The
   reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
   contract now expresses retained state, versioning, encryption choice,
   lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
@@ -2269,7 +2310,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   CloudFormation validation API on 2026-09-22 without creating a stack or
   change set. Its versioning lifecycle now also expires noncurrent versions
   using the same reviewed retention parameter, avoiding an unbounded version
-  accumulation path.
+  accumulation path. The template now fails closed on reused runtime and
+  maintenance role parameters, requires `KmsKeyArn` for SSE-KMS, and rejects
+  an unused key ARN for SSE-S3. The resource audit can also enforce the
+  reviewed live versioning status with
+  `AWS_S3_AUDIT_EXPECTED_VERSIONING_STATUS`; the hosted workflow path set now
+  includes the resource audit, PGlite harness, and shared provider/metadata
+  packages. These are reviewable safeguards only; production parameters,
+  role trust, change-set review, and live production audit remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -2318,17 +2366,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
   references. Both remediations and the secret-safe CI preflight are landed;
-  current pushed head `227f819` is covered by Standard scan
+  the earlier pushed head `227f819` is covered by Standard scan
   `bb69ddae-798a-4387-bb87-f3e7acd496cb`, which reports zero reportable
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  observed hosted run `35618187611` at `a83540a` passed the new secret-free
+  observed hosted run `35620404949` at `0010246` passed the secret-free
   validator regression step, then stopped before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS identity and acceptance were
   skipped, so this is a successful safety refusal, not acceptance evidence.
-  The preceding hosted run `35610661014` at `428ce6d` stopped at the same
-  preflight boundary, as did `35608516727` at `8e271cd`. A fresh
+  The preceding hosted run `35619552809` at `a84fa3e` stopped at the same
+  preflight boundary, as did `35618187611` at `a83540a`. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
