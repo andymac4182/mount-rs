@@ -24,7 +24,7 @@ for a production deployment result.
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Open; SQLite is single-host evidence only |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
 | Operations | S3 latency/error/retry/conditional-conflict signals, credential-expiry detection, cost/retention alerts, SLOs, and incident runbooks exist | Open |
-| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the fresh targeted review at baseline `89992ce3406f3f7586e5b072af488df4b565ea90` identified an AWS transport-override finding and mutable workflow action references. The AWS provider now rejects HTTP and invalid-certificate overrides; workflow pinning, repository-coverage remediation, and hosted/deployment evidence remain open. Bounded publication, listing, quota/TTL, and backing-file-aware staging cleanup remediations have landed |
+| Release | Locked artifact provenance, security review, load/soak/fault evidence, staged canary, rollback, and post-deploy smoke pass | Open; the fresh targeted review at baseline `89992ce3406f3f7586e5b072af488df4b565ea90` identified an AWS transport-override finding and mutable workflow action references. The AWS provider now rejects HTTP and invalid-certificate overrides, and all workflow action refs are pinned to verified full SHAs; a fresh follow-up scan, repository-coverage remediation, and hosted/deployment evidence remain open. Bounded publication, listing, quota/TTL, and backing-file-aware staging cleanup remediations have landed |
 
 ## Deployment contract
 

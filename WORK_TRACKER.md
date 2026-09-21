@@ -1690,8 +1690,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
-  references; this packet closes the transport override, while the workflow
-  pinning remains an active remediation. Hosted OIDC trust, the protected
+  references; both code and workflow-reference remediations are now landed
+  at the current head, pending a fresh scan. Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
