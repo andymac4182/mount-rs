@@ -56,6 +56,12 @@ export declare class Filesystem {
   lstat(path: string): Promise<JsStats>
   statfs(path: string): Promise<JsStatsFs>
   readdir(path: string, options?: JsReaddirOptions | undefined | null): Promise<Array<JsDirEntry>>
+  /**
+   * Enumerate a directory only when the provider can enforce the entry
+   * bound before returning its listing. Providers without that capability
+   * fail closed with ENOTSUP.
+   */
+  readdirBounded(path: string, maxEntries: number): Promise<Array<JsDirEntry>>
   get mountx(): JsMountx
   open(path: string, flags?: string | number | undefined | null, mode?: number | undefined | null): Promise<FileHandle>
   readFile(path: string): Promise<Uint8Array>

@@ -35,6 +35,8 @@ type GetItemRawCallback = JsCallback<KeyCall, Option<JsRawBytes>>;
 type SetItemRawCallback = JsCallback<SetCall, ()>;
 type RemoveItemCallback = JsCallback<KeyCall, ()>;
 type GetKeysCallback = JsCallback<KeyCall, Vec<String>>;
+type GetKeysBoundedCall = FnArgs<(String, f64)>;
+type GetKeysBoundedCallback = JsCallback<GetKeysBoundedCall, Vec<String>>;
 type GetMetaCallback = JsCallback<KeyCall, Option<JsMetadata>>;
 
 #[derive(Debug)]
@@ -389,6 +391,7 @@ struct Callbacks {
     set_item_raw: Arc<SetItemRawCallback>,
     remove_item: Arc<RemoveItemCallback>,
     get_keys: Arc<GetKeysCallback>,
+    get_keys_bounded: Option<Arc<GetKeysBoundedCallback>>,
     get_meta: Option<Arc<GetMetaCallback>>,
 }
 
@@ -406,6 +409,14 @@ impl CallbackSet {
         } else {
             None
         };
+        let get_keys_bounded = if store.has_named_property("getKeysBounded")? {
+            Some(Arc::new(build_callback::<GetKeysBoundedCall, Vec<String>>(
+                store,
+                "getKeysBounded",
+            )?))
+        } else {
+            None
+        };
         Ok(Self {
             callbacks: Mutex::new(Some(Callbacks {
                 has_item: Arc::new(build_callback(store, "hasItem")?),
@@ -413,6 +424,7 @@ impl CallbackSet {
                 set_item_raw: Arc::new(build_callback(store, "setItemRaw")?),
                 remove_item: Arc::new(build_callback(store, "removeItem")?),
                 get_keys: Arc::new(build_callback(store, "getKeys")?),
+                get_keys_bounded,
                 get_meta,
             })),
             closed: AtomicBool::new(false),
@@ -554,6 +566,41 @@ impl KeyValueStore for JsKeyValueStore {
         Box::pin(async move {
             let callback = callbacks.callback(|callbacks| callbacks.get_keys.clone())?;
             invoke(&callback, FnArgs::from((prefix,)), "getKeys").await
+        })
+    }
+
+    fn get_keys_bounded<'a, 'b, 'async_trait>(
+        &'a self,
+        prefix: &'b str,
+        max_keys: usize,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<String>>, Self::Error>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        let callbacks = Arc::clone(&self.callbacks);
+        let prefix = prefix.to_owned();
+        Box::pin(async move {
+            let Some(callback) =
+                callbacks.callback(|callbacks| callbacks.get_keys_bounded.clone())?
+            else {
+                return Ok(None);
+            };
+            let max_keys = u64::try_from(max_keys).map_err(|_| JsStoreError {
+                operation: "getKeysBounded",
+                reason: "bounded key limit does not fit in a JavaScript number".to_owned(),
+            })?;
+            if max_keys > 9_007_199_254_740_991 {
+                return Ok(None);
+            }
+            invoke(
+                &callback,
+                FnArgs::from((prefix, max_keys as f64)),
+                "getKeysBounded",
+            )
+            .await
+            .map(Some)
         })
     }
 

@@ -1789,6 +1789,23 @@ fn validate_chunk_size(value: f64) -> Result<usize, Error> {
         .map_err(|_| range_error("chunkSize", "a platform-sized integer", value))
 }
 
+fn validate_directory_entry_limit(value: f64) -> Result<usize, Error> {
+    if !value.is_finite()
+        || value.fract() != 0.0
+        || value <= 0.0
+        || value > MAX_SAFE_INTEGER
+        || value > usize::MAX as f64
+    {
+        return Err(range_error(
+            "maxEntries",
+            "> 0, an integer, and platform-sized",
+            value,
+        ));
+    }
+    usize::try_from(value as u64)
+        .map_err(|_| range_error("maxEntries", "a platform-sized integer", value))
+}
+
 fn validate_ttl(value: Option<f64>) -> Result<Duration, Error> {
     let value = value.unwrap_or(30_000.0);
     if !value.is_finite()
@@ -2760,6 +2777,24 @@ impl Filesystem {
             .map_err(to_js_error)
     }
 
+    /// Enumerate a directory only when the provider can enforce the entry
+    /// bound before returning its listing. Providers without that capability
+    /// fail closed with ENOTSUP.
+    #[napi(js_name = "readdirBounded")]
+    pub async fn read_dir_bounded(
+        &self,
+        path: String,
+        max_entries: f64,
+    ) -> napi::Result<Vec<JsDirEntry>> {
+        let max_entries = validate_directory_entry_limit(max_entries)?;
+        let driver = self.driver()?;
+        driver
+            .readdir_bounded(&normalized_path(&path), max_entries)
+            .await
+            .map(|entries| entries.into_iter().map(Into::into).collect())
+            .map_err(to_js_error)
+    }
+
     #[napi(getter, js_name = "mountx")]
     pub fn mountx(&self) -> JsMountx {
         JsMountx {
@@ -3413,6 +3448,16 @@ mod tests {
         assert!(negative.truncate);
         assert!(negative.append);
         assert!(negative.exclusive);
+    }
+
+    #[test]
+    fn bounded_directory_entry_limit_rejects_unsafe_numbers() {
+        assert_eq!(validate_directory_entry_limit(4.0).unwrap(), 4);
+        assert!(validate_directory_entry_limit(0.0).is_err());
+        assert!(validate_directory_entry_limit(-1.0).is_err());
+        assert!(validate_directory_entry_limit(1.5).is_err());
+        assert!(validate_directory_entry_limit(f64::NAN).is_err());
+        assert!(validate_directory_entry_limit(MAX_SAFE_INTEGER + 1.0).is_err());
     }
 
     #[test]

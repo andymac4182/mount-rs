@@ -114,6 +114,15 @@ provider-native process if they support that operation. Customers must schedule
 the action with the Ozone/operator control plane, retain enough history to meet
 their recovery policy, and monitor the report and provider space pressure.
 
+Directory listings that cross a remote HTTP boundary can use
+`filesystem.readdirBounded(path, maxEntries)`. The bound is enforced by the
+driver before the result is returned; providers without a provider-side
+enumeration limit fail closed with `ENOTSUP`. An unstorage store may opt into
+this path with `getKeysBounded(prefix, maxKeys)`, which must return no more than
+`maxKeys + 1` keys so the adapter can distinguish a complete listing from an
+overflow signal. The legacy `getKeys` callback alone is intentionally not used
+for bounded remote listings.
+
 ## Optional observability
 
 The native crate has an opt-in `observability` feature that decorates every

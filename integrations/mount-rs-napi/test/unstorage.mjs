@@ -32,6 +32,10 @@ function makeStore() {
     async getKeys(prefix) {
       return [...this.values.keys()].filter((key) => key.startsWith(prefix) && !key.endsWith("$"))
     },
+    async getKeysBounded(prefix, maxKeys) {
+      const keys = await this.getKeys(prefix)
+      return keys.slice(0, maxKeys + 1)
+    },
     getMeta(key) {
       return this.metadata.get(key) ?? {}
     },
@@ -78,6 +82,19 @@ assert.deepEqual(
     .sort(),
   ["bytes.bin", "pending.bin", "raw"].sort(),
 )
+
+const boundedStore = makeStore()
+boundedStore.values.clear()
+boundedStore.values.set("one", new Uint8Array([1]))
+boundedStore.values.set("two", new Uint8Array([2]))
+boundedStore.values.set("three", new Uint8Array([3]))
+const bounded = createUnstorageDriver(boundedStore)
+await assert.rejects(
+  () => bounded.readdirBounded("/", 2),
+  (error) => error.code === "EOVERFLOW",
+)
+assert.equal((await bounded.readdirBounded("/", 3)).length, 3)
+await bounded.shutdown()
 
 const readOnly = createUnstorageDriver(store, { readOnly: true })
 assert.equal(readOnly.capabilities.readOnly, true)

@@ -70,6 +70,17 @@ impl KeyValueStore for MemoryStore {
             .collect())
     }
 
+    async fn get_keys_bounded(
+        &self,
+        prefix: &str,
+        max_keys: usize,
+    ) -> Result<Option<Vec<String>>, Self::Error> {
+        let keys = self.get_keys(prefix).await?;
+        Ok(Some(
+            keys.into_iter().take(max_keys.saturating_add(1)).collect(),
+        ))
+    }
+
     async fn get_meta(&self, key: &str) -> Result<KeyValueMetadata, Self::Error> {
         Ok(self
             .metadata
@@ -178,6 +189,29 @@ async fn key_wins_over_a_prefix_and_reports_enotdir() {
     assert_eq!(
         fs.readdir("/a").await.expect_err("shadowed").code,
         ErrorCode::Enotdir
+    );
+}
+
+#[tokio::test]
+async fn bounded_readdir_enforces_the_provider_limit() {
+    let (store, fs) = setup();
+    store.put("one", b"1");
+    store.put("two", b"2");
+    store.put("three", b"3");
+
+    assert_eq!(
+        fs.readdir_bounded("/", 2)
+            .await
+            .expect_err("bounded listing must overflow")
+            .code,
+        ErrorCode::Eoverflow
+    );
+    assert_eq!(
+        fs.readdir_bounded("/", 3)
+            .await
+            .expect("bounded listing")
+            .len(),
+        3
     );
 }
 

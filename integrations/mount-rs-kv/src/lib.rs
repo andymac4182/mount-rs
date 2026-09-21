@@ -62,6 +62,19 @@ pub trait KeyValueStore: Send + Sync + 'static {
 
     async fn get_keys(&self, prefix: &str) -> std::result::Result<Vec<String>, Self::Error>;
 
+    /// Return a provider-bounded key listing when the backend can enforce one
+    /// before materializing the result. `None` means the provider has no safe
+    /// bounded-listing operation and callers must fail closed. A `Some` list
+    /// may contain at most `max_keys + 1` keys; a result longer than
+    /// `max_keys` is treated as an overflow signal by the filesystem adapter.
+    async fn get_keys_bounded(
+        &self,
+        _prefix: &str,
+        _max_keys: usize,
+    ) -> std::result::Result<Option<Vec<String>>, Self::Error> {
+        Ok(None)
+    }
+
     /// Return backend-native metadata without reading the value when possible.
     async fn get_meta(&self, _key: &str) -> std::result::Result<KeyValueMetadata, Self::Error> {
         Ok(KeyValueMetadata::default())
@@ -489,6 +502,26 @@ where
         Ok(value)
     }
 
+    async fn keys_under_bounded(
+        &self,
+        key: &str,
+        max_keys: usize,
+        syscall: &str,
+        path: &str,
+    ) -> Result<Option<Vec<String>>> {
+        self.store
+            .get_keys_bounded(key, max_keys)
+            .await
+            .map(|value| {
+                value.map(|keys| {
+                    keys.into_iter()
+                        .filter(|entry| !entry.ends_with('$'))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .map_err(|error| self.store_error(error, syscall, path))
+    }
+
     async fn read_value(&self, path: &str, syscall: &str) -> Result<Vec<u8>> {
         let key = key_of(path, syscall)?;
         Ok(self
@@ -845,6 +878,119 @@ where
             if !entries.iter().any(|(entry, _)| entry == &name) {
                 entries.push((name, true));
             }
+        }
+
+        Ok(entries
+            .into_iter()
+            .map(|(name, directory)| DirEntry {
+                name,
+                parent_path: parent_path.clone(),
+                file_type: if directory {
+                    FileType::Directory
+                } else {
+                    FileType::File
+                },
+            })
+            .collect())
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        let parent_path = normalize_path(path);
+        if max_entries == 0 {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("scandir")
+                .with_path(&parent_path)
+                .with_message("directory entry limit must be positive"));
+        }
+        let mut scope = Scope::default();
+        match self
+            .inner
+            .lookup(&parent_path, "scandir", &mut scope)
+            .await?
+        {
+            Kind::Missing => {
+                return Err(FsError::new(ErrorCode::Enoent)
+                    .with_syscall("scandir")
+                    .with_path(&parent_path));
+            }
+            Kind::File => {
+                return Err(FsError::new(ErrorCode::Enotdir)
+                    .with_syscall("scandir")
+                    .with_path(&parent_path));
+            }
+            Kind::Directory => {}
+        }
+
+        let base = key_of(&parent_path, "scandir")?;
+        let prefix = prefix_of(&base);
+        let Some(keys) = self
+            .inner
+            .keys_under_bounded(
+                &base,
+                max_entries.saturating_add(1),
+                "scandir",
+                &parent_path,
+            )
+            .await?
+        else {
+            return Err(FsError::enotsup("scandir")
+                .with_path(&parent_path)
+                .with_message("provider does not expose bounded key enumeration"));
+        };
+        if keys.len() > max_entries {
+            return Err(FsError::new(ErrorCode::Eoverflow)
+                .with_syscall("scandir")
+                .with_path(&parent_path)
+                .with_message("directory exceeds the configured entry limit"));
+        }
+
+        let mut entries: Vec<(String, bool)> = Vec::new();
+        for key in keys {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            let relative = &key[prefix.len()..];
+            if relative.is_empty() {
+                continue;
+            }
+            let (name, is_directory) = match relative.find(KEY_SEPARATOR) {
+                Some(index) => (&relative[..index], true),
+                None => (relative, false),
+            };
+            if let Some((_, current_directory)) =
+                entries.iter_mut().find(|(entry, _)| entry == name)
+            {
+                if !is_directory {
+                    *current_directory = false;
+                }
+            } else {
+                if entries.len() == max_entries {
+                    return Err(FsError::new(ErrorCode::Eoverflow)
+                        .with_syscall("scandir")
+                        .with_path(&parent_path)
+                        .with_message("directory exceeds the configured entry limit"));
+                }
+                entries.push((name.to_owned(), is_directory));
+            }
+        }
+
+        let state = self.inner.lock_state()?;
+        for directory in state
+            .empty_directories
+            .iter()
+            .filter(|directory| dirname(directory) == parent_path && **directory != parent_path)
+        {
+            let name = basename(directory);
+            if entries.iter().any(|(entry, _)| entry == &name) {
+                continue;
+            }
+            if entries.len() == max_entries {
+                return Err(FsError::new(ErrorCode::Eoverflow)
+                    .with_syscall("scandir")
+                    .with_path(&parent_path)
+                    .with_message("directory exceeds the configured entry limit"));
+            }
+            entries.push((name, true));
         }
 
         Ok(entries
