@@ -1575,6 +1575,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   artifact-boundary implementation evidence only; tag publication,
   signing/attestation, release-registry acceptance, canary, rollback and
   approval remain W08-P09 gates.
+- [x] W08.17 **Hosted cryptographic provenance and SBOM attestation wiring:**
+  `.github/workflows/cli-release.yml` now grants OIDC/attestation permissions
+  only to the tag-release job, invokes pinned
+  `actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d` (`v4.2.2`) for the
+  exact CLI tarball and CycloneDX SBOM, and verifies both with
+  `gh attestation verify` against the repository, signer workflow, source
+  commit, tag ref and hosted-runner identity. After those checks it rewrites
+  the manifest with `signature=verified sbom=verified` and rebuilds the
+  three-entry `SHA256SUMS`. `.github/workflows/w08-release-targets.yml` also
+  exposes a manual `attest=true` path that performs the same per-target
+  provenance/SBOM qualification. Local YAML, embedded-Bash and `gh` flag
+  checks pass. The tag workflow and manual attestation dispatch have not yet
+  run; no Sigstore bundle, attestation ID/URL, release-registry result, canary,
+  rollback or approval is claimed. *(Release implementation slice; GitHub
+  OIDC/attestation availability, release owner and production approvers are
+  external gates.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1676,10 +1692,11 @@ reproducible in a production-like environment.
   non-cancelling hosted job `106372777281` from run `35611883547`, source
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
-  include W08.15's three-asset checksum pass and W08.16's Linux/macOS
-  target/download matrix, but they do not create cryptographic
-  signing/attestation evidence or run a real tag release, and do not close
-  the canary, rollback or approval gates. *(Release implementation + hosted;
+  include W08.15's three-asset checksum pass, W08.16's Linux/macOS
+  target/download matrix and W08.17's pinned attestation wiring, but they do
+  not create executed cryptographic signing/attestation evidence or run a
+  real tag release, and do not close the canary, rollback or approval gates.
+  *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
 

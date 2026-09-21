@@ -19,6 +19,9 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -112,6 +115,77 @@ jobs:
           echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
           echo "target=$target" >> "$GITHUB_OUTPUT"
 
+      - name: Generate artifact provenance attestation
+        id: provenance-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.artifact }}
+
+      - name: Generate CycloneDX SBOM attestation
+        id: sbom-attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.artifact }}
+          sbom-path: ${{ runner.temp }}/mount-rs-cli-release/${{ steps.package.outputs.sbom }}
+
+      - name: Verify hosted release attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ steps.package.outputs.artifact }}
+          RELEASE_COMMIT: ${{ steps.package.outputs.release_commit }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_dir="$RUNNER_TEMP/mount-rs-cli-release"
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/cli-release.yml"
+          common_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$signer_workflow"
+            --source-digest "$RELEASE_COMMIT"
+            --source-ref "$GITHUB_REF"
+            --deny-self-hosted-runners
+            --format json
+          )
+
+          gh attestation verify "$release_dir/$ARTIFACT" \
+            "${common_args[@]}" \
+            > "$release_dir/provenance-attestation.json"
+          gh attestation verify "$release_dir/$ARTIFACT" \
+            "${common_args[@]}" \
+            --predicate-type https://cyclonedx.org/bom \
+            > "$release_dir/sbom-attestation.json"
+          node -e 'for (const path of process.argv.slice(1)) JSON.parse(require("node:fs").readFileSync(path, "utf8"));' \
+            "$release_dir/provenance-attestation.json" \
+            "$release_dir/sbom-attestation.json"
+
+          node scripts/write-w08-release-manifest.mjs \
+            --artifact "$release_dir/$ARTIFACT" \
+            --output "$release_dir/release-manifest.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$RELEASE_COMMIT" \
+            --version "${{ steps.package.outputs.package_version }}" \
+            --tag "$GITHUB_REF_NAME" \
+            --target "${{ steps.package.outputs.target }}" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --signature-status verified \
+            --sbom-status verified
+          node scripts/verify-w08-release-manifest.mjs \
+            "$release_dir/release-manifest.json" \
+            "$release_dir/$ARTIFACT"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/${{ steps.package.outputs.sbom }}" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$RELEASE_COMMIT" \
+            --package mount-rs-cli \
+            --version "${{ steps.package.outputs.package_version }}" \
+            --artifact "$release_dir/$ARTIFACT"
+          (cd "$release_dir" && shasum -a 256 "$ARTIFACT" release-manifest.json release-sbom.json > SHA256SUMS)
+          (cd "$release_dir" && shasum -a 256 -c SHA256SUMS)
+          echo "W08_RELEASE_ATTESTATION_PASS artifact=$ARTIFACT source=$RELEASE_COMMIT"
+
       - name: Publish GitHub release assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -132,6 +206,7 @@ jobs:
           Published target: $target
           Published artifact: $artifact
           Checksums: SHA256SUMS
+          GitHub Sigstore provenance and CycloneDX SBOM attestations were generated and verified in this workflow.
 
           This is a platform-specific CLI preview. It is not a complete platform matrix and does not imply overall project release readiness."
 
@@ -177,6 +252,19 @@ jobs:
             --package mount-rs-cli \
             --version "$package_version" \
             --artifact "$verification_dir/$artifact"
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/cli-release.yml"
+          common_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$signer_workflow"
+            --source-digest "$release_commit"
+            --source-ref "$GITHUB_REF"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify "$verification_dir/$artifact" "${common_args[@]}"
+          gh attestation verify "$verification_dir/$artifact" \
+            "${common_args[@]}" \
+            --predicate-type https://cyclonedx.org/bom
           test "$(tar -tzf "$verification_dir/$artifact")" = "mount-rs"
           extracted_dir="$verification_dir/extracted"
           mkdir -p "$extracted_dir"

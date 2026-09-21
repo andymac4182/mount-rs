@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator and locked-Cargo CycloneDX SBOM generator/verifier wired into the CLI preview workflow, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package and download-verification matrix, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, real-artifact, SBOM, asset-integrity, target-matrix and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator and locked-Cargo CycloneDX SBOM generator/verifier wired into the CLI preview workflow, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package and download-verification matrix, a tag-release GitHub Sigstore provenance/SBOM attestation path with strict identity verification, an opt-in target-matrix attestation path, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -38,7 +38,7 @@ planning result.
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
 | P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
-| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact, unsigned-SBOM, all-asset-integrity and target-matrix policy slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. Both release workflows create `SHA256SUMS` after the manifest and unsigned SBOM, cover all three assets and verify every entry; the preview workflow then re-downloads and verifies them. Dedicated `.github/workflows/w08-release-policy.yml` proves the Ubuntu artifact path. `.github/workflows/w08-release-targets.yml` builds/tests Linux x86_64 and macOS arm64, uploads each four-file asset set and verifies each downloaded set. Hosted run `35617415427`, source `b0ca8a9`, reached terminal success for both target builds and both download-verification jobs. Exit still requires an approved tag-triggered publication, cryptographic signing/attestation, target-platform package/SBOM checks in the release registry, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
+| P09 — release provenance, canary and go/no-go | Open — 10%; verifier, artifact-wiring, dedicated real-artifact, unsigned-SBOM, all-asset-integrity, target-matrix and attestation-wiring implementation slices passed | `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository identity, artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and explicit signature/SBOM/canary states; `scripts/write-w08-release-manifest.mjs` derives those fields from actual artifact bytes. `scripts/write-w08-release-sbom.mjs` and `scripts/verify-w08-release-sbom.mjs` generate and validate a 288-component CycloneDX 1.5 dependency graph bound to the artifact and source commit. Both release workflows create `SHA256SUMS` after the manifest and unsigned SBOM, cover all three assets and verify every entry; the preview workflow then re-downloads and verifies them. The tag release now invokes pinned GitHub `actions/attest@v4.2.2` for provenance and CycloneDX SBOM, verifies repository/signer-workflow/source-commit/tag identity with `gh attestation verify`, and finalizes the manifest's signature/SBOM controls; the target matrix exposes an explicit `workflow_dispatch` `attest=true` path. Dedicated `.github/workflows/w08-release-policy.yml` proves the Ubuntu artifact path. `.github/workflows/w08-release-targets.yml` builds/tests Linux x86_64 and macOS arm64, uploads each four-file asset set and verifies each downloaded set. Hosted run `35617415427`, source `b0ca8a9`, reached terminal success for both target builds and both download-verification jobs. The new attestation paths have not run on an approved tag or manual dispatch. Exit still requires an approved tag-triggered publication, terminal cryptographic attestations for the accepted target assets, target-platform package/SBOM checks in the release registry, staged canary with live SLO observation, rollback result and explicit release-owner approval. |
 
 No P01–P09 item is terminally accepted. P01/P02/P07 implementation progress is
 also covered locally by
@@ -102,6 +102,19 @@ identity. Hosted run `35617415427`, source `b0ca8a9`, passed build jobs
 `106393402680`. This is target-package and hosted artifact-boundary evidence,
 not tag publication, cryptographic signing/attestation, canary, rollback or
 approval.
+
+W08.17 wires the production-facing attestation path without claiming that it
+has executed. The tag-triggered CLI release job grants OIDC and attestation
+permissions only at that release job, runs pinned `actions/attest@v4.2.2` for
+the exact tarball and CycloneDX SBOM, verifies both predicates with
+`gh attestation verify` against the repository, signer workflow, source commit,
+tag ref and hosted-runner policy, then records `signature=verified` and
+`sbom=verified` in the finalized manifest before rebuilding `SHA256SUMS`. The
+target matrix has an explicit manual `attest=true` path that performs the same
+per-target qualification. Local YAML/embedded-Bash validation and the local
+GitHub CLI flag-surface check passed. No approved tag or manual attestation
+dispatch has run, so no Sigstore bundle, attestation ID/URL or production
+release signature is claimed.
 
 ## Deployment contract
 
@@ -234,12 +247,14 @@ jobs failed; it is not an aggregate-green release result either.
    runbook and on-call exercises. Record resource headroom and rollback timing.
 5. Confirm the dedicated W08 policy and Linux/macOS target matrix are terminal
    on the release candidate, including unsigned SBOM, three-asset checksum and
-   downloaded-asset verification, then run the approved tag-triggered CLI
-   release workflow and retain its actual target assets, `SHA256SUMS`,
-   manifests and SBOMs; close P09 with cryptographic signing/attestation,
-   target-platform parity, a held-back canary, live SLO observation, rollback
-   verification and release-owner approval. The synthetic accepted fixture,
-   local tarball and hosted CI artifacts are not sufficient.
+   downloaded-asset verification; run the target matrix's approved
+   `workflow_dispatch` attestation qualification; then run the approved
+   tag-triggered CLI release workflow and retain its actual target assets,
+   `SHA256SUMS`, manifests, SBOMs and verified attestation outputs. Close P09
+   with cryptographic signing/attestation, target-platform parity, a held-back
+   canary, live SLO observation, rollback verification and release-owner
+   approval. The synthetic accepted fixture, local tarball and hosted CI
+   artifacts are not sufficient.
 6. Promote in stages only after the evidence packet passes the final audit. On
    rollback, stop new writers, preserve metadata and block snapshots, restore
    the last known-good artifact/topology, verify reads/fences/ownership, and
