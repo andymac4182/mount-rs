@@ -122,21 +122,96 @@ function resultView(result) {
   return result;
 }
 
-const counts = { PASS: 0, ENOSYS: 0, ENOTSUP: 0 };
+async function prepareFile(fs, path, contents = new Uint8Array([1])) {
+  await writeFile(fs, path, contents);
+  assert.deepEqual([...await fs.readFile(path)], [...contents], `${path}: prepare did not persist`);
+}
+
+async function prepareDirectory(fs, path) {
+  await mkdir(fs, path);
+  assert.equal((await fs.stat(path)).isDirectory(), true, `${path}: prepare did not create a directory`);
+}
+
+async function filesystemSnapshot(fs) {
+  const entries = [];
+
+  async function visit(path) {
+    const children = await fs.readdir(path);
+    children.sort((left, right) => left.name.localeCompare(right.name));
+    for (const child of children) {
+      const childPath = path === "/" ? `/${child.name}` : `${path}/${child.name}`;
+      const stats = await fs.lstat(childPath);
+      const entry = {
+        path: childPath,
+        mode: stats.mode,
+        nlink: stats.nlink,
+        uid: stats.uid,
+        gid: stats.gid,
+        size: stats.size,
+        atimeMs: stats.atimeMs,
+        mtimeMs: stats.mtimeMs,
+        isFile: stats.isFile(),
+        isDirectory: stats.isDirectory(),
+        isSymbolicLink: stats.isSymbolicLink(),
+      };
+      if (stats.isFile()) entry.bytes = [...await fs.readFile(childPath)];
+      entries.push(entry);
+      if (stats.isDirectory()) await visit(childPath);
+    }
+  }
+
+  await visit("/");
+  return entries;
+}
+
+async function stateSnapshot(fs, store) {
+  return {
+    filesystem: await filesystemSnapshot(fs),
+    raw: {
+      values: structuredClone(store.values),
+      metadata: structuredClone(store.metadata),
+    },
+  };
+}
+
+const counts = { PASS: 0, ENOSYS: 0, ENOTSUP: 0, SKIP: 0 };
 const rows = [];
 
 /**
  * Compare one complete upstream scenario. An unsupported result is a result,
  * not a skip: both adapters must return the oracle's exact stable refusal.
  */
-async function runRow({ label, syscall, expectedError, scenario, project = resultView }) {
+async function runRow({
+  label,
+  syscall,
+  expectedError,
+  prepare,
+  scenario,
+  project = resultView,
+}) {
   const pair = makePair();
   try {
+    if (prepare) {
+      await Promise.all([prepare(pair.oracle), prepare(pair.native)]);
+    }
+    const [oracleBefore, nativeBefore] = await Promise.all([
+      stateSnapshot(pair.oracle, pair.oracleStore),
+      stateSnapshot(pair.native, pair.nativeStore),
+    ]);
     const [expected, actual] = await Promise.all([
       capture(() => scenario(pair.oracle), project),
       capture(() => scenario(pair.native), project),
     ]);
     assert.deepEqual(actual, expected, `${label}: native result differs from oracle`);
+
+    if (!expected.ok) {
+      const [oracleAfter, nativeAfter] = await Promise.all([
+        stateSnapshot(pair.oracle, pair.oracleStore),
+        stateSnapshot(pair.native, pair.nativeStore),
+      ]);
+      assert.deepEqual(oracleAfter, oracleBefore, `${label}: oracle refusal changed state`);
+      assert.deepEqual(nativeAfter, nativeBefore, `${label}: native refusal changed state`);
+    }
 
     if (expected.ok) {
       counts.PASS++;
@@ -199,8 +274,8 @@ const symlinkOpenRows = [
   {
     label: "symlink-gated exclusive open of valid link",
     syscall: "symlink",
+    prepare: (fs) => prepareFile(fs, "/target"),
     scenario: async (fs) => {
-      await writeFile(fs, "/target");
       await fs.symlink("target", "/link");
       const handle = await fs.open("/link", "wx");
       await handle.close();
@@ -217,13 +292,13 @@ const symlinkRows = [
   {
     label: "symlink readlink/stat prerequisite",
     syscall: "symlink",
-    prepare: (pair) => writeFile(pair, "/target"),
+    prepare: (fs) => prepareFile(fs, "/target"),
     scenario: async (fs) => fs.symlink("target", "/link"),
   },
   {
     label: "symlinked directory traversal prerequisite",
     syscall: "symlink",
-    prepare: (pair) => mkdir(pair, "/real"),
+    prepare: (fs) => prepareDirectory(fs, "/real"),
     scenario: async (fs) => fs.symlink("real", "/alias"),
   },
   {
@@ -239,7 +314,7 @@ const symlinkRows = [
   {
     label: "readlink regular-file error boundary",
     syscall: "readlink",
-    prepare: (pair) => writeFile(pair, "/file"),
+    prepare: (fs) => prepareFile(fs, "/file"),
     scenario: async (fs) => fs.readlink("/file"),
   },
   {
@@ -250,7 +325,7 @@ const symlinkRows = [
   {
     label: "symlink existing-name refusal prerequisite",
     syscall: "symlink",
-    prepare: (pair) => writeFile(pair, "/taken"),
+    prepare: (fs) => prepareFile(fs, "/taken"),
     scenario: async (fs) => fs.symlink("whatever", "/taken"),
   },
 ];
@@ -263,8 +338,8 @@ const hardlinkRows = [
   {
     label: "hardlink inode sharing and unlink lifetime",
     syscall: "link",
+    prepare: (fs) => prepareFile(fs, "/original", new TextEncoder().encode("shared")),
     scenario: async (fs) => {
-      await writeFile(fs, "/original", new TextEncoder().encode("shared"));
       await fs.link("/original", "/alias");
       const original = await fs.stat("/original");
       const alias = await fs.stat("/alias");
@@ -277,18 +352,26 @@ const hardlinkRows = [
   {
     label: "hardlink existing destination refusal",
     syscall: "link",
+    prepare: async (fs) => {
+      await prepareFile(fs, "/source");
+      await prepareFile(fs, "/taken");
+    },
     scenario: async (fs) => {
-      await writeFile(fs, "/source");
-      await writeFile(fs, "/taken");
       await fs.link("/source", "/taken");
     },
   },
   {
-    label: "hardlink directory and missing source refusal",
+    label: "hardlink directory refusal",
+    syscall: "link",
+    prepare: (fs) => prepareDirectory(fs, "/directory"),
+    scenario: async (fs) => {
+      await fs.link("/directory", "/directory-link");
+    },
+  },
+  {
+    label: "hardlink missing source refusal",
     syscall: "link",
     scenario: async (fs) => {
-      await mkdir(fs, "/directory");
-      await fs.link("/directory", "/directory-link");
       await fs.link("/missing", "/alias");
     },
   },
@@ -308,57 +391,73 @@ await runRow({
   },
 });
 
-// mknod is an optional mountx extension. Cover the two mode shapes absent from
-// the previous special-node packet: regular/no-type fallback and directory
-// type rejection. The oracle's absent extension is classified with its own
-// ENOSYS helper; the Rust extension must match it, not invent EPERM.
+// mknod is an optional mountx extension. Keep each call in its own row: a
+// capability refusal on the first call must not hide an independent mode or
+// path boundary later in the upstream scenario. The oracle's absent
+// extension is classified with its own ENOSYS helper; the Rust extension must
+// match it, not invent EPERM.
 const mknodRows = [
   {
-    label: "mknod FIFO/socket creation boundary",
+    label: "mknod FIFO creation boundary",
     syscall: "mknod",
-    scenario: async (fs) => {
-      await mknodOperation(fs, "/fifo", 0o010644, 0);
-      await mknodOperation(fs, "/sock", 0o140600, 0);
-    },
+    scenario: async (fs) => mknodOperation(fs, "/fifo", 0o010644, 0),
   },
   {
-    label: "mknod character/block device boundary",
+    label: "mknod socket creation boundary",
     syscall: "mknod",
-    scenario: async (fs) => {
-      await mknodOperation(fs, "/char", 0o020666, (1 << 8) | 3);
-      await mknodOperation(fs, "/block", 0o060660, 7 << 8);
-    },
+    scenario: async (fs) => mknodOperation(fs, "/sock", 0o140600, 0),
   },
   {
-    label: "mknod regular/no-type fallback",
+    label: "mknod character-device boundary",
     syscall: "mknod",
-    scenario: async (fs) => {
-      await mknodOperation(fs, "/plain", 0o644, 0);
-      await mknodOperation(fs, "/regular", 0o100600, 0);
-    },
+    scenario: async (fs) => mknodOperation(fs, "/char", 0o020666, (1 << 8) | 3),
+  },
+  {
+    label: "mknod block-device boundary",
+    syscall: "mknod",
+    scenario: async (fs) => mknodOperation(fs, "/block", 0o060660, 7 << 8),
+  },
+  {
+    label: "mknod regular/no-type plain-file boundary",
+    syscall: "mknod",
+    scenario: async (fs) => mknodOperation(fs, "/plain", 0o644, 0),
+  },
+  {
+    label: "mknod regular-file mode boundary",
+    syscall: "mknod",
+    scenario: async (fs) => mknodOperation(fs, "/regular", 0o100600, 0),
   },
   {
     label: "mknod directory type refusal",
     syscall: "mknod",
-    scenario: async (fs) => {
-      await mknodOperation(fs, "/directory", 0o040755, 0);
-    },
+    scenario: async (fs) => mknodOperation(fs, "/directory", 0o040755, 0),
   },
   {
-    label: "mknod ordinary-name lifecycle boundary",
+    label: "mknod ordinary-name creation boundary",
     syscall: "mknod",
+    scenario: async (fs) => mknodOperation(fs, "/fifo", 0o010644, 0),
+  },
+  {
+    label: "mknod ordinary-name rename/unlink boundary",
+    prepare: (fs) => prepareFile(fs, "/fifo"),
     scenario: async (fs) => {
-      await mknodOperation(fs, "/fifo", 0o010644, 0);
       await fs.rename("/fifo", "/moved");
       await fs.unlink("/moved");
+      assert.deepEqual(await fs.readdir("/"), [], "ordinary-name lifecycle left an entry behind");
     },
   },
   {
-    label: "mknod existing-name/missing-parent boundary",
+    label: "mknod existing-name refusal",
     syscall: "mknod",
-    prepare: (pair) => writeFile(pair, "/taken"),
+    prepare: (fs) => prepareFile(fs, "/taken"),
     scenario: async (fs) => {
       await mknodOperation(fs, "/taken", 0o010644, 0);
+    },
+  },
+  {
+    label: "mknod missing-parent refusal",
+    syscall: "mknod",
+    scenario: async (fs) => {
       await mknodOperation(fs, "/nowhere/fifo", 0o010644, 0);
     },
   },
@@ -414,8 +513,8 @@ await runRow({
 await runRow({
   label: "symlink-gated lutimes target-vs-link",
   syscall: "symlink",
+  prepare: (fs) => prepareFile(fs, "/target"),
   scenario: async (fs) => {
-    await writeFile(fs, "/target");
     await fs.symlink("target", "/link");
     await fs.utimes("/target", new Date(1_000), new Date(1_000));
     await fs.lutimes("/link", new Date(9_000), new Date(9_000));
@@ -427,8 +526,8 @@ await runRow({
 await runRow({
   label: "symlink-gated root-only lchown target-vs-link",
   syscall: "symlink",
+  prepare: (fs) => prepareFile(fs, "/target"),
   scenario: async (fs) => {
-    await writeFile(fs, "/target");
     await fs.symlink("target", "/link");
     const before = await fs.stat("/target");
     await fs.lchown("/link", 65_534, 65_534);
@@ -439,11 +538,13 @@ await runRow({
   },
 });
 
-assert.equal(rows.length, 25, "remaining-skip inventory changed without updating this test");
+assert.equal(rows.length, 31, "remaining-skip inventory changed without updating this test");
 assert.equal(counts.PASS + counts.ENOSYS + counts.ENOTSUP, rows.length);
+assert.equal(counts.SKIP, 0, "capability-gated skips must remain in the upstream suite");
 console.log(
   `mount-rs Unstorage remaining-skip parity: PASS (${rows.length} rows: ` +
-    `${counts.PASS} PASS, ${counts.ENOSYS} ENOSYS, ${counts.ENOTSUP} ENOTSUP, 0 skipped; ` +
+    `${counts.PASS} PASS, ${counts.ENOSYS} ENOSYS, ${counts.ENOTSUP} ENOTSUP, ` +
+    `${counts.SKIP} skipped; ` +
     `oracle=${PINNED_ORACLE})`,
 );
 console.log(`mount-rs Unstorage remaining-skip rows: ${rows.join(", ")}`);
