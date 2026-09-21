@@ -310,7 +310,7 @@ SQL`,
     name: 'Cloudflare R2 / S3-compatible blocks',
     eyebrow: 'Provider / object storage',
     maturity: 'Validated',
-    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, both metadata-provider composition gates, and the public-NAPI benchmark passed; hosted credentials, broader benchmark, and release gates remain separate.',
+    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, both metadata-provider composition gates, and the public-NAPI benchmark passed; a budgeted main-only live-R2 workflow is now wired, while hosted credentials, broader benchmark, and release gates remain separate.',
     summary: (
       <>
         R2 is the remote block plane in the current split-store design. It is
@@ -377,7 +377,9 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         R2 is block-only here; it does not solve metadata fencing or garbage
         collection. Orphan blocks can remain after uncertain publication, and
         native/hosted benchmark and full release matrices remain separate from
-        the authenticated live gate.
+        the authenticated live gate. The new main-only workflow admits at most
+        20 runs per month under a worst-case $100 monthly envelope (up to $4 per
+        run); its hosted result is still revision-specific and pending.
       </>
     ),
     evidence: (
@@ -399,13 +401,18 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         benchmark's <code>8/8</code> iterations across 1, 4, 10, and 16 MiB
         with fixed 64 KiB chunks and verified cleanup. Hosted CI does not
         receive the dedicated R2 credentials, so those results remain a
-        separately authenticated acceptance boundary.
+        separately authenticated acceptance boundary. The repository now also
+        wires a budget-gated <code>Live Cloudflare R2</code> workflow with
+        pinned Rust/Node tooling, a pinned mountx checkout, AWS CLI cleanup,
+        the full Rust/Node/CLI/PGlite/trace packet, and an uploaded benchmark
+        artifact; no hosted pass is claimed until that workflow completes.
       </>
     ),
     sources: [
       { label: 'R2 block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
       { label: 'Live R2 evidence in the tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w05--cloudflare-r2' },
       { label: 'Configuration-driven provider matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/config-pglite-r2.json' },
+      { label: 'Budgeted live-R2 workflow', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cloudflare-r2.yml' },
     ],
   },
   rustfs: {
@@ -509,7 +516,7 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     name: 'TiDB',
     eyebrow: 'Provider / distributed SQL',
     maturity: 'Experimental',
-    maturityNote: 'Provider and single-node ARM64 checks exist; bounded Node and CLI consumer matrices plus dedicated service jobs are wired, while live credential-gated rows, durable topology, and native/hosted acceptance remain open.',
+    maturityNote: 'Provider and single-node ARM64 checks exist; bounded Node and CLI consumer matrices plus dedicated service jobs and a durable Ozone composition gate are wired, while live credential-gated rows, durable topology, and native/hosted acceptance remain open.',
     summary: (
       <>
         TiDB can supply either side of the split store using the MySQL wire
@@ -576,10 +583,12 @@ LIMIT 20;`,
         truncate, shutdown/reopen, and owned RustFS-prefix cleanup, but native
         mount and hosted restart coverage remain open. Its live TiDB/RustFS
         rows require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS
-        credentials. The dedicated <code>tidb</code> and
-        <code>tidb-rustfs</code> jobs are the service-evidence boundary; a
-        durable run counts only when it emits
-        <code>TIDB_ACCEPTANCE evidence=durable-multinode-restart</code>.
+        credentials. The dedicated <code>tidb</code>,
+        <code>tidb-rustfs</code>, and <code>ozone-tidb</code> jobs are the
+        service-evidence boundary; a durable TiDB run counts only when it emits
+        <code>TIDB_ACCEPTANCE evidence=durable-multinode-restart</code>. The
+        Ozone/TiDB job is wired for the real gateway and three-PD/three-TiKV
+        topology, but its hosted result remains open.
       </>
     ),
     evidence: (
@@ -596,12 +605,16 @@ LIMIT 20;`,
         passed the direct TiDB contract, ChunkedFs partial/truncate/CAS/
         stale-fencing/reopen, ambiguous-commit handling, and cleanup; it is
         not replicated-durability evidence.
+        A dedicated <code>ozone-tidb</code> CI job is now wired on Ubuntu 24.04
+        with Node 24 and TiDB v8.5.7 durable-topology settings against the real
+        Ozone gateway; no green hosted result is counted yet.
       </>
     ),
     sources: [
       { label: 'TiDB provider README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-tidb/README.md' },
       { label: 'TiDB provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-tidb/src/storage.rs' },
       { label: 'TiDB/RustFS consumer matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w08--tidb' },
+      { label: 'Durable Ozone/TiDB CI gate', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
     ],
   },
   foundationdb: {
@@ -609,7 +622,7 @@ LIMIT 20;`,
     name: 'FoundationDB',
     eyebrow: 'Provider / transactional key-value store',
     maturity: 'Experimental',
-    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, and shared-provider consumer selection with opt-in Node/Linux CLI gates are present; hosted runtime and multi-host deployment evidence remain open.',
+    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, shared-provider consumer selection, and a durable three-node Ozone composition now exist locally; hosted runtime and production deployment evidence remain open.',
     summary: (
       <>
         FoundationDB stores the split filesystem in a volume-scoped keyspace.
@@ -693,14 +706,14 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         client and cluster. The production path now fails closed for
         unverified, development, and single-authority clocks. Hosted runtime,
         deployment-enforced read-only authority credentials,
-        multi-host clock-skew/recovery controls, service restart, hosted root
-        integration, and broader platform coverage remain open; commit versions
-        are not wall-clock expiry. The shared-provider Rust SDK/CLI and Node
-        selection paths are opt-in native features, not portable-default
-        support, and the authority service must enforce the read-only worker
-        boundary outside the library API. The latest arm64 Ozone/FoundationDB
-        composition attempt was blocked by Docker Desktop layer-registration
-        and daemon corruption, so it produces no Ozone/FoundationDB acceptance.
+        multi-host clock-skew/recovery controls beyond the tested topology,
+        hosted root integration, and broader platform coverage remain open;
+        commit versions are not wall-clock expiry. The shared-provider Rust
+        SDK/CLI and Node selection paths are opt-in native features, not
+        portable-default support, and the authority service must enforce the
+        read-only worker boundary outside the library API. The durable Ozone
+        composition is loopback/non-secure test deployment evidence; it does
+        not establish production authentication, TLS, or power-loss durability.
       </>
     ),
     evidence: (
@@ -719,14 +732,24 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         when <code>/dev/fuse</code> is present; the live Node gate and native CLI
         use a separately published shared-provider authority prefix. The macOS
         job compiles the FoundationDB-enabled CLI NFS test, but live macOS
-        service/cluster acceptance and hosted results remain open. This is not
-        yet a general production or release-readiness claim.
+        service/cluster acceptance and hosted results remain open. The latest
+        arm64 durable Ozone composition created three fixed-address FoundationDB
+        7.4.7 servers with three coordinators, separate persistent volumes, and
+        <code>double</code>/<code>SSD</code> configuration. Transactional
+        readiness passed before and after restarting replicated node 2; first
+        and fresh-client Ozone compositions emitted
+        <code>FOUNDATIONDB_RUSTFS_CHUNKED_PASS</code> and
+        <code>FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS</code>, followed by
+        <code>FOUNDATIONDB_TEST_PASS topology=durable</code> and owned cleanup.
+        This is real multi-node restart evidence, not production auth/TLS or
+        power-loss proof.
       </>
     ),
     sources: [
       { label: 'FoundationDB integration README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-foundationdb/README.md' },
       { label: 'FoundationDB keyspace implementation', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-foundationdb/src/lib.rs' },
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
+      { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
     ],
   },
   'aws-s3': {
@@ -823,7 +846,7 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and current arm64 block/restart/CAS/range checkpoint; SQLite/PGlite/TiDB composition and Node/Rust CLI consumer evidence now exist locally, while hosted topology and durable multi-host coverage remain open.',
+    maturityNote: 'Pinned 2.2.1 gateway and current arm64 block/restart/CAS/range checkpoint; SQLite/PGlite/TiDB and durable FoundationDB composition plus Node/Rust CLI consumer evidence now exist locally, while hosted topology and durable TiDB results remain open.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -892,14 +915,16 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         builds the public N-API addon and can run the live Node provider matrix,
         the Node CLI's <code>--sdk-self-test --reopen</code>, and the matching
         Rust CLI self-test when <code>MOUNT_RS_OZONE_NODE_COMPOSITION=1</code>;
-        those consumer results are still pending. Mixed TiDB/FoundationDB
-        stores also remain open. The
+        those consumer results are still pending. Durable FoundationDB/Ozone
+        composition is now covered locally, while the dedicated
+        <code>ozone-tidb</code> gate is wired and its hosted result remains
+        pending. The
         non-secure all-in-one service is loopback-only and is not production
-        authentication or durability evidence; the CI composition job covers
-        SQLite/PGlite only and does not imply TiDB/FoundationDB coverage. The
-        arm64 FoundationDB composition attempt was blocked by Docker Desktop
-        layer-registration/daemon corruption; no Ozone/FoundationDB result is
-        counted.
+        authentication or durability evidence; durable FoundationDB remains
+        test-deployment evidence and does not imply production auth, TLS, or
+        power-loss durability. The standard composition job covers
+        SQLite/PGlite only; the durable TiDB/FoundationDB jobs are separate
+        revision-specific gates.
       </>
     ),
     evidence: (
@@ -911,20 +936,28 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         the direct TiDB contract, ChunkedFs partial/truncate/CAS/stale-fencing/
         reopen, ambiguous-commit, and cleanup checks. The arm64 Node provider
         and Node/Rust CLI run recorded <code>pass=7 skip=1 fail=0</code>. A
+        durable FoundationDB/Ozone run also passed with three fixed-address
+        FoundationDB 7.4.7 servers, persistent volumes, double/SSD
+        configuration, transaction readiness across a replicated-node restart,
+        fresh-client reopen, and owned cleanup. A dedicated
+        <code>ozone-tidb</code> hosted job is now wired for durable v8.5.7
+        TiDB with Node 24 against the real Ozone gateway, but its hosted result
+        remains pending. A
         dedicated hosted
         <code>ozone-compositions</code> job now installs PGlite, builds the
         public Node addon, and runs the real SQLite/PGlite mixed-metadata gate.
         Its opt-in consumer phase covers the Node provider matrix, Node CLI,
         and Rust CLI against live Ozone/PGlite/R2-compatible services, but the
         hosted result is still pending and revision-specific. Durable
-        multi-node TiDB/FoundationDB, secure/replicated Ozone deployment, and
-        the broader backend matrix are not yet accepted.
+        multi-node TiDB, secure/replicated Ozone deployment, and the broader
+        backend matrix are not yet accepted.
       </>
     ),
     sources: [
       { label: 'Ozone acceptance requirements', href: 'https://github.com/andymac4182/mount-rs/blob/main/REQUIREMENTS.md#apache-ozone-backend-acceptance' },
       { label: 'Ozone workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w26--apache-ozone-s3-backend' },
       { label: 'Ozone composition CI job', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
+      { label: 'Durable FoundationDB composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>
