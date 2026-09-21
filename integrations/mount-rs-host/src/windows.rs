@@ -16,12 +16,20 @@ const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const SYMBOLIC_LINK_FLAG_DIRECTORY: u32 = 0x1;
 const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: u32 = 0x2;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
+const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
+const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
 const READ_ATTRIBUTES: u32 = 0x80;
 const WRITE_DATA: u32 = 0x2;
 const APPEND_DATA: u32 = 0x4;
 const WRITE_ATTRIBUTES: u32 = 0x100;
+const DELETE_ACCESS: u32 = 0x1_0000;
 const READONLY: u32 = 1;
-const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+const FILE_DISPOSITION_INFORMATION: i32 = 13;
+const FILE_DISPOSITION_INFORMATION_EX: i32 = 64;
+const FILE_DISPOSITION_DELETE: u32 = 0x1;
+const FILE_DISPOSITION_POSIX_SEMANTICS: u32 = 0x2;
+const FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE: u32 = 0x10;
 const EPOCH_TICKS: i128 = 116_444_736_000_000_000;
 
 #[repr(C)]
@@ -77,6 +85,16 @@ struct FullSizeInfo {
     sectors: u32,
     bytes_per_sector: u32,
 }
+#[repr(C)]
+#[derive(Default)]
+struct DispositionInfo {
+    delete_file: u8,
+}
+#[repr(C)]
+#[derive(Default)]
+struct DispositionInfoEx {
+    flags: u32,
+}
 
 // Catch accidental ABI layout changes even in cross-target cargo check.
 const _: () = {
@@ -85,6 +103,8 @@ const _: () = {
     assert!(size_of::<BasicInfo>() == 40);
     assert!(size_of::<StandardInfo>() == 24);
     assert!(size_of::<FullSizeInfo>() == 32);
+    assert!(size_of::<DispositionInfo>() == 1);
+    assert!(size_of::<DispositionInfoEx>() == 4);
     assert!(size_of::<IoStatus>() == 2 * size_of::<usize>());
 };
 
@@ -105,8 +125,6 @@ unsafe extern "system" {
         security: *const c_void,
     ) -> i32;
     fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> i32;
-    fn DeleteFileW(path: *const u16) -> i32;
-    fn GetFileAttributesW(path: *const u16) -> u32;
     fn GetFileInformationByHandle(handle: Handle, info: *mut HandleInfo) -> i32;
     fn GetFileInformationByHandleEx(
         handle: Handle,
@@ -114,16 +132,23 @@ unsafe extern "system" {
         info: *mut c_void,
         size: u32,
     ) -> i32;
+    fn ReOpenFile(handle: Handle, access: u32, share: u32, attributes: u32) -> Handle;
     fn SetFileTime(
         handle: Handle,
         creation: *const FileTime,
         access: *const FileTime,
         write: *const FileTime,
     ) -> i32;
-    fn SetFileAttributesW(path: *const u16, attributes: u32) -> i32;
 }
 #[link(name = "ntdll")]
 unsafe extern "system" {
+    fn NtSetInformationFile(
+        handle: Handle,
+        status: *mut IoStatus,
+        info: *const c_void,
+        size: u32,
+        class: i32,
+    ) -> i32;
     fn NtQueryVolumeInformationFile(
         handle: Handle,
         status: *mut IoStatus,
@@ -218,7 +243,7 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
     loop {
         // SAFETY: both buffers are NUL-terminated UTF-16 and remain alive for
         // the synchronous CreateSymbolicLinkW call.
-        if unsafe { CreateSymbolicLinkW(link.as_ptr(), target.as_ptr(), flags) } != 0 {
+        if unsafe { CreateSymbolicLinkW(link_path.as_ptr(), target.as_ptr(), flags) } != 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();
@@ -323,44 +348,125 @@ pub(super) fn hard_link(existing: &Path, new_path: &Path) -> io::Result<()> {
 }
 
 pub(super) fn unlink(path: &Path) -> io::Result<()> {
-    let wide = wide_host_path(path)?;
-    // DeleteFileW is deliberately used instead of std::fs::remove_file so
-    // long Win32 paths and open handles with FILE_SHARE_DELETE follow the same
-    // path as libuv. The first attempt also preserves ordinary error codes.
-    // SAFETY: `wide` is a live NUL-terminated UTF-16 path buffer.
-    if unsafe { DeleteFileW(wide.as_ptr()) } != 0 {
-        return Ok(());
-    }
-    let initial_error = io::Error::last_os_error();
-    if initial_error.raw_os_error() != Some(5) {
-        return Err(initial_error);
+    // Match libuv's fs__unlink_rmdir path: open the directory entry itself
+    // with DELETE sharing, then use the extended disposition API first. This
+    // is important for an open readonly file with hard-link aliases: the
+    // POSIX disposition removes only the requested name and preserves the
+    // file's readonly metadata for the remaining aliases and live handle.
+    let file = open_raw(path, READ_ATTRIBUTES | DELETE_ACCESS, 3, OPEN_REPARSE_POINT)?;
+    let mut basic = BasicInfo::default();
+    // SAFETY: `file` owns a live handle and `basic` is a correctly sized
+    // FILE_BASIC_INFO-compatible output buffer.
+    if unsafe {
+        GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            0,
+            (&mut basic as *mut BasicInfo).cast(),
+            size_of::<BasicInfo>() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
     }
 
-    // libuv's Windows unlink path uses FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE.
-    // DeleteFileW has no equivalent flag, so mirror that behavior for the
-    // fallback by clearing only the readonly bit, then restore it if deletion
-    // still fails. This matters for files created with O_RDONLY|O_CREAT and a
-    // mode without the owner-write bit.
-    // SAFETY: the path buffer remains valid for both synchronous Win32 calls.
-    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
-    if attributes == INVALID_FILE_ATTRIBUTES || attributes & READONLY == 0 {
-        return Err(initial_error);
+    // unlink must not remove an ordinary directory. A directory reparse point
+    // is permitted here because Node/libuv treats a directory symlink as the
+    // link entry, not as the target directory.
+    if basic.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
+        && basic.attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0
+    {
+        return Err(io::Error::from_raw_os_error(5));
     }
-    let writable_attributes = match attributes & !READONLY {
-        0 => FILE_ATTRIBUTE_NORMAL,
-        attributes => attributes,
+
+    let mut status = IoStatus::default();
+    let mut disposition_ex = DispositionInfoEx {
+        flags: FILE_DISPOSITION_DELETE
+            | FILE_DISPOSITION_POSIX_SEMANTICS
+            | FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE,
     };
-    if unsafe { SetFileAttributesW(wide.as_ptr(), writable_attributes) } == 0 {
-        return Err(initial_error);
-    }
-    if unsafe { DeleteFileW(wide.as_ptr()) } != 0 {
+    // SAFETY: the handle and disposition buffer remain live for this
+    // synchronous ntdll call. FileDispositionInformationEx is class 21.
+    let nt_status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status,
+            (&mut disposition_ex as *mut DispositionInfoEx).cast(),
+            size_of::<DispositionInfoEx>() as u32,
+            FILE_DISPOSITION_INFORMATION_EX,
+        )
+    };
+    if nt_status >= 0 {
         return Ok(());
     }
-    let delete_error = io::Error::last_os_error();
-    // Best-effort restoration avoids changing the host entry when the delete
-    // failed for a reason unrelated to readonly protection.
-    let _ = unsafe { SetFileAttributesW(wide.as_ptr(), attributes) };
-    Err(delete_error)
+
+    let error = nt_status_to_io(nt_status);
+    // Older Windows versions and filesystems may not implement the extended
+    // disposition class. Fall back to the legacy libuv sequence only for
+    // those capability errors; a real access/sharing failure must propagate.
+    if !matches!(error.raw_os_error(), Some(1 | 50 | 87)) {
+        return Err(error);
+    }
+
+    if basic.attributes & READONLY != 0 {
+        // ReOpenFile avoids asking the primary DELETE handle for write
+        // attributes and follows libuv's Wine-compatible fallback.
+        let writable = unsafe {
+            ReOpenFile(
+                file.as_raw_handle(),
+                WRITE_ATTRIBUTES,
+                7,
+                OPEN_REPARSE_POINT | BACKUP_SEMANTICS,
+            )
+        };
+        if writable == -1_isize as Handle {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: ReOpenFile returned an owned handle on success.
+        let writable = unsafe { File::from_raw_handle(writable) };
+        let writable_basic = BasicInfo {
+            attributes: (basic.attributes & !READONLY) | FILE_ATTRIBUTE_ARCHIVE,
+            ..BasicInfo::default()
+        };
+        // SAFETY: the reopened handle and FILE_BASIC_INFO-compatible buffer
+        // remain live for the synchronous ntdll call.
+        let status = unsafe {
+            NtSetInformationFile(
+                writable.as_raw_handle(),
+                &mut status,
+                (&writable_basic as *const BasicInfo).cast(),
+                size_of::<BasicInfo>() as u32,
+                0,
+            )
+        };
+        if status < 0 {
+            return Err(nt_status_to_io(status));
+        }
+    }
+
+    let mut disposition = DispositionInfo { delete_file: 1 };
+    // SAFETY: the original handle and one-byte disposition buffer remain
+    // live for the synchronous legacy ntdll call. Class 13 is the legacy
+    // FileDispositionInformation operation used by libuv.
+    let status = unsafe {
+        NtSetInformationFile(
+            file.as_raw_handle(),
+            &mut status,
+            (&mut disposition as *mut DispositionInfo).cast(),
+            size_of::<DispositionInfo>() as u32,
+            FILE_DISPOSITION_INFORMATION,
+        )
+    };
+    if status >= 0 {
+        Ok(())
+    } else {
+        Err(nt_status_to_io(status))
+    }
+}
+
+fn nt_status_to_io(status: i32) -> io::Error {
+    // SAFETY: RtlNtStatusToDosError is a pure conversion and accepts every
+    // NTSTATUS returned by NtSetInformationFile.
+    io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(status) } as i32)
 }
 
 pub(super) fn stat(path: &Path, follow: bool) -> io::Result<Stats> {
