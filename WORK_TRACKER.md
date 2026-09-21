@@ -501,7 +501,7 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
+| W25 | Actual AWS S3 integration | Production-readiness qualification: first-class Rust SDK/CLI path and least-privilege live test scope passed; rollout controls, deployment-grade metadata/DR, and hosted release gates remain open | Main |
 | W26 | Apache Ozone S3 backend | Complete within documented scope: local and hosted Ozone gateway, SQLite/PGlite composition, durable FoundationDB, and Ozone-backed durable TiDB gates passed; production/native boundaries remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
@@ -1492,18 +1492,48 @@ listing a source does not mean it has been reviewed or its code can be reused.
   immutable blocks, ranges, conditional/CAS behavior, multi-chunk writes and
   overwrite/truncate/extend/sparse-tail behavior, SQLite metadata composition,
   fresh-process reopen, and exact owner-verified prefix cleanup with zero
-  remaining objects. AWS S3 evidence does not replace Cloudflare R2 or RustFS
-  acceptance.
+  remaining objects. The same run also passed the real Rust CLI
+  `sdk-self-test --reopen` against a separate owned prefix, proving the
+  configuration-driven consumer path. AWS S3 evidence does not replace
+  Cloudflare R2 or RustFS acceptance.
+- [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
+  public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
+  accepts only bucket, region, prefix, and durable fields, resolves signed
+  workload credentials from the AWS environment/role chain, rejects custom
+  endpoints, and remains block-only. The live gate now runs the CLI
+  `sdk-self-test` plus the SDK composition against the same scoped role; the
+  public AWS path is no longer only a direct integration-test construction.
 - [x] The live AWS packet is present in the provider/test crates: immutable
   block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen,
-  nonce-owned cleanup and credential-safe validation. The harness emits the
-  secret-free `AWS_S3_TEST_BLOCKED` result when local credentials are absent,
-  while the renewed `myroot` run above provides the live Rust acceptance.
+  the public SDK and CLI configuration paths, nonce-owned cleanup and
+  credential-safe validation. The harness emits the secret-free
+  `AWS_S3_TEST_BLOCKED` result when local credentials are absent, while the
+  renewed `myroot` run above provides the live Rust acceptance.
 - [x] The harness accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that
   caller-provided role with a one-hour session, and uses the resulting temporary
   credentials for all S3 requests and cleanup. It does not create IAM resources
-  or access keys; W25.2 is provisioned in `myroot`, and W25.3 still requires the
-  live local Rust run.
+  or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
+  run is now recorded above.
+- [ ] W25.5 Define and approve the production rollout contract: AWS account,
+  region and bucket ownership; IaC or an equivalent reviewable change; bucket
+  policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
+  retention/lifecycle, prefix ownership, runtime/maintenance roles, and no
+  long-lived credentials. The W25 bucket and role are test resources.
+- [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
+  metadata provider and pass multi-writer/fencing, restart, backup/restore,
+  schema-migration, and failure-recovery tests with actual AWS S3 blocks.
+  The current SQLite composition is single-host reopen evidence only.
+- [ ] W25.7 Add deployment observability and operations: S3 latency/error and
+  retry metrics, conditional-conflict and orphan/cleanup signals, credential
+  expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
+  canary/rollback procedures.
+- [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
+  approved OIDC or equivalent short-lived role credentials, security scan,
+  load/soak/fault/restore drills, staged canary, rollback, and post-deploy
+  smoke. Do not place AWS secrets in the repository or CI logs.
+- [ ] W25.9 Production sign-off: record the exact released commit/image,
+  reviewed configuration, live smoke result, rollback owner, and evidence for
+  every W25.5-W25.8 gate before calling the AWS workstream production-ready.
 
 ## W26 — Apache Ozone S3 backend
 

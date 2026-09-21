@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "mountpoint": "./mnt",
+  "transport": "auto",
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "sqlite",
+        "path": "./state/aws-s3-metadata.sqlite"
+      },
+      "blocks": {
+        "kind": "aws-s3",
+        "bucket": "example-private-bucket",
+        "region": "ap-southeast-2",
+        "prefix": "mount-rs/example",
+        "durable": true
+      },
+      "chunk_size_bytes": 65536,
+      "owner": "aws-s3-example"
+    }
+  }
+}

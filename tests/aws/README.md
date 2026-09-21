@@ -1,9 +1,10 @@
 # Actual AWS S3 integration
 
 This is the opt-in W25 actual-service gate. It is separate from the
-Cloudflare R2 and RustFS lanes: the Rust test builds the existing
-`mount-rs-r2::R2BlockStore` over the AWS S3 client, then composes it with the
-production `ChunkedFs` and durable local SQLite metadata.
+Cloudflare R2 and RustFS lanes: the Rust test builds the first-class
+`mount-rs-sdk::Filesystem` with `StoreConfig::AwsS3`, then composes it with
+durable local SQLite metadata. The harness also runs the real Rust CLI
+`sdk-self-test` against the same configuration and scoped credentials.
 
 The gate covers:
 
@@ -14,6 +15,8 @@ The gate covers:
 - fresh metadata and fresh signed S3-client reopen;
 - a second Cargo test process reading a block and composed SQLite+S3
   filesystem left by the first process; and
+- the CLI's public configuration path writing, reopening, and cleaning a
+  separate AWS S3 prefix; and
 - shell-owned cleanup verified to leave no current objects below the run
   prefix.
 
@@ -101,6 +104,34 @@ only pass an explicit prefix that this test owns. AWS CLI endpoint and service
 profile overrides are refused. Use a short-lived SSO or assumed-role session
 where possible; the runner never creates access keys, prints credential
 values, or writes them to the repository.
+
+The corresponding versioned CLI provider shape is:
+
+```json
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {"kind": "sqlite", "path": "./state/metadata.sqlite"},
+      "blocks": {
+        "kind": "aws-s3",
+        "bucket": "private-bucket",
+        "region": "ap-southeast-2",
+        "prefix": "mount-rs/volume-a",
+        "durable": true
+      },
+      "chunk_size_bytes": 65536,
+      "owner": "volume-a"
+    }
+  }
+}
+```
+
+The AWS provider accepts credentials through the `object_store` workload
+chain (environment credentials, web identity, ECS task credentials, or EC2
+instance credentials). It intentionally has no endpoint or static-secret
+fields; use the `r2` provider for an S3-compatible endpoint.
 
 If the selected profile uses SSO, refresh its session or use another
 already-authorized profile before running the gate. Do not paste credentials
