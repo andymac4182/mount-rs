@@ -160,12 +160,12 @@ evidence.
 
 ## TiDB metadata plus RustFS chunks
 
-The combined ChunkedFs lane is a separate, explicitly opt-in test. Hooke/main
-owns the RustFS container, credentials, unique prefix, run directory, and
-cleanup; the test only uses the inherited loopback `R2_*` environment and
-never removes `RUSTFS_RUN_DIR`. It defaults its scoped volume key and cleanup
-fixture from `RUSTFS_COMBO_PREFIX` and `RUSTFS_RUN_DIR` when the optional
-`MOUNT_RS_TIDB_*` overrides are absent.
+The combined lane is a separate, explicitly opt-in test. The wrapper owns the
+RustFS container, credentials, unique prefix, run directory, and cleanup; the
+TiDB harness owns the TiDB/PD/TiKV topology and restart sequence. The child
+tests use only the inherited loopback `R2_*` environment and never remove
+`RUSTFS_RUN_DIR`. The wrapper also runs the public Node SDK/CLI matrix and a
+required Linux native Node CLI mount when those prerequisites are enabled.
 
 Run it through Hooke's RustFS orchestration with a real TiDB SQL URL:
 
@@ -177,6 +177,11 @@ MOUNT_RS_TIDB_URL='mysql://root@127.0.0.1:4000' \
 The test writes binary data across seven-byte chunks, performs partial writes
 and truncate, closes and reopens ChunkedFs, reads the exact durable namespace
 and blocks back, and checks TiDB writer fencing plus revision CAS conflicts.
+The consumer phase then selects the same public TiDB/RustFS shape through the
+Node SDK and Rust/Node CLI configuration, exercises native mounted I/O with
+independent Rust and Node clients, unmounts, and verifies fresh Node SDK
+readback. A required native phase fails on a missing Linux FUSE prerequisite;
+the generic host-backed native demo remains separately opt-in.
 The restart fixture is a scoped manifest: it records the RustFS prefix, TiDB
 volume key, and every block written by the seed phase. The reopen phase rejects
 any prefix or volume-key mismatch before deleting anything, verifies every

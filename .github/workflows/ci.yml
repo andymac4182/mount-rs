@@ -88,6 +88,8 @@ jobs:
     # silently downgrading to a single-node or underprovisioned diagnostic.
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-cargo-target
     permissions:
       contents: read
     steps:
@@ -103,6 +105,8 @@ jobs:
     # fixture after the durable TiDB component restarts.
     runs-on: ubuntu-24.04
     timeout-minutes: 100
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
     permissions:
       contents: read
     steps:
@@ -123,6 +127,14 @@ jobs:
         env:
           CARGOFLAGS: --locked
         run: pnpm --dir integrations/mount-rs-napi build
+      - name: Install and verify the Linux FUSE prerequisite for the consumer gate
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fuse3
+          test -c /dev/fuse
+          test -r /dev/fuse
+          test -w /dev/fuse
+          command -v fusermount3
       - name: Verify durable TiDB metadata over RustFS chunks
         env:
           MOUNT_RS_TIDB_VERSION: v8.5.7

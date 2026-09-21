@@ -2,8 +2,10 @@
 
 // Bounded, opt-in process-level integration for the Node SDK CLI. This test
 // deliberately uses a host-backed root so persistence can be checked without
-// credentials or a remote provider. The CLI owns the native mount; a second
-// Node process performs the mounted I/O.
+// credentials or a remote provider. An opt-in TiDB/RustFS mode exercises the
+// same native lifecycle against the configured split provider. The CLI owns
+// the native mount; independent Rust and Node processes perform the mounted
+// I/O.
 
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
@@ -40,7 +42,9 @@ import { join } from "node:path";
 const [mountpoint, filename, seed, first, second] = process.argv.slice(2);
 const seedPath = join(mountpoint, "seed.txt");
 const dataPath = join(mountpoint, filename);
-assert.equal(await readFile(seedPath, "utf8"), seed, "mounted seed readback");
+if (seed !== "__MOUNT_RS_SKIP_SEED__") {
+  assert.equal(await readFile(seedPath, "utf8"), seed, "mounted seed readback");
+}
 await writeFile(dataPath, first, { encoding: "utf8", flag: "wx" });
 assert.equal(await readFile(dataPath, "utf8"), first, "mounted write readback");
 await writeFile(dataPath, second, { encoding: "utf8" });
@@ -49,9 +53,15 @@ console.log("PASS independent Node client mounted read/write");
 `;
 
 function skip(reason) {
-  console.log(`SKIP node-cli-native gate=${reason}`);
-  console.log("SUMMARY node-cli-native pass=0 skip=1 fail=0");
-  process.exitCode = 0;
+  if (process.env.MOUNT_RS_NODE_CLI_NATIVE_REQUIRED === "1") {
+    console.error(`FAIL node-cli-native required gate=${reason}`);
+    console.log("SUMMARY node-cli-native pass=0 skip=0 fail=1");
+    process.exitCode = 1;
+  } else {
+    console.log(`SKIP node-cli-native gate=${reason}`);
+    console.log("SUMMARY node-cli-native pass=0 skip=1 fail=0");
+    process.exitCode = 0;
+  }
 }
 
 function appendOutput(state, field, chunk) {
@@ -156,6 +166,115 @@ async function loadProbe() {
   throw new Error(`unable to load the Node SDK for transport probing: ${failures.join("; ")}`);
 }
 
+function requiredEnv(name) {
+  const value = process.env[name];
+  if (!value) throw new Error(`${name} is required for the TiDB/RustFS native gate`);
+  return value;
+}
+
+function nativeProviderRunId() {
+  const configured = process.env.MOUNT_RS_PROVIDER_MATRIX_RUN_ID ?? "";
+  return /^[A-Za-z0-9._-]+$/.test(configured)
+    ? configured
+    : `${process.pid}-${Date.now()}`;
+}
+
+function tidbRustfsConfig(transport) {
+  const runId = nativeProviderRunId();
+  const prefix = `mount-rs-provider-matrix/${runId}/native-tidb-rustfs`;
+  const volumeKey = `mount-rs-provider-matrix/${runId}/native-tidb-rustfs-metadata`;
+  requiredEnv("MOUNT_RS_TIDB_URL");
+  const endpoint = requiredEnv("R2_ENDPOINT");
+  const bucket = requiredEnv("R2_BUCKET");
+  requiredEnv("R2_ACCESS_KEY_ID");
+  requiredEnv("R2_SECRET_ACCESS_KEY");
+  if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+(?:\/|$)/.test(endpoint)) {
+    throw new Error("the TiDB/RustFS native gate requires a loopback R2_ENDPOINT");
+  }
+  return {
+    prefix,
+    volumeKey,
+    config: {
+      version: 1,
+      mountpoint: "./mount",
+      transport,
+      driver: {
+        kind: "splitstore",
+        storage: {
+          metadata: {
+            kind: "tidb",
+            connection: { env: "MOUNT_RS_TIDB_URL" },
+            volume_key: volumeKey,
+            durable: true,
+          },
+          blocks: {
+            kind: "r2",
+            endpoint,
+            bucket,
+            prefix,
+            access_key_id: { env: "R2_ACCESS_KEY_ID" },
+            secret_access_key: { env: "R2_SECRET_ACCESS_KEY" },
+            durable: true,
+          },
+          chunk_size_bytes: 7,
+          owner: `mount-rs-node-native-${runId}`,
+        },
+      },
+    },
+  };
+}
+
+async function verifyTidbRustfsFiles(configPath, expectedFiles) {
+  const source = JSON.parse(await readFile(configPath, "utf8"));
+  const storage = source.driver?.storage;
+  if (!storage?.metadata || !storage?.blocks) {
+    throw new Error("the TiDB/RustFS native config did not contain split storage");
+  }
+  const resolveCredential = (reference, label) => {
+    const name = reference?.env;
+    if (typeof name !== "string") throw new Error(`${label} must be an environment reference`);
+    return requiredEnv(name);
+  };
+  const sdk = await import(new URL("../../integrations/mount-rs-napi/index.js", import.meta.url));
+  const createChunkedDriver = sdk.createChunkedDriver ?? sdk.default?.createChunkedDriver;
+  if (typeof createChunkedDriver !== "function") {
+    throw new Error("the Node SDK does not export createChunkedDriver for native verification");
+  }
+  const filesystem = await createChunkedDriver({
+    metadata: {
+      kind: "tidb",
+      uri: resolveCredential(storage.metadata.connection, "metadata.connection"),
+      key: storage.metadata.volume_key,
+      durable: storage.metadata.durable,
+    },
+    blocks: {
+      kind: "r2",
+      endpoint: storage.blocks.endpoint,
+      bucket: storage.blocks.bucket,
+      key: storage.blocks.prefix,
+      accessKeyId: resolveCredential(storage.blocks.access_key_id, "blocks.access_key_id"),
+      secretAccessKey: resolveCredential(
+        storage.blocks.secret_access_key,
+        "blocks.secret_access_key",
+      ),
+      durable: storage.blocks.durable,
+    },
+    chunkSize: storage.chunk_size_bytes,
+    owner: `${storage.owner}-verify`,
+  });
+  try {
+    for (const [path, expected] of expectedFiles) {
+      assert.equal(
+        Buffer.from(await filesystem.readFile(path)).toString("utf8"),
+        expected,
+        `fresh Node SDK readback for ${path}`,
+      );
+    }
+  } finally {
+    await filesystem.shutdown();
+  }
+}
+
 async function run() {
   if (process.env[optIn] !== "1") {
     skip(`${optIn}=1`);
@@ -181,11 +300,15 @@ async function run() {
     skip(`${transport}-unavailable (${availability?.reason ?? "the SDK probe did not report a reason"})`);
     return;
   }
-  console.log(`GATE node-cli-native platform=${process.platform} transport=${transport} credentials=none`);
+  const tidbRustfsNative = process.env.MOUNT_RS_NODE_CLI_TIDB_RUSTFS_NATIVE === "1";
+  console.log(
+    `GATE node-cli-native platform=${process.platform} transport=${transport} ` +
+      `credentials=${tidbRustfsNative ? "environment" : "none"}`,
+  );
 
   const runDirectory = await mkdtemp(join(tmpdir(), "mount-rs-node-cli-native-"));
   const mountpoint = join(runDirectory, "mount");
-  const backing = join(runDirectory, "backing");
+  const backing = tidbRustfsNative ? undefined : join(runDirectory, "backing");
   const configPath = join(runDirectory, "config.json");
   const rustClient = join(runDirectory, "rust-fs-io");
   const filename = `node-cli-${process.pid}.txt`;
@@ -197,21 +320,31 @@ async function run() {
   let cli;
   let mounted = false;
   let failure;
+  let providerConfig;
 
   try {
     await mkdir(mountpoint);
-    await mkdir(backing);
-    await writeFile(join(backing, "seed.txt"), seed, { encoding: "utf8", mode: 0o600 });
-    await writeFile(
-      configPath,
-      `${JSON.stringify({
-        version: 1,
-        mountpoint: "./mount",
-        transport,
-        driver: { kind: "host", root: "./backing" },
-      }, null, 2)}\n`,
-      { encoding: "utf8", mode: 0o600 },
-    );
+    if (tidbRustfsNative) {
+      providerConfig = tidbRustfsConfig(transport);
+      await writeFile(
+        configPath,
+        `${JSON.stringify(providerConfig.config, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    } else {
+      await mkdir(backing);
+      await writeFile(join(backing, "seed.txt"), seed, { encoding: "utf8", mode: 0o600 });
+      await writeFile(
+        configPath,
+        `${JSON.stringify({
+          version: 1,
+          mountpoint: "./mount",
+          transport,
+          driver: { kind: "host", root: "./backing" },
+        }, null, 2)}\n`,
+        { encoding: "utf8", mode: 0o600 },
+      );
+    }
     await execFileAsync(
       "rustc",
       ["--edition=2024", rustClientSource, "-o", rustClient],
@@ -267,7 +400,15 @@ async function run() {
 
     const client = startCaptured(
       process.execPath,
-      ["--input-type=module", "-", resolvedMountpoint, filename, seed, first, second],
+      [
+        "--input-type=module",
+        "-",
+        resolvedMountpoint,
+        filename,
+        tidbRustfsNative ? "__MOUNT_RS_SKIP_SEED__" : seed,
+        first,
+        second,
+      ],
       { stdin: clientSource },
     );
     const clientExit = await withTimeout(client.exit, clientWaitMs, "independent Node client");
@@ -291,9 +432,17 @@ async function run() {
     mounted = false;
     console.log("PASS Node SDK CLI unmounted cleanly");
 
-    assert.equal(await readFile(join(backing, filename), "utf8"), second);
-    assert.equal(await readFile(join(backing, rustFilename), "utf8"), rustPayload);
-    console.log("PASS backing root retained Rust and Node client bytes after unmount");
+    if (tidbRustfsNative) {
+      await verifyTidbRustfsFiles(configPath, [
+        [`/${filename}`, second],
+        [`/${rustFilename}`, rustPayload],
+      ]);
+      console.log("PASS TiDB/RustFS provider retained Rust and Node client bytes after unmount");
+    } else {
+      assert.equal(await readFile(join(backing, filename), "utf8"), second);
+      assert.equal(await readFile(join(backing, rustFilename), "utf8"), rustPayload);
+      console.log("PASS backing root retained Rust and Node client bytes after unmount");
+    }
   } catch (error) {
     failure = error;
   } finally {
