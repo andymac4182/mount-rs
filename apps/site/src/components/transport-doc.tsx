@@ -189,7 +189,11 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>/dev/fuse</code> is absent and the non-Linux mount path returns
         <code>UnsupportedPlatform</code> without touching the requested path;
         the supported native macOS path is NFS, with no macFUSE or FSKit FUSE
-        parity claim. Hosted Linux callback, concurrency, close-race,
+        parity claim. The automatic mount facade now reports the configured
+        FUSE <code>fsname</code> through its shared <code>source</code> property;
+        unsupported-platform FUSE objects return no source. This is local/source
+        parity; exact-SHA hosted runs remain pending and do not close native
+        evidence. Hosted Linux callback, concurrency, close-race,
         crash/restart, and durability execution remain open.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
@@ -280,13 +284,17 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       <>
         Current-tree Rust and N-API checks retain backend handles across NFSv3
         unlink and NFSv4 rename, expose shared v3/v4 state, and exercise live
-        connection/client close and wait behavior. The focused package packet
-        passed 35 unit, rootless wire 1, transport concurrency 1,
-        transport-error 4, v4 barrier 1, and v4 wire 6 cases; the release
-        addon, generated typecheck, and live N-API server integration also
-        pass. Rootless NFSv4.1 survives an orderly TCP reconnect while the
+        connection/client close and wait behavior. The current complete locked
+        NFS target passed 38 unit, rootless wire 1, transport concurrency 1,
+        transport-error 4, v4 barrier 1, and v4 wire 6 cases; release
+        build/typecheck/live server integration and strict Clippy also pass.
+        Rootless NFSv4.1 survives an orderly TCP reconnect while the
         server remains alive, and eight pipelined NFSv3 MOUNT NULL calls pass
-        with <code>max_in_flight=4</code>. A restart-boundary test confirms
+        with <code>max_in_flight=4</code>. Dynamic v4 owner and clock callbacks
+        are exercised through the live N-API sequence, and bounded real-TCP
+        close cancellation passes 2/2 cases. Recorded hosted native-NFS run
+        <code>35650924001</code> was cancelled, so it is not acceptance. A
+        restart-boundary test confirms
         the old v4 session is rejected with <code>NFS4ERR_BADSESSION</code> by
         a replacement server, proving that session/lease state is process-local
         rather than crash-durable. The v4 state packet now covers lease,
@@ -647,7 +655,11 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         latest lifecycle slice passed formatting and the locked WebDAV test
         target, including the immediate <code>listen()</code>/<code>close()</code>
         lost-wakeup regression and 16 concurrent <code>listen()</code> calls
-        sharing one loopback port; N-API network/hosted concurrency,
+        sharing one loopback port. The current packet also qualifies N-API
+        wrapper lifecycle serialization and close-timeout retry-after-failure
+        semantics; host-enabled listener/peer-reset checks pass locally. This
+        remains local lifecycle evidence; restart/hosted session lifecycle
+        stays open. N-API network/hosted concurrency,
         crash/power-loss restart, and provider durability remain open.
         The direct streaming facade passes a three-chunk PUT, multi-chunk GET,
         early response-iterator return, and deliberate request-body failure
