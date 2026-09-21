@@ -37,15 +37,16 @@ the mount option bag; injected shared servers retain their own hooks. It
 deliberately does not claim automatic cross-transport signal ownership or
 unsupported native platforms. The pinned direct-option audit found no
 additional unrepresented `MountP9Options` fields, and `P9Mount.source` is now
-string-qualified and runtime-checked in the hosted direct mount. Exact SHA
-`3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed hosted Linux automatic,
-direct `./9p`, and structural-driver N-API mounted I/O/cleanup in Native 9P
-run `35665824215`, N-API job `106552944097`, with Rust job `106552944349` also
-passing; the direct `./9p` facade now owns the bounded `signals` teardown
-option.
-The `./9p`
-constants/message-name
-barrel is now complete against the pinned upstream surface, with all 124
+string-qualified and runtime-checked in the hosted direct mount. The pinned
+runtime audit also covers all 124 constants and all 274 upstream runtime
+`./9p` barrel exports, including the six public defaults. Exact SHA
+`0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed hosted Linux automatic,
+direct `./9p`, and structural-driver N-API mounted I/O/cleanup in [Native 9P
+run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703),
+N-API job `106558367429`, with Rust job `106558367006` also passing; the
+direct `./9p` facade now owns the bounded `signals` teardown option.
+The `./9p` constants/message-name/default barrel is now complete against the
+pinned upstream surface, with all 124 constants and all 274 runtime barrel
 exports differentially checked. The transport
 now also broadcasts shutdown safely
 across the accept loop and all connections, closes the active-connection
@@ -772,6 +773,7 @@ patch):
 | Main | W01 N-API 9P direct-facade signal teardown | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct `./9p` mounts support `signals` with process-wide `SIGINT`/`SIGTERM` cleanup, unmount-all dispatch, last-mount handler removal, and default-signal re-raise; the signal and mount-helper regressions plus syntax/diff checks passed; automatic cross-transport signal ownership, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
+| Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -1702,6 +1704,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   ledger snapshot. No queued, partial, or pre-fix result is promoted to W04
   or production acceptance; production remains **NO-GO**.
 
+- Recovery run `35666527609` has produced partial but useful evidence on its
+  pre-Ozone-fix head: ARM Node job `106553420990` passed the exact PGlite
+  integration/restart-recovery step and fragmented HTTP early-rejection step;
+  Windows Node job `106553420495` passed package and consumer checks. Ozone /
+  TiDB job `106553420645` reached the functional block contract but failed the
+  hard 1,000-IOPS target at 30.34 IOPS, while Ozone/FoundationDB job
+  `106553422646` passed durable chunk/reopen and cleanup markers but failed the
+  same target at 56.72 IOPS. Intel macOS remains in progress and macOS-latest,
+  Linux Node, and Ubuntu Rust remain queued at the current snapshot. This is
+  not W04 or production acceptance; a current-main run containing `23c0ba7e`
+  is still required for Ozone requalification and the complete Node matrix.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -2483,6 +2497,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   TTL is at most 24 hours. These checks harden evidence integrity only; they
   do not close any production identity, failover, recovery, capacity,
   observability, native-platform or release-owner gate.
+  The hosted workflow also validates the machine-readable
+  `docs/W07-production-evidence.json` packet with
+  `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
+  packet cases through `scripts/test-w07-production-evidence.mjs`. The packet
+  has one row for each W07.7 production gate and requires explicit remaining
+  actions while **NO-GO**; any future **GO** packet must carry a concrete
+  source revision, accountable owner, target environment, terminal run,
+  provider versions, cleanup/rollback outcome and evidence reference for every
+  closed gate. This is admission/tracking integrity only and cannot
+  authenticate production evidence or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
@@ -4676,6 +4700,7 @@ cross-drive isolation.
 | `2026-09-22 FUSE blocked-read stop-notify packet` | Hosted run `35662346488` at `b27dd2b` passed round-trip and backend-panic callback but failed only the blocked-read unmount in native-FUSE job `106540264683`; retain one stop-notify permit alongside `notify_waiters()` and add a Linux-gated blocked-positional-read stop regression | Host FUSE all-target tests, formatting/diff checks, and Linux-target strict Clippy pass; exact-tip hosted rerun must prove the blocked-read unmount before native lifecycle acceptance, and W01 remains NO-GO |
 | `2026-09-22 FUSE forced-unmount grace packet` | The same hosted timeout also showed that draining a session stuck in `/dev/fuse` for the full second timeout delays lazy detach beyond the native test's 15-second bound; add a 250ms stop grace, abort the owner task to close the descriptor, then begin a fresh forced-unmount deadline | Host FUSE tests, formatting/diff checks, and Linux-target strict Clippy pass; exact-tip hosted native-FUSE rerun remains required for ordinary/blocked unmount, callback, crash/restart, concurrency, locks and durability, and W01 stays NO-GO |
 | `2026-09-22 FUSE stopped-read terminal reply packet` | On stop, let each prepared positional-read worker produce a terminal `EIO` reply for its original request unique before session/device cleanup; only abort workers after the bounded drain deadline, and assert the wire error in the Linux-gated Unix-stream regression | Host FUSE all-target tests (14 unit, 6 INIT, 0 native, 6 notify/record, 11 protocol, 20 session, 4 sync-barrier), host strict Clippy, Linux-target check/strict Clippy, formatting and diff checks pass; manual hosted run `35662415701` / native-FUSE job `106540484337` passed ordinary round-trip and backend-panic close but blocked-read unmount and kernel read both timed out, so exact-tip hosted rerun remains required and W01 stays NO-GO |
+| `2026-09-22 FUSE concurrent forced-detach packet` | Manual non-canceling CI `35666436803` / native-FUSE job `106553144636` passed round-trip and backend-panic callback/close but blocked-read unmount exceeded the 15s observation bound; launch lazy detach concurrently with the 250ms stop grace so closing the descriptor can release the helper without adding a serialized timeout phase | Host FUSE tests, formatting/diff checks and Linux-target strict Clippy pass; exact updated hosted blocked-read result plus callback/lifecycle, crash/restart, concurrency, locks and durability evidence remain required, and W01 stays NO-GO |
 | `2026-09-22 FUSE native mount-object packet` (published as `4fd3e25e`) | Restore root N-API `Mounted[Symbol.asyncDispose]()` and record the supported-scope decision for transport-specific FUSE `session`, device `fd`, and invalidation members | Runtime/type coverage and the source audit are local PASS; final remote verification is `HEAD=origin/main=4fd3e25e`; exact-SHA CI run `35646646162` is pending and Fault injection run `35646646113` is in progress, so hosted Linux mount/callback/lifecycle evidence remains open |
 | `a3795f0` (published as `a4fa70a`) | Public napi-rs FUSE `OPEN`/`OPENDIR` request codecs | Protocol 7.8/7.39/7.41 pinned differential, typed replies, malformed/truncated/trailing checks and full N-API/typecheck/Clippy gates passed; native FUSE session/device/mount remains open |
 | `cc73ad5` (published as `0d8f3c3`) | Unstorage path, metadata and handle parity | 11 oracle rows passed with zero mismatches/skips; capability/edge/N-API/upstream gates passed; hardlinks, symlinks, statfs and mknod remain explicit limitations |

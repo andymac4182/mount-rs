@@ -14,11 +14,11 @@ upstream stream/attach contract or hosted native mount behavior.
 
 | Gate | State | Required evidence |
 | --- | --- | --- |
-| Public 9P exports and protocol behavior | Local PASS for the implemented codec, constants, qid, cursor, fid-table, and session-backed fid surface; parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, and public-session behavior |
+| Public 9P exports and protocol behavior | Local PASS for the implemented codec, all 124 pinned constants, and all 274 upstream runtime `./9p` barrel exports; broader protocol/session parity remains partial | Pinned 9P differential, generated declarations, malformed/trailing coverage, deterministic fid/qid/cursor lifecycle tests, the six public default values, every upstream `./9p` barrel export, and public-session behavior |
 | Session and connection objects | Local PASS for current exposed members and the bounded N-API mount-helper facade; hosted Linux N-API lifecycle PASS for the supported surface; parity remains partial | `P9Session.handleCall`/`destroy`, scalar `options`, live `driver`, `userFor`, debug-gated assertions, request-error/assertion callbacks, live `locks` and `fids`, stats/lifecycle, live property-shaped `clients`, peer, `closed`, attached stream exposure, identity/handle tests, injected shared lock-table option coverage, direct `./9p` probe/refusal/option/mount-helper/signal checks, configured `P9Server` reuse through the native mount option, direct mount-created scalar server-policy/session-callback mapping, and exact-SHA hosted automatic/direct/structural native 9P mounted I/O and cleanup; the direct `MountP9Options` audit found no additional unrepresented fields, while automatic cross-transport signal ownership remains an explicit scope boundary |
 | Attached-stream contract | Local PASS | Node `attach(stream, options)` with typed peer/ownership/frame/in-flight bounds, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
-| Linux native 9P | Hosted PASS for the supported Rust and N-API Linux lifecycle scope; crash/reset/half-close recovery is outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2`, passed `9p`/`9pnet_fd` probing and all four ignored Rust native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` then passed [Native 9P run `35665824215`](https://github.com/andymac4182/mount-rs/actions/runs/35665824215): N-API job `106552944097` passed automatic, direct `./9p` (including non-empty string `source`), and structural-driver mounted I/O/cleanup, while Rust job `106552944349` passed all four ignored native tests. Earlier runs remain below as history |
+| Linux native 9P | Hosted PASS for the supported Rust and N-API Linux lifecycle scope; crash/reset/half-close recovery is outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2`, passed `9p`/`9pnet_fd` probing and all four ignored Rust native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` then passed [Native 9P run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703): N-API job `106558367429` passed automatic, direct `./9p` (including non-empty string `source`), and structural-driver mounted I/O/cleanup, while Rust job `106558367006` passed all four ignored native tests. Earlier runs remain below as history |
 | Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; supported hosted lifecycle PASS; crash/reset/half-close are supervisor-owned | Focused Rust/N-API lifecycle and fault tests cover broadcast shutdown, accept-loop close races, shutdown-aware in-flight permit waits, bounded task reaping, transport faults, and session destruction that wakes and drains `Tflush` waiters; the hosted native harness now passes eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, external umount, and bounded-unmount cleanup. Automatic recovery after process crash or arbitrary kernel reset/half-close remains explicitly outside the library contract |
 
 ## Current queue
@@ -47,13 +47,16 @@ upstream stream/attach contract or hosted native mount behavior.
   ownership claims, debug mode, lock-table injection, and direct session
   `onError`/`onAssertion` callbacks. These callbacks apply to a listener created
   by the mount; an injected shared server retains its own callbacks. The direct
-  `./9p` signal teardown is now supported. Automatic cross-transport signal ownership and
-  the pinned oracle audit found no additional unrepresented direct `MountP9Options`
-  fields, and `P9Mount.source` is now type- and runtime-qualified as a non-empty
-  string. Automatic cross-transport signal ownership remains an explicit scope
-  boundary rather than a root automatic-mount claim. The exact-SHA hosted N-API
-  run `35665824215` / job `106552944097` qualifies the supported Linux automatic,
-  direct, and structural-driver native lifecycle views.
+  `./9p` signal teardown is now supported. The pinned oracle audit found no
+  additional unrepresented direct `MountP9Options` fields, and `P9Mount.source`
+  is now type- and runtime-qualified as a non-empty string. Automatic
+  cross-transport signal ownership remains an explicit scope boundary rather
+  than a root automatic-mount claim. Exact SHA
+  `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` in [Native 9P run
+  `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703),
+  N-API job `106558367429`, qualifies the supported Linux automatic, direct,
+  and structural-driver native lifecycle views; Rust job `106558367006` also
+  passed all four ignored native tests.
 
 ## Supported-scope decisions
 
@@ -88,9 +91,10 @@ upstream stream/attach contract or hosted native mount behavior.
   opened session fid. Direct table mutation is a low-level inspection/testing
   seam: orderly production teardown remains protocol `Tclunk` or
   `P9Session.destroy`, not an arbitrary `clear()` on a live session. The
-  constants/message-name part of the `./9p` barrel is complete and
-  differentially checked across all 124 upstream exports. These remaining gaps
-  are not silently accepted out of scope.
+  constants/message-name/default part of the `./9p` barrel is complete and
+  differentially checked across all 124 pinned constants and all 274 upstream
+  runtime barrel exports, including the six public defaults. These remaining
+  gaps are not silently accepted out of scope.
 - Graceful server close, external unmount, and retryable unmount are in scope;
   the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
@@ -100,17 +104,20 @@ upstream stream/attach contract or hosted native mount behavior.
 The dedicated hosted `Native 9P` workflow now also contains an N-API Linux job
 that loads the kernel client, builds the public addon, and runs automatic,
 direct `./9p`, and structural-driver mounted-I/O/cleanup checks as root. Exact
-SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed all three checks in run
-`35665824215`, N-API job `106552944097`, with the direct native check asserting
-the mounted `source` is a non-empty string; the Rust native job
-`106552944349` passed all four ignored lifecycle tests. The direct native check
-is opt-in outside that job and deliberately preserves its mountpoint and driver
+SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed all three checks in
+[run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703),
+N-API job `106558367429`, with the direct native check asserting the mounted
+`source` is a non-empty string; the Rust native job `106558367006` passed all
+four ignored lifecycle tests. The local pinned oracle check at that same
+packet passed `124 constants; 274 barrel exports`. The direct native check is
+opt-in outside that job and deliberately preserves its mountpoint and driver
 root when teardown is not proven safe.
 
 ## Evidence ledger
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | N-API 9P public barrel and default parity | Added the six pinned oracle defaults (`DEFAULT_P9_PORT`, `DEFAULT_SOCKET_MODE`, `DEFAULT_MAX_IN_FLIGHT`, `DEFAULT_MSIZE`, `P9_LOCK_EOF_END`, and `DEFAULT_MAX_LOCKS_PER_FILE`) to the direct facade, postlude binding, and generated declarations. The pinned runtime test passed all 124 constants and every one of the 274 upstream 9P barrel exports; local typecheck, syntax, helper, and diff checks passed. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed [Native 9P run `35668145703`](https://github.com/andymac4182/mount-rs/actions/runs/35668145703): N-API job `106558367429` passed automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests | Automatic cross-transport signal ownership remains an explicit scope boundary; native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 acceptance remain open |
 | 2026-09-22 | N-API 9P return-shape and direct-option parity | The declaration now narrows `P9Mount.source` to `string`; generated typecheck, `node --check test/p9-native.mjs`, the Darwin-safe native smoke test, the mount-helper regression, and `git diff --check` passed locally. The pinned oracle audit found no additional unrepresented direct `MountP9Options` fields. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed [Native 9P run `35665824215`](https://github.com/andymac4182/mount-rs/actions/runs/35665824215): N-API job `106552944097` passed automatic/direct/structural mounted I/O and cleanup, including the non-empty `source` assertion, and Rust job `106552944349` passed all four ignored native tests | Automatic cross-transport signal ownership remains an explicit scope boundary; crash/reset/half-close recovery remains supervisor-owned and broader W01 acceptance remains open |
 | 2026-09-22 | Hosted N-API 9P lifecycle gate | Run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic N-API mounted I/O/cleanup (`PASS (9p)`), direct `./9p` mounted I/O/views/cleanup, and structural-driver mounted I/O/cleanup (`PASS (9p; read/write/unmount callback reachability)`); the Rust `native-9p` job `106547449501` also passed | Automatic cross-transport signal ownership and remaining mount controls remain open; crash/reset/half-close recovery remains supervisor-owned and broader W01 acceptance remains open |
 | 2026-09-22 | Attached Node Duplex and session contract | `./scripts/cargo-shared test -p mount-rs-9p --all-targets --locked` passed 24 focused tests; `./scripts/cargo-shared check -p mount-rs-napi --locked` passed; `./scripts/cargo-shared clippy -p mount-rs-9p -p mount-rs-napi --all-targets --locked -- -D warnings` passed; `pnpm build:debug`, `node test/typecheck.mjs`, and host-enabled `node test/servers.mjs` passed; `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 pnpm test` passed, including the pinned 44-case 9P codec differential and artifact aggregation | PGlite/R2/native-mount opt-ins are explicit skips; current-revision hosted Linux native 9P, native mount fault/race/crash, and broader W01 acceptance remain open |
