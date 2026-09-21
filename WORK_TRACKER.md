@@ -908,6 +908,10 @@ hosted session/member lifecycle remain open; local SQLite process-crash
 recovery is covered by the dedicated N-API probe. The callable/member packet
 `8f0e74138286a678cbc5868d3cc4a528fb1b9fe9` has exact-SHA CI and release lanes
 pending or queued, so no hosted WebDAV acceptance is claimable from that packet.
+The subsequent 64-pair packet `d391f9b798df455311177f462ab160736ed3ba4c`
+had its exact-SHA CI, W08, Fault injection, and W04 runs cancelled by later
+mainline publication while its Live R2 run remained queued; its local
+concurrency evidence is not promoted to hosted acceptance.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
