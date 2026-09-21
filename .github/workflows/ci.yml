@@ -63,6 +63,25 @@ jobs:
           MOUNT_RS_OZONE_NODE_COMPOSITION: '1'
         run: sh scripts/test-ozone-compositions.sh
 
+  ozone-tidb:
+    # W26.3 needs the real Ozone gateway and the durable TiDB topology in the
+    # same job; the separate tidb-rustfs job intentionally uses RustFS.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify durable TiDB metadata over Apache Ozone chunks
+        env:
+          MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
+          MOUNT_RS_TIDB_TOPOLOGY: durable
+          MOUNT_RS_TIDB_VERSION: v8.5.7
+          MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
+        run: sh scripts/test-ozone.sh
+
   rustfs:
     runs-on: ubuntu-latest
     timeout-minutes: 25

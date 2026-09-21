@@ -161,4 +161,9 @@ provider matrix's PGlite-metadata/R2-block row and
 Node CLI's real `--sdk-self-test --reopen` path; it also runs the matching
 ignored Rust CLI self-test against a generated versioned config. Those rows
 are live provider evidence, not static validation. TiDB and FoundationDB
-remain explicit manual modes and are not implied to be covered by this job.
+have dedicated hosted composition jobs: `ozone-tidb` runs the durable
+three-PD/three-TiKV TiDB topology against the real Ozone gateway, while the
+FoundationDB lane selects its durable three-node topology in the
+`foundationdb-rustfs` job. A green job is still revision-specific and does not
+claim production authentication, TLS, power-loss durability, or native-mount
+support.
