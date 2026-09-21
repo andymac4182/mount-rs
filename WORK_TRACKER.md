@@ -2331,14 +2331,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   the AWS S3 provider, SDK/CLI, gateway, CI-safety changes, and the integrated
   workstream code present at that commit; later unrelated NFS/W01 commits are
   outside this evidence boundary.
-- [x] Current-head repository gates at `8004999` passed on 2026-09-22:
+- [x] The latest tested repository boundary `8004999` passed on 2026-09-22:
   `cargo fmt --all -- --check`,
   `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
   --all-targets --locked --offline`, and strict workspace Clippy with
   `--all-targets --locked --offline -- -D warnings`. The passing test gate
   includes the AWS provider, SDK/CLI, S3 gateway, policy/preflight support, and
-  current integrated source. Explicitly ignored native/service rows remain
-  separate prerequisites and are not promoted to production evidence.
+  current integrated source. Current `origin/main` is `beee06f`; the
+  intervening changes are documentation/workflow updates and do not change the
+  provider source covered by that gate. Explicitly ignored native/service rows
+  remain separate prerequisites and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2454,8 +2456,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
   `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
-  and partial 606-file inventory; the issue is remediated on current pushed
-  head `3fca802` by a redacting SDK `Debug` implementation and regression test,
+  and partial 606-file inventory; the issue is remediated on pushed head
+  `3fca802` by a redacting SDK `Debug` implementation and regression test,
   and the later `1d63319` IaC prefix hardening is also outside the scan; the
   scan itself remains stale for current-head security acceptance. The existing
   test role trust policy allows only the selected SSO administrator role and does
