@@ -133,6 +133,50 @@ const latency = latencyMatch
     }
   : null;
 
+const provenanceFields = [
+  [
+    "repository",
+    process.env.W07_QUALIFICATION_REPOSITORY,
+    /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u,
+  ],
+  ["workflow", process.env.W07_QUALIFICATION_WORKFLOW, /\S/u],
+  ["ref", process.env.W07_QUALIFICATION_REF, /\S/u],
+  [
+    "sourceRevision",
+    process.env.W07_QUALIFICATION_SOURCE_REVISION,
+    /^[0-9a-f]{40}$/iu,
+  ],
+  ["runId", process.env.W07_QUALIFICATION_RUN_ID, /^[1-9]\d*$/u],
+  ["runAttempt", process.env.W07_QUALIFICATION_RUN_ATTEMPT, /^[1-9]\d*$/u],
+  ["runner", process.env.W07_QUALIFICATION_RUNNER, /\S/u],
+];
+const provenanceRequested =
+  process.env.W07_REQUIRE_PROVENANCE === "1" ||
+  provenanceFields.some(([, value]) => value !== undefined);
+let provenance = null;
+if (provenanceRequested) {
+  const missingProvenance = provenanceFields
+    .filter(([, value]) => value === undefined || value.length === 0)
+    .map(([name]) => name);
+  const invalidProvenance = provenanceFields
+    .filter(
+      ([, value, pattern]) =>
+        value !== undefined && value.length > 0 && !pattern.test(value),
+    )
+    .map(([name]) => name);
+  if (missingProvenance.length > 0) {
+    missing.push(`provenance-missing-${missingProvenance.join("+")}`);
+  }
+  if (invalidProvenance.length > 0) {
+    missing.push(`provenance-invalid-${invalidProvenance.join("+")}`);
+  }
+  if (missingProvenance.length === 0 && invalidProvenance.length === 0) {
+    provenance = Object.fromEntries(
+      provenanceFields.map(([name, value]) => [name, value]),
+    );
+  }
+}
+
 if (
   latency &&
   (latency.operations <= 0 ||
@@ -162,17 +206,27 @@ if (missing.length > 0) {
 }
 
 const summary = {
-  schema: 1,
+  schema: 2,
   result: "qualification-pass",
   expectedSoakRounds: expectedRounds,
   markers: found,
   latency,
+  provenance,
 };
 
 if (summaryPath) {
   await writeFile(summaryPath, `${JSON.stringify(summary, null, 2)}\n`);
 }
 
+if (provenance) {
+  console.log(
+    "W07_PRODUCTION_QUALIFICATION_PROVENANCE_PASS " +
+      `repository=${provenance.repository} workflow=${provenance.workflow} ` +
+      `ref=${provenance.ref} source_revision=${provenance.sourceRevision} ` +
+      `run_id=${provenance.runId} run_attempt=${provenance.runAttempt} ` +
+      `runner=${provenance.runner}`,
+  );
+}
 console.log(
   `W07_PRODUCTION_QUALIFICATION_EVIDENCE_PASS rounds=${expectedRounds} ` +
     `workload=${latency.workload} operations=${latency.operations}`,

@@ -43,7 +43,7 @@ included
 `FOUNDATIONDB_NAPI_PASS`, `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
 `FOUNDATIONDB_TEST_PASS topology=durable`.
 
-The current terminal hosted evidence is run
+The previous corrected terminal hosted evidence is run
 [`35620006731`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731)
 (job `106402140768`, revision `aa3dae3`). Its retained artifact summary is
 `qualification-pass` and records `FOUNDATIONDB_CLI_PASS
@@ -52,10 +52,10 @@ mode=foundationdb-rustfs-fuse`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
 p95_us=48162 p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`,
 `FOUNDATIONDB_TEST_PASS ... platform=linux/amd64 service_restart=pass
 soak_rounds=5`, `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This closes
-the hosted Linux qualification checkpoint for the tested revision; it does not
-close the separate production gates.
+the corrected hosted Linux qualification checkpoint for the tested revision; it
+does not close the separate production gates.
 
-The later current-main hosted run
+The latest current-main hosted run
 [`35623491280`](https://github.com/andymac4182/mount-rs/actions/runs/35623491280)
 (job `106415143857`, revision `336d9a3`) also retained a
 `qualification-pass` summary with `FOUNDATIONDB_CLI_PASS`, five soak rounds,
@@ -63,7 +63,11 @@ The later current-main hosted run
 p95_us=61081 p99_us=61081 total_ms=233 throughput_ops_per_sec=64.28`,
 `FOUNDATIONDB_TEST_PASS ... platform=linux/amd64 service_restart=pass
 soak_rounds=5`, `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. It is the
-latest hosted qualification checkpoint, not production acceptance.
+latest hosted qualification checkpoint. Its retained artifact
+`foundationdb-production-qualification-35623491280-1` has SHA-256
+`b353ac2744dae9c469f7807533f8eec0d52e49120a101552c428585e0559741d`; the
+schema-versioned summary now records the workflow provenance for that run. It
+is still qualification evidence, not production acceptance.
 
 The follow-up network-cleanup run also emitted
 `FOUNDATIONDB_RUSTFS_NETWORK_READY`,
@@ -82,9 +86,12 @@ The repository now also contains the manually dispatched
 `.github/workflows/foundationdb-production.yml` gate. It uses non-cancelling
 concurrency, runs the durable composition with five isolated bounded soak
 rounds plus Node, Linux native CLI/FUSE, restart and fresh-client checks, and retains a
-redacted terminal log artifact. This makes the hosted qualification result
-auditable despite unrelated mainline pushes; it remains qualification evidence
-and cannot close the production gates below.
+redacted terminal log and a schema-versioned summary artifact. The summary is
+required to carry the repository, source revision, ref, workflow, runner, run ID
+and attempt that produced the markers, so the retained result can be reconciled
+to one immutable workflow execution despite unrelated mainline pushes. This
+makes the hosted qualification result auditable; it remains qualification
+evidence and cannot close the production gates below.
 
 ## Production gate ledger
 

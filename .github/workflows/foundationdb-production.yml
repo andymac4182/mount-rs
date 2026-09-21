@@ -87,11 +87,22 @@ jobs:
 
       - name: Validate W07 qualification evidence markers
         if: success()
+        env:
+          W07_REQUIRE_PROVENANCE: '1'
+          W07_QUALIFICATION_REPOSITORY: ${{ github.repository }}
+          W07_QUALIFICATION_WORKFLOW: ${{ github.workflow }}
+          W07_QUALIFICATION_REF: ${{ github.ref }}
+          W07_QUALIFICATION_SOURCE_REVISION: ${{ github.sha }}
+          W07_QUALIFICATION_RUN_ID: ${{ github.run_id }}
+          W07_QUALIFICATION_RUN_ATTEMPT: ${{ github.run_attempt }}
+          W07_QUALIFICATION_RUNNER: ${{ runner.name }}
         run: |
+          set -o pipefail
           node scripts/verify-w07-qualification-log.mjs \
             artifacts/foundationdb-production-qualification.log \
             5 \
-            artifacts/foundationdb-production-qualification-summary.json
+            artifacts/foundationdb-production-qualification-summary.json \
+            2>&1 | tee -a artifacts/foundationdb-production-qualification.log
 
       - name: Preserve W07 qualification evidence
         if: always()

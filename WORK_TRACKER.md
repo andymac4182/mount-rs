@@ -1482,7 +1482,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   throughput_ops_per_sec=64.28`, `FOUNDATIONDB_TEST_PASS topology=durable
   ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
   `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a newer bounded
-  current-main qualification checkpoint, not production-duration, capacity,
+  current-main qualification checkpoint; its retained artifact
+  `foundationdb-production-qualification-35623491280-1` has SHA-256
+  `b353ac2744dae9c469f7807533f8eec0d52e49120a101552c428585e0559741d`, and
+  the workflow summary records the repository, source revision, ref, runner,
+  workflow, run ID and attempt. It is not production-duration, capacity,
   identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
