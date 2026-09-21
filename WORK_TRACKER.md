@@ -305,6 +305,9 @@ Malformed bodies return `EINVAL` without backend mutation. The complete locked
 FUSE target passed 14 unit, 6 INIT, 6 notify/record, 11 protocol, 20 session,
 and 3 sync-barrier tests, and strict warning-denied Clippy passed; native xattr
 and BMAP support remains unadvertised and unimplemented.
+The subsequent native read-interrupt packet is also compiled against this
+context-aware validator, so `FUSE_INTERRUPT` retains its fixed-body boundary
+while known read workers can be aborted independently.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 

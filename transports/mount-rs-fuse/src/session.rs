@@ -693,7 +693,7 @@ impl FuseSession {
     ) -> std::result::Result<Option<u64>, crate::ProtocolError> {
         let request = Request::decode(bytes, self.max_request)?;
         if request.header.opcode != FUSE_INTERRUPT
-            || validate_body(FUSE_INTERRUPT, request.body).is_err()
+            || validate_body(FUSE_INTERRUPT, request.body, None).is_err()
         {
             return Ok(None);
         }
