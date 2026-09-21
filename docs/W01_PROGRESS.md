@@ -256,6 +256,8 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-21 | W01.1 / W01.4 | Added peer-aware S3 connection transport errors on the tracked TCP boundary: a reset-on-close loopback fault produced one `Connection` event with the accepted peer, and the full Rust gateway target passed 14/14; strict S3/N-API Clippy, release N-API build, host-enabled server integration, generated typecheck, and distribution/export checks also passed | — | 77% W01.1 planning view | Direct JavaScript peer-fault injection remains unqualified; streaming direct-session bodies, S3 assertion retention, protocol/XML/lock helper exports, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-S3 | Reconciled the current `origin/main` S3 loopback-only hardening with the Rust peer-fault packet; bounded drain timeout, live TCP connection tracking, peer-aware transport hooks, and reset-on-close evidence passed in the locked S3 target (4 unit, 6 chunked, 17 gateway, 5 public-API tests) | — | 70% W01.1 planning view | S3 N-API streaming/member parity, direct JavaScript peer-fault evidence, live AWS/R2, and broader fault/restart/durability/concurrency/native gates remain open; W01 stays NO-GO |
 
+| 2026-09-22 | W01-FUSE | Added fail-closed validation for caller-supplied native FUSE mount option tokens and transport-owned overrides; focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS | — | 35% W01.4 planning view | Hosted Linux `/dev/fuse`, callback-event, crash/concurrency/durability, and signed/activated FSKit evidence remain open; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:

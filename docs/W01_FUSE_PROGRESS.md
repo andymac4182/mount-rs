@@ -37,6 +37,7 @@ close native Linux mount, hosted CI, FSKit, or root-callback acceptance.
 | --- | --- | --- | --- |
 | 2026-09-22 | Inherited W01 baseline | Current `origin/main` FUSE codec/session packets and existing root evidence remain available; privileged/native results are separate | Native Linux/FSKit, root callback events, remaining session parity, and lifecycle/race gates |
 | 2026-09-22 | Rust session controls | Added public `FuseSessionOptions`, configurable inode identity, INIT preferences, cache/timeout policy, explicit flush modes, lifecycle/error observability, and regression tests; focused package tests and strict Clippy remain required before publication | Native mount/callback, hosted Linux, cancellation/concurrency, crash/restart and durability evidence |
+| 2026-09-22 | Mount option boundary | Added fail-closed validation for caller-supplied native mount option tokens and transport-owned overrides; focused package tests and strict Clippy passed on macOS | Hosted Linux `/dev/fuse`, callback-event, crash/concurrency/durability, and signed/activated FSKit evidence |
 
 ## Completion rule
 

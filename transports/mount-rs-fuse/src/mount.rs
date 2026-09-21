@@ -646,6 +646,9 @@ fn validate_options(options: &MountOptions) -> Result<(), MountError> {
     if let Some(subtype) = &options.subtype {
         validate_token("subtype", subtype)?;
     }
+    for (index, option) in options.mount_options.iter().enumerate() {
+        validate_mount_option(index, option)?;
+    }
     if options.max_frame < crate::IN_HEADER_SIZE {
         return Err(MountError::InvalidOption(
             "max_frame is smaller than the FUSE request header".to_owned(),
@@ -660,6 +663,40 @@ fn validate_options(options: &MountOptions) -> Result<(), MountError> {
         return Err(MountError::InvalidOption(
             "mount timeouts must be non-zero".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_mount_option(index: usize, value: &str) -> Result<(), MountError> {
+    let key = value.split_once('=').map_or(value, |(key, _)| key);
+    let reserved = matches!(
+        key,
+        "fd" | "rootmode"
+            | "user_id"
+            | "group_id"
+            | "fsname"
+            | "subtype"
+            | "default_permissions"
+            | "allow_other"
+            | "ro"
+            | "max_read"
+    );
+    if value.is_empty()
+        || value.starts_with('-')
+        || key.is_empty()
+        || value.chars().any(|character| {
+            character == ',' || character.is_whitespace() || character.is_control()
+        })
+    {
+        return Err(MountError::InvalidOption(format!(
+            "mount_options[{index}] must be one non-empty option token without commas, whitespace, control characters or a leading '-'"
+        )));
+    }
+    if reserved {
+        return Err(MountError::InvalidOption(format!(
+            "mount_options[{index}] may not override the transport-owned '{key}' option"
+        )));
     }
     Ok(())
 }
@@ -1333,6 +1370,21 @@ mod tests {
             assert!(validate_token("fsname", "bad,allow_other").is_err());
             assert!(validate_token("subtype", "bad=option").is_err());
             assert!(validate_token("fsname", "-option").is_err());
+
+            assert!(validate_mount_option(0, "nodev").is_ok());
+            assert!(validate_mount_option(1, "context=system_u:object_r:fusefs_t:s0").is_ok());
+            assert!(validate_mount_option(2, "bad,allow_other").is_err());
+            assert!(validate_mount_option(3, "bad option").is_err());
+            assert!(validate_mount_option(4, "=missing-key").is_err());
+            assert!(validate_mount_option(5, "-o").is_err());
+            assert!(validate_mount_option(6, "fsname=caller-controlled").is_err());
+            assert!(validate_mount_option(7, "fd=99").is_err());
+
+            let mut options = MountOptions::default();
+            options.mount_options = vec!["nodev".to_owned()];
+            assert!(validate_options(&options).is_ok());
+            options.mount_options = vec!["fsname=caller-controlled".to_owned()];
+            assert!(validate_options(&options).is_err());
         }
     }
 
