@@ -1018,6 +1018,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `RUSTFS_INTEGRATION_PASS`. This is terminal hosted Linux qualification for
   the tested revision; it does not close the production identity/TLS,
   backup/recovery, capacity, observability, macOS or release-owner gates.
+A follow-up hosted run
+[`35601357569`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35601357569)
+(job
+[`106337982523`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35601357569/job/106337982523))
+at revision `622d0d1` also completed green on `ubuntu-24.04` in 11m38s. Both
+production-config policy fixtures passed their expected positive/negative
+outcomes, and the run emitted
+`FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=9893
+p95_us=28865 p99_us=28865 total_ms=124 throughput_ops_per_sec=88.62`, followed
+by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
+`RUSTFS_COMBO_PASS` and RustFS integration markers. This is terminal hosted
+Linux qualification and bounded workload measurement for the tested revision;
+it does not close production identity/ACL/TLS, backup/recovery, capacity,
+observability, macOS or release-owner gates.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1058,8 +1072,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput for future retained runs; this does not convert
-    the prior one-round qualification into production capacity evidence.
+    latency and throughput; hosted run `35601357569` recorded the marker at
+    revision `622d0d1`. This is bounded qualification evidence and does not
+    convert the one-round result into production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
