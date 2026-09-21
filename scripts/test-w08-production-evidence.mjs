@@ -120,6 +120,21 @@ const cases = [
     args: ["--require-go"],
   },
   {
+    name: "go-placeholder-evidence",
+    expectedStatus: 1,
+    expectedOutput: "reason=p01-evidence-1-topology-must-be-concrete",
+    evidence: (() => {
+      const packet = completeGoPacket();
+      packet.gates[0].evidence[0].topology = "TBD";
+      return packet;
+    })(),
+    rollout: sourceRollout.replace(
+      "| Production rollout | **NO-GO** |",
+      "| Production rollout | **GO** |",
+    ),
+    args: ["--require-go"],
+  },
+  {
     name: "go-nonterminal-evidence",
     expectedStatus: 1,
     expectedOutput: "reason=p01-evidence-1-terminal-status-not-terminal",

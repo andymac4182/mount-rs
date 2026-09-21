@@ -2627,6 +2627,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   implementation/static qualification; provider and production gates remain
   external.)*
 
+- [x] W08.36 **Production evidence placeholder rejection:** the machine-
+  readable W08 GO validator now rejects placeholder-shaped provider versions,
+  topology, environment, run, owner, cleanup, rollback and evidence-reference
+  values such as `TBD`, `pending`, `unknown`, `TODO`, template markers and
+  angle-bracket substitutions. The regression suite now covers a synthetic GO
+  packet with `topology=TBD` and fails it closed while the real packet remains
+  NO-GO with zero evidence records. This prevents tracking text from being
+  mistaken for terminal production evidence; it does not authenticate a real
+  provider run or grant release approval. *(Implementation/static
+  qualification; production evidence and approval remain external.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the

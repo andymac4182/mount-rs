@@ -42,6 +42,14 @@ function requireString(value, reason) {
   if (typeof value !== "string" || value.trim() === "") fail(reason);
 }
 
+const placeholderPattern =
+  /(?:\b(?:TBD|TODO|UNKNOWN|PENDING|CHANGEME)\b|<[^>\n]+>|\{\{[^}\n]+\}\})/iu;
+
+function requireConcreteString(value, reason) {
+  requireString(value, reason);
+  if (placeholderPattern.test(value.trim())) fail(`${reason}-must-be-concrete`);
+}
+
 function requireSha(value, reason) {
   if (!/^[0-9a-f]{40}$/u.test(value ?? "")) fail(reason);
 }
@@ -113,23 +121,49 @@ for (const gateId of expectedGateIds) {
     if (
       !Array.isArray(record.providerVersions) ||
       record.providerVersions.length === 0 ||
-      record.providerVersions.some((version) => typeof version !== "string" || version.trim() === "")
+      record.providerVersions.some(
+        (version) =>
+          typeof version !== "string" ||
+          version.trim() === "" ||
+          placeholderPattern.test(version.trim()),
+      )
     ) {
       fail(`${gateId.toLowerCase()}-evidence-${index + 1}-provider-versions`);
     }
-    requireString(record.topology, `${gateId.toLowerCase()}-evidence-${index + 1}-topology`);
-    requireString(record.environment, `${gateId.toLowerCase()}-evidence-${index + 1}-environment`);
-    requireString(record.testOrRunId, `${gateId.toLowerCase()}-evidence-${index + 1}-test-or-run-id`);
+    requireConcreteString(
+      record.topology,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-topology`,
+    );
+    requireConcreteString(
+      record.environment,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-environment`,
+    );
+    requireConcreteString(
+      record.testOrRunId,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-test-or-run-id`,
+    );
     if (
       typeof record.terminalStatus !== "string" ||
       !terminalStatuses.has(record.terminalStatus.trim().toLowerCase())
     ) {
       fail(`${gateId.toLowerCase()}-evidence-${index + 1}-terminal-status-not-terminal`);
     }
-    requireString(record.owner, `${gateId.toLowerCase()}-evidence-${index + 1}-owner`);
-    requireString(record.cleanupOutcome, `${gateId.toLowerCase()}-evidence-${index + 1}-cleanup-outcome`);
-    requireString(record.rollbackOutcome, `${gateId.toLowerCase()}-evidence-${index + 1}-rollback-outcome`);
-    requireString(record.evidenceRef, `${gateId.toLowerCase()}-evidence-${index + 1}-evidence-ref`);
+    requireConcreteString(
+      record.owner,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-owner`,
+    );
+    requireConcreteString(
+      record.cleanupOutcome,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-cleanup-outcome`,
+    );
+    requireConcreteString(
+      record.rollbackOutcome,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-rollback-outcome`,
+    );
+    requireConcreteString(
+      record.evidenceRef,
+      `${gateId.toLowerCase()}-evidence-${index + 1}-evidence-ref`,
+    );
     evidenceRecords += 1;
   }
 
