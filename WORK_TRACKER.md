@@ -228,6 +228,22 @@ Node SDK mounting through native NFS, writing and reading its file, unmounting,
 and leaving the temporary backing directory clean. This is a separate Node CLI
 consumer check; it does not qualify Linux FUSE, FSKit or live providers.
 
+The latest W01 acceptance packets were published to `origin/main` at
+`25644c5`. `462d54b` closes the remaining Unstorage evidence harness gap:
+preparations now execute for both oracle and native adapters, refusals assert
+state preservation, hidden hardlink/mknod boundaries are split into separate
+rows, and the packet is part of the N-API chain. The direct and N-API gates
+passed 31 rows (5 PASS, 26 exact ENOSYS, zero ENOTSUP or skipped rows).
+`a3d980d` extends the opt-in Node SDK CLI native gate so the mounted path is
+exercised by an independent Rust client and an independent Node client, with
+Rust verifying the bytes written by Node. The authorized macOS NFS run passed
+mount, Rust read/write, Node read/write, cross-client readback, unmount and
+backing-root persistence. `25644c5` adds plain-flag FUSE `RENAME2` session
+support while keeping unsupported flags fail-closed; 16 focused FUSE tests,
+strict Clippy and formatting passed. FALLOCATE, LSEEK and COPY_FILE_RANGE
+remain explicit unsupported boundaries, and Linux hosted FUSE remains a
+separate acceptance gate.
+
 The third W01 implementation rotation was validated locally and published
 sequentially to `origin/main` (verified remote ref
 `10666e8dcca35c0cb39483317272de6832acb984`). The Rust FUSE packet is

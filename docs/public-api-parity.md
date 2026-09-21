@@ -592,6 +592,19 @@ the closure items listed above.
   rows now cover inode-sharing, destination/source errors, alias write-through
   and unlink lifetime in direct and N-API execution, with zero `ENOTSUP`
   mismatches and zero skips. Generic hardlink inode support remains open.
+- **PASS** — `462d54b` Unstorage remaining-skip evidence packet: preparations
+  execute against both adapters, refusal rows verify state preservation, and
+  the direct/N-API chain covers 31 rows with 5 PASS, 26 exact `ENOSYS`, zero
+  `ENOTSUP` mismatches and zero skipped rows.
+- **PASS** — `25644c5` Rust FUSE `RENAME2` session packet: plain-flag rename
+  is supported, unsupported flags return `ENOSYS` without mutation, and the
+  focused 16-test suite plus strict Clippy passed. FALLOCATE, LSEEK and
+  COPY_FILE_RANGE remain intentionally unsupported; this is not native-kernel
+  mount evidence.
+- **PASS** — `a3d980d` Node SDK CLI cross-language native gate: the authorized
+  macOS NFS run mounted through the Node CLI, exercised independent Rust and
+  Node clients, verified Rust readback of Node-written bytes, unmounted and
+  retained backing data. Linux FUSE and live-provider acceptance remain open.
 
 This follow-up proves the process-level SDK consumer paths, not native mount
 support or live R2/PGlite acceptance. The remaining transport/session and
