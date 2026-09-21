@@ -84,6 +84,15 @@ if [ -z "$docker_platform" ]; then
       ;;
   esac
 fi
+
+run_napi=0
+if [ "${MOUNT_RS_TIDB_NAPI:-0}" = "1" ]; then
+  run_napi=1
+  if ! command -v node >/dev/null 2>&1; then
+    echo "test-tidb.sh: MOUNT_RS_TIDB_NAPI=1 requires node" >&2
+    exit 2
+  fi
+fi
 case "$docker_platform" in
   linux/arm64|linux/amd64) ;;
   *)
@@ -627,6 +636,17 @@ run_provider_test() {
   fi
 }
 
+run_node_provider_test() {
+  if [ "$run_napi" -ne 1 ]; then
+    return 0
+  fi
+  node_prefix=${MOUNT_RS_TIDB_NODE_PREFIX:-${MOUNT_RS_TIDB_RUSTFS_PREFIX:-mount-rs-tidb/$run_id}/napi}
+  MOUNT_RS_TIDB_NAPI=1 \
+  MOUNT_RS_TIDB_URL="$tidb_url" \
+  MOUNT_RS_TIDB_NODE_PREFIX="$node_prefix" \
+    node "$repo_dir/integrations/mount-rs-napi/test/tidb.mjs"
+}
+
 run_ambiguous_commit_test() {
   MOUNT_RS_TIDB_URL="$tidb_url" \
     "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test ambiguous_commit -- --ignored --nocapture
@@ -708,6 +728,7 @@ set -e
 if [ "$provider_status" -ne 0 ]; then
   exit "$provider_status"
 fi
+run_node_provider_test
 if [ "$topology" = durable ]; then
   # Confirm data remains available through PD quorum recovery, a TiDB frontend
   # restart, and a TiKV store restart. This is still a test-cluster check, not

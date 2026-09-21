@@ -37,6 +37,7 @@ pub enum P9TransportErrorKind {
     Read,
     Frame,
     Write,
+    Task,
 }
 
 /// A transport failure reported to an embedding server.
@@ -237,6 +238,7 @@ pub struct P9Server {
     hooks: P9ServerHooks,
     locks: P9LockTable,
     shutdown: Arc<Notify>,
+    shutdown_requested: Arc<AtomicBool>,
     closed: AtomicBool,
     serving: AtomicBool,
     next_id: AtomicU64,
@@ -284,6 +286,7 @@ impl P9Server {
             hooks,
             locks,
             shutdown: Arc::new(Notify::new()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
             closed: AtomicBool::new(false),
             serving: AtomicBool::new(false),
             next_id: AtomicU64::new(1),
@@ -418,10 +421,11 @@ impl P9Server {
     }
 
     pub fn shutdown(&self) {
-        // There is one accept loop. `notify_one` is intentional: unlike
-        // `notify_waiters`, it cannot lose a shutdown requested before the
-        // loop reaches its select.
-        self.shutdown.notify_one();
+        // Store the state before broadcasting. The accept loop and every
+        // connection task can therefore observe shutdown even when the
+        // notification happens before one of them reaches its select.
+        self.shutdown_requested.store(true, Ordering::Release);
+        self.shutdown.notify_waiters();
     }
 
     /// Return live connections in arrival order.
@@ -485,7 +489,7 @@ impl P9Server {
     /// Start accepting in a spawned Tokio task. A shared server may already be
     /// serving; callers can treat `AlreadyExists` as an existing accept loop.
     pub fn start(self: &Arc<Self>) -> io::Result<JoinHandle<io::Result<()>>> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire) || self.shutdown_requested.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "9P server is closed",
@@ -507,7 +511,7 @@ impl P9Server {
 
     async fn serve_inner(&self) -> io::Result<()> {
         let listener = self.listener.lock().await.take();
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire) || self.shutdown_requested.load(Ordering::Acquire) {
             return Ok(());
         }
         let listener = listener.ok_or_else(|| {
@@ -570,8 +574,17 @@ impl P9Server {
 
     async fn serve_tcp(&self, listener: TcpListener) -> io::Result<()> {
         loop {
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let shutdown_notified = self.shutdown.notified();
+            tokio::pin!(shutdown_notified);
+            shutdown_notified.as_mut().enable();
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Ok(());
+            }
             tokio::select! {
-                _ = self.shutdown.notified() => return Ok(()),
+                _ = shutdown_notified => return Ok(()),
                 accepted = listener.accept() => {
                     let (stream, peer) = match accepted {
                         Ok(accepted) => accepted,
@@ -584,6 +597,9 @@ impl P9Server {
                             return Err(error);
                         }
                     };
+                    if self.shutdown_requested.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
                     if !self.options.allow_remote && !is_loopback(peer.ip()) {
                         self.report(P9TransportError::from_message(
                             P9TransportErrorKind::PeerRefused,
@@ -610,8 +626,17 @@ impl P9Server {
     #[cfg(unix)]
     async fn serve_unix(&self, listener: UnixListener) -> io::Result<()> {
         loop {
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            let shutdown_notified = self.shutdown.notified();
+            tokio::pin!(shutdown_notified);
+            shutdown_notified.as_mut().enable();
+            if self.shutdown_requested.load(Ordering::Acquire) {
+                return Ok(());
+            }
             tokio::select! {
-                _ = self.shutdown.notified() => return Ok(()),
+                _ = shutdown_notified => return Ok(()),
                 accepted = listener.accept() => {
                     let (stream, _) = match accepted {
                         Ok(accepted) => accepted,
@@ -624,6 +649,9 @@ impl P9Server {
                             return Err(error);
                         }
                     };
+                    if self.shutdown_requested.load(Ordering::Acquire) {
+                        return Ok(());
+                    }
                     if let Err(error) = self.attach_boxed(
                         Box::new(stream),
                         P9AttachOptions {
@@ -661,7 +689,7 @@ impl P9Server {
         stream: BoxedP9Stream,
         attach: P9AttachOptions,
     ) -> io::Result<P9Connection> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.closed.load(Ordering::Acquire) || self.shutdown_requested.load(Ordering::Acquire) {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "9P server is closed",
@@ -675,22 +703,36 @@ impl P9Server {
             id,
             control: Arc::clone(&control),
         };
-        self.connections
+        let mut connections = self
+            .connections
             .lock()
-            .map_err(|_| io::Error::other("connection lock poisoned"))?
-            .insert(id, connection.clone());
+            .map_err(|_| io::Error::other("connection lock poisoned"))?;
+        // Recheck under the same lock used by close(). This closes the race
+        // where close observes an empty client map just before attach inserts
+        // the new connection.
+        if self.closed.load(Ordering::Acquire) || self.shutdown_requested.load(Ordering::Acquire) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "9P server is closed",
+            ));
+        }
+        connections.insert(id, connection.clone());
+        drop(connections);
         let server_shutdown = Arc::clone(&self.shutdown);
+        let server_shutdown_requested = Arc::clone(&self.shutdown_requested);
         let connections = Arc::clone(&self.connections);
         let hooks = self.hooks.clone();
         let reported = Arc::new(AtomicBool::new(false));
         let max_frame = self.options.max_frame;
         let max_in_flight = self.options.max_in_flight.max(1);
+        let runtime_connection = connection.clone();
         tokio::spawn(async move {
             run_connection(ConnectionRuntime {
                 stream,
-                connection,
+                connection: runtime_connection,
                 control,
                 server_shutdown,
+                server_shutdown_requested,
                 connections,
                 hooks,
                 reported,
@@ -700,13 +742,7 @@ impl P9Server {
             })
             .await;
         });
-        Ok(self
-            .connections
-            .lock()
-            .map_err(|_| io::Error::other("connection lock poisoned"))?
-            .get(&id)
-            .cloned()
-            .expect("connection inserted immediately before task spawn"))
+        Ok(connection)
     }
 }
 
@@ -715,6 +751,7 @@ struct ConnectionRuntime {
     connection: P9Connection,
     control: Arc<ConnectionControl>,
     server_shutdown: Arc<Notify>,
+    server_shutdown_requested: Arc<AtomicBool>,
     connections: Arc<StdMutex<HashMap<u64, P9Connection>>>,
     hooks: P9ServerHooks,
     reported: Arc<AtomicBool>,
@@ -729,6 +766,7 @@ async fn run_connection(runtime: ConnectionRuntime) {
         connection,
         control,
         server_shutdown,
+        server_shutdown_requested,
         connections,
         hooks,
         reported,
@@ -764,9 +802,32 @@ async fn run_connection(runtime: ConnectionRuntime) {
     let mut buffer = vec![0_u8; 64 * 1024];
 
     'read: loop {
+        if server_shutdown_requested.load(Ordering::Acquire) {
+            break;
+        }
+        let server_shutdown_notified = server_shutdown.notified();
+        tokio::pin!(server_shutdown_notified);
+        server_shutdown_notified.as_mut().enable();
+        if server_shutdown_requested.load(Ordering::Acquire) {
+            break;
+        }
         tokio::select! {
             _ = control.shutdown.notified() => break,
-            _ = server_shutdown.notified() => break,
+            _ = server_shutdown_notified => break,
+            completed = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Err(error)) = completed {
+                    report_once(
+                        &hooks,
+                        &reported,
+                        P9TransportError::from_message(
+                            P9TransportErrorKind::Task,
+                            connection.peer.clone(),
+                            format!("9P connection task failed: {error}"),
+                        ),
+                    );
+                    break;
+                }
+            }
             read = reader.read(&mut buffer) => {
                 let count = match read {
                     Ok(count) => count,
@@ -858,7 +919,21 @@ async fn run_connection(runtime: ConnectionRuntime) {
         }
     }
     tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            report_once(
+                &hooks,
+                &reported,
+                P9TransportError::from_message(
+                    P9TransportErrorKind::Task,
+                    connection.peer.clone(),
+                    format!("9P connection task failed: {error}"),
+                ),
+            );
+        }
+    }
     if own {
         let _ = writer.lock().await.shutdown().await;
     }

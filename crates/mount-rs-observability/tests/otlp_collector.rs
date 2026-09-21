@@ -3,6 +3,7 @@
 use std::io;
 use std::time::Duration;
 
+use mount_rs_core::storage::BlockReconcileReport;
 use mount_rs_observability::{OtlpConfig, Telemetry, TelemetryConfig, install_otlp};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -12,7 +13,7 @@ use tokio::time::{Instant, timeout, timeout_at};
 const SECRET_PATH: &str = "/tenant/super-secret-w30-collector.txt";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn local_collector_receives_traces_metrics_and_logs_without_raw_paths() {
+async fn local_collector_receives_signals_and_reconciliation_telemetry_without_raw_paths() {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let address = listener.local_addr().unwrap();
     let (sender, mut receiver) = mpsc::channel(16);
@@ -57,6 +58,12 @@ async fn local_collector_receives_traces_metrics_and_logs_without_raw_paths() {
         .await
         .unwrap();
     telemetry.record_bytes("write", 42);
+    telemetry.record_reconcile(&BlockReconcileReport {
+        scanned: 11,
+        protected: 7,
+        recent: 3,
+        deleted: 1,
+    });
     tracing::info!(
         target: "mount_rs.event",
         telemetry_schema = "mount-rs.telemetry.v1",
@@ -106,6 +113,29 @@ async fn local_collector_receives_traces_metrics_and_logs_without_raw_paths() {
     paths.sort_unstable();
     paths.dedup();
     assert_eq!(paths, ["/v1/logs", "/v1/metrics", "/v1/traces"]);
+    let metric_body = requests
+        .iter()
+        .find_map(|(path, body)| (path == "/v1/metrics").then_some(body))
+        .expect("collector did not receive metrics");
+    for instrument in [
+        "mount_rs.blocks.reconcile.scanned",
+        "mount_rs.blocks.reconcile.protected",
+        "mount_rs.blocks.reconcile.recent",
+        "mount_rs.blocks.reconcile.deleted",
+    ] {
+        assert!(
+            contains_ascii(metric_body, instrument),
+            "reconciliation metric {instrument} was not exported"
+        );
+    }
+    let log_body = requests
+        .iter()
+        .find_map(|(path, body)| (path == "/v1/logs").then_some(body))
+        .expect("collector did not receive logs");
+    assert!(
+        contains_ascii(log_body, "mount_rs.blocks.reconciled"),
+        "reconciliation completion event was not exported"
+    );
     for (_, body) in requests {
         assert!(!body.is_empty(), "collector received an empty OTLP payload");
         assert!(
@@ -114,6 +144,11 @@ async fn local_collector_receives_traces_metrics_and_logs_without_raw_paths() {
                 .any(|window| window == SECRET_PATH.as_bytes())
         );
     }
+}
+
+fn contains_ascii(body: &[u8], value: &str) -> bool {
+    body.windows(value.len())
+        .any(|window| window == value.as_bytes())
 }
 
 async fn read_request(stream: &mut TcpStream) -> io::Result<(String, Vec<u8>)> {

@@ -803,6 +803,7 @@ module.exports.P9Session = nativeBinding.P9Session
 module.exports.PathLock = nativeBinding.PathLock
 module.exports.S3Server = nativeBinding.S3Server
 module.exports.WebdavServer = nativeBinding.WebdavServer
+module.exports.WebdavSession = nativeBinding.WebdavSession
 module.exports.basename = nativeBinding.basename
 module.exports.createChunkedDriver = nativeBinding.createChunkedDriver
 module.exports.createDriver = nativeBinding.createDriver

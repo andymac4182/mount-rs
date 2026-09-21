@@ -109,9 +109,10 @@ The crate tests cover disabled behavior, bounded path summaries, driver
 round-trips, byte counters, configuration bounds, and W3C carrier round-trips
 when the relevant feature is enabled. The `otlp_collector` integration test
 also runs a loopback collector and verifies that all three signal paths receive
-non-empty payloads without a raw path value. The `otlp_failure` test verifies
-that setup, flush, and shutdown failures remain in the guard API. These tests
-prove the local exporter/collector boundary, not reachability of an external
+non-empty payloads without a raw path value, including the reconciliation
+metric instruments and completion event. The `otlp_failure` test verifies that
+setup, flush, and shutdown failures remain in the guard API. These tests prove
+the local exporter/collector boundary, not reachability of an external
 collector. A demo or release claim of external end-to-end export still
 requires a live collector-backed run with the exact binary revision and OTLP
 endpoint recorded.

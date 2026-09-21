@@ -361,12 +361,14 @@ struct ErasedMetadataStore {
 }
 
 impl ErasedMetadataStore {
+    #[cfg(feature = "observability")]
+    fn new(inner: Arc<dyn MetadataStore>, telemetry: Telemetry) -> Self {
+        Self { inner, telemetry }
+    }
+
+    #[cfg(not(feature = "observability"))]
     fn new(inner: Arc<dyn MetadataStore>) -> Self {
-        Self {
-            inner,
-            #[cfg(feature = "observability")]
-            telemetry: mount_rs_observability::global(),
-        }
+        Self { inner }
     }
 }
 
@@ -484,12 +486,14 @@ struct ErasedBlockStore {
 }
 
 impl ErasedBlockStore {
+    #[cfg(feature = "observability")]
+    fn new(inner: Arc<dyn BlockStore>, telemetry: Telemetry) -> Self {
+        Self { inner, telemetry }
+    }
+
+    #[cfg(not(feature = "observability"))]
     fn new(inner: Arc<dyn BlockStore>) -> Self {
-        Self {
-            inner,
-            #[cfg(feature = "observability")]
-            telemetry: mount_rs_observability::global(),
-        }
+        Self { inner }
     }
 }
 
@@ -659,9 +663,22 @@ async fn open_storage(metadata: &StoreConfig, blocks: &StoreConfig) -> Result<Op
         }
     };
     metadata_resources.append(&mut block_resources);
+    #[cfg(feature = "observability")]
+    let (metadata, blocks) = {
+        let telemetry = mount_rs_observability::global();
+        (
+            ErasedMetadataStore::new(metadata, telemetry.clone()),
+            ErasedBlockStore::new(blocks, telemetry),
+        )
+    };
+    #[cfg(not(feature = "observability"))]
+    let (metadata, blocks) = (
+        ErasedMetadataStore::new(metadata),
+        ErasedBlockStore::new(blocks),
+    );
     Ok(OpenStorage {
-        metadata: ErasedMetadataStore::new(metadata),
-        blocks: ErasedBlockStore::new(blocks),
+        metadata,
+        blocks,
         resources: StorageResources {
             resources: metadata_resources,
         },

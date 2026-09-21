@@ -27,13 +27,19 @@
 //! Unsupported methods answer `405` with `Allow`. The HTTP integration tests
 //! never claim native mount verification.
 
-mod constants;
+pub mod constants;
 pub mod locks;
 pub mod protocol;
 pub mod server;
 pub mod session;
 
-pub use constants::DEFAULT_HOST;
+pub use constants::{
+    ALLOW_HEADER, COLLECTION_CONTENT_TYPE, DAV_COMPLIANCE, DAV_NS, DEFAULT_HOST,
+    DEFAULT_LOCK_TIMEOUT_SECONDS, DEFAULT_MAX_REQUEST_BYTES, LOCK_TOKEN_PREFIX,
+    MAX_LOCK_TIMEOUT_SECONDS, MAX_LOCKS, MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_ELEMENTS,
+    MS_AUTHOR_VIA, READ_CHUNK_BYTES, RESOURCE_CONTENT_TYPE, XML_CONTENT_TYPE, is_absent,
+    status_for_error, status_line, status_text,
+};
 pub use locks::{
     DavLock, DavLockGrant, DavLockRequest, DavLockTable, DavLockTableOptions, LockDepth,
 };
@@ -43,8 +49,9 @@ pub use protocol::{
     Propstat, RangeSpec, WebdavBody, WebdavError, WebdavRequestHead, WebdavResponse, XmlNode,
 };
 pub use server::{
-    DEFAULT_DRAIN_TIMEOUT, WebdavBindError, WebdavServer, WebdavServerError, WebdavServerOptions,
-    bind_refusal, create_webdav_server, is_loopback_host,
+    DEFAULT_DRAIN_TIMEOUT, WebdavBindError, WebdavServer, WebdavServerError, WebdavServerHooks,
+    WebdavServerOptions, WebdavTransportError, WebdavTransportErrorHook, WebdavTransportErrorKind,
+    bind_refusal, create_webdav_server, create_webdav_server_with_hooks, is_loopback_host,
 };
 pub use session::{
     WebdavCredentials, WebdavRequestBody, WebdavSession, WebdavSessionOptions, WebdavSessionStats,

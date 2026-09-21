@@ -12,13 +12,25 @@ Current W01-9P packet (2026-09-22): the N-API 9P facade now owns the bounded
 Node `attach(stream, options)` adapter, direct session `handleCall`/`destroy`,
 attached connection identity/peer/stream/closed state, duplicate-attach and
 ownership teardown, shared byte-range lock state, and backpressure/write-fault
-coverage. The focused Rust 9P tests, strict affected-crate checks, rebuilt
-declarations, host-enabled N-API server phases, and pinned-oracle package gate
-pass. Native accepted connections deliberately expose no Node stream because
-their Tokio stream is not transferable across the N-API boundary; `attach` is
-the supported Node Duplex seam. Production remains NO-GO pending a fresh
-revision-matched hosted Linux 9P kernel-client mount/read/write/unmount result,
-native fault/race/crash evidence, and the remaining W01 gates.
+coverage. The transport now also broadcasts shutdown safely across the accept
+loop and all connections, closes the active-connection accept-loop race, and
+reaps completed request tasks while reporting task failures. Local lifecycle
+5/5, transport-error 8/8, strict 9P Clippy and formatting pass. Hosted run
+`35616832528` / job `106389895603` passed the prior Linux kernel-client
+mount/read/write/unmount packet; a fresh run is required for this packet.
+Native accepted connections deliberately expose no Node stream because their
+Tokio stream is not transferable across the N-API boundary; `attach` is the
+supported Node Duplex seam. Production remains NO-GO pending the fresh hosted
+rerun, native reset/half-close/concurrency/crash evidence, and the remaining
+W01 gates.
+
+Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
+shared BigInt handle snapshots and live accepted-socket counts, with abort-safe
+connection teardown and awaited server close. The focused Rust/N-API checks
+pass, and the opt-in macOS native NFSv3 loopback mount gate passed 1/1 in
+0.09s. Production remains NO-GO pending the privileged Linux v4.1 lane, the
+full v3/v4 stateful and connection-object surface, hosted/native lifecycle
+evidence, and crash/concurrency/durability qualification.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -601,6 +613,18 @@ transport tracker together.
   consecutive pinned-oracle runs. Cross-process/crash, exact append ordering,
   cancellation/close races, durability/restart and transport/native concurrency
   remain open by classification.
+
+WebDAV-owned W01 tracking is maintained in
+[`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md). The current
+bounded slice adds the low-level `./webdav` barrel and generated declarations,
+the N-API `WebdavSession`/server session view, buffered request handling,
+serializable session and lock policy, driver access, Basic-auth challenge and
+acceptance, and Rust transport-hook plumbing. The Rust WebDAV target passed
+13/13 tests and the isolated locked N-API check plus release generation passed;
+the oracle differential is explicitly skipped without `MOUNTX_SOURCE`, the
+sandbox blocks the live N-API loopback bind with `Operation not permitted`, and
+streaming, peer-fault, restart/durability, provider, hosted, and native gates
+remain open. W01 and production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -2149,6 +2173,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   credentials for all S3 requests and cleanup. It does not create IAM resources
   or access keys; W25.2 is provisioned in `myroot`, and the live local Rust
   run is now recorded above.
+- [x] A fresh end-to-end qualification rerun at audit commit `d7ccdc7` on
+  2026-09-22 passed scoped-role sibling-prefix denial, the public SDK/CLI
+  self-test, composed AWS S3 filesystem, process reopen, independent PGlite
+  metadata, writer fencing, restored-PGlite reopen, and exact owned-prefix
+  cleanup under
+  `mount-rs-tests/aws-s3/20260921T152108Z-66596-90bba238142882ef153e6e3c246d0003`.
+  The read-only resource audit at the same source passed account/region
+  binding, public-access blocks, BucketOwnerEnforced ownership, AES256,
+  versioning readback, seven-day lifecycle, and one-day multipart-abort checks.
+  This remains qualification-account evidence, not production deployment
+  acceptance.
 - [x] Repository qualification after the AWS packet passed on 2026-09-21 at
   local `4a72d85` (an ancestor of current `origin/main` `7488aa8`):
   `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
@@ -2184,6 +2219,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   workstream changes already on that commit; the later unrelated `de6514c`
   N-API test-only change landed after the gate and requires a post-rebase
   verification before it can be included in current-head release evidence.
+- [x] The latest W25 repository-gate audit at `ae33e4c` passed
+  `cargo fmt --all -- --check`, the full locked offline workspace test gate,
+  and strict workspace Clippy with `-D warnings` on 2026-09-22. This includes
+  the AWS S3 provider, SDK/CLI, gateway, CI-safety changes, and the integrated
+  workstream code present at that commit; later unrelated NFS/W01 commits are
+  outside this evidence boundary.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -2440,6 +2481,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   is blocked by missing `libfdb_c`. Current hosted results at `44b01a7` are
   canceled/failed and are not promoted; a terminal Ozone/provider marker is
   still required.
+  The published `b80c19c` follow-up enables the feature-built FoundationDB
+  Node/N-API client in the dedicated Ozone job. Its seed/reopen test asserts
+  bounded success and `EOVERFLOW` and scopes its object prefix below the owned
+  Ozone run prefix so the parent cleanup can remove it.
   `MOUNTX_SOURCE` parity and live hosted provider results remain
   environment-gated checks.
 
@@ -2457,7 +2502,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | --- | --- | ---: | --- |
 | P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
 | P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
-| P2 — all-feasible-provider Ozone CI matrix | Ozone provider matrix expanded; KV/N-API contract added; terminal evidence pending | 50% | Benchmark rows cover SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with configuration-gated skips; the optional key-value bounded-listing contract is locally tested, and the SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition paths contain provider-backed bounded-listing assertions, but hosted provider parity and each configured row still need terminal retained evidence |
+| P2 — all-feasible-provider Ozone CI matrix | Ozone provider matrix expanded; KV/N-API contract added; terminal evidence pending | 52% | Benchmark rows cover SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with configuration-gated skips; the optional key-value bounded-listing contract is locally tested, and the SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition paths contain provider-backed bounded-listing assertions. The feature-built FoundationDB Node/N-API Ozone lane now exercises the same contract with a scoped cleanup prefix, but hosted provider parity and each configured row still need terminal retained evidence |
 | P3 — authentication, TLS, secrets and redaction | Local transport boundary hardened; secure integration open | 50% | Static and runtime R2/Ozone validation rejects malformed, credential-bearing and remote plaintext-HTTP endpoints before client construction; HTTP config/runtime now reject non-loopback binds and require a TLS reverse proxy for remote clients; secure endpoint/auth, least privilege, rotation and full negative-path evidence remain open |
 | P4 — durability/storage failure contract | Lifecycle protection implemented; durability qualification open | 35% | Lease-protected root reconciliation and R2/Ozone scoped cleanup are locally tested; CI client recovery/error evidence plus customer Ozone replication/storage requirements remain open |
 | P5 — fencing, ambiguous commit and failover recovery | Lease-protected reconciliation implemented; failover matrix open | 35% | Reconciliation renews the writer lease and never runs implicitly on shutdown; concurrent/retry/failover evidence across feasible Ozone/provider CI lanes remains open |
@@ -2466,7 +2511,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P8 — 1,000 IOPS per-drive CI workload | Per-provider CI gate implemented; hosted result pending | 25% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider; Ozone CI requests SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2 with 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live Ozone evidence is blocked by missing service credentials/provider topologies. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
 | P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 68% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`; standard scan `5ad61e60-20e3-4223-885a-d4b516d49bb1` completed against published revision `44b01a7` with zero reportable findings across 16 W26-relevant surfaces. Semantic coverage is explicitly partial because independently launched workers did not return within bounded waits and parent fallback was used. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred; current CI/Fault/W08 runs are canceled and Live Cloudflare R2 failed |
-| P11 — end-to-end client/platform matrix | HTTP path and built-in/KV/durable-provider bounded-listing contracts added to Ozone CI; full matrix open | 40% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition tests assert provider-backed bounded success and `EOVERFLOW`; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; TiDB test compilation/Clippy and FoundationDB `cargo check --tests` pass locally, but live provider/Ozone execution is hosted-only and FoundationDB local linking lacks `libfdb_c`; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
+| P11 — end-to-end client/platform matrix | HTTP path and built-in/KV/durable-provider bounded-listing contracts added to Ozone CI; full matrix open | 43% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition tests assert provider-backed bounded success and `EOVERFLOW`; the feature-built FoundationDB Node/N-API Ozone lane from `b80c19c` asserts the same contract with a scoped cleanup prefix; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; TiDB test compilation/Clippy and FoundationDB `cargo check --tests` pass locally, but live provider/Ozone execution is hosted-only and FoundationDB local linking lacks `libfdb_c`; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
 | P14 — final W26 integration-readiness review | Not started | 0% | One-revision all-provider/performance/security/end-to-end audit and explicit handoff decision |

@@ -26,8 +26,9 @@ semantics.
   session/member parity.
 - Exercise the full v3/v4 behavior matrix, including stateful v4 operations,
   malformed records, reconnects, and version negotiation.
-- Refresh supported macOS/Linux native mount evidence and keep ignored native
-  tests classified as external gates.
+- Keep the macOS v3 native result current; execute the separate privileged
+  Linux v4.1 native lane and keep both platform results classified as external
+  gates.
 - Qualify cross-process crash, cancellation/close, concurrency, and durability
   behavior.
 
@@ -37,6 +38,7 @@ semantics.
 | --- | --- | --- | --- |
 | 2026-09-22 | v3/v4 shared-state foundation | N-API v3/v4 direct routing and `Nfs4Session` view pass; the Rust server shares the v3/v4 handle table, path lock, and counters; NFS crate and host-enabled package regressions pass | Direct shared-handle inspection, complete connection-object parity, native/hosted lifecycle, and crash/durability gates |
 | 2026-09-22 | active connections and shared handle inspection | Rust `NfsServer::connections()` now reports active accepted socket tasks and close awaits their teardown; N-API `NfsServer.connections`, `NfsSession.handles`, and `Nfs4Session.handles` are generated and exercised with BigInt handle identity. Rust tests pass 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; release N-API build, generated typecheck, and live server integration pass | Full v3/v4 stateful matrix, upstream connection-object parity, native/hosted lifecycle, and crash/durability gates |
+| 2026-09-22 | macOS native NFSv3 loopback | The opt-in `native_loopback_mount_round_trip` gate passed 1/1 in 0.09s, including the temporary native mount, filesystem round trips, and bounded cleanup | Privileged Linux NFSv4.1, hosted lifecycle, full stateful matrix, connection-object parity, and crash/durability gates |
 
 ## Exact commands and gate boundaries
 
@@ -51,9 +53,9 @@ semantics.
   record reporting, close, and destroyed-state cleanup.
 - `(cd integrations/mount-rs-napi && node test/nfs-codec.mjs)` — SKIP because
   `MOUNTX_SOURCE` was not configured; this is not acceptance evidence.
-- Native qualification remains external and was not run:
-  `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture`
-  and Linux v4.1 requires the separate
+- `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture` — PASS: macOS native NFSv3 loopback mount, filesystem round trips, unmount, and bounded cleanup; 1 passed, 0 failed, 0.09s.
+- Linux v4.1 native qualification remains an external gate and was not run on
+  this macOS host; it requires the separate
   `MOUNT_RS_NFS_NATIVE_V4_TEST=1` lane plus a privileged Linux NFS client.
 
 ## Completion rule
