@@ -66,6 +66,14 @@ matrices, the 1,194-test upstream suite, and all 40 PGlite-inclusive seeded
 trace lanes passed. R2 rows were explicit skips because this shell still lacks
 the required scoped credentials.
 
+The exact published tree at `747b160` was rerun on 2026-09-21 with the same
+gate and exited 0: PGlite lifecycle/reconnect/fencing/cancellation, SQLite VFS
+round-trip and fresh-provider reconnect, disk-server restart, split stores,
+N-API, chunked, userspace FUSE, Rust SDK 6/6, Node SDK 5/5, CLI 11/11, the
+upstream suite 1,200 passed/82 skipped, and all 40 seeded oracle lanes passed.
+R2 factory/runtime rows remained explicit credential-gated skips; this is not
+live R2 acceptance.
+
 The follow-up PGlite CLI consumer check in `dcc3aa4` also exited 0: the Rust
 CLI now performs the same configured PGlite split-store write, shutdown,
 reopen and readback that the Node CLI already performed. The live CLI matrix
