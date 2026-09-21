@@ -1,10 +1,11 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-21 08:30 UTC / 18:30 AEST**
+Status snapshot: **2026-09-21 10:08 UTC / 20:08 AEST**
 Repository: `andymac4182/mount-rs`  
-Evidence tip: `origin/main` at `6d59d20` (contains the W08 restart-readiness
-fix `769ea08`; the concurrent shutdown-lease fix is `c71c8ee`)
-Hosted verification queued: CI run `35577929196` for the current main tip
+Functional evidence tip (before this documentation chunk): `origin/main` at
+`bb27fe0`
+Authoritative W08 hosted evidence: CI run `35585066458`, source `9c098e5`
+(W08-relevant jobs all terminal success)
 
 This ledger is the detailed working record for W08 in `WORK_TRACKER.md`. It
 separates implementation completion from real provider, durable-service,
@@ -14,13 +15,15 @@ are provisional planning values, not release-readiness measurements.
 
 ## Summary
 
-W08 is approximately **83% complete** by acceptance scope and remains
-**Verifying**, not complete. The implementation and bounded single-node
-TiDB/RustFS composition are substantially landed. Hosted direct provider,
-provider-clock/concurrency, ambiguous-commit, and corrected Linux native
-mount rows are now evidenced, but the durable frontend restart still fails
-before the post-restart provider phase. The remaining material gates are the
-restart result and current macOS/native evidence.
+W08 is **100% complete for the defined workstream acceptance scope**. The
+implementation, real durable TiDB/PD/TiKV restart sequence, provider
+time/fencing and ambiguous-commit semantics, live Linux TiDB/RustFS consumer
+composition, and current Linux/macOS native-platform rows are all evidenced
+by terminal hosted jobs. The aggregate workflow was later cancelled by
+`main`-branch concurrency and had unrelated FoundationDB/Windows/macOS Rust
+failures; those are separate workstreams and are not converted into W08
+failures. Local Docker capacity and local native-device/credential gaps remain
+environment boundaries, not open W08 acceptance actions.
 
 The headline percentage uses this deliberately simple weighting of the five
 top-level tracker items; it is not a line-count metric:
@@ -28,26 +31,65 @@ top-level tracker items; it is not a line-count metric:
 | Item | Provisional completion | Weight | Weighted contribution |
 | --- | ---: | ---: | ---: |
 | W08.1 implementation | 100% | 15% | 15% |
-| W08.2 durable TiDB/PD/TiKV harness and restart | 60% | 25% | 15% |
-| W08.3 fencing, concurrency, ambiguous commit and durability assumptions | 80% | 20% | 16% |
-| W08.4 Node/CLI/native platform acceptance | 85% | 20% | 17% |
+| W08.2 durable TiDB/PD/TiKV harness and restart | 100% | 25% | 25% |
+| W08.3 fencing, concurrency, ambiguous commit and durability assumptions | 100% | 20% | 20% |
+| W08.4 Node/CLI/native platform acceptance | 100% | 20% | 20% |
 | W08.5 bounded TiDB metadata + RustFS composition | 100% | 20% | 20% |
-| **Rounded workstream view** |  | **100%** | **83%** |
+| **Workstream view** |  | **100%** | **100%** |
 
 The W08.4 number includes W08.4a and W08.4b; those nested rows are shown
 separately below and are not additional weight in the summary calculation.
+
+## Production rollout readiness — new scope
+
+The demo is not a production gate. W08 is **100% complete for its defined
+functional acceptance scope**, but the production rollout decision is currently
+**NO-GO**. The hosted jobs prove a bounded, real TiDB/RustFS topology and
+consumer path; they do not prove that a production deployment has an approved
+topology, secret-management process, backup/restore capability, upgrade or
+rollback path, SLOs, capacity headroom, security sign-off, on-call readiness or
+release provenance.
+
+The provisional production-readiness baseline is **15%**. This is a planning
+indicator showing that the functional foundation exists; it is deliberately not
+a release-readiness measurement and must not be used to approve a rollout. Each
+production item below remains open until its required evidence is produced in a
+production-like environment. “Implementation” rows are repository work; the
+hosted/provider/native rows require external systems or platform evidence.
+
+| ID | Production work item | Gate class | Status and completion | Evidence currently available | Remaining actions / exit evidence | Provisional engineering time | External blockers / dependency |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **P01** | Production deployment contract, topology and configuration | Implementation + hosted/provider | **Open — 20%** | W08 proves a pinned TiDB `v8.5.7` durable 3PD/3TiKV test topology and a pinned RustFS service in hosted Linux CI. That is a qualification baseline, not an approved production architecture. | Select managed or self-hosted TiDB/PD/TiKV and object storage; document regions, quorum/HA, network policy, TLS endpoints, resource limits, tenant isolation, supported versions, config ownership and IaC; deploy a staging topology and pass a production-like smoke/restart gate. | **1–2 engineer-days** | Platform/provider owners, target regions, DNS/network/TLS and production-sized capacity are not yet supplied. |
+| **P02** | Secrets, IAM, credential rotation and audit | Implementation + provider | **Open — 15%** | W08 keeps live provider credentials environment-injected and does not commit them; hosted rows used real credential-gated services. | Bind production credentials through the approved secret manager; define least-privilege TiDB/RustFS policies, rotation/revocation, bootstrap and break-glass procedures, audit events and redaction checks; prove rotation without data loss. | **0.5–1 engineer-day** | Secret manager, IAM roles/policies and credential-rotation owner are external gates. |
+| **P03** | Backup, restore, disaster recovery and data-retention policy | Hosted/provider | **Open — 10%** | Restart/reopen and RustFS fault-recovery markers passed, but no backup, restore, corruption, region-loss or measured RPO/RTO evidence exists. | Define RPO/RTO and retention; configure TiDB and object-store backups/versioning; run an isolated restore drill, point-in-time or snapshot recovery, metadata/block consistency checks, corruption/partial-object handling and documented recovery sign-off. | **2–4 engineer-days** | Backup/restore facilities, retention policy, second environment/region and data-owner approval are required. |
+| **P04** | Upgrade, compatibility and rollback rehearsal | Hosted/provider + implementation | **Open — 10%** | The acceptance matrix is pinned to TiDB `v8.5.7` and RustFS `1.0.0`; no production-version upgrade or rollback rehearsal has been run. | Test the supported TiDB/RustFS/client version matrix in staging; rehearse schema/config migration, rolling provider upgrades, client/package rollback, interrupted upgrade recovery and downgrade/forward-fix policy; retain logs and compatibility sign-off. | **1–2 engineer-days** | Target upgrade versions, staging snapshots and provider maintenance windows are external inputs. |
+| **P05** | Observability, SLOs, health checks and alerting | Implementation + hosted/provider | **Open — 15%** | Existing code and test markers provide component diagnostics; no production collector, dashboard, alert route, SLO or redaction evidence is recorded here. | Define availability, mount/unmount, metadata latency, block latency, error-budget and recovery SLOs; expose actionable metrics/logs/traces and readiness/health checks; configure dashboards, alerts, paging, retention and secret/PII redaction; exercise an alert end-to-end. | **1–2 engineer-days** | Production collector, paging destination, ownership and alert thresholds are not configured in this workstream. |
+| **P06** | Capacity, performance, load and soak qualification | Hosted/provider + implementation | **Open — 10%** | RustFS block benchmark and bounded provider/consumer tests passed, but they are not a representative production workload or capacity claim. | Establish workload mix and dataset/concurrency targets; run baseline, peak, saturation, failover and multi-hour soak tests against production-like capacity; record latency/throughput/error budgets, headroom and scaling limits. | **2–4 engineer-days** | Representative workload, load generators, production-sized service capacity and performance acceptance thresholds are required. |
+| **P07** | Security, transport and operational hardening | Implementation + provider | **Open — 15%** | Provider configuration is credential-gated and bounded tests reject unsafe fixture scope; no production TLS/IAM/network/security review or image/dependency sign-off is recorded. | Enforce TLS and certificate rotation, network segmentation, authn/authz and tenant isolation; run dependency/image/SBOM scanning, threat-model review, audit verification, secret-redaction checks and security sign-off for the selected provider topology. | **2–4 engineer-days** | Security review, approved certificates, firewall/network policy and provider hardening controls are external gates. |
+| **P08** | Failure injection, runbooks, on-call and incident readiness | Hosted/provider + operations | **Open — 15%** | W08 exercised service restarts, provider fencing, ambiguous commit and RustFS fault recovery; no production incident drill, operator runbook or on-call acknowledgement is recorded. | Exercise client/process loss, metadata outage, object-store outage, stale lease, network partition, partial object write, rolling restart and restore; document detection, diagnosis, mitigation, rollback and data-integrity checks; run an on-call tabletop and timed drill. | **1–2 engineer-days** | Named operators, staging access, incident tooling and an agreed escalation policy are needed. |
+| **P09** | Release provenance, canary, go/no-go and rollback | Implementation + hosted | **Open — 10%** | Source commits and terminal hosted job IDs are recorded; no production artifact promotion, signed provenance/SBOM, canary, approval record or rollback result exists. | Produce immutable versioned artifacts and SBOM/signatures; verify package/native artifacts in the target platforms; publish release notes and migration limits; execute staged canary with live SLO/alert observation, rollback rehearsal and an explicit approval record. | **1–2 engineer-days** | Registry/signing, deployment controller, release approvers and a production-like canary target are external dependencies. |
+
+### Production go/no-go rule
+
+The rollout remains **NO-GO** while any P01–P09 item is open, skipped,
+credential-blocked, provider-unverified, or supported only by local planning
+documents. A later aggregate CI cancellation must not be converted into a
+production pass, and W08's Linux live-provider evidence must not be promoted to
+macOS/provider or production evidence. The first production milestone is a
+staging deployment with real provider credentials and retained evidence for
+P01–P05; P06–P09 then gate canary and production approval.
 
 ## Work-item ledger
 
 | Work item | Status and completion | Implementation evidence | Provider/hosted/native evidence | Remaining actions | Provisional engineering time | External blockers |
 | --- | --- | --- | --- | --- | --- | --- |
 | **W08.1** Separate TiDB metadata/block implementation and dependencies | **Landed — 100%** | `integrations/mount-rs-tidb/**` is a separate provider crate. The tracker records the implementation landing as `ca57758`; format checks, four unit tests and acceptance binaries passed. The provider has explicit pessimistic transactions, writer fencing, provider-clock reads, CAS publication and ambiguous-commit mapping. | Local focused TiDB library tests passed (`6 passed`). The real v8.5.7 single-node lane has passed schema, UTF-8/trailing-space, identity and provider checks. | No remaining implementation action in this item. Broader replicated-service evidence belongs to W08.2/W08.3. | **0–1 h** for maintenance/documentation only. | None for the landed scope. |
-| **W08.2** Durable real TiDB/PD/TiKV Docker harness and restart results | **Verifying — 60%** | The harness is pinned to TiDB `v8.5.7`, has single-node and durable topology paths, explicit readiness/identity markers, restart sequencing, and a fast capacity check. The TiKV descriptor-limit hardening is in the published ancestry (`a452220`); restart ordering is `67ca490`; top-level provider DDL serialization is `17c8bda`; the published restart-readiness change is `769ea08`. | Hosted run `35576142240`, `tidb` job `106258416149`, reached the durable 3PD/3TiKV topology and passed direct provider identity/schema, provider-clock/concurrency, and ambiguous-commit checks, but TiDB status readiness timed out after the frontend restart at 300 seconds. TiDB v8.5.7 logs showed `force-init-stats=true`; `769ea08` disables that optional startup gate for the next attempt. The documented local Docker host remains below the declared memory requirement (`8,232,747,008` versus `10,737,418,240`). | Obtain a terminal hosted pass with the published `force-init-stats=false` harness; retain PD/TiKV readiness, identity, frontend/store/PD restart, fresh-client and post-restart provider results; update `WORK_TRACKER.md` only after the complete result is available. | **4–8 h active**, plus **30–90 min hosted wall time** per attempt. | Local Docker capacity is below the declared topology requirement. Hosted runner scheduling and concurrent pushes can cancel a run before evidence is retained. |
-| **W08.3** Provider time/fencing, ambiguous commits, concurrency and deployment durability | **Verifying — 80%** | The published TiDB hardening packet (`6327857`, published through `bbe8ebb`) adds provider-clock fencing races, concurrent publication, ambiguous-commit failure injection and durable-harness markers. The code maps known transaction conflicts to `EAGAIN`, stale leases to `ESTALE`, and uncertain commit outcomes to a distinct backend error. | Hosted run `35576142240`, `tidb` job `106258416149`, passed all three direct provider tests and `actual_tidb_commit_outcome_is_ambiguous_and_not_replayed` before the restart timeout. This is accepted evidence for provider time/fencing/concurrency and ambiguity semantics, but not for post-restart durability. | Retain a complete durable deployment/restart result; keep the unknown-commit outcome distinct from retryable statement conflicts and keep liveness probes separate from fsync/replication claims. | **2–5 h active**, plus **30–90 min hosted wall time**. | The remaining service lane depends on hosted TiDB/PD/TiKV restart behavior and queue stability. |
-| **W08.4** Node, CLI, native-mount and macOS/Linux acceptance coverage | **Verifying — 85%** | Public Rust SDK/N-API and Rust/Node CLI configuration paths are wired for TiDB metadata with RustFS/S3-compatible `r2` chunks. Native integration scripts distinguish credentials, transport, mount, unmount and fresh-provider verification. | Hosted run `35574581481`, `tidb-rustfs` job `106253499553`, passed the corrected Linux FUSE native gate, including independent Rust/Node mounted I/O, clean unmount, fresh provider readback and retained client bytes. Node ARM and the standalone native-FUSE job also passed in that run. macOS NFS remains unclosed. | Close the umbrella only when W08.4a is retained and W08.4b has current Linux and macOS/native evidence, with no credentials, mount or post-unmount cleanup step silently skipped. | **1–3 h active**, mostly evidence reconciliation and any final fix. | This macOS host has no usable local FUSE device; hosted native jobs are required. CI concurrency can invalidate an otherwise useful run. |
-| **W08.4a** Bounded Node/CLI consumer slice | **Landed bounded scope — 100%** | The provider matrix covers configuration, explicit `durable`, partial write, truncate, shutdown, reopen and owned RustFS-prefix cleanup. Key published chunks include `f55f2eb` (native Node consumer wiring), `5556872` (CI temp-target scoping), and `6038772` (supported PD bootstrap flags). Local tracker evidence records Rust SDK, CLI, N-API, Node matrix and CLI matrix passes with explicit credential-gated skips. | In hosted run `35571758453`, the live TiDB/RustFS Node SDK matrix passed all `8/8` cases and the CLI matrix passed all `16/16` cases before the native gate. This does not, by itself, close native acceptance or replicated durability. | No new implementation is currently required. Keep the live rows and bounded skips explicit; carry native and durable-service closure to W08.4b/W08.2/W08.3. | **0.5–1 h** for evidence maintenance. | Local credentials and a local TiDB/RustFS service are absent; the hosted lane supplies them. |
-| **W08.4b** Native-mount and live TiDB/RustFS consumer acceptance | **Verifying — 85%** | The native gate verifies independent Rust and Node clients through the mounted Node SDK CLI path and performs a fresh provider read after unmount. Commit `71a7a4c` changed default native mount ownership to the current process identity, fixing the prior Linux FUSE `EACCES`; formatting cleanup followed in `6b75cea`. Commit `2221144` makes the CLI call `Filesystem.shutdown()` after a successful transport unmount, releasing the TiDB writer before fresh verification. | In `35571758453`/job `106244679000`, native FUSE mounted I/O passed but the fresh post-unmount TiDB open hit `EAGAIN`. In `35574581481`/job `106253499553`, the corrected native gate passed: mounted Rust/Node I/O, clean unmount, fresh provider readback and retained client bytes. That job later failed in the separate durable TiDB restart phase; macOS NFS is not yet retained for this live provider row. | Obtain current macOS NFS/native evidence and retain a non-cancelled run containing the corrected live TiDB/RustFS row. Do not infer macOS closure from Linux FUSE or from the later durable-service failure. | **1–3 h active** for follow-up, plus **10–30 min hosted wall time** per native attempt. | No local FUSE device or local live TiDB/RustFS services. Hosted macOS rows remain external gates. |
-| **W08.5** TiDB metadata + RustFS S3 chunks | **Landed bounded scope — 100%** | The real single-node v8.5.7 service and pinned loopback RustFS endpoint passed mixed-provider seed, partial write, truncate, reopen, CAS/fencing and exact owned cleanup. Persisted fixtures require explicit volume/prefix/manifest scope and reject transient or symlink paths. | `TIDB_CHUNKED_RUSTFS_SEED_PASS` and reopen/cleanup evidence were retained in the real composition lane. This is accepted for the single-node bounded scope only. | No remaining action inside the bounded W08.5 scope. Replicated TiDB capacity and provider restart acceptance remain open under W08.2/W08.3. | **0–1 h** for documentation only. | None for the bounded single-node composition; broader durability is intentionally not inferred. |
+| **W08.2** Durable real TiDB/PD/TiKV Docker harness and restart results | **Complete — 100%** | The harness is pinned to TiDB `v8.5.7`, owns a durable 3PD/3TiKV topology, validates capacity/readiness/identity, replaces the frontend for a fresh listener lifecycle, restarts TiKV and PD, and reruns the persisted provider contract. Published implementation chunks include `a452220`, `17c8bda`, `c0aa081`, `63dbdbd` and `ece6977`. | CI `35585066458` / `tidb` job `106286459436` passed network, PD, TiKV and TiDB readiness, the frontend replacement, TiKV restart, PD restart and the post-restart provider rerun. Marker: `TIDB_ACCEPTANCE evidence=durable-multinode-restart topology=durable version=v8.5.7 platform=linux/amd64 cpus=4 mem_bytes=16766414848 ambiguous_commit=pass`. | No required W08.2 action remains. Keep the local capacity limitation documented and do not reinterpret this hosted test-cluster result as a host power-loss/fsync guarantee. | **0–1 h** maintenance/documentation only; hosted gate consumed approximately **20 min wall time** in the retained run. | Local Docker remains below the durable memory threshold (`8,232,747,008` available versus `10,737,418,240` required); this is an environment boundary, not an open hosted acceptance blocker. |
+| **W08.3** Provider time/fencing, ambiguous commits, concurrency and deployment durability | **Complete — 100%** | The provider maps statement conflicts to `EAGAIN`, stale leases to `ESTALE`, and unknown commit outcomes to a distinct backend error. The published ordering refinement `ecc1106` runs ambiguous-commit injection after durable restart/reopen, and `2e66f94` supplies the strict-Clippy cleanup. | In CI `35585066458`, direct `tidb` job `106286459436` and composite job `106286459715` passed provider identity/schema, provider-clock fencing, concurrent publication, ambiguous-commit no-replay, frontend/TiKV/PD restart and persisted fresh-client checks. | No required W08.3 action remains. Preserve the boundary that liveness/readiness and container restart are service durability evidence, not a universal fsync or power-loss claim. | **0–1 h** maintenance/documentation only; approximately **20 min hosted wall time** retained. | None for the defined W08.3 acceptance. The aggregate workflow had unrelated failures, recorded separately below. |
+| **W08.4** Node, CLI, native-mount and macOS/Linux acceptance coverage | **Complete — 100%** | Public Rust SDK/N-API and Rust/Node CLI configuration paths compose TiDB metadata with RustFS/S3-compatible `r2` chunks. Native scripts distinguish credentials, transport, mount, unmount, fresh-provider readback and cleanup. | CI `35585066458` passed `tidb-rustfs` job `106286459715`, ARM Node job `106286459639`, Linux FUSE job `106286459998`, Ubuntu NFS job `106286459483`, and macOS NFS job `106286459246`. | No required W08.4 action remains. Platform rows retain their provider boundaries: live TiDB/RustFS is Linux FUSE; macOS/Ubuntu NFS are native-platform lifecycle gates. | **0–1 h** reconciliation only; approximately **25 min hosted wall time** across retained rows. | Local macOS lacks the required native-device/service prerequisites; hosted platform jobs provide the evidence. |
+| **W08.4a** Bounded Node/CLI consumer slice | **Complete bounded scope — 100%** | The provider matrix covers configuration, explicit `durable`, partial write, truncate, shutdown, reopen and owned RustFS-prefix cleanup. Published chunks include `f55f2eb`, `5556872` and `6038772`; hosted `tidb-rustfs` retained all live Node SDK/CLI rows. | CI `35585066458` / job `106286459715` passed the Node SDK and CLI matrices, with live TiDB/RustFS cases executed rather than credential-skipped. Local credential-gated skips remain explicit and are not used as hosted evidence. | No required W08.4a action remains. | **0–1 h** maintenance only. | Local credentials/services are absent, but the hosted gate is complete. |
+| **W08.4b** Native-mount and live TiDB/RustFS consumer acceptance | **Complete — 100%** | `71a7a4c` uses current-process mount identity; `6b75cea` is formatting cleanup; `2221144` releases the provider after transport unmount. `ece6977` replaces the TiDB frontend during durable restart, and `ecc1106` isolates ambiguous-commit injection from restart readiness. | CI `35585066458` / `tidb-rustfs` job `106286459715` passed live Linux TiDB/RustFS Node and CLI matrices, independent Rust/Node mounted I/O, clean unmount, fresh provider readback, retained client bytes, TiDB/TiKV/PD restart and RustFS reopen. Standalone Linux FUSE `106286459998`, ARM Node `106286459639`, Ubuntu NFS `106286459483` and macOS NFS `106286459246` also passed. | No required W08.4b action remains. The macOS NFS row is native lifecycle evidence only; it does not claim live TiDB/RustFS ran on macOS. | **0–1 h** reconciliation only; approximately **15 min** for the retained composite/native rows. | Local FUSE/Docker/credential limitations remain non-hosted environment boundaries. |
+| **W08.5** TiDB metadata + RustFS S3 chunks | **Complete bounded scope — 100%** | The real v8.5.7 TiDB service and pinned RustFS endpoint passed mixed-provider seed, partial write, truncate, reopen, CAS/fencing and exact owned cleanup; persisted fixtures require explicit volume/prefix/manifest scope and reject transient or symlink paths. | CI `35585066458` / job `106286459715` emitted `TIDB_CHUNKED_RUSTFS_SEED_PASS`, `TIDB_CHUNKED_RUSTFS_REOPEN_PASS`, `RUSTFS_COMBO_PASS`, `RUSTFS_RESTART_REOPEN_PASS` and `RUSTFS_INTEGRATION_PASS`; RustFS restart/fault recovery also passed. | No required W08.5 action remains. | **0–1 h** documentation only. | None for the bounded scope; broad provider claims remain limited to the explicitly exercised durable topology. |
 
 ## Evidence ledger
 
@@ -71,31 +113,38 @@ for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
 
 | Run/job | Result counted here | Evidence boundary |
 | --- | --- | --- |
-| CI `35571758453`, `tidb-rustfs` job `106244679000` | Partial pass, then FAIL | Real TiDB/RustFS topology, provider contract, seed, Node SDK matrix and CLI matrix passed; native FUSE I/O passed; fresh post-unmount TiDB writer acquisition failed with `EAGAIN`. The run is diagnostic, not a W08.4b pass. |
-| CI `35571758453`, Node ARM job `106244679020` | PASS for its listed rows | Native Linux Node/FUSE and consumer coverage passed at the pre-`2221144` source; it does not prove the corrected fresh-provider teardown. |
-| CI `35574581481`, `tidb-rustfs` job `106253499553` | Partial pass, then FAIL | The corrected native Linux FUSE gate passed, including fresh post-unmount provider readback and cleanup. The same job later failed at durable TiDB restart readiness, so the job is not a complete W08 acceptance pass. |
-| CI `35576142240`, `tidb` job `106258416149` | FAIL after direct provider checks | Direct provider rows and ambiguous commit passed; TiDB frontend restart status readiness timed out after 300 seconds. The serialized DDL attempt did not resolve the restart gate. |
-| CI `35577929196`, current main CI | QUEUED | Includes published `769ea08` (`--force-init-stats=false`) and the current main tip; no result is counted until the W08 jobs are terminal. |
+| CI `35571758453`, `tidb-rustfs` job `106244679000` | Diagnostic partial pass | Real TiDB/RustFS topology, provider contract, seed, Node SDK matrix and CLI matrix passed; native FUSE I/O passed; fresh post-unmount TiDB writer acquisition failed with `EAGAIN`. Retained as the pre-`2221144` failure baseline only. |
+| CI `35574581481`, `tidb-rustfs` job `106253499553` | Diagnostic partial pass | Corrected Linux FUSE I/O, clean unmount and fresh provider readback passed; the same job later failed at the then-unfixed durable TiDB restart gate. Retained as an intermediate regression checkpoint. |
+| CI `35576142240`, `tidb` job `106258416149` | Diagnostic failure | Direct provider rows and ambiguous commit passed; TiDB frontend restart readiness timed out after 300 seconds. This motivated the supported TOML setting, fresh frontend replacement and later ordering fix. |
+| CI `35585066458`, source `9c098e5`, `tidb` job `106286459436` | PASS — W08.2/W08.3 | Terminal success across durable 3PD/3TiKV startup, TiDB frontend replacement, TiKV restart, PD restart, provider-clock/fencing/concurrency, ambiguous-commit no-replay and post-restart persisted provider checks. |
+| CI `35585066458`, source `9c098e5`, `tidb-rustfs` job `106286459715` | PASS — W08.4b/W08.5 | Terminal success for real RustFS, TiDB/RustFS seed and reopen, Node SDK/CLI matrices, Linux FUSE mounted Rust/Node I/O, clean unmount, fresh provider readback, retained bytes and RustFS restart/fault recovery. |
+| CI `35585066458`, source `9c098e5`, `native-fuse` job `106286459998` | PASS — native Linux | Terminal success for the standalone privileged FUSE/native suite. |
+| CI `35585066458`, source `9c098e5`, `node (ubuntu-24.04-arm)` job `106286459639` | PASS — ARM consumer | Terminal success for the ARM Node distribution/consumer gate. |
+| CI `35585066458`, source `9c098e5`, `native-nfs (ubuntu-latest)` job `106286459483` | PASS — native Ubuntu | Terminal success for native NFS lifecycle and SQLite split-store coverage. |
+| CI `35585066458`, source `9c098e5`, `native-nfs (macos-latest)` job `106286459246` | PASS — native macOS | Terminal success for macOS ARM native NFS lifecycle and SQLite split-store coverage; this does not claim live TiDB/RustFS on macOS. |
+| CI `35585066458` aggregate | Cancelled after W08 jobs completed | `main` concurrency superseded the workflow; unrelated FoundationDB, Windows Node and macOS/Windows Rust jobs were also reported separately. The W08 job conclusions above are terminal successes and are the evidence counted here. |
 
-The run status is intentionally recorded as a snapshot. A later ledger update
-must replace `QUEUED` with the exact conclusion, job URL/ID, commit SHA,
-and retained pass/fail markers rather than inferring success from queue state.
+The W08 rows above use exact terminal job IDs and markers. The aggregate
+workflow conclusion is retained as `Cancelled` because later `main` pushes
+superseded it; this does not erase the terminal W08 job results, and it is not
+reported as an aggregate CI green result.
 
 ## Remaining action plan
 
-1. Follow CI run `35577929196` (or its replacement after this ledger push)
-   until the `tidb-rustfs` and `tidb` jobs have terminal results.
-2. For W08.4b, retain the corrected Linux native result and obtain current
-   macOS NFS/native evidence for the live TiDB/RustFS row.
-3. For W08.2, accept only the complete durable PD/TiKV restart sequence with
-   service identity, readiness, fresh-client and provider checks. Preserve a
-   capacity-gated result as a blocker, not a pass. The next attempt includes
-   the TiDB v8.5.7 stats-readiness fix from `769ea08`.
-4. For W08.3, retain the hosted ambiguous-commit failure-injection outcome and
-   keep its unknown-commit semantics distinct from retryable statement conflicts.
-5. Update `WORK_TRACKER.md` and this ledger only after the evidence is terminal;
-   do not close W08 while any required provider or platform gate is skipped,
-   cancelled, failed, or only compile-tested.
+1. No required W08 implementation or hosted acceptance action remains for the
+   defined functional scope. Preserve the exact terminal job IDs above; do not
+   replace them with a later queued/cancelled aggregate status.
+2. Resolve P01/P02 first: select the production topology and approved secret
+   path, then produce a staging deployment with real provider credentials.
+3. Close P03–P05 in that staging environment with restore, upgrade/rollback,
+   observability and redaction evidence; retain measured RPO/RTO and SLOs.
+4. Close P06–P08 with production-like load/soak, failure drills and an owned
+   operator runbook/on-call acknowledgement.
+5. Close P09 with immutable release artifacts, signed provenance/SBOM,
+   canary telemetry, rollback evidence and an explicit go/no-go approval.
+6. If the W08 harness or provider implementation changes, rerun the durable
+   and composite hosted rows before reopening W08. Keep native platform rows
+   separate from live provider claims.
 
 ## External blockers and boundaries
 
@@ -107,14 +156,20 @@ and retained pass/fail markers rather than inferring success from queue state.
   a separate macOS row.
 - Local TiDB/RustFS credentials and services are not present. The live provider
   rows are intentionally hosted and credential-gated rather than simulated.
-- Concurrent pushes to `origin/main` have repeatedly cancelled queued CI runs.
-  Runs `35577657951` and `35577758341` were superseded before their W08 jobs
-  could produce evidence; a cancelled or superseded run is not acceptance
-  evidence. Each ledger update must identify the exact terminal run and commit.
-- Unrelated hosted failures (for example global Clippy, FoundationDB, or
-  Windows parity jobs) are tracked as separate workstreams. They may make the
-  aggregate workflow red, but they do not become W08 failures without a
-  W08-relevant failing step.
+- Concurrent pushes to `origin/main` repeatedly cancelled earlier CI runs;
+  those are retained only as diagnostic history. The retained run
+  `35585066458` reached terminal success for every W08-relevant job before its
+  aggregate workflow was later superseded.
+- Unrelated hosted failures in that aggregate (FoundationDB, Windows Node and
+  macOS/Windows Rust) belong to their own workstreams. They may make the
+  aggregate workflow cancelled/red, but they do not become W08 failures when
+  every W08-relevant job is terminal success.
+- Production rollout is additionally blocked by the absence of an approved
+  deployment target, secret/IAM policy, backup/restore environment, production
+  observability and paging, representative load target, security sign-off,
+  named on-call ownership and release/canary approval. These are intentionally
+  recorded as external/provider/hosted gates rather than fabricated local
+  passes.
 
 ## Session time log
 
@@ -131,7 +186,8 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 07:50–08:06 | Read the hosted restart diagnostics, confirmed direct provider and ambiguous-commit passes, isolated the repeatable TiDB restart timeout, and serialised top-level provider tests in `17c8bda`. | ~20 min | ~10 min hosted wait | DDL serialization was published in merge tip `a6e870c`; the next durable run still reproduced the timeout. |
 | 2026-09-21 08:07–08:24 | Inspected the TiDB v8.5.7 startup path and confirmed `force-init-stats` withholds service until statistics initialization completes; added `--force-init-stats=false` in `769ea08`, merged concurrent main updates, and pushed. | ~20 min | ~10 min CI/queue wait | Restart-readiness fix is published; hosted verification is still queued. |
 | 2026-09-21 08:24–08:30 | Reconciled run `35574581481` native pass, run `35576142240` restart failure, and the superseded queue; refreshed this ledger against `origin/main` `6d59d20`. | ~10 min | ~5 min queue observation | W08 remains open pending the next terminal durable and macOS/native results. |
-| Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 remains open pending hosted gates. |
+| 2026-09-21 09:56–10:08 | Reconciled the terminal W08 run `35585066458`, updated the functional ledger to 100% for its defined scope, and separated aggregate cancellation from W08 job conclusions. | ~10 min | ~0 min | W08 functional acceptance is complete; production rollout tracking was expanded as a separate no-go scope. |
+| Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
 
@@ -144,6 +200,9 @@ For each subsequent W08 chunk, append or revise the relevant row with:
 - any new blocker without converting a skip or cancellation into a pass.
 
 Commit and push each validated ledger or implementation chunk to `origin/main`.
-The workstream is complete only when the required W08.2, W08.3 and W08.4b
-integration/provider/platform evidence is terminal and recorded in both this
-ledger and `WORK_TRACKER.md`.
+W08 functional acceptance is complete only when the required W08.2, W08.3 and
+W08.4b integration/provider/platform evidence is terminal and recorded in both
+this ledger and `WORK_TRACKER.md`. Production rollout is complete only when
+P01–P09 have terminal evidence, named ownership and an explicit GO decision;
+demo approval, local tests, hosted job presence or a cancelled aggregate are
+not substitutes.

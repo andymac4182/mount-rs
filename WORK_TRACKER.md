@@ -484,7 +484,7 @@ complete.
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
-| W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
+| W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
 | W11 | Config-driven CLI | Rust CLI now consumes the Rust SDK; Node CLI consumes the Node SDK; provider/remote/hosted gates remain | Main |
@@ -985,19 +985,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
 - [x] W08.1 Review and land the separate TiDB metadata/block implementation and
   dependencies (`ca57758`); four unit tests, format checks and test binaries
   passed.
-- [ ] W08.2 Complete the durable real TiDB/PD/TiKV Docker harness and restart
-  results. The pinned v8.5.7 single-node ARM64 TiDB/TiKV run passed schema,
-  UTF-8/trailing-space, identity and provider checks; the durable 3PD/3TiKV
-  topology now fails fast because this Docker host has 8,232,747,008 bytes and
-  the harness requires 10,737,418,240. MySQL compatibility alone does not
-  constitute TiDB verification.
-- [ ] W08.3 Verify provider time/fencing, ambiguous commits, concurrency and
+- [x] W08.2 Complete the durable real TiDB/PD/TiKV Docker harness and restart
+  results. Hosted CI run `35585066458` at source `9c098e5`, `tidb` job
+  `106286459436`, passed the pinned v8.5.7 durable 3PD/3TiKV topology,
+  frontend replacement, TiKV restart, PD restart, readiness checks and the
+  post-restart persisted provider rerun. The acceptance marker was
+  `evidence=durable-multinode-restart` on `linux/amd64` with 4 CPUs and
+  16,766,414,848 bytes of Docker memory. The local host remains capacity-gated;
+  hosted evidence is the authoritative service result.
+- [x] W08.3 Verify provider time/fencing, ambiguous commits, concurrency and
   deployment durability assumptions. Liveness queries are not fsync evidence.
-  The published `6327857` packet adds provider-clock fencing races, concurrent
-  RustFS publication, ambiguous-commit failure injection and durable-harness
-  capacity/restart markers; its real TiDB/RustFS lane remains blocked by the
-  unavailable Docker daemon, so no service result is counted.
-- [ ] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+  The same hosted durable run passed provider-clock fencing/concurrency,
+  ambiguous-commit no-replay, schema/identity, frontend/store/PD restart and
+  persisted fresh-client checks. The ambiguous-commit injection is ordered
+  after the durable restart gate so its intentionally unknown client outcome
+  cannot contaminate restart readiness; it remains a distinct backend outcome.
+- [x] W08.4 Add Node, CLI, native-mount and macOS/Linux acceptance coverage.
+  Run `35585066458` passed the live Linux TiDB/RustFS consumer composition,
+  ARM Node consumers, Linux FUSE, and both Ubuntu and macOS native-NFS jobs.
 - [x] W08.4a The bounded Node/CLI consumer slice is wired through the public
   Rust SDK, N-API and Rust/Node CLI configuration: TiDB metadata can compose
   with RustFS/S3-compatible `r2` chunks, with explicit `durable` assertions.
@@ -1010,16 +1015,70 @@ Evidence landed without closing the remaining W01 acceptance gates:
   loopback RustFS credential set are absent here. The consumer cleanup row
   removes only owned RustFS objects and verifies provider shutdown; exact TiDB
   metadata-row deletion remains the W08.5 service-harness boundary.
-- [ ] W08.4b Native-mount and live TiDB/RustFS consumer acceptance remain open.
-  The host has no Docker daemon/service run, and the full CLI all-target test's
-  two HTTP subprocess cases are blocked before readiness by the sandbox's
-  `Operation not permitted` mount denial; those are not counted as passes.
+- [x] W08.4b Native-mount and live TiDB/RustFS consumer acceptance are
+  complete for the defined hosted matrix. The `tidb-rustfs` job
+  `106286459715` passed live TiDB/RustFS Node and CLI matrices, independent
+  Rust/Node mounted I/O through Linux FUSE, clean unmount, fresh-provider
+  readback and retained client bytes. The standalone `native-fuse` job
+  `106286459998`, ARM Node job `106286459639`, Ubuntu native-NFS job
+  `106286459483`, and macOS native-NFS job `106286459246` also passed. The
+  macOS native-NFS row is a native-platform lifecycle gate, not a claim that
+  TiDB/RustFS itself ran on macOS; the live provider row is the Linux FUSE
+  composition job.
 - [x] W08.5 **TiDB metadata + RustFS S3 chunks:** the real single-node v8.5.7
   TiDB service and pinned loopback RustFS endpoint passed the mixed-provider
-  seed, partial-write, truncate, reopen, CAS/fencing and exact cleanup path.
-  Persisted fixtures require explicit volume/prefix/manifest scope and reject
-  transient or symlink paths. Replicated/durable TiDB capacity and provider
-  restart acceptance remain open under W08.2-W08.3.
+  seed, partial-write, truncate, reopen, CAS/fencing and exact cleanup path;
+  the hosted durable composition additionally passed the RustFS restart/reopen
+  phases. Persisted fixtures require explicit volume/prefix/manifest scope and
+  reject transient or symlink paths.
+
+### W08 production rollout track — NO-GO (15% provisional)
+
+The demo and W08 functional acceptance are not production approval. Track the
+following gates separately from implementation, hosted provider, and native
+platform evidence; the detailed ledger and evidence boundaries are in
+`docs/W08-progress-ledger.md`. No production gate is checked until its exit
+evidence is terminal, owned and reproducible in a production-like environment.
+
+- [ ] **W08-P01 (20%) — deployment contract/topology:** choose and document the
+  managed or self-hosted TiDB/PD/TiKV and object-storage architecture, HA,
+  regions, TLS/network policy, resource limits, versions, tenancy and IaC;
+  prove a staging deployment and smoke/restart gate. *(Implementation +
+  hosted/provider; target platform not supplied.)*
+- [ ] **W08-P02 (15%) — secrets/IAM/rotation:** bind production credentials
+  through the approved secret manager; prove least privilege, rotation,
+  revocation, audit and redaction without data loss. *(Implementation +
+  provider; secret manager and IAM owner are external.)*
+- [ ] **W08-P03 (10%) — backup/restore/DR:** define RPO/RTO and retention;
+  configure backups/versioning and complete an isolated restore, corruption and
+  region-loss/recovery drill with metadata/block consistency evidence. *(Hosted
+  provider; backup environment and second region are external.)*
+- [ ] **W08-P04 (10%) — upgrade/compatibility/rollback:** rehearse the
+  supported TiDB/RustFS/client upgrade matrix, schema/config migration,
+  interrupted upgrade recovery and package/provider rollback. *(Hosted
+  provider + implementation; target versions and maintenance window are open.)*
+- [ ] **W08-P05 (15%) — observability/SLO/alerting:** define SLOs and error
+  budgets; configure metrics/logs/traces, health checks, dashboards, paging,
+  retention and redaction; exercise an alert end to end. *(Implementation +
+  hosted/provider; collector and on-call route are not configured.)*
+- [ ] **W08-P06 (10%) — capacity/load/soak:** run representative baseline,
+  peak, saturation, failover and multi-hour soak workloads; record latency,
+  throughput, errors, headroom and scaling limits. *(Hosted/provider +
+  implementation; workload and production-sized capacity are open.)*
+- [ ] **W08-P07 (15%) — security/hardening:** enforce TLS/certificate
+  rotation, network segmentation, authz/tenant isolation; complete dependency,
+  image and SBOM scanning, threat-model review and security sign-off. *(Provider
+  + implementation; security approval and network controls are external.)*
+- [ ] **W08-P08 (15%) — failure drills/runbooks/on-call:** exercise client and
+  provider loss, stale leases, partitions, partial writes, rolling restart and
+  restore; publish operator runbooks and complete an on-call tabletop/timed
+  drill. *(Hosted/provider + operations; named operators and incident tooling
+  are open.)*
+- [ ] **W08-P09 (10%) — release/canary/go-no-go:** produce immutable signed
+  artifacts and SBOM, verify target-platform packages, run a staged canary with
+  live SLO telemetry, rehearse rollback and record explicit approval. *(Release
+  implementation + hosted; registry, signing, deployment controller and
+  approvers are external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
