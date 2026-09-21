@@ -3057,6 +3057,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   bounded block-store diagnostics test, the 18-case S3 gateway suite, and all
   other non-ignored workspace rows. Explicitly ignored native/service rows
   remain separate prerequisites and are not production acceptance.
+- [x] The current shared `origin/main` boundary at
+  `31e122bc2e5790bb3568c01aaea4b236d89dce96` passed on 2026-09-22 after the
+  security-evidence rebase: `./scripts/cargo-shared fmt --all -- --check`,
+  the full locked offline workspace/all-target test gate with the required
+  local loopback permission, and strict workspace Clippy with `-D warnings`
+  on the isolated Cargo target `/private/tmp/mount-rs-w25-current-main-gate`.
+  The credential-free template, bucket-policy, CI-config, and CI-environment
+  contract fixtures also passed. Explicitly ignored native/service rows and
+  all production deployment gates remain separate prerequisites.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

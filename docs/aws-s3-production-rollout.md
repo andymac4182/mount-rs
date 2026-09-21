@@ -73,6 +73,16 @@ worktree artifact races; this gate therefore binds to the checked-out source
 rather than another thread's compiled metadata. Ignored native/service rows
 remain explicit prerequisites and are not treated as production acceptance.
 
+The current shared `origin/main` boundary at
+`31e122bc2e5790bb3568c01aaea4b236d89dce96` passed on 2026-09-22 after the
+security-evidence rebase: formatting, the full locked offline workspace/all-
+target test gate with the required local loopback permission, and strict
+workspace Clippy with `-D warnings` on the isolated Cargo target
+`/private/tmp/mount-rs-w25-current-main-gate`. The credential-free template,
+bucket-policy, CI-config, and CI-environment contract fixtures also passed.
+Explicitly ignored native/service rows and all production deployment gates
+remain separate prerequisites.
+
 ## Deployment contract
 
 The production configuration must contain only non-secret provider identity:
