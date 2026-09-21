@@ -483,7 +483,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native and hosted acceptance remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition passed; target-gated root member and Rust SDK/CLI selection landed; production authority, Node/native, hosted acceptance and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Crate and single-node harness landed; bounded RustFS composition passed; durable topology capacity-gated | Mill (checkpoint) / Main |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -979,6 +979,46 @@ Evidence landed without closing the remaining W01 acceptance gates:
   published `629c2f6` packet adds an owned FoundationDB restart/readiness gate,
   fresh-client RustFS reopen/CAS/fencing checks and fail-closed external-FDB
   handling; its real runtime lane remains blocked by host `libfdb_c` and Docker.
+- [ ] W07.7 **Production rollout readiness and go/no-go:** the demo and local
+  Docker evidence are not production acceptance. Before enabling any production
+  consumer, close every gate below with a linked revision, test/run result,
+  environment identity and accountable owner:
+  - [ ] **Identity and least privilege:** document and deploy one
+    write-capable authority identity per authority prefix, read-only consumer
+    identities, secret injection/rotation and no shared credentials. Prove
+    with the actual production credential/tenant/ACL policy that a consumer
+    cannot publish or overwrite the authority record.
+  - [ ] **Time and authority failure policy:** enforce the authority-host
+    clock-skew bound and alerting; publish more frequently than the shortest
+    lease TTL; republish after authority restart before admitting readers; fail
+    closed during authority loss; and test the reviewed failover and recovery
+    procedure.
+  - [ ] **FoundationDB durability and recovery:** prove the production
+    cluster's replication/storage policy, backup/restore, service
+    restart/failover, keyspace/version compatibility and a recovery drill.
+    The single-node pinned Docker harness is not this evidence.
+  - [ ] **Production-like workload and soak:** run multi-chunk reads/writes,
+    partial writes, truncate/extend, concurrent publication, stale-writer
+    fencing, maybe-committed reconciliation, lease renewal/expiry, reconnect
+    and fresh-client reopen at production-like duration and load. Record
+    latency, retry, capacity and error-budget results.
+  - [ ] **Observability and operations:** expose and alert on cluster health,
+    authority publication age/errors, reader failures, lease-fence/ESTALE,
+    transaction retries/maybe-committed EIO and cleanup/space pressure.
+    Publish the dashboards, on-call runbook, escalation thresholds and
+    incident/recovery ownership.
+  - [ ] **Rollout and rollback:** stage a canary with a holdback, define
+    go/no-go and abort criteria, verify backward/forward compatibility of the
+    keyspace and configuration, rehearse rollback/authority recovery and
+    record owner sign-off.
+  - [ ] **Hosted and platform evidence:** obtain green hosted
+    FoundationDB/RustFS, Node, CLI/native Linux and macOS/Linux build/native
+    acceptance runs. Record the actual runner, cluster/image, revision and
+    result; failed, skipped, cancelled or unavailable evidence remains open.
+
+  W07.7 remains open until every nested gate has concrete production-like
+  evidence. No demo, local qualification, queued CI run or installation-only
+  result may be promoted to a production PASS.
 
 ## W08 — TiDB
 
