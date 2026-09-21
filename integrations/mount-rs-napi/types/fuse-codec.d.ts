@@ -340,6 +340,8 @@ export declare const FUSE_SETXATTR: number
 export declare const FUSE_GETXATTR: number
 export declare const FUSE_LISTXATTR: number
 export declare const FUSE_REMOVEXATTR: number
+export declare const FUSE_ASYNC_DIO: bigint
+export declare const FUSE_PARALLEL_DIROPS: bigint
 export declare const FUSE_GETLK: number
 export declare const FUSE_SETLK: number
 export declare const FUSE_SETLKW: number

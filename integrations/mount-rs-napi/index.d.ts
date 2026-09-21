@@ -1976,6 +1976,18 @@ export interface NativeP9Txattrwalk {
   name: string
 }
 
+export interface Nfs4StateKnobs {
+  leaseSeconds?: number
+  maxSessions?: number
+  maxForeSlots?: number
+  maxOperations?: number
+  maxRequestSize?: number
+  maxCachedResponseSize?: number
+  maxOpensPerFile?: number
+  maxLocksPerFile?: number
+  requireReclaimComplete?: boolean
+}
+
 export declare function nfsAuthNull(): NfsOpaqueAuth
 
 export declare function nfsAuthSys(uid?: number | undefined | null, gid?: number | undefined | null, machineName?: string | undefined | null): NfsOpaqueAuth
@@ -2131,6 +2143,7 @@ export interface NfsServerOptions {
   dtpref?: number
   snapshotCache?: number
   claimOwnership?: boolean
+  nfs4?: Nfs4StateKnobs
   onTransportError?: (error: unknown, peer: string | undefined) => void
 }
 

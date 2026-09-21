@@ -15,7 +15,7 @@ semantics.
 | Gate | State | Required evidence |
 | --- | --- | --- |
 | NFSv3/MOUNT public API and wire behavior | In progress | Codec, rootless wire, session, error, generated N-API, and shared-handle-view evidence |
-| NFSv4.1 router/session behavior | In progress | Version routing, COMPOUND/state matrix, shared handle/counter proof, and direct N-API view |
+| NFSv4.1 router/session behavior | In progress | Version routing, COMPOUND/state matrix, shared handle/counter proof, direct N-API view, and bounded channel/state knobs |
 | Connection and server lifecycle | In progress | Active connection objects/counts, malformed/EOF/reset handling, close/wait, async disposal, and restart evidence |
 | macOS/Linux native NFS | External gate | Actual supported-client mount/read/write/unmount and cleanup results |
 | Handles, concurrency, crash and durability | In progress | Cross-version handle lifetime, bounded LRU/pinning, cancellation/close, crash/restart, ordering, and persistence evidence |
@@ -23,8 +23,9 @@ semantics.
 ## Current queue
 
 - Reconcile the remaining upstream NFS connection-object surface and direct
-  session/member parity; the local live-client object/close boundary and the
-  bounded `maxHandles`/NFSv4 pinning policy now pass.
+  session/member parity; the local live-client object/close boundary, bounded
+  `maxHandles`/NFSv4 pinning policy, and bounded v4 channel/state knobs now
+  pass.
 - Exercise the full v3/v4 behavior matrix, including stateful v4 operations,
   malformed records, reconnects, and version negotiation.
 - Keep the macOS v3 native result current; execute the separate privileged
@@ -44,12 +45,13 @@ semantics.
 | 2026-09-22 | restart-boundary state classification | A rootless restart-boundary test reuses the backend across two server instances, proves `NfsServer::close()` destroys the first v4 session, and verifies the old session is rejected with `NFS4ERR_BADSESSION` by the replacement server. The v4 wire target now passes 4/4 | This proves process-local session/lease/replay state is not crash-durable; backend data durability, crash injection, native Linux v4.1, hosted lifecycle, and full upstream state/member parity remain open |
 | 2026-09-22 | macOS native NFSv3 loopback | The refreshed opt-in `native_loopback_mount_round_trip` gate passed 1/1 in 0.11s on the exact pushed tip, including the temporary native mount, filesystem round trips, and bounded cleanup | Privileged Linux NFSv4.1, hosted lifecycle, full stateful matrix, remaining upstream member differences, and crash/durability gates |
 | 2026-09-22 | pinned upstream and bounded-handle parity | The pinned oracle (`85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`) passed 266 NFSv3/MOUNT and NFSv4.1 TCP conformance cases with 18 capability/root skips and zero mismatches; the N-API NFS codec differential passed; `maxHandles` now has shared LRU eviction, root/current protection, and NFSv4 open-state pins, covered by two focused table tests and the N-API server option path | The 18 conformance skips are explicit capability boundaries, not passes for unsupported rows; richer upstream `onError`/NFSv4 lease, ID-map, state-limit and reclaim knobs, native Linux v4.1, hosted lifecycle, and crash/durability remain open |
+| 2026-09-22 | NFSv4 channel/state limit parity | Rust `Nfs4StateOptions` and nested N-API `Nfs4StateKnobs` now cover lease seconds, per-client sessions, fore slots, COMPOUND operations, request/replay-cache ceilings, per-file opens/locks, and reclaim policy; the v4 wire suite passes 5/5 with capped `CREATE_SESSION`, `maxSessions`, and `maxOperations` evidence | Upstream ID-map callbacks, deterministic `now`/`seed`, and session `onError` remain explicit parity gaps; native Linux/hosted lifecycle and crash/durability remain external gates |
 
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
   33 unit tests, rootless wire 1, transport concurrency 1, transport errors 4,
-  v4 commit barrier 1, and v4 wire 4; the native mount target remains 1
+  v4 commit barrier 1, and v4 wire 5; the native mount target remains 1
   explicitly ignored test. The reconnect and pipelining rows are rootless
   userspace evidence, not native or hosted-client acceptance.
 - `CI=true CARGO_TARGET_DIR=/Users/andrewmcclenaghan/Library/Caches/mount-rs/cargo-target MOUNTX_SOURCE=/private/tmp/mountx-w01-nfs-oracle pnpm --dir tests/upstream exec vitest run nfs-conformance.test.mjs --config vitest.config.mjs` — PASS: 266 pinned-oracle NFSv3/MOUNT and NFSv4.1 TCP cases, 18 explicit capability/root skips, 0 mismatches.

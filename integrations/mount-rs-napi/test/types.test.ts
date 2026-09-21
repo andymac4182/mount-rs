@@ -49,6 +49,7 @@ import {
 import {
   createNfsServer,
   type NfsConnection,
+  type Nfs4StateKnobs,
   type NfsServer,
   type NfsServerOptions,
 } from "@mount-rs/core/nfs"
@@ -81,6 +82,9 @@ import {
   decodeLkOut,
   encodeLkIn,
   encodeLkOut,
+  FUSE_ASYNC_DIO,
+  FUSE_PARALLEL_DIROPS,
+  FUSE_SETXATTR_EXT,
   FUSE_LK_FLOCK,
   F_UNLCK,
   FuseSession,
@@ -123,6 +127,7 @@ const autoMountOptions: JsAutoMountOptions = {
   },
 }
 void autoMountOptions
+void (FUSE_ASYNC_DIO | FUSE_PARALLEL_DIROPS | FUSE_SETXATTR_EXT)
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
   __napiBindingTarget
@@ -302,11 +307,23 @@ function checkUtilities(): void {
 
 function checkServerAndKvSubpaths(): void {
   const filesystem = Filesystem.memory()
+  const nfs4Options: Nfs4StateKnobs = {
+    leaseSeconds: 90,
+    maxSessions: 4,
+    maxForeSlots: 64,
+    maxOperations: 64,
+    maxRequestSize: 1024 * 1024,
+    maxCachedResponseSize: 64 * 1024,
+    maxOpensPerFile: 256,
+    maxLocksPerFile: 1024,
+    requireReclaimComplete: true,
+  }
   const nfsOptions: NfsServerOptions = {
     host: "127.0.0.1",
     port: 0,
     allowRemote: false,
     verifier: new Uint8Array(8),
+    nfs4: nfs4Options,
   }
   const p9Options: P9ServerOptions = {
     host: "127.0.0.1",

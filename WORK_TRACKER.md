@@ -53,7 +53,12 @@ The opt-in macOS native NFSv3
 loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
 remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
 stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-backend durability, crash injection, and durable-restart qualification.
+backend durability, crash injection, and durable-restart qualification. The
+new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
+session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
+open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
+options; the wire suite passes 5/5. Upstream ID-map, deterministic clock/seed,
+and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -241,6 +246,14 @@ covers the bounded close. Local all-target FUSE tests, strict Clippy,
 formatting, and Linux-target test type-check pass, while hosted close races,
 concurrent request behavior, crash/restart, callback-event, lock and
 durability evidence remain external; W01 stays NO-GO.
+The bounded concurrency packet now permits up to 16 positional `FUSE_READ`
+workers with a single serialized reply writer. Stateful operations and writes
+still use the serialized session boundary, and stop aborts plus drains read
+workers; a Linux-gated barrier-driver harness proves two reads overlap. Local
+all-target FUSE tests, strict Clippy, formatting, and Linux-target test
+type-check pass, while hosted `/dev/fuse`, native mutation/write concurrency,
+close/crash/restart, callback-event, lock and durability evidence remain
+external; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -255,6 +268,13 @@ and releases it on `Mounted` teardown. The scoped auto/NFS/N-API Rust tests,
 debug addon build, native-facade skip lane, generated typecheck, formatting
 and diff checks pass; hosted native fault-event delivery and the remaining
 native lifecycle gates remain open.
+The latest mount-free N-API session follow-up now starts from the same
+conservative INIT policy as the serialized native dispatcher. Default
+negotiation no longer advertises asynchronous direct I/O, parallel directory
+dispatch, or `SETXATTR_EXT` without an explicit caller override; the generated
+N-API session test asserts those flags remain clear. This closes a capability-
+honesty gap but does not qualify hosted Linux negotiation, native callback
+delivery, cancellation/concurrency, crash/restart, durability, or FSKit.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
@@ -597,7 +617,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35623491280`/`336d9a3`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35627206302`/`87db9fd`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -707,9 +727,12 @@ isolated locked N-API check, release addon, generated declarations, and direct
 N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
 return, and deliberate body failure. The oracle differential is explicitly
 skipped without `MOUNTX_SOURCE`, the sandbox blocks the live N-API loopback
-bind with `Operation not permitted`, and complete member parity, peer-fault,
-restart/durability, provider, hosted, and native gates remain open. W01 and
-production status remain **NO-GO**.
+bind with `Operation not permitted`, and complete member parity, provider,
+hosted, native, network-client concurrency, and restart/durability gates
+remain open. The host-enabled WebDAV session packet also completes eight
+parallel unique-file PUTs and GETs through one direct session with exact
+byte-for-byte readback; that is same-process same-driver evidence only. W01
+and production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1065,7 +1088,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   socket-reset tests now produce exactly one typed
   peer-aware callback event for both S3 and WebDAV. Complete WebDAV
   session/member parity remains open; active lock-record readback and
-  post-UNLOCK cleanup, plus the session-owned driver wrapper, are verified.
+  post-UNLOCK cleanup, eight parallel unique-file direct-session PUT/GET
+  requests, plus the session-owned driver wrapper, are verified. The
+  parallel packet is limited to in-process same-driver concurrency.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -1482,7 +1507,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   qualification checkpoint for that revision; production identity/ACL/TLS,
   backup/recovery, capacity, observability, macOS and release-owner gates
   remain open.
-  A later non-cancelling hosted run
+  A prior non-cancelling hosted run
   [35623491280](https://github.com/andymac4182/mount-rs/actions/runs/35623491280)
   (job
   [106415143857](https://github.com/andymac4182/mount-rs/actions/runs/35623491280/job/106415143857))
@@ -1494,13 +1519,30 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
   throughput_ops_per_sec=64.28`, `FOUNDATIONDB_TEST_PASS topology=durable
   ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
-  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a newer bounded
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. This is a prior bounded
   current-main qualification checkpoint; its retained artifact
   `foundationdb-production-qualification-35623491280-1` has SHA-256
   `b353ac2744dae9c469f7807533f8eec0d52e49120a101552c428585e0559741d`, and
   the workflow summary records the repository, source revision, ref, runner,
   workflow, run ID and attempt. It is not production-duration, capacity,
   identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
+  The latest non-cancelling hosted run
+  [35627206302](https://github.com/andymac4182/mount-rs/actions/runs/35627206302)
+  (job
+  [106424385715](https://github.com/andymac4182/mount-rs/actions/runs/35627206302/job/106424385715))
+  tested current-main revision `87db9fd` on `ubuntu-24.04` and completed green
+  in 10m47s. Its retained artifact
+  `foundationdb-production-qualification-35627206302-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=7981 p95_us=23550 p99_us=23550 total_ms=124
+  throughput_ops_per_sec=120.85`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. Its artifact has SHA-256
+  `d2e6743dedf5d1099e383cfc41fe00cfb2e22a05068289084c2db75641cbf7e3`, and
+  the schema-2 workflow summary records the repository, source revision, ref,
+  runner, workflow, run ID and attempt. It is not production-duration,
+  capacity, identity/ACL/TLS, backup/recovery, macOS or release-owner evidence.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1541,9 +1583,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35623491280` recorded
-    `operations=15 p50_us=13140 p95_us=61081 p99_us=61081 total_ms=233
-    throughput_ops_per_sec=64.28` at revision `336d9a3`. This is bounded
+    latency and throughput; latest hosted run `35627206302` recorded
+    `operations=15 p50_us=7981 p95_us=23550 p99_us=23550 total_ms=124
+    throughput_ops_per_sec=120.85` at revision `87db9fd`. This is bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -1556,22 +1598,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `336d9a3` in run
-    `35623491280` on `ubuntu-24.04`, with the retained
+    Node, CLI/native Linux checkpoint is green for revision `87db9fd` in run
+    `35627206302` on `ubuntu-24.04`, with the retained
     `qualification-pass` artifact. Complete the advertised macOS/Linux
     build/native matrix and any remaining clean-install/package evidence;
     record the actual runner, cluster/image, revision and result. Failed,
     skipped, cancelled or unavailable evidence remains open.
 
-  A fresh local source gate on 2026-09-22 tested revision `717a0ab` and
+  The current-main source gate on 2026-09-22 tested revision `29365e9` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
   Clippy with `-D warnings`, and the locked
-  `./scripts/cargo-shared test --workspace --all-targets --locked` suite with
-  loopback networking enabled for the TCP integration test. The suite's
-  provider, native-mount and external-service rows remained explicitly
-  ignored where their required harnesses were not present. This is current
-  source qualification only; it does not close the hosted platform matrix or
-  any production deployment gate.
+  `./scripts/cargo-shared test --workspace --all-targets --locked` suite.
+  The suite's provider, native-mount and external-service rows remained
+  explicitly ignored where their required harnesses were not present. This is
+  current source qualification only; it does not close the hosted platform
+  matrix or any production deployment gate. The earlier source checkpoint at
+  `717a0ab` remains historical evidence in the rollout ledger.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
@@ -2395,6 +2437,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `mount-rs-tests/aws-s3/20260921T124037Z-88398-91d73f60bde3b905c3af2cc78b38b224`.
   This is current test-account evidence, not production resource or hosted
   deployment acceptance.
+- [x] The pushed W25 revision `56ef9ab` passed a fresh scoped live packet on
+  2026-09-22 under the dedicated role: sibling-prefix denial, public SDK/CLI
+  self-test, composed AWS S3 filesystem, process reopen, independent PGlite
+  metadata, writer fencing, PGlite backup/restore and fresh-server reopen,
+  and exact owned-prefix cleanup. It emitted `AWS_S3_TEST_PASS` for
+  `mount-rs-tests/aws-s3/20260921T165854Z-84404-217dc2bf24fb46f9e3b96e88ba4fd4a4`
+  and `AWS_S3_PGLITE_TEST_PASS` for its child prefix. The standalone
+  `tests/aws/Cargo.lock` was refreshed for the current `mount-rs-fuse`
+  `futures-util` dependency so the harness now passes its `--locked` gate.
+  This remains qualification-account and local-metadata evidence, not
+  production deployment acceptance.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -2553,7 +2606,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   without AWS credentials. The CloudFormation bucket-name constraint and the
   read-only resource audit now reject consecutive dots and invalid length or
   edge characters consistently with the hosted preflight.
-- [x] A fresh read-only resource audit at current source `32b0609` on
+- [x] A fresh read-only resource audit at pushed source `56ef9ab` on
   2026-09-22 again passed the selected `myroot` qualification bucket's
   account/region binding, all four public-access blocks,
   `BucketOwnerEnforced` ownership, AES256 encryption, `None` versioning,
@@ -2625,7 +2678,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `35622312798` at `4242c24`, and `35620404949` at `0010246` stopped at the same preflight boundary, as did
   `35619552809` at `a84fa3e`. The provenance-hash expansion now binds the
   policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
-  PGlite harness, and AWS test manifest inputs in this artifact; this improves
+  PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs
+  in this artifact; the workflow also validates the standalone AWS manifest
+  with `cargo metadata --locked` before any AWS authentication. This improves
   evidence integrity but does not create AWS authentication or deployment
   evidence. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
@@ -2647,7 +2702,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   mutating either system; additional or broad GitHub federation trust
   statements fail closed. Its credential-free three-case environment fixture
   test is wired into the hosted preflight. The
-  fresh read-only audit at current source `32b0609` on 2026-09-22 returned
+  fresh read-only audit at pushed source `56ef9ab` on 2026-09-22 returned
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
   non-self-approvable reviewer, protected-environment inputs and secret,
   missing GitHub OIDC provider, and missing immutable-subject role trust; it
@@ -2807,6 +2862,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `1d97028f-e153-4b49-9fac-c3a8c1fc1117` found zero reportable findings.
   Terminal hosted artifacts, provider performance, TLS/IAM and customer
   capacity evidence remain open.
+- [x] W26.10 Make W26 IOPS artifact retention fail closed. The generic,
+  TiDB and FoundationDB Ozone upload steps in `.github/workflows/ci.yml` now
+  use `if-no-files-found: error`, so missing expected JSON evidence fails the
+  evidence job even on the `always()` upload path. CI YAML parsing, shell
+  syntax, benchmark unit tests and diff checks pass. Commit `c0f8370` was
+  published in `12ba117`; focused scan
+  `18010cad-ed69-4da3-b0a9-57163091e878` found zero reportable findings.
+  Hosted artifact retention/access and terminal provider results remain open.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
@@ -2880,9 +2943,9 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P5 — fencing, ambiguous commit and failover recovery | Lease-protected reconciliation implemented; failover matrix open | 35% | Reconciliation renews the writer lease and never runs implicitly on shutdown; concurrent/retry/failover evidence across feasible Ozone/provider CI lanes remains open |
 | P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |
 | P7 — integration observability and error contract | Local HTTP/OTLP and provider-boundary evidence passed; production integration open | 45% | `mount-rs-http` passed 8 unit and 12 integration tests; OTLP-enabled HTTP passed 11 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection/listing behavior; `reconcileBlocks` returns scanned/protected/recent/deleted counts and fails closed when unsupported, `readdir_bounded` is forwarded through observability/CLI wrappers, and N-API unstorage preserves `EOVERFLOW`; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
-| P8 — 1,000 IOPS per-drive CI workload | Per-provider hard-threshold gates implemented; hosted result pending | 45% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider. The generic Ozone composition requests SQLite/R2 and PGlite/R2 with 4 KiB payloads, 400 iterations, concurrency 64, `--min-iops 1000` and `--require-configured`; dedicated TiDB/FoundationDB Ozone jobs request their own rows with the same strict mode. Wrapper settings cannot lower the target below 1,000 or weaken the fixed profile. `scripts/verify-w26-ozone-iops-artifact.mjs` requires the exact provider set, zero skipped/configuration-failed rows, successful cleanup, per-size lifecycle success and a valid retained JSON artifact before the generic or dedicated pass marker is emitted. `de9d267` at `414a469` adds dedicated durable-provider artifact paths; `66f3670` at `00d2b80` adds the fixed-profile/artifact gate. Local benchmark/unit, verifier negative cases and syntax checks pass; local live Ozone evidence is blocked by missing service credentials/provider topologies. |
+| P8 — 1,000 IOPS per-drive CI workload | Per-provider hard-threshold gates implemented; hosted result pending | 47% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider. The generic Ozone composition requests SQLite/R2 and PGlite/R2 with 4 KiB payloads, 400 iterations, concurrency 64, `--min-iops 1000` and `--require-configured`; dedicated TiDB/FoundationDB Ozone jobs request their own rows with the same strict mode. Wrapper settings cannot lower the target below 1,000 or weaken the fixed profile. `scripts/verify-w26-ozone-iops-artifact.mjs` requires the exact provider set, zero skipped/configuration-failed rows, successful cleanup, per-size lifecycle success and a valid retained JSON artifact before the generic or dedicated pass marker is emitted. The three W26 IOPS uploads now fail the CI job when expected JSON is absent. `de9d267` at `414a469` adds dedicated durable-provider artifact paths; `66f3670` at `00d2b80` adds the fixed-profile/artifact gate and `c0f8370` at `12ba117` makes retention fail closed. Local benchmark/unit, verifier negative cases and syntax checks pass; local live Ozone evidence is blocked by missing service credentials/provider topologies. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
-| P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 76% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`. The credential-free Ozone policy gate covers all four metadata-provider shapes, HTTPS R2, scoped prefixes, durable settings, external secret references and TiDB TLS options with local positive/negative execution; expanded fixtures independently reject inline credentials, unsafe FoundationDB authority and TLS verification downgrade. Standard scan `5ad61e60-20e3-4223-885a-d4b516d49bb1`, focused IOPS diff scans `5fc5a943-07bb-4979-9f37-efd87a7f505e`, `60269206-bb22-4b78-aaf7-f05d16ffcca0` and `1d97028f-e153-4b49-9fac-c3a8c1fc1117`, production-config diff scan `d74e3e86-2e0a-45cf-9819-e31f428eb5d4` and expanded negative-path scan `7addeeb5-4601-4951-aca9-becffb9bd4b9` all found zero reportable findings; their hosted/provider coverage is partial or deferred. The artifact verifier rejects malformed/weak profiles without printing artifact contents. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred; latest published head `00d2b80` has CI/W08 policy/W08 targets pending, Fault injection/W04 production policy/Live Cloudflare R2 queued, with no terminal W26 provider result |
+| P10 — security, privacy, tenancy and audit | Published-tip local security review complete; hosted/customer security remains open | 76% | Delegated architecture threat model covers provider, credential, prefix, client/native and customer/Ozone boundaries; endpoint/TLS/redaction/auth/isolation, loopback-only bind, connection-cap, stalled-request and pre-materialization directory entry/response-byte limit tests pass locally; SDK `StoreConfig` debug output now redacts provider credentials; strict affected-workspace check is green; scoped reconciliation fails closed for unsupported providers, renews the writer lease, protects live/open-unlinked roots, validates block IDs and deletes only aged objects under the configured prefix; `FsDriver::readdir_bounded` fails closed for unsupported providers and is implemented/forwarded for built-in Rust paths, while KV can opt into `get_keys_bounded` and N-API maps provider overflow back to Node `EOVERFLOW`. The credential-free Ozone policy gate covers all four metadata-provider shapes, HTTPS R2, scoped prefixes, durable settings, external secret references and TiDB TLS options with local positive/negative execution; expanded fixtures independently reject inline credentials, unsafe FoundationDB authority and TLS verification downgrade. Standard scan `5ad61e60-20e3-4223-885a-d4b516d49bb1`, focused IOPS diff scans `5fc5a943-07bb-4979-9f37-efd87a7f505e`, `60269206-bb22-4b78-aaf7-f05d16ffcca0` and `1d97028f-e153-4b49-9fac-c3a8c1fc1117`, retention scan `18010cad-ed69-4da3-b0a9-57163091e878`, production-config diff scan `d74e3e86-2e0a-45cf-9819-e31f428eb5d4` and expanded negative-path scan `7addeeb5-4601-4951-aca9-becffb9bd4b9` all found zero reportable findings; their hosted/provider coverage is partial or deferred. The artifact verifier rejects malformed/weak profiles without printing artifact contents, and missing IOPS artifacts now fail CI. Customer Ozone TLS/IAM/rotation, provider-native allocation, dependency/native provenance, 99.99%/recovery drills and production operations remain deferred; latest published head `12ba117` has CI/W08 policy/W08 targets pending, Fault injection queued and unrelated W04 policy succeeded, with no terminal W26 provider result |
 | P11 — end-to-end client/platform matrix | HTTP path and built-in/KV/durable-provider bounded-listing contracts added to Ozone CI; full matrix open | 46% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; built-in Rust providers enforce the directory bound before response materialization; SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition tests assert provider-backed bounded success and `EOVERFLOW`; the feature-built FoundationDB and TiDB Node/N-API Ozone lanes from `b80c19c` and `ef6a876` assert the same contract with scoped cleanup prefixes; unstorage/N-API has a provider callback, public bounded API, TypeScript declaration and Node error-shape test; TiDB test compilation/Clippy and FoundationDB `cargo check --tests` pass locally, but live provider/Ozone execution is hosted-only and FoundationDB local linking lacks `libfdb_c`; native mounts, providers without the callback, `MOUNTX_SOURCE` parity, every advertised platform and terminal hosted evidence remain open |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
