@@ -560,10 +560,14 @@ begin_phase() {
 
 run_direct_provider_test() {
   persistence_expectation=$1
+  # Each top-level ignored test initializes the shared provider schema. Keep
+  # those DDL transactions serial while preserving the tests' own explicit
+  # concurrency coverage; parallel schema creation can leave TiDB's DDL
+  # owner/recovery path unable to expose the status endpoint after restart.
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_TEST_VOLUME_KEY="$volume_key" \
   MOUNT_RS_TIDB_EXPECT_PERSISTED="$persistence_expectation" \
-    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture
+    "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-tidb --test tidb -- --ignored --nocapture --test-threads=1
 }
 
 run_provider_test() {
