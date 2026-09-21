@@ -56,6 +56,7 @@ pub use record::{
     TranscriptError, TranscriptFrame, TranscriptRecorder, decode_transcript, encode_transcript,
     replay_transcript,
 };
+pub use session::{FuseFlushMechanism, FuseSession, FuseSessionOptions};
 
 pub const IN_HEADER_SIZE: usize = 40;
 pub const OUT_HEADER_SIZE: usize = 16;

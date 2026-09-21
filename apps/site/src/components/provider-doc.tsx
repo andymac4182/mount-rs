@@ -784,7 +784,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
     name: 'AWS S3',
     eyebrow: 'Provider / remote object storage',
     maturity: 'Validated',
-    maturityNote: 'The first-class Rust SDK/CLI AWS S3 block provider passed the live myroot private-bucket gate with a prefix-scoped assumed role, composed SQLite metadata, process reopen, and owned-prefix cleanup. Deployment-specific metadata, backup/DR, monitoring, and hosted release gates remain separate.',
+    maturityNote: 'The first-class Rust SDK/CLI AWS S3 block provider passed the live myroot private-bucket gate with a prefix-scoped assumed role, composed SQLite metadata, process reopen, and owned-prefix cleanup. The repository now also defines an operations runbook and optional S3Session::stats() telemetry boundary; production identity rotation, metadata ownership, recovery drills, collectors/alerts, canary/rollback, and hosted release gates remain separate.',
     summary: (
       <>
         AWS S3 is a first-class block provider using the actual AWS region and
@@ -856,7 +856,9 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         not infer multi-writer or power-loss guarantees from the SQLite test
         composition. Production deployments still need explicit metadata
         durability, backup/restore, monitoring, cost/retention, and hosted
-        release qualification. The bounded publication path requires a driver
+        release qualification. The companion operations runbook is a handoff
+        and drill contract, not proof that those production gates have passed.
+        The bounded publication path requires a driver
         with <code>atomic_rename</code>; unsupported drivers return an explicit
         <code>NotImplemented</code> response rather than falling back to a
         weaker direct write. Use the AWS workload identity chain rather than
@@ -878,12 +880,20 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         multipart completion, and cross-driver CopyObject publication, with
         existing-object preservation on integrity/read failure. That is
         implementation and rootless gateway-test evidence, not a new hosted
-        AWS durability or release-qualification claim.
+        AWS durability or release-qualification claim. The companion operations
+        runbook defines provider/reconciliation/identity/capacity signals,
+        redaction boundaries, and O01–O08 drills, including identity expiry,
+        conditional conflicts, throttling, metadata outage, restore, schema
+        migration, cleanup/retention, and canary/rollback. It explicitly keeps
+        production collector and alert routing, workload-identity rotation,
+        approved metadata ownership, staging drills, canary, rollback, and
+        post-deploy smoke open.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
+      { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },

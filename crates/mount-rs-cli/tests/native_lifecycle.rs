@@ -624,10 +624,23 @@ fn run_configured_mount_cycle<F>(
         &mut output,
         transport,
     );
-    assert!(
-        ready,
-        "config-backed {transport} did not mount; output: {output:?}"
-    );
+    if !ready {
+        // Reap the short-lived child before joining the reader threads so an
+        // early mount failure includes the diagnostic that the CLI wrote to
+        // stderr. The guard still performs bounded native-mount cleanup if a
+        // partially initialized transport left a mount behind.
+        let _ = child_guard.child_mut().kill();
+        let status = child_guard
+            .child_mut()
+            .wait()
+            .expect("reap failed config-backed mount-rs subprocess");
+        stdout_thread.join().expect("join CLI stdout reader");
+        let stderr_lines = stderr_thread.join().expect("join CLI stderr reader");
+        output.extend(line_receiver.try_iter());
+        panic!(
+            "config-backed {transport} did not mount; status={status}; stdout={output:?}; stderr={stderr_lines:?}"
+        );
+    }
     assert!(
         is_mounted_at(mountpoint),
         "kernel did not report the config-backed {transport} mount"

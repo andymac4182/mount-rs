@@ -87,9 +87,26 @@ jobs:
           node scripts/verify-w08-release-manifest.mjs \
             "$release_dir/release-manifest.json" \
             "$release_dir/$artifact"
+          cargo metadata --locked --format-version 1 > "$release_dir/cargo-metadata.json"
+          node scripts/write-w08-release-sbom.mjs \
+            --metadata "$release_dir/cargo-metadata.json" \
+            --output "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$release_dir/$artifact"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$release_dir/$artifact"
 
           echo "artifact=$artifact" >> "$GITHUB_OUTPUT"
           echo "manifest=release-manifest.json" >> "$GITHUB_OUTPUT"
+          echo "sbom=release-sbom.json" >> "$GITHUB_OUTPUT"
           echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
           echo "release_commit=$release_commit" >> "$GITHUB_OUTPUT"
           echo "target=$target" >> "$GITHUB_OUTPUT"
@@ -105,6 +122,7 @@ jobs:
           release_dir="$RUNNER_TEMP/mount-rs-cli-release"
           artifact="${{ steps.package.outputs.artifact }}"
           manifest="${{ steps.package.outputs.manifest }}"
+          sbom="${{ steps.package.outputs.sbom }}"
           package_version="${{ steps.package.outputs.package_version }}"
           release_commit="${{ steps.package.outputs.release_commit }}"
           target="${{ steps.package.outputs.target }}"
@@ -121,6 +139,7 @@ jobs:
               "$release_dir/$artifact" \
               "$release_dir/SHA256SUMS" \
               "$release_dir/$manifest" \
+              "$release_dir/$sbom" \
               --clobber \
               --repo "$GITHUB_REPOSITORY"
           else
@@ -128,6 +147,7 @@ jobs:
               "$release_dir/$artifact" \
               "$release_dir/SHA256SUMS" \
               "$release_dir/$manifest" \
+              "$release_dir/$sbom" \
               --repo "$GITHUB_REPOSITORY" \
               --title "mount-rs $package_version CLI preview" \
               --notes "$notes" \
@@ -142,12 +162,20 @@ jobs:
             --pattern "$artifact" \
             --pattern SHA256SUMS \
             --pattern "$manifest" \
+            --pattern "$sbom" \
             --dir "$verification_dir" \
             --clobber
           (cd "$verification_dir" && shasum -a 256 -c SHA256SUMS)
           node scripts/verify-w08-release-manifest.mjs \
             "$verification_dir/$manifest" \
             "$verification_dir/$artifact"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$verification_dir/$sbom" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$verification_dir/$artifact"
           test "$(tar -tzf "$verification_dir/$artifact")" = "mount-rs"
           extracted_dir="$verification_dir/extracted"
           mkdir -p "$extracted_dir"

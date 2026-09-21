@@ -34,7 +34,7 @@ use crate::device::DEFAULT_MAX_FRAME;
 #[cfg(target_os = "linux")]
 use crate::device::FuseDevice;
 #[cfg(target_os = "linux")]
-use crate::session::FuseSession;
+use crate::session::{FuseSession, FuseSessionOptions};
 
 /// Which Linux mount authority to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -393,11 +393,16 @@ async fn mount_linux(
             return Err(MountError::Io(error));
         }
     };
-    let mut session = FuseSession::new(driver);
     // Keep the transport buffer and protocol decoder on the same boundary.
     // The default is one MiB, but callers may deliberately choose a smaller
     // frame ceiling for a constrained device.
-    session.max_request = options.max_frame;
+    let session = FuseSession::with_options(
+        driver,
+        FuseSessionOptions {
+            max_request: options.max_frame,
+            ..FuseSessionOptions::default()
+        },
+    );
     let state = Arc::new(MountState::new(
         mode,
         target.clone(),

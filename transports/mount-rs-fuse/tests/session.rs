@@ -11,9 +11,9 @@ use mount_rs_fuse::{
         FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
-    session::FuseSession,
+    session::{FuseFlushMechanism, FuseSession, FuseSessionOptions},
 };
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 fn frame(opcode: u32, nodeid: u64, body: &[u8]) -> Vec<u8> {
     frame_with_credentials(opcode, nodeid, body, 0, 0)
@@ -166,6 +166,77 @@ async fn lifecycle_requires_handshake_and_rejects_requests_after_destroy() {
         .unwrap();
     assert_eq!(i32::from_le_bytes(reply[4..8].try_into().unwrap()), -19);
     session.destroy().await;
+    assert!(session.is_destroyed());
+    assert_eq!(session.open_handles(), 0);
+}
+
+#[tokio::test]
+async fn construction_options_control_identity_timeouts_cache_and_errors() {
+    let fs: Arc<dyn FsDriver> = Arc::new(MemoryFs::empty());
+    let file = fs.open("/visible", "w", 0o644).await.unwrap();
+    file.close().await.unwrap();
+    fs.link("/visible", "/alias").await.unwrap();
+
+    let mut path_identity = FuseSession::with_options(
+        Arc::clone(&fs),
+        FuseSessionOptions {
+            max_request: 1024 * 1024,
+            use_driver_ino: false,
+            attr_timeout: Duration::new(1, 250_000_000),
+            entry_timeout: Duration::new(2, 500_000_000),
+            negative_timeout: Duration::new(3, 750_000_000),
+            keep_cache: false,
+            flush_mechanism: FuseFlushMechanism::Noflush,
+            ..FuseSessionOptions::default()
+        },
+    );
+    let path_visible = number(&request(&mut path_identity, 1, 1, b"visible\0").await, 0);
+    let path_alias = number(&request(&mut path_identity, 1, 1, b"alias\0").await, 0);
+    assert_ne!(path_visible, path_alias);
+
+    let missing = request(&mut path_identity, 1, 1, b"missing\0").await;
+    assert_eq!(number(&missing, 0), 0);
+    assert_eq!(number(&missing, 16), 3);
+    assert_eq!(
+        u32::from_le_bytes(missing[32..36].try_into().unwrap()),
+        750_000_000
+    );
+
+    let lookup = request(&mut path_identity, 1, 1, b"visible\0").await;
+    assert_eq!(number(&lookup, 16), 2);
+    assert_eq!(
+        u32::from_le_bytes(lookup[32..36].try_into().unwrap()),
+        500_000_000
+    );
+    assert_eq!(number(&lookup, 24), 1);
+    assert_eq!(
+        u32::from_le_bytes(lookup[36..40].try_into().unwrap()),
+        250_000_000
+    );
+
+    let inode = number(&lookup, 0);
+    let getattr = request(&mut path_identity, 3, inode, &[0; 16]).await;
+    assert_eq!(number(&getattr, 0), 1);
+    assert_eq!(
+        u32::from_le_bytes(getattr[8..12].try_into().unwrap()),
+        250_000_000
+    );
+
+    let open = request(&mut path_identity, 14, inode, &[0; 8]).await;
+    assert_eq!(u32::from_le_bytes(open[8..12].try_into().unwrap()), 0);
+    assert_eq!(path_identity.open_handles(), 1);
+
+    let error = failed_request(&mut path_identity, FUSE_READLINK, inode, &[]).await;
+    assert_eq!(error, -22);
+    assert_eq!(
+        path_identity.take_last_error().unwrap().code,
+        mount_rs_core::ErrorCode::Einval
+    );
+    assert!(path_identity.take_last_error().is_none());
+
+    path_identity.destroy().await;
+    assert!(path_identity.is_destroyed());
+    assert_eq!(path_identity.open_handles(), 0);
 }
 
 #[tokio::test]
