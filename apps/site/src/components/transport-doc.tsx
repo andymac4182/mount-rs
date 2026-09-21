@@ -401,8 +401,11 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         facade exposes direct <code>P9Session.handleCall</code>/<code>destroy</code>,
         attached stream identity/peer/closed state, ownership and duplicate
         attach handling, bounded backpressure, and write-fault reporting.
-        Native Tokio connections deliberately expose no Node stream; callers
-        needing a Node <code>Duplex</code> use <code>server.attach</code>.
+        Native Tokio connections deliberately expose no Node stream and report
+        <code>peer: null</code>; callers needing a Node <code>Duplex</code> use
+        <code>server.attach</code>, which retains the supplied stream and peer
+        metadata. Effective callback hooks remain omitted from serializable
+        option snapshots.
         Authentication, xattr messages, legacy message families, and several
         unsupported driver capabilities return explicit unsupported errors.
       </>
@@ -745,8 +748,8 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         terminal hosted WebDAV result because its exact-SHA workflow was
         cancelled by subsequent mainline publication. The 128-pair packet had
         only pending/queued hosted workflow snapshots, and the newer 256-pair
-        ceiling is local-only, so no hosted WebDAV concurrency PASS is
-        claimable. A failed streamed
+        packet's exact-SHA workflow snapshot was also pending/queued, so no
+        hosted WebDAV concurrency PASS is claimable. A failed streamed
         <code>PUT</code> returns <code>500</code> while preserving exactly the
         bytes already written (<code>partial</code>), matching the pinned
         oracle's in-place write contract rather than atomic publication. A rooted NodeFs
@@ -780,7 +783,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'W01 WebDAV progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_WEBDAV_PROGRESS.md' },
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted native WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35640746296' },
-      { label: 'Latest hosted WebDAV status snapshot', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35667576642' },
+      { label: 'Latest hosted WebDAV status snapshot', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35669390058' },
       { label: '256-request concurrency change', href: 'https://github.com/andymac4182/mount-rs/commit/efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6' },
     ],
   },
