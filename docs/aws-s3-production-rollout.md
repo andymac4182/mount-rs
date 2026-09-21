@@ -36,6 +36,11 @@ then safely refused the unconfigured protected environment with
 completed run or a safe preflight refusal; it does not substitute for
 successful AWS authentication, acceptance, or production deployment evidence.
 
+The current repository head `8004999` also passed formatting, the full locked
+offline workspace test gate, and strict workspace Clippy with `-D warnings`.
+Ignored native/service rows remain explicit prerequisites and are not treated
+as production acceptance.
+
 ## Deployment contract
 
 The production configuration must contain only non-secret provider identity:

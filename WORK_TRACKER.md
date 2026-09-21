@@ -2317,6 +2317,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   the AWS S3 provider, SDK/CLI, gateway, CI-safety changes, and the integrated
   workstream code present at that commit; later unrelated NFS/W01 commits are
   outside this evidence boundary.
+- [x] Current-head repository gates at `8004999` passed on 2026-09-22:
+  `cargo fmt --all -- --check`,
+  `CARGO_NET_OFFLINE=true ./scripts/cargo-shared test --workspace
+  --all-targets --locked --offline`, and strict workspace Clippy with
+  `--all-targets --locked --offline -- -D warnings`. The passing test gate
+  includes the AWS provider, SDK/CLI, S3 gateway, policy/preflight support, and
+  current integrated source. Explicitly ignored native/service rows remain
+  separate prerequisites and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
