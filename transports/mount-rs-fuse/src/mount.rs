@@ -1392,7 +1392,7 @@ mod tests {
             .expect("privileged mount data should be valid");
         assert_eq!(
             privileged.to_str().expect("mount data is UTF-8"),
-            "fd=3,rootmode=40755,user_id=1000,group_id=1000,default_permissions"
+            "fd=3,rootmode=40000,user_id=1000,group_id=1000,default_permissions"
         );
 
         let helper = mount_data(&options, None).expect("helper mount data should be valid");
