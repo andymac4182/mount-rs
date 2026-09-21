@@ -502,7 +502,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Private test bucket verified; Rust tests pending | Main |
-| W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite CI gate added, hosted result pending; TiDB/FoundationDB mixed stores pending | Main |
+| W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite and durable FoundationDB composition gates added, hosted result pending; durable TiDB mixed store remains open | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -1454,17 +1454,23 @@ listing a source does not mean it has been reviewed or its code can be reused.
   single-node TiDB/Ozone run also passed the direct TiDB contract, the
   ChunkedFs partial/truncate/CAS/stale-fencing/reopen path, ambiguous-commit
   handling and cleanup; it is explicitly not replicated-durability evidence.
-- W26.3 FoundationDB remains an explicit manual gate. The 2026-09-21 arm64
-  attempt reached the Ozone restart/reopen window, then Docker Desktop failed
-  while registering the pinned FoundationDB image layer and dropped its daemon
-  socket. A retry pulled the official arm64 platform manifest successfully,
-  but the daemon dropped again while creating the FoundationDB server
-  container; Docker's VM log reported an overlapping overlay lowerdir and
-  layer-registration corruption. No FoundationDB acceptance is claimed.
+- W26.3 FoundationDB durable evidence passed on 2026-09-21 arm64 after the
+  harness recovered from the earlier Docker layer-registration failure. The
+  run created three fixed-address FoundationDB 7.4.7 server containers with
+  three coordinators, separate persistent Docker volumes and `double`/SSD
+  configuration. The transactional readiness probe passed both before and
+  after restarting replicated node 2; the first and fresh-client Ozone
+  compositions emitted `FOUNDATIONDB_RUSTFS_CHUNKED_PASS` and
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS`, followed by
+  `FOUNDATIONDB_TEST_PASS topology=durable` and owned Ozone cleanup. This is
+  real multi-node restart evidence, but remains loopback/non-secure test
+  deployment evidence rather than production auth, TLS or power-loss proof;
+  hosted CI remains revision-specific and pending.
 - [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
-  revision CAS and stale-writer fencing. SQLite, PGlite and single-node TiDB
-  are covered above; durable multi-node TiDB and FoundationDB remain open.
+  revision CAS and stale-writer fencing. SQLite, PGlite, single-node TiDB and
+  durable three-node FoundationDB are covered above; durable multi-node TiDB
+  remains open.
 - [x] W26.4 Cover Node factories and CLI configuration; add required CI gates
   and document verified versions, limitations and platform evidence. The
   2026-09-21 arm64 live Ozone run passed the Node provider matrix (including
