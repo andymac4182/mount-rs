@@ -2064,6 +2064,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   or W08-P01–P09 production gates. *(Implementation verification; provider,
   native and production environments remain external.)*
 
+- [x] W08.28 **Protected production-candidate release admission:** added
+  `.github/workflows/w08-production-release.yml`, scoped to immutable
+  `v*-cli-production-candidate*` tags. It builds/tests/packages Linux x86_64 and
+  macOS arm64, verifies downloaded target assets, generates and verifies the
+  artifact-bound manifest/SBOM/checksums, generates and verifies both hosted
+  provenance/SBOM attestations, and re-verifies the final GitHub release assets.
+  Publication is a prerelease and is held behind the protected `w08-production`
+  environment; it refuses non-main ancestry and refuses to overwrite an
+  existing release. The existing preview workflow now matches only
+  `v*-cli-preview*` tags, so production candidates cannot silently use the
+  preview path. Local YAML parsing, embedded Bash `bash -n` checks and
+  `git diff --check` passed. No candidate tag was created in this chunk, so no
+  hosted release, canary, rollback or production GO evidence is claimed.
+  *(Implementation/static qualification; environment approval, release
+  registry and rollout evidence remain external.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the
@@ -2167,8 +2183,11 @@ reproducible in a production-like environment.
   include W08.15's three-asset checksum pass, W08.16's Linux/macOS
   target/download matrix and W08.17–W08.24's pinned attestation wiring,
   dispatch isolation, full-pin correction, verifier identity fix and terminal
-  target qualification, but they do not run a real tag release or close the
-  canary, rollback or approval gates.
+  target qualification. W08.28 adds the protected
+  `v*-cli-production-candidate*` workflow, which builds both targets, verifies
+  final release assets and attestations, and requires the `w08-production`
+  environment before publishing a prerelease. It has not been run from an
+  approved tag and does not close the canary, rollback or approval gates.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*

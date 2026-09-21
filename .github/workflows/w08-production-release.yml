@@ -1,0 +1,454 @@
+name: W08 production candidate release
+
+on:
+  push:
+    tags:
+      - 'v*-cli-production-candidate*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: w08-production-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.label }} production candidate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - label: macos-arm64
+            os: macos-14
+            target: aarch64-apple-darwin
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - name: Build and qualify production candidate target
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+          TARGET_LABEL: ${{ matrix.label }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="$GITHUB_REF_NAME"
+          release_commit="$(git rev-parse "${release_tag}^{commit}")"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Refusing to publish: $release_tag is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | node -e 'let s=""; process.stdin.on("data", c => s += c).on("end", () => { const m = JSON.parse(s); const p = m.packages.find((candidate) => candidate.name === "mount-rs-cli"); if (!p) process.exit(1); console.log(p.version); });')"
+          case "$release_tag" in
+            "v${package_version}-cli-production-candidate"*) ;;
+            *)
+              echo "Production candidate tag $release_tag does not match mount-rs-cli version $package_version" >&2
+              exit 1
+              ;;
+          esac
+
+          target="$(rustc -vV | sed -n 's/^host: //p')"
+          test "$target" = "$EXPECTED_TARGET"
+          release_target="$RUNNER_TEMP/w08-production-target-$TARGET_LABEL"
+          release_dir="$RUNNER_TEMP/w08-production-artifact-$TARGET_LABEL"
+          mkdir -p "$release_dir"
+
+          CARGO_TARGET_DIR="$release_target" \
+            ./scripts/cargo-shared test --locked -p mount-rs-cli --all-targets
+          CARGO_TARGET_DIR="$release_target" \
+            ./scripts/cargo-shared build --locked --release -p mount-rs-cli
+
+          version_output="$release_target/release/mount-rs"
+          test "$("$version_output" --version)" = "mount-rs $package_version"
+          artifact="mount-rs-${package_version}-${target}.tar.gz"
+          cp "$version_output" "$release_dir/mount-rs"
+          chmod 755 "$release_dir/mount-rs"
+          COPYFILE_DISABLE=1 tar -czf "$release_dir/$artifact" \
+            -C "$release_dir" mount-rs
+
+          node scripts/write-w08-release-manifest.mjs \
+            --artifact "$release_dir/$artifact" \
+            --output "$release_dir/release-manifest.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --version "$package_version" \
+            --tag "$release_tag" \
+            --target "$target" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --workflow-run-id "$GITHUB_RUN_ID"
+          node scripts/verify-w08-release-manifest.mjs \
+            "$release_dir/release-manifest.json" \
+            "$release_dir/$artifact"
+
+          cargo metadata --locked --format-version 1 > "$release_dir/cargo-metadata.json"
+          node scripts/write-w08-release-sbom.mjs \
+            --metadata "$release_dir/cargo-metadata.json" \
+            --output "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$release_dir/$artifact"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$release_dir/$artifact"
+
+          (cd "$release_dir" && sha256sum "$artifact" release-manifest.json release-sbom.json > SHA256SUMS)
+          (cd "$release_dir" && sha256sum -c SHA256SUMS)
+          test "$(tar -tzf "$release_dir/$artifact")" = "mount-rs"
+          extracted_dir="$RUNNER_TEMP/w08-production-extracted-$TARGET_LABEL"
+          mkdir -p "$extracted_dir"
+          tar -xzf "$release_dir/$artifact" -C "$extracted_dir"
+          test "$("$extracted_dir/mount-rs" --version)" = "mount-rs $package_version"
+
+          printf 'release_commit=%s\n' "$release_commit" >> "$GITHUB_OUTPUT"
+          echo "W08_PRODUCTION_CANDIDATE_TARGET_PASS target=$target artifact=$artifact source=$release_commit"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: w08-production-candidate-${{ matrix.label }}-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/w08-production-artifact-${{ matrix.label }}/*.tar.gz
+            ${{ runner.temp }}/w08-production-artifact-${{ matrix.label }}/SHA256SUMS
+            ${{ runner.temp }}/w08-production-artifact-${{ matrix.label }}/release-manifest.json
+            ${{ runner.temp }}/w08-production-artifact-${{ matrix.label }}/release-sbom.json
+          if-no-files-found: error
+          retention-days: 14
+
+  verify-download:
+    name: Verify downloaded ${{ matrix.label }} candidate
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - label: macos-arm64
+            target: aarch64-apple-darwin
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Download candidate target
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w08-production-candidate-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/w08-production-download-${{ matrix.label }}
+
+      - name: Verify downloaded candidate target
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+          TARGET_LABEL: ${{ matrix.label }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="$GITHUB_REF_NAME"
+          release_commit="$(git rev-parse "${release_tag}^{commit}")"
+          release_dir="$RUNNER_TEMP/w08-production-download-$TARGET_LABEL"
+          artifact="$(find "$release_dir" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          test -n "$artifact"
+          target="$(node -e 'const m = require(process.argv[1]); console.log(m.target)' "$release_dir/release-manifest.json")"
+          source_commit="$(node -e 'const m = require(process.argv[1]); console.log(m.source_commit)' "$release_dir/release-manifest.json")"
+          test "$target" = "$EXPECTED_TARGET"
+          test "$source_commit" = "$release_commit"
+          (cd "$release_dir" && sha256sum -c SHA256SUMS)
+          node scripts/verify-w08-release-manifest.mjs \
+            "$release_dir/release-manifest.json" \
+            "$artifact"
+          package_version="$(node -e 'const m = require(process.argv[1]); console.log(m.version)' "$release_dir/release-manifest.json")"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$release_dir/release-sbom.json" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$artifact"
+          test "$(tar -tzf "$artifact")" = "mount-rs"
+          echo "W08_PRODUCTION_CANDIDATE_DOWNLOAD_PASS target=$target artifact=$(basename "$artifact") source=$source_commit"
+
+  attest:
+    name: Attest ${{ matrix.label }} production candidate
+    needs: [build, verify-download]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - label: macos-arm64
+            target: aarch64-apple-darwin
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Download candidate target
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w08-production-candidate-${{ matrix.label }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/w08-production-attestation-${{ matrix.label }}
+
+      - name: Resolve candidate target
+        id: asset
+        env:
+          TARGET_LABEL: ${{ matrix.label }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir="$RUNNER_TEMP/w08-production-attestation-$TARGET_LABEL"
+          artifact="$(find "$release_dir" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          test -n "$artifact"
+          test -f "$release_dir/release-sbom.json"
+          printf 'release_dir=%s\n' "$release_dir" >> "$GITHUB_OUTPUT"
+          printf 'artifact=%s\n' "$artifact" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact provenance attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.asset.outputs.artifact }}
+
+      - name: Generate CycloneDX SBOM attestation
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.asset.outputs.artifact }}
+          sbom-path: ${{ steps.asset.outputs.release_dir }}/release-sbom.json
+
+      - name: Verify candidate attestations and finalize metadata
+        id: finalize
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: ${{ steps.asset.outputs.artifact }}
+          RELEASE_DIR: ${{ steps.asset.outputs.release_dir }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="$GITHUB_REF_NAME"
+          release_commit="$(git rev-parse "${release_tag}^{commit}")"
+          source_commit="$(node -e 'const m = require(process.argv[1]); console.log(m.source_commit)' "$RELEASE_DIR/release-manifest.json")"
+          package_version="$(node -e 'const m = require(process.argv[1]); console.log(m.version)' "$RELEASE_DIR/release-manifest.json")"
+          test "$source_commit" = "$release_commit"
+          signer_workflow="$GITHUB_REPOSITORY/.github/workflows/w08-production-release.yml"
+          common_args=(
+            --repo "$GITHUB_REPOSITORY"
+            --signer-workflow "$signer_workflow"
+            --source-digest "$release_commit"
+            --source-ref "$GITHUB_REF"
+            --deny-self-hosted-runners
+          )
+          gh attestation verify "$ARTIFACT" "${common_args[@]}"
+          gh attestation verify "$ARTIFACT" \
+            "${common_args[@]}" \
+            --predicate-type https://cyclonedx.org/bom
+
+          manifest="$RELEASE_DIR/release-manifest-${TARGET}.json"
+          sbom="$RELEASE_DIR/release-sbom-${TARGET}.json"
+          node scripts/write-w08-release-manifest.mjs \
+            --artifact "$ARTIFACT" \
+            --output "$manifest" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --version "$package_version" \
+            --tag "$release_tag" \
+            --target "$TARGET" \
+            --workflow "$GITHUB_WORKFLOW" \
+            --workflow-run-id "$GITHUB_RUN_ID" \
+            --signature-status verified \
+            --sbom-status verified
+          node scripts/verify-w08-release-manifest.mjs "$manifest" "$ARTIFACT"
+          cp "$RELEASE_DIR/release-sbom.json" "$sbom"
+          node scripts/verify-w08-release-sbom.mjs \
+            --sbom "$sbom" \
+            --repository "$GITHUB_REPOSITORY" \
+            --source-commit "$release_commit" \
+            --package mount-rs-cli \
+            --version "$package_version" \
+            --artifact "$ARTIFACT"
+          printf 'artifact=%s\n' "$ARTIFACT" >> "$GITHUB_OUTPUT"
+          printf 'manifest=%s\n' "$manifest" >> "$GITHUB_OUTPUT"
+          printf 'sbom=%s\n' "$sbom" >> "$GITHUB_OUTPUT"
+          echo "W08_PRODUCTION_CANDIDATE_ATTESTATION_PASS target=$TARGET artifact=$(basename "$ARTIFACT") source=$release_commit"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: w08-production-final-${{ matrix.label }}-${{ github.run_id }}
+          path: |
+            ${{ steps.finalize.outputs.artifact }}
+            ${{ steps.finalize.outputs.manifest }}
+            ${{ steps.finalize.outputs.sbom }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish protected production candidate release
+    needs: attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: w08-production
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ github.ref_name }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w08-production-final-linux-x86_64-${{ github.run_id }}
+          path: ${{ runner.temp }}/w08-production-final/linux-x86_64
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w08-production-final-macos-arm64-${{ github.run_id }}
+          path: ${{ runner.temp }}/w08-production-final/macos-arm64
+
+      - name: Verify final candidate and publish immutable prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="$GITHUB_REF_NAME"
+          release_commit="$(git rev-parse "${release_tag}^{commit}")"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "Refusing to publish: $release_tag is not reachable from origin/main" >&2
+            exit 1
+          fi
+
+          publish_dir="$RUNNER_TEMP/w08-production-publish"
+          verify_dir="$RUNNER_TEMP/w08-production-release-verify"
+          mkdir -p "$publish_dir" "$verify_dir"
+          assets=()
+          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do
+            case "$target" in
+              x86_64-unknown-linux-gnu) source_dir="$RUNNER_TEMP/w08-production-final/linux-x86_64" ;;
+              aarch64-apple-darwin) source_dir="$RUNNER_TEMP/w08-production-final/macos-arm64" ;;
+              *) echo "unexpected target $target" >&2; exit 1 ;;
+            esac
+            artifact="$(find "$source_dir" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+            manifest="$source_dir/release-manifest-$target.json"
+            sbom="$source_dir/release-sbom-$target.json"
+            test -n "$artifact"
+            test -f "$manifest"
+            test -f "$sbom"
+            source_commit="$(node -e 'const m = require(process.argv[1]); console.log(m.source_commit)' "$manifest")"
+            signature_status="$(node -e 'const m = require(process.argv[1]); console.log(m.release_controls.signature_status)' "$manifest")"
+            sbom_status="$(node -e 'const m = require(process.argv[1]); console.log(m.release_controls.sbom_status)' "$manifest")"
+            test "$source_commit" = "$release_commit"
+            test "$signature_status" = verified
+            test "$sbom_status" = verified
+            package_version="$(node -e 'const m = require(process.argv[1]); console.log(m.version)' "$manifest")"
+            node scripts/verify-w08-release-manifest.mjs "$manifest" "$artifact"
+            node scripts/verify-w08-release-sbom.mjs \
+              --sbom "$sbom" \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$release_commit" \
+              --package mount-rs-cli \
+              --version "$package_version" \
+              --artifact "$artifact"
+            cp "$artifact" "$publish_dir/$(basename "$artifact")"
+            cp "$manifest" "$publish_dir/$(basename "$manifest")"
+            cp "$sbom" "$publish_dir/$(basename "$sbom")"
+            assets+=("$publish_dir/$(basename "$artifact")")
+            assets+=("$publish_dir/$(basename "$manifest")")
+            assets+=("$publish_dir/$(basename "$sbom")")
+          done
+
+          (cd "$publish_dir" && sha256sum ./*.tar.gz ./release-manifest-*.json ./release-sbom-*.json > SHA256SUMS)
+          assets+=("$publish_dir/SHA256SUMS")
+          if gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Refusing to overwrite existing production candidate release $release_tag" >&2
+            exit 1
+          fi
+          gh release create "$release_tag" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "mount-rs $package_version production candidate" \
+            --notes "Production candidate built from $release_commit for Linux x86_64 and macOS arm64.
+
+          Both target artifacts have verified GitHub Sigstore provenance and CycloneDX SBOM attestations. This prerelease is protected by the w08-production environment, but it does not claim a completed canary, rollback rehearsal, or production GO decision." \
+            --prerelease \
+            --verify-tag
+
+          gh release download "$release_tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir "$verify_dir" \
+            --clobber
+          (cd "$verify_dir" && sha256sum -c SHA256SUMS)
+          for target in x86_64-unknown-linux-gnu aarch64-apple-darwin; do
+            artifact="$(find "$verify_dir" -maxdepth 1 -type f -name "*-${target}.tar.gz" -print -quit)"
+            manifest="$verify_dir/release-manifest-$target.json"
+            sbom="$verify_dir/release-sbom-$target.json"
+            test -n "$artifact"
+            source_commit="$(node -e 'const m = require(process.argv[1]); console.log(m.source_commit)' "$manifest")"
+            package_version="$(node -e 'const m = require(process.argv[1]); console.log(m.version)' "$manifest")"
+            node scripts/verify-w08-release-manifest.mjs "$manifest" "$artifact"
+            node scripts/verify-w08-release-sbom.mjs \
+              --sbom "$sbom" \
+              --repository "$GITHUB_REPOSITORY" \
+              --source-commit "$source_commit" \
+              --package mount-rs-cli \
+              --version "$package_version" \
+              --artifact "$artifact"
+            signer_workflow="$GITHUB_REPOSITORY/.github/workflows/w08-production-release.yml"
+            common_args=(
+              --repo "$GITHUB_REPOSITORY"
+              --signer-workflow "$signer_workflow"
+              --source-digest "$source_commit"
+              --source-ref "$GITHUB_REF"
+              --deny-self-hosted-runners
+            )
+            gh attestation verify "$artifact" "${common_args[@]}"
+            gh attestation verify "$artifact" \
+              "${common_args[@]}" \
+              --predicate-type https://cyclonedx.org/bom
+            test "$(tar -tzf "$artifact")" = "mount-rs"
+          done
+          echo "W08_PRODUCTION_CANDIDATE_RELEASE_PASS tag=$release_tag source=$release_commit"

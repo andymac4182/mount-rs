@@ -11,6 +11,14 @@ provider identities, monitoring route and on-call owner are recorded. The
 current rollout decision remains **NO-GO**. A completed demo, a local check, or
 the retained hosted qualification jobs do not count as an executed drill.
 
+The release admission path is also a controlled template until the GitHub
+`w08-production` environment has required reviewers and tag/branch policy. The
+`v*-cli-production-candidate*` workflow produces a protected prerelease with
+Linux/macOS artifacts, target-specific manifests/SBOMs, aggregate checksums and
+verified attestations; it does not by itself execute a canary, rollback or
+production GO decision. Record the environment approval and resulting release
+asset digests in the evidence record before beginning the canary.
+
 ## Evidence record
 
 Create one redacted record for every deployment, drill and incident. Never put

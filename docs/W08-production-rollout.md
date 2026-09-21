@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator and locked-Cargo CycloneDX SBOM generator/verifier wired into the CLI preview workflow, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package and download-verification matrix, a tag-release GitHub Sigstore provenance/SBOM attestation path with strict identity verification, an opt-in target-matrix attestation path, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, a guarded TLS acceptance wrapper, fail-closed production-config and release-provenance policy verifiers, an artifact-manifest generator and locked-Cargo CycloneDX SBOM generator/verifier wired into the CLI preview workflow, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package and download-verification matrix, tag-release and protected production-candidate GitHub Sigstore provenance/SBOM attestation paths with strict identity verification, an opt-in target-matrix attestation path, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -51,6 +51,15 @@ storage. The later hosted `tidb-tls-compile` job `106311076905` in run
 check, alongside TLS compilation and URL guardrails. These jobs remain
 compile/policy evidence only and do not close the live provider, IAM,
 certificate, or production-deployment gates.
+
+W08.28 adds `.github/workflows/w08-production-release.yml` as a protected
+production-candidate path. A tag matching `v*-cli-production-candidate*` builds
+and verifies Linux x86_64 and macOS arm64 assets, generates target-specific
+manifests and SBOMs, verifies GitHub Sigstore provenance/SBOM attestations, and
+holds prerelease publication behind the `w08-production` environment. The
+environment must be configured with required reviewers and tag/branch policy;
+no candidate tag or environment approval has been executed here, and this
+workflow does not replace the canary, rollback or explicit production GO gates.
 
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
@@ -311,13 +320,14 @@ jobs failed; it is not an aggregate-green release result either.
 5. Confirm the dedicated W08 policy and Linux/macOS target matrix are terminal
    on the release candidate, including unsigned SBOM, three-asset checksum and
    downloaded-asset verification; run the target matrix's approved
-   `workflow_dispatch` attestation qualification; then run the approved
-   tag-triggered CLI release workflow and retain its actual target assets,
-   `SHA256SUMS`, manifests, SBOMs and verified attestation outputs. Close P09
-   with cryptographic signing/attestation, target-platform parity, a held-back
-   canary, live SLO observation, rollback verification and release-owner
-   approval. The synthetic accepted fixture, local tarball and hosted CI
-   artifacts are not sufficient.
+   `workflow_dispatch` attestation qualification; configure the protected
+   `w08-production` environment and run the approved
+   `v*-cli-production-candidate*` tag workflow. Retain its actual Linux/macOS
+   target assets, target-specific manifests/SBOMs, aggregate `SHA256SUMS` and
+   verified attestation outputs. Close P09 only after target-platform parity, a
+   held-back canary, live SLO observation, rollback verification and
+   release-owner approval. The synthetic accepted fixture, local tarball and
+   hosted CI artifacts are not sufficient.
 6. Promote in stages only after the evidence packet passes the final audit. On
    rollback, stop new writers, preserve metadata and block snapshots, restore
    the last known-good artifact/topology, verify reads/fences/ownership, and
