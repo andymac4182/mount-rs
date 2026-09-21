@@ -603,6 +603,8 @@ fn http_server_options(config: &HttpServiceConfig) -> HttpServerOptions {
         host: config.host.clone(),
         port: config.port,
         max_request_bytes: config.max_request_bytes,
+        max_response_bytes: config.max_response_bytes,
+        max_directory_entries: config.max_directory_entries,
         read_chunk_bytes: config.read_chunk_bytes,
         drain_timeout: Duration::from_millis(config.drain_timeout_ms),
         max_connections: config.max_connections,

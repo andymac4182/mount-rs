@@ -171,7 +171,8 @@ bearer-token environment reference, and one of the existing `driver` shapes
 relative to the HTTP config file, just as they are for native configs. The
 service defaults to loopback (`127.0.0.1`), an ephemeral port (`0`), bounded
 request/chunk sizes, 256 active connections, a 30-second request timeout, and
-a five-second shutdown drain; all values can be overridden in the `http`
+a five-second shutdown drain. Directory listings are capped at 4,096 entries
+and 8 MiB by default; all values can be overridden in the `http`
 object. Only loopback hosts are accepted; remote customers must terminate TLS
 and authenticate at a reverse proxy before forwarding to this listener.
 

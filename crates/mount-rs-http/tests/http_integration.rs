@@ -673,6 +673,106 @@ async fn stalled_request_body_is_terminated_by_the_request_timeout() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_entry_limit_bounds_both_listing_routes() {
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new("memory", Arc::new(MemoryFs::empty()), MEMORY_TOKEN)
+                .expect("drive config"),
+        )
+        .expect("drive registration");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            max_directory_entries: 2,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    let client = reqwest::Client::new();
+    for name in ["one", "two", "three"] {
+        let response = client
+            .put(format!("{}/v1/drives/memory/fs/{name}", server.url()))
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .body(name.to_owned())
+            .send()
+            .await
+            .expect("file creation response");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    for path in ["entries/", "fs"] {
+        let response = client
+            .get(format!("{}/v1/drives/memory/{path}", server.url()))
+            .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+            .send()
+            .await
+            .expect("directory listing response");
+        assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response
+                .headers()
+                .get("connection")
+                .and_then(|value| value.to_str().ok()),
+            Some("close")
+        );
+    }
+
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn directory_response_byte_limit_bounds_serialized_metadata() {
+    let mut registry = DriveRegistry::new();
+    registry
+        .register(
+            DriveConfig::new("memory", Arc::new(MemoryFs::empty()), MEMORY_TOKEN)
+                .expect("drive config"),
+        )
+        .expect("drive registration");
+    let server = HttpServer::start(
+        registry,
+        HttpServerOptions {
+            max_response_bytes: 32,
+            max_directory_entries: 100,
+            ..HttpServerOptions::default()
+        },
+    )
+    .await
+    .expect("HTTP server");
+    let client = reqwest::Client::new();
+    let response = client
+        .put(format!(
+            "{}/v1/drives/memory/fs/a-long-enough-file-name",
+            server.url()
+        ))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .body("content")
+        .send()
+        .await
+        .expect("file creation response");
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+    let response = client
+        .get(format!("{}/v1/drives/memory/entries/", server.url()))
+        .header(AUTHORIZATION, bearer(MEMORY_TOKEN))
+        .send()
+        .await
+        .expect("directory listing response");
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(
+        response
+            .headers()
+            .get("connection")
+            .and_then(|value| value.to_str().ok()),
+        Some("close")
+    );
+
+    server.close().await.expect("server close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connection_limit_rejects_excess_idle_connections() {
     let mut registry = DriveRegistry::new();
     registry

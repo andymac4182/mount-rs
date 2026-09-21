@@ -22,6 +22,8 @@ pub const DEFAULT_CHUNK_SIZE_BYTES: usize = 64 * 1024;
 const DEFAULT_HTTP_HOST: &str = "127.0.0.1";
 const DEFAULT_HTTP_PORT: u16 = 0;
 const DEFAULT_HTTP_MAX_REQUEST_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_HTTP_MAX_DIRECTORY_ENTRIES: usize = 4096;
 const DEFAULT_HTTP_READ_CHUNK_BYTES: usize = 64 * 1024;
 const DEFAULT_HTTP_DRAIN_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_HTTP_MAX_CONNECTIONS: usize = 256;
@@ -130,6 +132,8 @@ pub(crate) struct HttpServiceConfig {
     pub host: String,
     pub port: u16,
     pub max_request_bytes: usize,
+    pub max_response_bytes: usize,
+    pub max_directory_entries: usize,
     pub read_chunk_bytes: usize,
     pub drain_timeout_ms: u64,
     pub max_connections: usize,
@@ -353,6 +357,8 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
             "host",
             "port",
             "max_request_bytes",
+            "max_response_bytes",
+            "max_directory_entries",
             "read_chunk_bytes",
             "drain_timeout_ms",
             "max_connections",
@@ -384,6 +390,16 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         .map(|value| positive_usize(value, "config.http.max_request_bytes"))
         .transpose()?
         .unwrap_or(DEFAULT_HTTP_MAX_REQUEST_BYTES);
+    let max_response_bytes = object
+        .get("max_response_bytes")
+        .map(|value| positive_usize(value, "config.http.max_response_bytes"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_MAX_RESPONSE_BYTES);
+    let max_directory_entries = object
+        .get("max_directory_entries")
+        .map(|value| positive_usize(value, "config.http.max_directory_entries"))
+        .transpose()?
+        .unwrap_or(DEFAULT_HTTP_MAX_DIRECTORY_ENTRIES);
     let read_chunk_bytes = object
         .get("read_chunk_bytes")
         .map(|value| positive_usize(value, "config.http.read_chunk_bytes"))
@@ -432,6 +448,8 @@ fn parse_http(value: &Value, base_dir: &Path) -> Result<HttpServiceConfig, Confi
         host,
         port,
         max_request_bytes,
+        max_response_bytes,
+        max_directory_entries,
         read_chunk_bytes,
         drain_timeout_ms,
         max_connections,
@@ -1920,6 +1938,8 @@ mod tests {
                 "http": {
                     "port": 0,
                     "max_request_bytes": 4096,
+                    "max_response_bytes": 8192,
+                    "max_directory_entries": 12,
                     "read_chunk_bytes": 1024,
                     "drain_timeout_ms": 250,
                     "max_connections": 12,
@@ -1950,6 +1970,8 @@ mod tests {
         assert_eq!(http.host, "127.0.0.1");
         assert_eq!(http.port, 0);
         assert_eq!(http.max_request_bytes, 4096);
+        assert_eq!(http.max_response_bytes, 8192);
+        assert_eq!(http.max_directory_entries, 12);
         assert_eq!(http.read_chunk_bytes, 1024);
         assert_eq!(http.drain_timeout_ms, 250);
         assert_eq!(http.max_connections, 12);
