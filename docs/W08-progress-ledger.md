@@ -112,6 +112,7 @@ for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
 | `CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-production-policy-target ./scripts/cargo-shared run --quiet --offline --locked -p mount-rs-cli -- validate-config --config tests/tidb/production-config-policy.json` | PASS — `valid config` | The public Rust CLI schema accepts the production-policy shape; it does not validate endpoint identity, credentials, IAM, TLS trust, topology or deployment readiness. |
 | `./scripts/cargo-shared test --locked -p mount-rs-tidb --features rustls` | PASS, 6 provider unit tests | TLS-enabled provider unit/error-redaction coverage; ignored service tests remained explicitly ignored because no endpoint was available. |
 | `./scripts/cargo-shared clippy --locked -p mount-rs-tidb --all-targets --features rustls -- -D warnings` | PASS | Strict-Clippy TLS feature build; not live provider or production evidence. |
+| `docker info --format 'server={{.ServerVersion}} mem_bytes={{.MemTotal}}'` | BLOCKED — local daemon unavailable | The Docker CLI is installed, but the current local command exits non-zero before reporting a server or memory value; no local TiDB/RustFS provider run is claimed. Hosted terminal jobs remain the service evidence. |
 | N-API library tests | PASS, 15 tests | Binding/lifecycle unit coverage. |
 | TiDB library tests | PASS, 6 tests | Provider unit coverage. |
 | Ignored TiDB acceptance binaries `tidb`, `ambiguous_commit`, `chunked_rustfs` | PASS compile-only | Does not claim that live services ran. |
@@ -166,9 +167,11 @@ reported as an aggregate CI green result.
 
 ## External blockers and boundaries
 
-- The local Docker host cannot satisfy the durable 3PD/3TiKV memory requirement
-  (`8,232,747,008` available versus `10,737,418,240` required). This is an
-  environment capacity blocker, not permission to downgrade the topology.
+- The local Docker CLI is present, but the current Docker daemon check exits
+  before returning server/memory information; the earlier retained capacity
+  check also measured `8,232,747,008` available versus `10,737,418,240`
+  required for the durable 3PD/3TiKV topology. This is an environment
+  capacity/daemon blocker, not permission to downgrade the topology.
 - The local macOS host has no usable `/dev/fuse`/`fusermount3`, so Linux FUSE
   evidence must come from the hosted native job; macOS NFS evidence must remain
   a separate macOS row.
@@ -214,6 +217,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 10:50–10:53 | Followed hosted run `35590919645` and retained `tidb-tls-compile` job `106304951579` as terminal success for source `b68c1f2`. | ~1 min | ~2 min hosted wait | The production-contract revision is remotely verified for TLS implementation/guard behavior; live endpoint, secrets, operations and rollout approval remain open. |
 | 2026-09-21 21:00–21:09 AEST | Added W08.6: a credential-free production-config policy verifier, positive and insecure fixtures, and a CI positive/negative gate; ran Node syntax/policy checks and the public Rust CLI `validate-config` check locally. | ~9 min | ~0 min | The deployment shape now fails closed on placeholders, inline secrets, non-HTTPS blocks, non-durable stores and missing/unsafe TLS policy. Hosted verification was pending at this point in the session; the later terminal result is recorded in the next row. P01/P02/P07 remain open for real topology, IAM, certificates and provider evidence. |
 | 2026-09-21 21:10–21:16 AEST | Followed hosted run `35592902494` and retained terminal `tidb-tls-compile` job `106311076905` at source `4326c54`; updated the W08.6 evidence ledger. | ~2 min | ~2 min hosted wait; aggregate concurrency continued | Hosted TLS compilation and positive/negative production-config policy checks passed. The aggregate run had unrelated cancellations/failures and is not reported as a W08 aggregate pass; real production gates remain open. |
+| 2026-09-21 21:17–21:21 AEST | Re-ran the W08 production policy’s missing/unsafe TLS cases and checked the local provider prerequisites without printing credentials. | ~3 min | ~0 min | Missing `MOUNT_RS_TIDB_TLS_URL`, `require_ssl=false`, `verify_identity=false` and `built_in_roots=false` all failed closed. Provider URLs/credentials are absent; Docker CLI is present but its daemon check is unusable, so no new local provider evidence can be claimed. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
