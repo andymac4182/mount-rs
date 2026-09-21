@@ -34,6 +34,13 @@ RUSTFS_COMBO_COMMAND='./scripts/test-foundationdb.sh' \
 ./scripts/test-rustfs.sh
 ```
 
+Set `MOUNT_RS_FOUNDATIONDB_TOPOLOGY=durable` for the three-node disposable
+cluster used by the hosted acceptance lane. It uses three pinned FoundationDB
+server containers, `double` redundancy, separate persistent Docker volumes,
+and restarts one replicated node while the other two coordinators remain
+available. The default `single` topology is still useful for a fast local
+provider smoke test and is not replicated-durability evidence.
+
 The FoundationDB script owns its isolated server, cluster file, client library,
 network, and cleanup for that run. In the composed lane it runs the first client
 against the live providers, restarts the owned FoundationDB container,

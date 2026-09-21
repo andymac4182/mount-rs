@@ -21,10 +21,24 @@ fi
 run_id="$(date +%s)-$$"
 network="mount-rs-foundationdb-net-$run_id"
 server="mount-rs-foundationdb-server-$run_id"
+server1="$server"
+server2="mount-rs-foundationdb-server-$run_id-2"
+server3="mount-rs-foundationdb-server-$run_id-3"
+fdb_servers="$server"
+fdb_volumes=""
 client_container=""
 probe_key="mount-rs/foundationdb/readiness/$run_id"
 probe_value="ready"
 probe_key_written=0
+topology=${MOUNT_RS_FOUNDATIONDB_TOPOLOGY:-single}
+case "$topology" in
+  single) fdb_server_count=1 ;;
+  durable) fdb_server_count=3 ;;
+  *)
+    echo "MOUNT_RS_FOUNDATIONDB_TOPOLOGY must be single or durable" >&2
+    exit 2
+    ;;
+esac
 provided_cluster_file=${MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE:-}
 external_network=${MOUNT_RS_FOUNDATIONDB_NETWORK:-}
 external_server=${MOUNT_RS_FOUNDATIONDB_SERVER_CONTAINER:-}
@@ -49,15 +63,30 @@ cleanup() {
     docker rm --force "$client_container" >/dev/null 2>&1 || cleanup_status=1
   fi
   if [ "${MOUNT_RS_FOUNDATIONDB_KEEP:-0}" = "1" ]; then
-    echo "FOUNDATIONDB_KEEP=1 server=$server network=$network data=$run_dir" >&2
+    echo "FOUNDATIONDB_KEEP=1 topology=$topology servers=$fdb_servers volumes=${fdb_volumes:-none} network=$network data=$run_dir" >&2
     exit "$exit_status"
   fi
-  if [ "$owns_server" -eq 1 ] && docker container inspect "$server" >/dev/null 2>&1; then
-    docker rm --force "$server" >/dev/null 2>&1 || cleanup_status=1
+  if [ "$owns_server" -eq 1 ]; then
+    for fdb_server in $fdb_servers; do
+      if docker container inspect "$fdb_server" >/dev/null 2>&1; then
+        docker rm --force "$fdb_server" >/dev/null 2>&1 || cleanup_status=1
+      fi
+    done
   fi
   if [ "$owns_network" -eq 1 ] && docker network inspect "$network" >/dev/null 2>&1; then
     docker network rm "$network" >/dev/null 2>&1 || cleanup_status=1
   fi
+  for fdb_volume in $fdb_volumes; do
+    if docker volume inspect "$fdb_volume" >/dev/null 2>&1; then
+      volume_owner=$(docker volume inspect --format '{{index .Labels "mount-rs.foundationdb.run"}}' "$fdb_volume" 2>/dev/null || true)
+      if [ "$volume_owner" = "$run_id" ]; then
+        docker volume rm "$fdb_volume" >/dev/null 2>&1 || cleanup_status=1
+      else
+        echo "Refusing cleanup of FoundationDB volume without this run's ownership label: $fdb_volume" >&2
+        cleanup_status=1
+      fi
+    fi
+  done
   case "$run_dir" in
     "$temp_root"/mount-rs-foundationdb.??????) rm -rf "$run_dir" || cleanup_status=1 ;;
     *) echo "Refusing cleanup of unexpected FoundationDB temp path: $run_dir" >&2; cleanup_status=1 ;;
@@ -94,6 +123,53 @@ else
   # container creation while preserving a digest pin for each architecture.
   fdb_image=$default_fdb_image
 fi
+resource_label="mount-rs.foundationdb.run=$run_id"
+created_network=0
+network_subnet=""
+network_prefix=""
+fdb_ip1=""
+fdb_ip2=""
+fdb_ip3=""
+fdb_cluster_file_contents=""
+
+create_foundationdb_network() {
+  if [ "$topology" = "single" ]; then
+    docker network create --label "$resource_label" "$network" >/dev/null
+    created_network=1
+    return 0
+  fi
+
+  network_candidate_seed=$(printf '%s' "$run_id" | cksum | awk '{print ($1 % 240) + 1}')
+  network_candidate_attempt=0
+  while [ "$network_candidate_attempt" -lt 240 ]; do
+    network_candidate_octet=$(( (network_candidate_seed + network_candidate_attempt - 1) % 240 + 1 ))
+    network_subnet="172.31.$network_candidate_octet.0/24"
+    network_error="$run_dir/network-create.err"
+    if docker network create --driver bridge --subnet "$network_subnet" \
+      --label "$resource_label" "$network" > /dev/null 2>"$network_error"; then
+      created_network=1
+      break
+    fi
+    if grep -Eiq 'overlap|address space' "$network_error"; then
+      network_candidate_attempt=$((network_candidate_attempt + 1))
+      continue
+    fi
+    sed -n '1,6p' "$network_error" >&2 || true
+    echo "Could not create the isolated FoundationDB network" >&2
+    return 1
+  done
+  if [ "$created_network" -ne 1 ]; then
+    echo "Exhausted isolated FoundationDB subnet candidates" >&2
+    return 1
+  fi
+
+  network_prefix="172.31.$network_candidate_octet"
+  fdb_ip1="$network_prefix.10"
+  fdb_ip2="$network_prefix.11"
+  fdb_ip3="$network_prefix.12"
+  cluster_id=$(printf '%s' "$run_id" | tr -cd '[:alnum:]')
+  fdb_cluster_file_contents="mount_rs:$cluster_id@$fdb_ip1:4500,$fdb_ip2:4500,$fdb_ip3:4500"
+}
 
 if [ -n "$provided_cluster_file" ]; then
   if [ "${MOUNT_RS_FOUNDATIONDB_ALLOW_EXTERNAL_CLUSTER:-0}" != "1" ]; then
@@ -123,6 +199,7 @@ if [ -n "$provided_cluster_file" ]; then
   external_mode=1
   network="$external_network"
   server="$external_server"
+  fdb_servers="$server"
   owns_server=0
   owns_network=0
 fi
@@ -146,13 +223,76 @@ if [ "$external_mode" -eq 1 ]; then
   fi
   cp "$provided_cluster_file" "$run_dir/fdb.cluster"
 else
-  docker network create "$network" >/dev/null
-  docker run --detach --platform "$docker_platform" \
-    --name "$server" --hostname fdb --network "$network" \
-    --env FDB_NETWORKING_MODE=container --env FDB_PORT=4500 \
-    --env FDB_CLUSTER_FILE=/var/fdb/fdb.cluster \
-    --entrypoint /var/fdb/scripts/fdb_single.bash \
-    "$fdb_image" >/dev/null
+  create_foundationdb_network
+  if [ "$topology" = "single" ]; then
+    fdb_servers="$server"
+    docker run --detach --platform "$docker_platform" \
+      --name "$server" --hostname fdb --network "$network" \
+      --env FDB_NETWORKING_MODE=container --env FDB_PORT=4500 \
+      --env FDB_CLUSTER_FILE=/var/fdb/fdb.cluster \
+      --entrypoint /var/fdb/scripts/fdb_single.bash \
+      "$fdb_image" >/dev/null
+  else
+    fdb_servers=""
+    fdb_number=1
+    while [ "$fdb_number" -le "$fdb_server_count" ]; do
+      case "$fdb_number" in
+        1) fdb_server="$server1"; fdb_ip="$fdb_ip1" ;;
+        2) fdb_server="$server2"; fdb_ip="$fdb_ip2" ;;
+        3) fdb_server="$server3"; fdb_ip="$fdb_ip3" ;;
+        *) echo "Unsupported FoundationDB server number: $fdb_number" >&2; exit 2 ;;
+      esac
+      fdb_volume="mount-rs-foundationdb-$run_id-fdb$fdb_number-data"
+      docker volume create --label "$resource_label" "$fdb_volume" >/dev/null
+      fdb_volumes="$fdb_volumes $fdb_volume"
+      fdb_servers="$fdb_servers $fdb_server"
+      docker run --detach --platform "$docker_platform" \
+        --name "$fdb_server" --hostname "fdb$fdb_number" \
+        --network "$network" --ip "$fdb_ip" --network-alias "fdb$fdb_number" \
+        --volume "$fdb_volume:/var/fdb/data" \
+        --env FDB_NETWORKING_MODE=container --env FDB_PORT=4500 \
+        --env "FDB_PUBLIC_IP=$fdb_ip" \
+        --env FDB_CLUSTER_FILE=/var/fdb/fdb.cluster \
+        --env "FDB_CLUSTER_FILE_CONTENTS=$fdb_cluster_file_contents" \
+        --entrypoint /var/fdb/scripts/fdb.bash \
+        "$fdb_image" >/dev/null
+      fdb_number=$((fdb_number + 1))
+    done
+  fi
+fi
+
+configure_durable_foundationdb() {
+  ticks=0
+  while :; do
+    all_running=1
+    for fdb_server in $fdb_servers; do
+      if ! docker inspect --format '{{.State.Running}}' "$fdb_server" 2>/dev/null | grep -q '^true$'; then
+        all_running=0
+        break
+      fi
+    done
+    if [ "$all_running" -eq 1 ] && docker exec "$server" fdbcli --exec 'configure new double ssd' >"$run_dir/configure.log" 2>&1; then
+      echo "FOUNDATIONDB_CONFIGURED topology=durable redundancy=double storage=ssd servers=$fdb_servers"
+      return 0
+    fi
+    if [ "$all_running" -eq 1 ] && docker exec "$server" fdbcli --exec 'status json' >"$run_dir/status.json" 2>"$run_dir/status.err"; then
+      echo "FOUNDATIONDB_CONFIGURED topology=durable redundancy=double storage=ssd servers=$fdb_servers"
+      return 0
+    fi
+    if [ "$ticks" -ge 90 ]; then
+      docker logs --tail 160 "$server" >&2 || true
+      cat "$run_dir/configure.log" >&2 || true
+      cat "$run_dir/status.err" >&2 || true
+      echo "Timed out configuring the durable FoundationDB cluster" >&2
+      return 1
+    fi
+    sleep 1
+    ticks=$((ticks + 1))
+  done
+}
+
+if [ "$topology" = "durable" ] && [ "$external_mode" -eq 0 ]; then
+  configure_durable_foundationdb
 fi
 
 wait_for_foundationdb() {
@@ -400,13 +540,19 @@ if [ -n "$rustfs_endpoint" ]; then
       exit 2
       ;;
   esac
+  restart_server="$server"
+  if [ "$topology" = "durable" ]; then
+    # Keep the three-coordinator majority available while one replicated
+    # storage/transaction node is restarted.
+    restart_server="$server2"
+  fi
   if ! python3 "$repo_dir/scripts/rustfs-bounded-docker.py" "$restart_timeout" \
-    foundationdb-service-restart docker restart "$server" >/dev/null; then
+    foundationdb-service-restart docker restart "$restart_server" >/dev/null; then
     echo "Could not restart the owned FoundationDB service container" >&2
     exit 1
   fi
   wait_for_foundationdb
-  echo "FOUNDATIONDB_SERVICE_RESTART_READY server=$server"
+  echo "FOUNDATIONDB_SERVICE_RESTART_READY topology=$topology server=$restart_server"
 
   restart_test_command="cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
   docker run --rm \
@@ -437,7 +583,7 @@ if [ -n "$rustfs_endpoint" ]; then
 fi
 
 if [ -n "$rustfs_endpoint" ]; then
-  echo "FOUNDATIONDB_TEST_PASS manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass"
+  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass"
 else
-  echo "FOUNDATIONDB_TEST_PASS manifest=$test_manifest platform=$docker_platform"
+  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifest=$test_manifest platform=$docker_platform"
 fi
