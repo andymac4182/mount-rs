@@ -53,7 +53,12 @@ The opt-in macOS native NFSv3
 loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
 remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
 stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-backend durability, crash injection, and durable-restart qualification.
+backend durability, crash injection, and durable-restart qualification. The
+new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
+session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
+open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
+options; the wire suite passes 5/5. Upstream ID-map, deterministic clock/seed,
+and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2

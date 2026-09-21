@@ -397,8 +397,7 @@ pub const READW_LT: u32 = 3;
 pub const WRITEW_LT: u32 = 4;
 
 const COOKIE_BASE: u64 = 3;
-const DEFAULT_MAX_SLOTS: usize = 16;
-const DEFAULT_LEASE_SECONDS: u32 = 60;
+const DEFAULT_MAX_SLOTS: usize = 64;
 const DEFAULT_MAX_READ: usize = 1024 * 1024;
 const DEFAULT_MAX_WRITE: usize = 1024 * 1024;
 const MAX_OFFSET: u64 = 9_007_199_254_740_991;
@@ -2201,15 +2200,28 @@ impl Nfs4Session {
         // flags and returns csr_flags=0 because this server implements no
         // persistent session cache, callback channel, or RDMA transport.
         let response_flags = *flags & SERVER_CREATE_SESSION_FLAGS;
-        let (sessionid, slots, max_operations, max_cached) = {
+        let (sessionid, slots, max_operations, max_cached, max_request_size) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
-            let Some(client) = state.clients.get_mut(clientid) else {
+            let Some(client) = state.clients.get(clientid) else {
                 return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_STALE_CLIENTID);
             };
             let _ = client.id;
             if client.sequence != *sequence {
                 return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_BAD_SEQID);
             }
+            if state
+                .sessions
+                .values()
+                .filter(|session| session.clientid == *clientid)
+                .count()
+                >= self.options.nfs4.max_sessions.max(1)
+            {
+                return V4OpResult::new(OP_CREATE_SESSION, NFS4ERR_RESOURCE);
+            }
+            let client = state
+                .clients
+                .get_mut(clientid)
+                .expect("validated client while holding state lock");
             client.confirmed = true;
             client.sequence = client.sequence.saturating_add(1);
             let counter = state.next_session;
@@ -2217,13 +2229,30 @@ impl Nfs4Session {
             let mut id = [0_u8; NFS4_SESSIONID_SIZE];
             id[..8].copy_from_slice(&self.write_verifier);
             id[8..].copy_from_slice(&counter.to_be_bytes());
+            let max_fore_slots = self.options.nfs4.max_fore_slots.clamp(1, DEFAULT_MAX_SLOTS);
             let slots = usize::try_from(fore.maxrequests)
-                .unwrap_or(DEFAULT_MAX_SLOTS)
-                .clamp(1, DEFAULT_MAX_SLOTS);
-            let max_operations = fore.maxoperations.clamp(1, 64);
+                .unwrap_or(max_fore_slots)
+                .clamp(1, max_fore_slots);
+            let max_operations_cap = self
+                .options
+                .nfs4
+                .max_operations
+                .clamp(1, NFS4_MAX_COMPOUND_OPS) as u32;
+            let max_operations = fore.maxoperations.clamp(1, max_operations_cap);
+            let max_request_size = self
+                .options
+                .nfs4
+                .max_request_size
+                .max(1)
+                .min(u32::MAX as usize) as u32;
+            let max_cached_response_size = self
+                .options
+                .nfs4
+                .max_cached_response_size
+                .min(u32::MAX as usize);
             let max_cached = usize::try_from(fore.maxresponsesize_cached)
-                .unwrap_or(DEFAULT_MAX_READ)
-                .max(1024);
+                .unwrap_or(usize::MAX)
+                .min(max_cached_response_size);
             state.sessions.insert(
                 id,
                 SessionState {
@@ -2235,21 +2264,26 @@ impl Nfs4Session {
                     max_cached,
                 },
             );
-            (id, slots, max_operations, max_cached)
+            (id, slots, max_operations, max_cached, max_request_size)
         };
         let response_fore = ChannelAttrs4 {
             headerpadsize: 0,
-            maxrequestsize: fore.maxrequestsize.max(1024),
-            maxresponsesize: fore.maxresponsesize.max(1024),
-            maxresponsesize_cached: fore.maxresponsesize_cached.max(max_cached as u32),
+            maxrequestsize: fore.maxrequestsize.min(max_request_size),
+            maxresponsesize: fore.maxresponsesize.min(max_request_size),
+            maxresponsesize_cached: fore.maxresponsesize_cached.min(max_cached as u32),
             maxoperations: max_operations,
             maxrequests: slots as u32,
         };
+        let max_cached_response_size = self
+            .options
+            .nfs4
+            .max_cached_response_size
+            .min(u32::MAX as usize) as u32;
         let response_back = ChannelAttrs4 {
             headerpadsize: 0,
-            maxrequestsize: back.maxrequestsize.max(1024),
-            maxresponsesize: back.maxresponsesize.max(1024),
-            maxresponsesize_cached: back.maxresponsesize_cached,
+            maxrequestsize: back.maxrequestsize.min(max_request_size),
+            maxresponsesize: back.maxresponsesize.min(max_request_size),
+            maxresponsesize_cached: back.maxresponsesize_cached.min(max_cached_response_size),
             maxoperations: back.maxoperations.max(1),
             maxrequests: back.maxrequests.max(1),
         };
@@ -2564,7 +2598,7 @@ impl Nfs4Session {
                     values.u64(0);
                 }
                 FATTR4_UNIQUE_HANDLES => values.bool(true),
-                FATTR4_LEASE_TIME => values.u32(DEFAULT_LEASE_SECONDS),
+                FATTR4_LEASE_TIME => values.u32(self.options.nfs4.lease_seconds.max(1)),
                 FATTR4_RDATTR_ERROR => values.u32(NFS4_OK),
                 FATTR4_FILEHANDLE => values.var_opaque(&self.handles.encode(entry)),
                 FATTR4_FILEID => values.u64(entry.fileid),
@@ -3371,7 +3405,7 @@ impl Nfs4Session {
             let Some(client) = state.clients.get(&clientid) else {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_STALE_CLIENTID);
             };
-            if !client.reclaim_complete {
+            if self.options.nfs4.require_reclaim_complete && !client.reclaim_complete {
                 return V4OpResult::new(OP_LOCK, NFS4ERR_GRACE);
             }
         }
@@ -3446,6 +3480,17 @@ impl Nfs4Session {
         };
 
         let mut state = self.state.lock().expect("NFSv4 state lock");
+        if target_key.is_none() {
+            let granted_ranges = state
+                .locks
+                .values()
+                .filter(|lock| lock.file_id == entry.fileid)
+                .map(|lock| lock.ranges.len())
+                .sum::<usize>();
+            if granted_ranges >= self.options.nfs4.max_locks_per_file.max(1) {
+                return V4OpResult::new(OP_LOCK, NFS4ERR_RESOURCE);
+            }
+        }
         let denied = state.locks.values().find_map(|held| {
             if held.file_id != entry.fileid || (held.clientid == clientid && held.owner == owner) {
                 return None;
@@ -3772,7 +3817,7 @@ impl Nfs4Session {
             }
             return V4OpResult::new(OP_OPEN, NFS4ERR_SHARE_DENIED);
         }
-        let stateid = {
+        let (stateid, open_limit_reached) = {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             let existing_key = state
                 .opens
@@ -3792,38 +3837,55 @@ impl Nfs4Session {
                 open.access |= access;
                 open.deny |= args.share_deny;
                 open.stateid.seqid = bump_stateid_seq(open.stateid.seqid);
-                open.stateid.clone()
+                (Some(open.stateid.clone()), false)
             } else {
-                let stateid = open_stateid(1, clientid, entry.fileid, &args.owner);
-                if should_create
-                    && exclusive
-                    && let Some(verifier) = args.create_verf
-                {
-                    state.exclusive_creates.insert(
-                        path.clone(),
-                        ExclusiveV4 {
-                            verifier,
-                            attrset: attrset.clone(),
+                let open_count = state
+                    .opens
+                    .values()
+                    .filter(|open| open.file_id == entry.fileid)
+                    .count();
+                if open_count >= self.options.nfs4.max_opens_per_file.max(1) {
+                    (None, true)
+                } else {
+                    let stateid = open_stateid(1, clientid, entry.fileid, &args.owner);
+                    if should_create
+                        && exclusive
+                        && let Some(verifier) = args.create_verf
+                    {
+                        state.exclusive_creates.insert(
+                            path.clone(),
+                            ExclusiveV4 {
+                                verifier,
+                                attrset: attrset.clone(),
+                            },
+                        );
+                    }
+                    state.opens.insert(
+                        stateid.other,
+                        OpenState {
+                            stateid: stateid.clone(),
+                            clientid,
+                            handle_id: entry.id,
+                            file_id: entry.fileid,
+                            path: path.clone(),
+                            handle: handle.take().expect("new open backend handle"),
+                            access,
+                            deny: args.share_deny,
+                            owner: args.owner.clone(),
                         },
                     );
+                    (Some(stateid), false)
                 }
-                state.opens.insert(
-                    stateid.other,
-                    OpenState {
-                        stateid: stateid.clone(),
-                        clientid,
-                        handle_id: entry.id,
-                        file_id: entry.fileid,
-                        path: path.clone(),
-                        handle: handle.take().expect("new open backend handle"),
-                        access,
-                        deny: args.share_deny,
-                        owner: args.owner.clone(),
-                    },
-                );
-                stateid
             }
         };
+        if open_limit_reached {
+            self.handles.unpin(entry.id);
+            if let Some(handle) = handle.take() {
+                let _ = handle.close().await;
+            }
+            return V4OpResult::new(OP_OPEN, NFS4ERR_RESOURCE);
+        }
+        let stateid = stateid.expect("open state unless the per-file limit was reached");
         if let Some(handle) = handle {
             let _ = handle.close().await;
         }
