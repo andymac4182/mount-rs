@@ -225,6 +225,9 @@ if [ "$run_native_cli" -eq 1 ] && [ -z "$rustfs_endpoint" ]; then
 fi
 authority_prefix=""
 if [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq 1 ]; then
+  if [ -z "$test_prefix" ]; then
+    test_prefix="mount-rs/foundationdb/$run_id"
+  fi
   authority_prefix=${MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX:-}
   if [ -z "$authority_prefix" ]; then
     authority_prefix="$test_prefix/lease-authority"
