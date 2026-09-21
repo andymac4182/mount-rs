@@ -153,8 +153,11 @@ crate.
 
 UDP transport, portmapper registration, NLM/NSM locking, and persistent
 cross-process file-handle recovery remain unimplemented. The two-client v4.1
-round-trip does not qualify cross-process concurrency or native-client
-ordering. File handles and
+round-trip qualifies concurrent clients and sessions served by one
+`NfsServer` process, but does not qualify native-client ordering. Running
+multiple server processes against one backend is outside the supported scope:
+there is no cross-process session, lease, replay, or handle arbitration. File
+handles and
 exclusive-create verifiers are process-local unless the caller supplies a
 stable handle verifier. A caller can reconnect to a still-running server and
 reuse the tested session, but `NfsConnection` close/wait state does not provide

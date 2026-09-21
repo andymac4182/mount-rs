@@ -299,7 +299,9 @@ Current focused behavior:
   independent sessions through concurrent distinct-file OPEN/WRITE/READ
   round trips. NFSv4 lease/replay/file-handle recovery, cross-process/native
   concurrency, power-loss durability, and whole-workflow release acceptance
-  remain open. The exact published concurrency tip's CI run
+  remain open. Multiple server processes sharing one backend are outside the
+  supported scope because session/lease/replay/handle arbitration is
+  process-local. The exact published concurrency tip's CI run
   `35663954461` was cancelled before jobs were created, so it adds no newer
   hosted native result. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
