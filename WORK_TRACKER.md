@@ -1976,7 +1976,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `a2fda11`; it therefore cannot be used as current-head release
+  current head `5116ded`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
   `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
   and partial 606-file inventory; the issue is remediated on current pushed
