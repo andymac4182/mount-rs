@@ -501,8 +501,8 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Production-readiness qualification: first-class Rust SDK/CLI path and least-privilege live test scope passed; rollout controls, deployment-grade metadata/DR, and hosted release gates remain open | Main |
-| W26 | Apache Ozone S3 backend | Complete within documented scope: local and hosted Ozone gateway, SQLite/PGlite composition, durable FoundationDB, and Ozone-backed durable TiDB gates passed; production/native boundaries remain explicit | Main |
+| W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification complete within documented scope: local and hosted Ozone gateway, SQLite/PGlite composition, durable FoundationDB, and Ozone-backed durable TiDB gates passed; post-demo production rollout track is open and currently NO-GO | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -1611,6 +1611,37 @@ listing a source does not mean it has been reviewed or its code can be reused.
   skip=1 fail=0`. The CI job now builds the NAPI addon and installs PGlite;
   hosted results remain revision-specific. Ozone remains loopback-only,
   non-secure and not production replicated-durability acceptance.
+
+### W26 production-rollout readiness (post-demo; currently NO-GO)
+
+W26 qualification is complete, but production rollout is a separate open
+track. The detailed evidence ledger, provisional estimates and blockers are in
+[`docs/w26-progress-ledger.md`](docs/w26-progress-ledger.md). Do not mark a
+production gate complete from the demo or from the hosted qualification packet
+alone.
+
+| Gate | Status | Completion | Exit evidence / primary blocker |
+| --- | --- | ---: | --- |
+| P0 — scope, support matrix, SLO/RPO/RTO, ownership | Open | 10% | Approved production target and non-goals; product/operations decisions required |
+| P1 — secure production Ozone topology and rehearsal | Not started | 0% | Multi-node persistent production-like deployment; Ozone/cluster infrastructure required |
+| P2 — production metadata-provider matrix | Qualification only | 10% | Selected supported providers and secure staging matrix; managed-provider/version access required |
+| P3 — authentication, TLS, secrets and redaction | Not started | 0% | Certificate/identity/secret rotation and negative tests; security/platform access required |
+| P4 — replicated durability and storage failure protection | Not started | 0% | Storage/node/power-loss boundary and integrity recovery; production storage/fault controls required |
+| P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 25% | Secure multi-node failure/retry evidence; distributed fault tooling required |
+| P6 — backup, restore and DR | Not started | 0% | Clean-environment restore with measured RPO/RTO; backup/KMS/second failure domain required |
+| P7 — observability, alerting and runbooks | Not started | 0% | SLO telemetry, alerts and tested operator procedures; monitoring/on-call ownership required |
+| P8 — load, capacity, soak and cost envelope | Not started | 0% | Production-shaped performance/soak evidence; dedicated capacity and budget required |
+| P9 — upgrade, rollback and compatibility | Not started | 0% | Rehearsed migration and rollback on retained data; release/change-window approval required |
+| P10 — security, privacy, tenancy and audit | Not started | 0% | Security review and closed findings/approved exceptions; security/compliance owner required |
+| P11 — native client/mount/platform matrix | Not started | 0% | Every advertised native platform passes; native runners, facilities and signing required |
+| P12 — signed release, promotion, canary and rollback automation | Qualification CI only | 10% | Production promotion controls and canary evidence; CI/CD/artifact/signing access required |
+| P13 — incident, failover and recovery rehearsal | Not started | 0% | Timed operator exercise meets RTO and integrity criteria; on-call/incident participation required |
+| P14 — final launch evidence audit and GO/NO-GO | Not started | 0% | One-revision evidence packet and release-owner decision; all upstream gates required |
+
+The production track is **0/15 terminal gates accepted**. Its current
+provisional planning range is **31–76 engineering days plus external waits**;
+this is not a delivery commitment and must be refined after P0 fixes the
+advertised provider/platform scope.
 
 ## W27 — Native Windows support and CI
 
