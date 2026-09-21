@@ -174,6 +174,11 @@ The N-API package still does not expose the complete request/reply body codec,
 init negotiation, session, or native mount objects. Therefore this packet
 proves focused body/inode components only, not full FUSE transport parity.
 
+The previously known `js_driver.rs` type-complexity lint was resolved in
+`dbfa2ea`; the current scoped N-API Clippy gate passes with `-D warnings`
+without that exclusion. This removes a lint blocker only and does not change
+the native-session, hosted-platform, or native-mount acceptance boundary.
+
 ### P1 — auto/mount option and lifecycle parity: PARTIAL; UNVERIFIED
 
 The current root facade exposes `mount`, `liveMounts`, `unmountAll`, and
