@@ -26,6 +26,7 @@ import {
   splitPath,
   type JsCapabilities,
   type JsAutoMountOptions,
+  type Mounted,
   type JsChunkedOptions,
   type JsMemoryOptions,
   type JsReadResult,
@@ -155,6 +156,9 @@ const autoMountOptions: JsAutoMountOptions = {
   },
 }
 void autoMountOptions
+declare const mounted: Mounted
+const mountedDisposal: Promise<void> = mounted[Symbol.asyncDispose]()
+void mountedDisposal
 void (FUSE_ASYNC_DIO | FUSE_PARALLEL_DIROPS | FUSE_SETXATTR_EXT)
 
 const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =

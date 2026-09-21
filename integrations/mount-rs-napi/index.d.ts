@@ -176,6 +176,7 @@ export declare class Mounted {
   get source(): string | null
   get active(): boolean
   unmount(): Promise<void>
+  [Symbol.asyncDispose](): Promise<void>
 }
 
 export declare class NativeFuseInodeTable {

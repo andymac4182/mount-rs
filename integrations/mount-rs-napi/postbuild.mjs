@@ -91,6 +91,15 @@ types = types.replace(
   },
 )
 types = types.replace(
+  /export declare class Mounted \{([\s\S]*?)\n\}/g,
+  (declaration, body) => {
+    if (!body.includes("[Symbol.asyncDispose]")) {
+      body += "\n  [Symbol.asyncDispose](): Promise<void>"
+    }
+    return `export declare class Mounted {${body}\n}`
+  },
+)
+types = types.replace(
   /export declare class P9Connection \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
     if (!/\bclosed\s*:/.test(body)) body += "\n  readonly closed: Promise<void>"
