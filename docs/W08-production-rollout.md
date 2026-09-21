@@ -44,9 +44,11 @@ also covered locally by
 tests/tidb/production-config-policy.json`, whose positive fixture passed and
 whose insecure fixture failed closed; the public CLI schema accepted the
 positive fixture. This policy check does not connect to TiDB or object
-storage. The hosted `tidb-tls-compile` job `106304951579` in run
-`35590919645` remains compile/guard evidence only and does not close the live
-provider, IAM, certificate, or production-deployment gates.
+storage. The later hosted `tidb-tls-compile` job `106311076905` in run
+`35592902494` also passed the positive/negative production-config policy
+check, alongside TLS compilation and URL guardrails. These jobs remain
+compile/policy evidence only and do not close the live provider, IAM,
+certificate, or production-deployment gates.
 
 ## Deployment contract
 
@@ -138,6 +140,7 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 | `MOUNT_RS_TIDB_TLS_URL=... node scripts/verify-w08-production-config.mjs <config>` | Credential-free deployment-shape, durable-store, HTTPS-block, external-secret-reference and TLS-required policy validation | Topology, IAM grants, certificate trust, backup/restore, capacity, monitoring, provider handshake or production approval |
 | `./scripts/cargo-shared check/test/clippy ... --features rustls` | Public TLS graph compilation, unit tests and lint | A network endpoint, certificate trust, provider identity or deployment |
 | Hosted `tidb-tls-compile` job `106304951579` | Revision-specific TLS feature and fail-closed guard evidence | Live provider, production identity, capacity, observability or release gates |
+| Hosted `tidb-tls-compile` job `106311076905` in run `35592902494` | Terminal TLS feature, URL-guard and production-config policy evidence for source `4326c54` | Live provider, IAM, certificate trust, topology, capacity, observability or release gates |
 
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate

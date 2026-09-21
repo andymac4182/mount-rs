@@ -1086,8 +1086,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   TLS-required TiDB input without opening a provider connection. The positive
   fixture passed, the insecure fixture failed closed, and the public Rust CLI
   schema accepted the positive fixture. The hosted CI positive/negative gate
-  is implementation evidence only; P01/P02/P07 remain open for real
-  topology, IAM, certificates and provider/security sign-off.
+  passed in run `35592902494`, `tidb-tls-compile` job `106311076905` at source
+  `4326c54`; this is implementation evidence only. P01/P02/P07 remain open
+  for real topology, IAM, certificates and provider/security sign-off.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
