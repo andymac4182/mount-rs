@@ -1110,7 +1110,9 @@ evidence is terminal, owned and reproducible in a production-like environment.
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
   + implementation; the hosted TLS compile gate passed, while the actual
-  endpoint, certificates, security approval and network controls are external.)*
+  endpoint, certificates, security approval and network controls are external.
+  `scripts/test-tidb-tls.sh` now provides the guarded credentialed provider
+  gate and rejects missing TLS/CA/hostname verification before connecting.)*
 - [ ] **W08-P08 (15%) — failure drills/runbooks/on-call:** exercise client and
   provider loss, stale leases, partitions, partial writes, rolling restart and
   restore; publish operator runbooks and complete an on-call tabletop/timed

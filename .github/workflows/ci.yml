@@ -193,6 +193,17 @@ jobs:
           cargo check --locked -p mount-rs-sdk --features rustls
           cargo check --locked -p mount-rs-cli --features rustls
           cargo check --locked -p mount-rs-napi --features rustls
+      - name: Verify TLS deployment URL guardrails without credentials
+        run: |
+          MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 \
+          MOUNT_RS_TIDB_TLS_URL='mysql://tls-validation.invalid:4000/test?require_ssl=true&verify_ca=true&verify_identity=true' \
+            ./scripts/test-tidb-tls.sh
+          if MOUNT_RS_TIDB_TLS_VALIDATE_ONLY=1 \
+            MOUNT_RS_TIDB_TLS_URL='mysql://tls-validation.invalid:4000/test?require_ssl=false' \
+            ./scripts/test-tidb-tls.sh; then
+            echo 'TLS guard accepted require_ssl=false' >&2
+            exit 1
+          fi
 
   tidb-rustfs:
     # This job keeps the real RustFS service alive while test-tidb.sh owns the
