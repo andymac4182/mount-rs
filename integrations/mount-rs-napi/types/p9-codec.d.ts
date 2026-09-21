@@ -1,5 +1,7 @@
 /// <reference lib="esnext.disposable" />
 
+import type { FileHandle, P9FidTable } from "../index.js"
+
 // The 9P entrypoint retains the existing package exports (including the P9
 // server) and adds the Rust-backed 9P2000.L codec surface below.
 export * from "../index.js"
@@ -32,6 +34,46 @@ export interface P9Header {
 export interface P9Message extends P9Header {
   body: P9Reader
 }
+
+/** The first qid.path allocated by a fid table. */
+export declare const FIRST_QID_PATH: 1n
+
+export interface FidOpenState {
+  flags: number
+  handle: FileHandle | undefined
+  directory: boolean
+  qid?: P9Qid
+}
+
+export interface DirCursor<TDirent = string> {
+  readonly entries: readonly TDirent[]
+  readonly offsets: ReadonlyMap<bigint, number>
+}
+
+export interface DirResume<TDirent = string> {
+  readonly entries: readonly TDirent[]
+  readonly index: number
+}
+
+export interface Fid<TDirent = string> {
+  readonly fid: number
+  path: string
+  open: FidOpenState | undefined
+  readonly iounit: number
+  readonly cursor: DirCursor<TDirent> | undefined
+}
+
+export interface FidTableOptions {
+  useDriverIno?: boolean
+}
+
+/** Runtime alias for the Rust-backed fid table class. */
+export declare const FidTable: typeof P9FidTable
+export type FidTable<TDirent = string> = P9FidTable
+
+export declare function qidType(mode: number): number
+export declare function qidVersion(stats: { mtimeMs: number }): number
+export declare function walkStep(path: string, name: string): string
 
 export declare const P9_QID_SIZE: 13
 export declare const P9_MAX_STRING: 65535

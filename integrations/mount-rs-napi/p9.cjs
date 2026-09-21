@@ -158,6 +158,193 @@ module.exports.P9_LOCK_GRACE = 3
 module.exports.P9_LOCK_FLAGS_BLOCK = 1
 module.exports.P9_LOCK_FLAGS_RECLAIM = 2
 
+// Fid-table classes are exported under both their native names and the
+// upstream 9P facade names. Direct assignments keep them visible to CommonJS
+// and ESM named-export discovery.
+module.exports.P9Fid = binding.P9Fid
+module.exports.P9FidOpenState = binding.P9FidOpenState
+module.exports.P9FidTable = binding.P9FidTable
+module.exports.P9OpenHandle = binding.P9OpenHandle
+module.exports.FidTable = binding.P9FidTable
+
+module.exports.FIRST_QID_PATH = 1n
+
+function p9WalkError(message) {
+  if (typeof binding.fsError === "function") {
+    return binding.fsError("EINVAL", { message })
+  }
+  const error = new Error(message)
+  error.code = "EINVAL"
+  return error
+}
+
+function p9NormalizePath(value) {
+  const parts = []
+  for (const segment of String(value).split("/")) {
+    if (!segment || segment === ".") continue
+    if (segment === "..") {
+      if (parts.length) parts.pop()
+      continue
+    }
+    parts.push(segment)
+  }
+  return `/${parts.join("/")}`
+}
+
+function p9QidType(mode) {
+  switch (Number(mode) & 0o170000) {
+    case 0o040000:
+      return module.exports.P9_QTDIR
+    case 0o120000:
+      return module.exports.P9_QTSYMLINK
+    default:
+      return module.exports.P9_QTFILE
+  }
+}
+
+function p9QidVersion(stats) {
+  const mtimeMs = Number(stats?.mtimeMs)
+  if (!Number.isFinite(mtimeMs) || mtimeMs <= 0) return 0
+  return Math.trunc(mtimeMs) >>> 0
+}
+
+function p9WalkStep(path, name) {
+  const element = String(name)
+  if (!element) throw p9WalkError("EINVAL: walk element is empty")
+  if (element.includes("/")) {
+    throw p9WalkError(`EINVAL: walk element ${JSON.stringify(element)} contains a separator`)
+  }
+  if (element.includes("\0")) throw p9WalkError("EINVAL: walk element contains a NUL")
+  return p9NormalizePath(`${p9NormalizePath(path)}/${element}`)
+}
+
+module.exports.qidType = p9QidType
+module.exports.qidVersion = p9QidVersion
+module.exports.walkStep = p9WalkStep
+
+function p9DecodeErrorField(value) {
+  if (value === "-") return undefined
+  try {
+    return Buffer.from(value, "hex").toString("utf8")
+  } catch {
+    return value
+  }
+}
+
+function p9ReviveError(error) {
+  const message = String(error?.message ?? error)
+  const fields = message.split("|")
+  if (fields[0] !== "__mount_rs_error_v1__" || fields.length !== 7) return error
+  const [, code, errno, syscall, path, dest, encodedMessage] = fields
+  const options = { message: p9DecodeErrorField(encodedMessage) }
+  const decodedSyscall = p9DecodeErrorField(syscall)
+  const decodedPath = p9DecodeErrorField(path)
+  const decodedDest = p9DecodeErrorField(dest)
+  if (decodedSyscall !== undefined) options.syscall = decodedSyscall
+  if (decodedPath !== undefined) options.path = decodedPath
+  if (decodedDest !== undefined) options.dest = decodedDest
+  if (typeof binding.fsError === "function") return binding.fsError(code, options)
+  const revived = new Error(options.message)
+  revived.code = code
+  if (errno !== "-") revived.errno = Number(errno)
+  return revived
+}
+
+function p9Invoke(native, receiver, args) {
+  try {
+    return native.apply(receiver, args)
+  } catch (error) {
+    throw p9ReviveError(error)
+  }
+}
+
+// N-API uses `null` for Rust `Option<T>`. The upstream 9P objects use
+// `undefined` for absent optional fields, so normalize the fid facade at this
+// boundary while leaving the native binding's generated surface intact.
+for (const [ctor, properties] of [
+  [binding.P9Fid, ["open", "cursor"]],
+  [binding.P9FidOpenState, ["handle", "qid"]],
+]) {
+  if (!ctor?.prototype) continue
+  for (const property of properties) {
+    const descriptor = Object.getOwnPropertyDescriptor(ctor.prototype, property)
+    if (!descriptor?.get) continue
+    const native = descriptor.get
+    Object.defineProperty(ctor.prototype, property, {
+      ...descriptor,
+      get() {
+        const value = p9Invoke(native, this, [])
+        return value === null ? undefined : value
+      },
+      ...(descriptor.set
+        ? {
+            set(value) {
+              if (
+                ctor === binding.P9Fid &&
+                property === "open" &&
+                value !== undefined &&
+                value !== null &&
+                !(value instanceof binding.P9FidOpenState)
+              ) {
+                value = new binding.P9FidOpenState(
+                  value.flags,
+                  value.handle,
+                  value.directory,
+                  value.qid,
+                )
+              }
+              return p9Invoke(descriptor.set, this, [value])
+            },
+          }
+        : {}),
+    })
+  }
+}
+
+const nativeFidGet = binding.P9FidTable?.prototype?.get
+if (typeof nativeFidGet === "function") {
+  binding.P9FidTable.prototype.get = function getFid(fid) {
+    const value = p9Invoke(nativeFidGet, this, [fid])
+    return value === null ? undefined : value
+  }
+}
+
+const nativeFidResume = binding.P9FidTable?.prototype?.resume
+if (typeof nativeFidResume === "function") {
+  binding.P9FidTable.prototype.resume = function resumeFid(entry, offset) {
+    const value = p9Invoke(nativeFidResume, this, [entry, offset])
+    return value === null ? undefined : value
+  }
+}
+
+for (const name of [
+  "require",
+  "create",
+  "clone",
+  "clunk",
+  "snapshot",
+  "noteOffset",
+  "qidFor",
+  "qidPathFor",
+  "release",
+  "remap",
+  "fids",
+  "entries",
+  "openHandles",
+  "clear",
+]) {
+  const native = binding.P9FidTable?.prototype?.[name]
+  if (typeof native !== "function") continue
+  Object.defineProperty(binding.P9FidTable.prototype, name, {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value(...args) {
+      return p9Invoke(native, this, args)
+    },
+  })
+}
+
 module.exports.P9_TLERROR = 6
 module.exports.P9_RLERROR = 7
 module.exports.P9_TSTATFS = 8

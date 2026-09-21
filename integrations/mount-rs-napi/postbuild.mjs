@@ -115,6 +115,16 @@ types = types.replace(
     return `export declare class P9Session {${body}\n}`
   },
 )
+// The fid facade translates N-API's null option representation to the
+// upstream 9P contract's undefined values in p9.cjs. Keep the generated
+// declarations aligned with that public boundary after every native build.
+types = types.replaceAll("JsFileHandle", "FileHandle")
+types = types.replaceAll("get open(): P9FidOpenState | null", "get open(): P9FidOpenState | undefined")
+types = types.replaceAll("get cursor(): P9FidCursor | null", "get cursor(): P9FidCursor | undefined")
+types = types.replaceAll("get handle(): FileHandle | null", "get handle(): FileHandle | undefined")
+types = types.replaceAll("get qid(): NativeP9Qid | null", "get qid(): NativeP9Qid | undefined")
+types = types.replaceAll("get(fid: number): P9Fid | null", "get(fid: number): P9Fid | undefined")
+types = types.replaceAll("resume(entry: P9Fid, offset: bigint): P9DirResume | null", "resume(entry: P9Fid, offset: bigint): P9DirResume | undefined")
 types = types.replace(
   /export declare class P9Server \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
