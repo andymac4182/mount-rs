@@ -19,7 +19,7 @@ for a production deployment result.
 | Gate | Required evidence | Status |
 | --- | --- | --- |
 | Provider contract | `kind: "aws-s3"` uses the real region, signed AWS workload credentials, immutable create, conditional update, and block-only semantics | Passed in local code gates and the live public SDK/CLI run |
-| AWS resource controls | Reviewable IaC or equivalent, private bucket, Block Public Access, Object Ownership, encryption/KMS decision, lifecycle/versioning decision, and prefix ownership | Read-only audit script added; test-resource controls passed; production resource review open |
+| AWS resource controls | Reviewable IaC or equivalent, private bucket, Block Public Access, Object Ownership, encryption/KMS decision, lifecycle/versioning decision, and prefix ownership | Reviewable CloudFormation contract added and AWS syntax-validated; production parameters, change set, and resource review open |
 | Identity | Runtime and maintenance roles are least-privilege, short-lived, trusted only by the intended workload, and have no committed access keys | Test role and sibling-prefix denial passed; production workload identity open |
 | Metadata | A durable, independently operated metadata provider is selected and qualified for the intended host/multi-writer scope | Open; SQLite is single-host evidence only |
 | Recovery | Backup/restore, schema migration, orphan-block cleanup, restart, failure recovery, and disaster-recovery drills pass | Open |
@@ -55,6 +55,28 @@ are enabled, the cleanup, restore, key-policy, and cost procedures must cover
 object versions and KMS access rather than treating current-object deletion as
 complete cleanup.
 
+## Reviewable infrastructure contract
+
+[`infra/aws-s3-production.yaml`](../infra/aws-s3-production.yaml) is the
+reviewable CloudFormation contract for one production bucket and one owned
+mount-rs object prefix. It creates no IAM roles and grants no trust. The
+deployment owner must supply and approve the existing short-lived runtime and
+separate maintenance role ARNs, the production bucket name, the owned prefix,
+the retention period, and the encryption choice.
+
+The template defaults to BucketOwnerEnforced ownership, all four S3 public
+access blocks, versioning enabled, retained state on stack deletion or
+replacement, a one-day incomplete-multipart abort, and SSE-S3. It can select
+SSE-KMS and an optional customer-managed key ARN. The runtime role can list,
+read, and publish only objects below the owned prefix; version listing and
+deletion are reserved for the maintenance role. A bucket policy denies
+insecure transport.
+
+The template was syntax-validated with the read-only AWS CloudFormation API on
+2026-09-21; no stack or change set was created. Validation does not approve
+the production parameters, role trust policies, metadata topology, backup
+plan, or deployment promotion. Those remain W25.5-W25.9 gates.
+
 ## Minimum IAM policy shapes
 
 The runtime role should be limited to the one volume prefix. Replace the
@@ -68,7 +90,7 @@ values or credentials into this repository.
     {
       "Sid": "VolumeObjects",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"],
       "Resource": "arn:aws:s3:::<private-bucket>/<volume-prefix>/*"
     },
     {

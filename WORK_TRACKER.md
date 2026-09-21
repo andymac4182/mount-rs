@@ -1749,10 +1749,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
-  role are test resources, so
-  production resource review remains open. The audit now fails closed on
-  inherited endpoint/service-profile overrides, requires an expected caller
-  account, and verifies the bucket location before reporting controls.
+  role are test resources, so production resource review remains open. The
+  reviewable [`infra/aws-s3-production.yaml`](infra/aws-s3-production.yaml)
+  contract now expresses retained state, versioning, encryption choice,
+  lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
+  access, and separately governed maintenance access. AWS CloudFormation
+  syntax validation passed on 2026-09-21 without creating a stack or change
+  set. The audit still fails closed on inherited endpoint/service-profile
+  overrides, requires an expected caller account, and verifies bucket
+  location before reporting controls; approved production parameters, role
+  trust, change-set review, and live production audit remain open.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.

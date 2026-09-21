@@ -1,0 +1,178 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >-
+  Reviewable production contract for one mount-rs AWS S3 block namespace. This
+  template provisions only the bucket and its prefix-scoped bucket policy;
+  workload roles, metadata, backups, monitoring, and deployment promotion are
+  separate reviewed concerns.
+
+Parameters:
+  BucketName:
+    Type: String
+    Description: Globally unique private S3 bucket name for the production deployment.
+    AllowedPattern: '^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$'
+    ConstraintDescription: Must be a 3-63 character lowercase DNS-compatible S3 bucket name.
+  OwnedPrefix:
+    Type: String
+    Description: >-
+      The single object prefix owned by this mount-rs deployment. Do not use a
+      leading slash, empty path components, or dot components.
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._/-]*[A-Za-z0-9]$'
+    ConstraintDescription: Must be a non-empty relative object prefix without a trailing slash.
+  RuntimeRoleArn:
+    Type: String
+    Description: >-
+      Existing short-lived workload role ARN. The template does not create or
+      grant trust to this role.
+    AllowedPattern: '^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$'
+    ConstraintDescription: Must be an IAM role ARN in the commercial AWS partition.
+  MaintenanceRoleArn:
+    Type: String
+    Description: >-
+      Existing separately governed maintenance/reconciliation role ARN. Keep
+      this distinct from the runtime role.
+    AllowedPattern: '^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+(/[A-Za-z0-9+=,.@_-]+)*$'
+    ConstraintDescription: Must be an IAM role ARN in the commercial AWS partition.
+  EncryptionAlgorithm:
+    Type: String
+    Description: Default server-side encryption for objects in the bucket.
+    Default: AES256
+    AllowedValues:
+      - AES256
+      - aws:kms
+  KmsKeyArn:
+    Type: String
+    Description: Optional customer-managed KMS key ARN when EncryptionAlgorithm is aws:kms.
+    Default: ''
+    AllowedPattern: '^$|^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:(key/[0-9a-f-]+|alias/[A-Za-z0-9/_+=.@-]+)$'
+    ConstraintDescription: Must be empty or a valid commercial AWS KMS key or alias ARN.
+  ObjectExpirationDays:
+    Type: Number
+    Description: Reviewed retention period for current objects under OwnedPrefix.
+    MinValue: 1
+    MaxValue: 3650
+  IncompleteMultipartAbortDays:
+    Type: Number
+    Description: Maximum age of incomplete multipart uploads under the owned prefix.
+    Default: 1
+    MinValue: 1
+    MaxValue: 30
+
+Conditions:
+  UseCustomerManagedKms: !Equals [!Ref EncryptionAlgorithm, aws:kms]
+
+Resources:
+  MountRsBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref BucketName
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: !Ref EncryptionAlgorithm
+              KMSMasterKeyID: !If [UseCustomerManagedKms, !Ref KmsKeyArn, !Ref AWS::NoValue]
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: MountRsOwnedPrefixRetention
+            Status: Enabled
+            Prefix: !Sub '${OwnedPrefix}/'
+            ExpirationInDays: !Ref ObjectExpirationDays
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: !Ref IncompleteMultipartAbortDays
+      Tags:
+        - Key: component
+          Value: mount-rs
+        - Key: managed-by
+          Value: cloudformation
+        - Key: data-class
+          Value: filesystem-blocks
+
+  MountRsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref MountRsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt MountRsBucket.Arn
+              - !Sub '${MountRsBucket.Arn}/${OwnedPrefix}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+          - Sid: RuntimeListOwnedPrefix
+            Effect: Allow
+            Principal:
+              AWS: !Ref RuntimeRoleArn
+            Action: s3:ListBucket
+            Resource: !GetAtt MountRsBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - !Sub '${OwnedPrefix}'
+                  - !Sub '${OwnedPrefix}/*'
+          - Sid: RuntimeObjectAccess
+            Effect: Allow
+            Principal:
+              AWS: !Ref RuntimeRoleArn
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub '${MountRsBucket.Arn}/${OwnedPrefix}/*'
+          - Sid: MaintenanceListOwnedPrefix
+            Effect: Allow
+            Principal:
+              AWS: !Ref MaintenanceRoleArn
+            Action:
+              - s3:ListBucket
+              - s3:ListBucketMultipartUploads
+              - s3:ListBucketVersions
+            Resource: !GetAtt MountRsBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix:
+                  - !Sub '${OwnedPrefix}'
+                  - !Sub '${OwnedPrefix}/*'
+          - Sid: MaintenanceObjectAccess
+            Effect: Allow
+            Principal:
+              AWS: !Ref MaintenanceRoleArn
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:GetObject
+              - s3:GetObjectVersion
+              - s3:ListMultipartUploadParts
+              - s3:PutObject
+            Resource: !Sub '${MountRsBucket.Arn}/${OwnedPrefix}/*'
+
+Outputs:
+  BucketName:
+    Description: The retained production S3 bucket name.
+    Value: !Ref MountRsBucket
+  BucketArn:
+    Description: The production S3 bucket ARN.
+    Value: !GetAtt MountRsBucket.Arn
+  OwnedPrefix:
+    Description: The prefix granted to the runtime and maintenance roles.
+    Value: !Ref OwnedPrefix
+  RuntimeObjectArnPattern:
+    Description: Object ARN pattern granted to the runtime role.
+    Value: !Sub '${MountRsBucket.Arn}/${OwnedPrefix}/*'
