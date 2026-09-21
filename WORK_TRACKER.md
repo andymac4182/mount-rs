@@ -1635,6 +1635,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Direct AWS tests now construct the public `AwsS3Config` path rather than a
   parallel raw client, and version-aware cleanup completed with
   `AWS_S3_TEST_PASS`.
+- [x] The current pushed-head rerun at `da4d36c` refreshed the same evidence
+  under the selected `myroot` account: the read-only audit passed for
+  `mount-rs-integration-922978963556-ap-southeast-2` in `ap-southeast-2`
+  (`BucketOwnerEnforced`, `AES256`, versioning `None`, seven-day lifecycle,
+  one-day incomplete-multipart abort), the scoped role denied a sibling
+  prefix, the public CLI SDK self-test reopened successfully, the composed
+  AWS block test passed, and the cross-process reopen test passed. The run
+  cleaned its owned prefix and emitted `AWS_S3_TEST_PASS` at
+  `mount-rs-tests/aws-s3/20260921T120543Z-65309-0663df4c1d84504983babd5ff88f4e02`.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -1665,6 +1674,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   this macOS runner does not provide native `libfdb_c`; the site typecheck also
   needs a network-backed dependency install and is not claimed from the
   offline run.
+- [x] The current pushed head `da4d36c` also passed the full locked offline
+  workspace test gate and strict workspace Clippy with `-D warnings`. The
+  passing run includes the 14-test S3 gateway suite, 13 AWS-provider unit
+  tests, both signed HTTP interop tests, and the public SDK/CLI tests; the
+  workspace's explicitly ignored native/service rows remain separate gates.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -1673,7 +1687,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   qualification controls without mutation. It passed the `myroot` test bucket
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
-  incomplete-multipart abort; the W25 bucket and role are test resources, so
+  incomplete-multipart abort in the current `myroot` rerun; the W25 bucket and
+  role are test resources, so
   production resource review remains open. The audit now fails closed on
   inherited endpoint/service-profile overrides, requires an expected caller
   account, and verifies the bucket location before reporting controls.
@@ -1690,9 +1705,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
-  references; both code and workflow-reference remediations are now landed
-  at the current head, pending a fresh scan. Hosted OIDC trust, the protected
-  versioning-status input, and the deployment evidence remain open. The
+  references. Both remediations are landed at current head `da4d36c`; the
+  follow-up Standard scan reports zero reportable findings in the 20 directly
+  reviewed W25 surfaces, with partial repository coverage (590 files, 20
+  closed review rows). Hosted OIDC trust, the protected versioning-status
+  input, and the deployment evidence remain open. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
