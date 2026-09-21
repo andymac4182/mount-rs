@@ -9,24 +9,48 @@ function DocsOverview() {
   return (
     <article className="doc-article">
       <p className="eyebrow">Documentation / start here</p>
-      <h1>Turn the file boundary into an explicit design choice.</h1>
+      <h1>Choose the file decision you need to make.</h1>
       <p className="doc-lede">
-        The business case is simple: keep file semantics stable while the
-        deployment, metadata provider, block store, or transport changes.
-        These pages show the contract behind that promise.
+        Move from the first file feature to a deliberate storage and transport
+        design. These pages show the contract, the provider roles, the edge
+        choices, and the evidence behind the promise.
       </p>
 
       <div className="callout callout-blue">
-          <strong>Choose your next decision</strong>
-          <p>
-            Start with Rust or Node if you are integrating the contract. Choose
-            providers when you are designing storage. Choose transports when you
-            are deciding how the file surface reaches a process. The acceptance
-            requirements describe what is not yet a blanket guarantee.
-          </p>
+        <strong>Start with the smallest working boundary</strong>
+        <p>
+          Begin with the direct contract in Rust or Node. Then choose the
+          metadata and immutable block roles, add the edge your environment
+          needs, and read the acceptance requirements before making a
+          production claim.
+        </p>
       </div>
 
-      <h2>Three layers, one observable contract</h2>
+      <h2>Four decisions, one observable contract</h2>
+      <div className="decision-map">
+        <Link className="decision-card" to="/docs/rust">
+          <span className="decision-card-number">01</span>
+          <h3>Build the contract</h3>
+          <p>Give the product paths, handles, directories, and sync semantics.</p>
+        </Link>
+        <Link className="decision-card" to="/docs/providers">
+          <span className="decision-card-number">02</span>
+          <h3>Choose storage roles</h3>
+          <p>Separate namespace metadata from immutable file bytes.</p>
+        </Link>
+        <Link className="decision-card" to="/docs/transports">
+          <span className="decision-card-number">03</span>
+          <h3>Choose the edge</h3>
+          <p>Reach the process through a binding, transport, or native mount.</p>
+        </Link>
+        <a className="decision-card" href="https://github.com/andymac4182/mount-rs/blob/main/REQUIREMENTS.md">
+          <span className="decision-card-number">04</span>
+          <h3>Prove the risk</h3>
+          <p>Use architecture, porting evidence, and requirements to set the boundary.</p>
+        </a>
+      </div>
+
+      <h2>The contract behind the product</h2>
       <div className="layer-list">
         <div className="layer-row">
           <span className="layer-label">Core</span>
@@ -39,6 +63,22 @@ function DocsOverview() {
         <div className="layer-row">
           <span className="layer-label">Edge</span>
           <div><strong>Transports and bindings</strong><p>FUSE, NFS, 9P, WebDAV, S3, auto-mount, CLI, and napi-rs are integration surfaces.</p></div>
+        </div>
+      </div>
+
+      <div className="storage-model-doc">
+        <p className="eyebrow">A file is two planes</p>
+        <h2>Publish references only after the bytes are ready.</h2>
+        <p>
+          The provider model keeps metadata and immutable blocks independent:
+          write fixed-size chunks, complete the block-store barrier, then
+          publish a metadata revision with a revision CAS and writer fence.
+          Complete the metadata barrier before acknowledging the write.
+        </p>
+        <div className="storage-model-doc-grid">
+          <div><span>Metadata</span><code>inode → entries → block refs</code></div>
+          <div><span>Blocks</span><code>chunk → immutable key → bytes</code></div>
+          <div><span>Publish</span><code>lease → fence → revision</code></div>
         </div>
       </div>
 
