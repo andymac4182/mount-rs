@@ -1694,6 +1694,11 @@ async function exerciseWebdav() {
     );
     assert.equal(emittedFailureChunk, true);
     assert.equal(failedStream.status, 500);
+    assert.deepEqual(
+      Buffer.from(await filesystem.readFile("/streamed-failure.txt")),
+      Buffer.from("partial"),
+      "WebDAV PUT preserves the written prefix when its request body fails",
+    );
 
     await filesystem.writeFile(
       "/peer-fault-webdav.txt",

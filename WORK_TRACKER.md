@@ -1047,6 +1047,14 @@ pending and [fault-injection run
 in progress at the read-only check; W04 policy succeeded, but no hosted
 WebDAV PASS was claimable.
 
+The WebDAV streamed `PUT` atomicity boundary is now explicit and tested:
+matching the pinned oracle, the destination opens at the first non-empty body
+chunk, so a body failure returns `500` while preserving the exact written
+prefix. The Rust focused regression and host-enabled N-API WebDAV phase both
+assert `partial` remains after the deliberate failure. This is an accepted
+oracle-compatible protocol scope decision, not atomic publication or
+power-loss/live-provider durability evidence; those gates remain open.
+
 Evidence landed without closing the remaining W01 acceptance gates:
 
 - [x] `0de1832` plus `6ba3d62` now provide a mount-free core parity harness:
