@@ -123,5 +123,8 @@ The script removes only `s3://$AWS_S3_TEST_BUCKET/$MOUNT_RS_AWS_S3_TEST_PREFIX/`
 and verifies that `ListObjectsV2` returns zero current objects. It does not
 delete the bucket or any object outside the exact run prefix. An invocation
 without `MOUNT_RS_RUN_AWS_S3=1` reports `AWS_S3_TEST_SKIPPED`; an opted-in run
-with missing/expired credentials fails with a prerequisite error and is not a
-pass.
+whose local credential chain cannot authenticate reports
+`AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` (or the
+corresponding local identity reason) and exits 3. The harness cannot inherit
+credentials held by AWS MCP/OAuth, so this is a blocked prerequisite rather
+than a live Rust-service pass.

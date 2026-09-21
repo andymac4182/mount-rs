@@ -1267,13 +1267,18 @@ listing a source does not mean it has been reviewed or its code can be reused.
   Local `myroot` SSO credentials are expired; secure local test authentication
   and least-privilege test access remain pending. MCP provisioning is not a
   Rust integration test result.
-- [x] AWS MCP OAuth was revalidated on 2026-09-21 for account `106427005394`: `HeadBucket`, location/public-access/ownership/encryption reads, a unique-prefix `PutObject`/`HeadObject`/`ListObjectsV2` probe, `DeleteObject`, and post-delete empty-prefix verification all passed. The Rust shell harness remains pending because the local `aws` CLI cannot inherit MCP-managed OAuth credentials; no live Rust-service acceptance is claimed from this probe.
+- [x] AWS MCP OAuth was revalidated on 2026-09-21 for account `106427005394`: bucket location, all four public-access blocks, bucket-owner-enforced ownership, AES256 encryption, lifecycle and tags were read successfully; the root `mount-rs-tests/aws-s3/` inventory was empty before and after testing. A unique-prefix service-side probe passed create-only immutable publication, duplicate rejection, byte ranges, stale conditional read/CAS rejection, current ETag CAS, a 65,537-byte boundary read, four concurrent writers, scoped deletion, and post-delete empty-prefix verification. This is AWS API/SDK evidence only: the MCP caller was account root and the bucket has no bucket policy, so least-privilege authorization remains unverified.
 - [ ] W25.2 Provision private test bucket, narrowly scoped access, and test-data
   cleanup/retention policy. Keep credentials outside chat and source control.
 - [ ] W25.3 Execute actual AWS S3 block and composed-filesystem integration
   tests with restart/reopen, ranges, conditional immutable writes and cleanup.
-  AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance.
-- [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The W25 worker verified formatting, strict Clippy, AWS-crate compilation and 10 R2 plus 12 chunked unit tests; the two actual AWS-service tests remain ignored until the local `myroot` SSO session is renewed. No live AWS acceptance is claimed yet.
+  AWS S3 evidence does not replace Cloudflare R2 or RustFS acceptance. The
+  checked-in Rust crate compiles with `cargo test --manifest-path
+  tests/aws/Cargo.toml --locked --lib --no-run`, but the actual two ignored
+  service tests remain blocked: the local `AWS_PROFILE=myroot` SSO session is
+  expired before the harness can claim a prefix, so no Rust `ChunkedFs`,
+  SQLite+S3, or fresh-process reopen acceptance is claimed.
+- [x] The live AWS packet is now present in the provider/test crates: immutable block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen, nonce-owned cleanup and credential-safe validation. The harness now emits the secret-free `AWS_S3_TEST_BLOCKED reason=local_cli_credentials_unavailable` and exits 3 when local credentials cannot be exported, making the AWS MCP/OAuth-to-local-Cargo boundary explicit. The W25 worker verified the AWS-crate compile and ordinary ignored-test gate; the two actual AWS-service tests remain blocked until the local `myroot` SSO session is renewed. No live Rust acceptance is claimed yet.
 
 ## W26 — Apache Ozone S3 backend
 
