@@ -171,9 +171,18 @@ const autoMountOptions: JsAutoMountOptions = {
 void autoMountOptions
 const p9MountConfig: MountP9Options = {
   transport: "unix",
+  allowRemote: false,
+  socketMode: 0o600,
+  allowSharedDirectory: false,
+  maxFrame: 1 << 20,
+  maxInFlight: 16,
+  msize: 131096,
   mountMsize: 131096,
   mountOptions: ["debug"],
   unmountTimeout: 1000,
+  claimOwnership: true,
+  debug: true,
+  locks: new P9LockTable({ maxLocksPerFile: 2 }),
 }
 const p9Target: P9MountTarget = { trans: "tcp", port: 564 }
 const p9Probe: P9ClientProbe = p9ClientProbe()

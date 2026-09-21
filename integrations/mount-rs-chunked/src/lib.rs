@@ -31,6 +31,7 @@ const BLOCK_SIZE: u64 = 4096;
 const MAX_SYMLINK_DEPTH: usize = 40;
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
+const MAX_PENDING_MUTATIONS: usize = 1024;
 
 /// Runtime configuration for a newly-created namespace.
 ///
@@ -176,6 +177,42 @@ impl MutationQueue {
         Self {
             pending: Vec::new(),
             running: false,
+        }
+    }
+}
+
+struct MutationRunnerGuard<'a> {
+    queue: &'a Mutex<MutationQueue>,
+    active: bool,
+}
+
+impl<'a> MutationRunnerGuard<'a> {
+    fn new(queue: &'a Mutex<MutationQueue>) -> Self {
+        Self {
+            queue,
+            active: true,
+        }
+    }
+
+    fn finish(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for MutationRunnerGuard<'_> {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let Ok(mut queue) = self.queue.lock() else {
+            return;
+        };
+        queue.running = false;
+        let pending = std::mem::take(&mut queue.pending);
+        drop(queue);
+        let error = FsError::new(ErrorCode::Eio).with_message("mutation batch runner canceled");
+        for request in pending {
+            mutation_reply(request, Err(error.clone()));
         }
     }
 }
@@ -688,6 +725,11 @@ where
             let mut queue = self.inner.mutations.lock().map_err(|_| {
                 FsError::new(ErrorCode::Eio).with_message("mutation queue poisoned")
             })?;
+            if queue.pending.len() >= MAX_PENDING_MUTATIONS {
+                return Err(
+                    FsError::new(ErrorCode::Eagain).with_message("mutation queue is at capacity")
+                );
+            }
             queue.pending.push(request);
             if queue.running {
                 false
@@ -703,6 +745,7 @@ where
     }
 
     async fn run_mutation_batches(&self) {
+        let mut runner = MutationRunnerGuard::new(&self.inner.mutations);
         loop {
             // Let other operations finish their immutable block work and
             // enqueue their prepared metadata mutations before this runner
@@ -712,10 +755,14 @@ where
             let requests = {
                 let mut queue = match self.inner.mutations.lock() {
                     Ok(queue) => queue,
-                    Err(_) => return,
+                    Err(_) => {
+                        runner.finish();
+                        return;
+                    }
                 };
                 if queue.pending.is_empty() {
                     queue.running = false;
+                    runner.finish();
                     return;
                 }
                 std::mem::take(&mut queue.pending)
@@ -745,6 +792,9 @@ where
         for request in requests {
             match request {
                 MutationRequest::WholeFile { mutation, reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
                     let mut candidate = namespace.clone();
                     let result = apply_whole_file_mutation(&mut candidate, revision, &mutation);
                     match result {
@@ -768,6 +818,9 @@ where
                     }
                 }
                 MutationRequest::Unlink { path, reply } => {
+                    if reply.is_closed() {
+                        continue;
+                    }
                     let mut candidate = namespace.clone();
                     match apply_unlink_mutation(self, &mut candidate, &path) {
                         Ok(()) => {
@@ -3389,6 +3442,45 @@ mod tests {
             let inode = resolve(&namespace, &format!("/file-{index}"), true, "test").unwrap();
             assert_eq!(namespace.nodes[&inode].stats.size, 4);
         }
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn canceled_mutation_runner_releases_queued_requests_without_publishing() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks,
+            options("mutation-cancel"),
+        ))
+        .unwrap();
+        block_on(filesystem.write_file("/file", b"old!")).unwrap();
+        let before = block_on(metadata.load()).unwrap();
+
+        let mut canceled = Box::pin(filesystem.write_file("/file", b"first"));
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        loop {
+            assert!(matches!(
+                Future::poll(canceled.as_mut(), &mut context),
+                Poll::Pending
+            ));
+            let running = filesystem.inner.mutations.lock().unwrap().running;
+            if running {
+                break;
+            }
+        }
+        drop(canceled);
+
+        block_on(filesystem.write_file("/file", b"second")).unwrap();
+        let after = block_on(metadata.load()).unwrap();
+        assert_eq!(after.revision, before.revision + 1);
+        let file = block_on(filesystem.open("/file", "r", 0)).unwrap();
+        let mut bytes = [0_u8; 6];
+        assert_eq!(block_on(file.read(&mut bytes, Some(0))).unwrap(), 6);
+        assert_eq!(&bytes, b"second");
+        block_on(file.close()).unwrap();
         block_on(filesystem.shutdown()).unwrap();
     }
 
