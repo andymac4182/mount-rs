@@ -2403,7 +2403,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   transport deny and exact prefix-scoped runtime/maintenance statements from
   the CloudFormation contract; its synthetic valid/tampered policy tests are
   wired into the hosted preflight. No production bucket policy has been
-  changed or claimed as audited.
+  changed or claimed as audited. The credential-free
+  `scripts/test-aws-s3-production-template.rb` gate now structurally asserts
+  the retained bucket controls, KMS/versioning rules, lifecycle, and all five
+  policy statements; it is wired into the hosted preflight and passed locally
+  without AWS credentials.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
