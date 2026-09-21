@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use mount_rs_core::{Capabilities, FileHandle, FsDriver, MemoryFs, Result as FsResult};
 use mount_rs_s3::{
     CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, PresignRequest, S3BindError,
-    S3Request, S3Response, S3Server, S3ServerOptions, S3Session, S3SessionOptions,
+    S3ErrorClass, S3Request, S3Response, S3Server, S3ServerOptions, S3Session, S3SessionOptions,
     STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest,
     canonical_query, format_amz_date, presign_request, sha256_hex, sign_chunk, sign_request,
     sign_trailer,
@@ -143,6 +143,44 @@ fn authorization_signature(authorization: &str) -> &str {
         .rsplit_once("Signature=")
         .map(|(_, signature)| signature)
         .expect("SigV4 authorization signature")
+}
+
+#[tokio::test]
+async fn session_stats_capture_latency_bytes_and_bounded_error_classes() {
+    let session = S3Session::new(MemoryFs::empty());
+
+    assert_eq!(
+        session
+            .handle(request("PUT", "/mountx/stats.txt", b"metrics", &[]))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        session
+            .handle(request("GET", "/mountx/stats.txt", [], &[]))
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        session
+            .handle(request("GET", "/mountx/missing.txt", [], &[]))
+            .await
+            .status,
+        404
+    );
+
+    let stats = session.stats().await;
+    assert_eq!(stats.requests, 3);
+    assert_eq!(stats.replies, 3);
+    assert_eq!(stats.errors, 1);
+    assert!(stats.duration_ms_total >= stats.duration_ms_max);
+    assert!(stats.request_bytes >= b"metrics".len() as u64);
+    assert!(stats.response_bytes >= b"metrics".len() as u64);
+    assert_eq!(stats.operations.get("PutObject"), Some(&1));
+    assert_eq!(stats.operations.get("GetObject"), Some(&2));
+    assert_eq!(stats.error_classes.get(&S3ErrorClass::Client), Some(&1));
 }
 
 #[tokio::test]

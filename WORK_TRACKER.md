@@ -1728,7 +1728,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.7 Add deployment observability and operations: S3 latency/error and
   retry metrics, conditional-conflict and orphan/cleanup signals, credential
   expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
-  canary/rollback procedures.
+  canary/rollback procedures. The adjacent S3 gateway now exposes a bounded
+  `S3Session::stats()` snapshot for latency, buffered bytes, operation counts,
+  and authentication/conditional/throttling/client/server error classes; the
+  public SDK's optional observability path records provider block latency,
+  errors, and bytes. This is an instrumentation surface only. Exporter wiring,
+  retry visibility, credential-expiry detection, cost/retention alerts,
+  SLO thresholds, orphan/cleanup signals, and an exercised incident runbook
+  remain deployment gates.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
