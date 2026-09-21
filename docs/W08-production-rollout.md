@@ -60,6 +60,8 @@ holds prerelease publication behind the `w08-production` environment. The
 environment must be configured with required reviewers and tag/branch policy;
 no candidate tag or environment approval has been executed here, and this
 workflow does not replace the canary, rollback or explicit production GO gates.
+The implementation was published as `dff55858` in merge tip `6abc0535` on
+`origin/main` after concurrent mainline reconciliation.
 
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;

@@ -2115,6 +2115,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   preview path. Local YAML parsing, embedded Bash `bash -n` checks and
   `git diff --check` passed. No candidate tag was created in this chunk, so no
   hosted release, canary, rollback or production GO evidence is claimed.
+  Implementation commit `dff55858` was reconciled with concurrent mainline
+  changes and published in merge tip `6abc0535` (`origin/main`).
   *(Implementation/static qualification; environment approval, release
   registry and rollout evidence remain external.)*
 
