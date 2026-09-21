@@ -29,7 +29,10 @@ pub use constants::{
     error_with_message, s3_error, s3_error_of, s3_error_of_errno,
 };
 pub use protocol::S3Response;
-pub use server::{S3BindError, S3Server, S3ServerOptions, create_s3_server};
+pub use server::{
+    DEFAULT_DRAIN_TIMEOUT, S3BindError, S3Server, S3ServerHooks, S3ServerOptions, S3TransportError,
+    S3TransportErrorHook, S3TransportErrorKind, create_s3_server, create_s3_server_with_hooks,
+};
 pub use session::{
     S3ErrorClass, S3Request, S3RequestHead, S3Session, S3SessionOptions, S3SessionStats,
 };

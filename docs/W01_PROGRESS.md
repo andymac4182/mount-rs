@@ -1,0 +1,265 @@
+# W01 progress ledger
+
+This file is the working-time ledger for W01, **Core and mountx behavioral
+parity**. It is intentionally separate from `WORK_TRACKER.md`: the tracker
+records milestone acceptance, while this file records the remaining work in a
+form that can be updated after every implementation or evidence run.
+
+Last refreshed: **2026-09-21** (Australia/Brisbane)
+
+## How to read the numbers
+
+The percentages below are provisional planning percentages, not release
+claims. They measure the scoped work item against its listed closure evidence;
+they do not promote a component pass into native, hosted, or live-provider
+acceptance.
+
+- `Done` means the listed local implementation and evidence are complete.
+- `In progress` means meaningful evidence exists, but a required boundary is
+  still open.
+- `External gate` means the remaining result depends on credentials,
+  privileges, another operating system, hosted CI, or a provider service.
+- `Open` means implementation or focused evidence is still required.
+
+For time, record actual engineering time in the `Actual h` column. The
+remaining ranges are planning estimates only. External-gate time is kept
+separate because it cannot be predicted from local coding effort.
+
+## W01 roll-up
+
+| ID | Work item | Status | Completion | Remaining engineering time | External dependency |
+| --- | --- | --- | ---: | ---: | --- |
+| W01.1 | Applicable public exports and behavior ledger | In progress | 77% | 16–32 h | Hosted/native transport qualification |
+| W01.2 | Upstream skip classification and required coverage | In progress | 65% | 8–16 h | Linux uid-0/hosted lanes, provider credentials |
+| W01.3 | Seeded cross-engine traces | In progress | 75% | 4–12 h | Live R2 credentials |
+| W01.4 | Supported macOS/Linux errors, data, links, times, handles, concurrency, lifecycle | In progress | 35% | 16–32 h | Linux FUSE, hosted Windows/Linux, native/FSKit prerequisites |
+| W01.5 | Bounded deterministic concurrency packet | Done | 100% | 0 h | Follow-up races remain classified under W01.4 |
+| **W01** | **Weighted planning view** | **Open** | **66%** | **44–92 h** | **Several gates are environment-dependent** |
+
+The W01 percentage is a planning indicator calculated from the five work-item
+percentages, weighted 25% / 20% / 20% / 25% / 10% for W01.1–W01.5. It must not
+be read as “65% of release acceptance”; W01 remains open until every required
+gate below is either passed or explicitly accepted as outside the supported
+scope.
+
+## Detailed work items
+
+### W01.1 — Applicable public exports and behavior ledger
+
+Current estimate: **77%**. The mount-free core contract is strong; the
+remaining work is concentrated in the public transport and native lifecycle
+surfaces.
+
+| Sub-item | State | Evidence / remaining action | Completion | Actual h |
+| --- | --- | --- | ---: | ---: |
+| Core Rust, Node, memory, and oracle contract | Done | 101-step pinned trace: 79 successful results, 22 expected errors, zero mismatches/skips | 100% | — |
+| Local persistence and consumer paths | Done locally | Rust/Node SDK, CLI, SQLite, object-store, and chunked local paths pass; live providers remain separate | 90% | — |
+| FUSE wire codecs and whole-message framing | Done focused | Typed body table, raw/unknown framing, protocol-minor differentials, malformed/trailing checks | 95% | — |
+| Rust-backed mount-free FUSE session | In progress | INIT, options, cache, negative lookup, flush, callbacks, counters, lifecycle readback, inode view, and plain RENAME2 pass; remaining operation/native-session parity is open | 80% | — |
+| Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
+| Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
+| NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with synchronized stats, mounts, and destroyed state plus a live server connection count and raw-v3 request method; 9P now exposes direct raw-frame handling alongside its session/connection view; the full upstream object/session/handle/attach surface plus native qualification remain | 55% | — |
+| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and the WebDAV subpath now exposes pinned constants/status tables; S3 Rust gateway connection/peer-fault coverage is green, while streaming N-API bodies, protocol/XML/lock helper barrels, direct JavaScript peer-fault injection, and complete option/member parity remain | 70% | — |
+| CLI parity and native consumer behavior | Partial | SDK-backed Rust/Node CLI and macOS NFS self-tests pass; exact oracle/native/hosted coverage remains | 65% | — |
+
+Latest W01.1 action: the shared `useDriverIno` option was added to the public
+auto options and threaded through the native FUSE, 9P, and NFS mount paths.
+The auto option mapping tests (16 N-API unit tests), locked FUSE/9P/NFS tests,
+strict FUSE/auto Clippy, release build, generated typecheck, authorized macOS
+NFS native mount/read/write/unmount test with positive `Mounted.port` readback
+and `Mounted[Symbol.asyncDispose]()` disposal, and opt-in child-process signal
+teardown test passed with the nested NFS bag and `useDriverIno: false`. The
+configured FUSE `Mounted.source` mapping is compiled and exposed, and the
+`x86_64-unknown-linux-gnu` FUSE/auto transport check passed; a hosted Linux
+native-FUSE runtime result is still required. The same authorized macOS NFS
+lane now adopts an already-created NFS server through the auto option bag and
+confirms the mount port identity and teardown. Already-listened 9P server
+handles are mapped through the same bag, while a hosted Linux 9P runtime is
+still required. The auto FUSE, 9P, and NFS bags now own their
+transport-specific `onTransportError` hooks through the mount/session or
+mount-created server lifecycle; locked crate/N-API tests, release build, and
+generated typecheck cover callback construction and ownership. The authorized
+macOS lane exercises the NFS callback construction/teardown, while the direct
+NFS/9P fault packets remain the event-delivery evidence; a Linux FUSE runtime
+event and a root auto callback event remain unverified. This is a focused
+option/lifecycle result; FUSE request callbacks, the complete option/session
+surface, and hosted/native lifecycle gates stay open. The same lane now
+configures both root and focused NFS callbacks, exits cleanly with status 0,
+and confirms that adopting a shared NFS server does not retain an unused
+mount-level callback in the live mount object. The next server-object slice
+adds N-API `S3Session` and `WebdavSession` views behind the existing server
+objects: bucket/method counters, error/reply totals, WebDAV lock count, and
+assertion readback are exercised by the real loopback PUT/GET/404 tests. The
+S3 session assertion list is currently an explicit empty native boundary
+because the Rust S3 session does not retain assertion messages; this is not
+full S3 session parity. The NFS server-object follow-up adds N-API `NfsSession`
+behind the NFS server: synchronized request/reply/error/drop/procedure stats,
+mount records, and destroyed-state readback are exercised by real loopback
+NULL/MOUNT/GETATTR traffic. The server's live `connections` count is checked
+while the socket is open and after close. The malformed-record callback and
+cleanup path also pass. The same view exposes direct `handleCall` for raw
+unframed NFSv3 RPC records, with a direct NULL reply checked independently of
+the socket. NFS library tests (30/30), NFS integration targets
+(rootless wire 1, transport errors 4, v4 barrier 1, v4 wire 2), N-API library
+tests (16/16), the N-API server integration, release addon build, generated
+typecheck, repository formatting, and focused cross-transport Clippy pass; this
+is still a read-only view with a raw-v3 request method rather than complete
+NFS unified session, connection-object, or handle parity. The `./nfs` package
+subpath now re-exports the same
+`NfsServer` and `NfsSession` constructors/classes as the root facade, and the
+pinned NFS codec differential verifies that identity without mutating root
+exports. The analogous `P9Session.handleCall` binding is exercised on a live
+connection session with a direct `Rversion` reply, while the Rust/N-API 9P
+integration, pinned 44-case differential, generated typecheck, release build,
+and combined 9P/NFS/N-API Clippy remain green. These direct methods still do
+not establish the oracle's v3/v4 NFS router or 9P stream/attach parity. The S3
+server-object follow-up now exposes a typed buffered `S3Session.handleRequest`
+with header/response mapping; a direct PUT with its required content-length
+and the existing loopback PUT/GET/404 lane pass. Streaming request bodies and
+S3 assertion retention remain unqualified; the S3 server's live
+`connections` count now follows accepted TCP socket lifetimes and disconnect
+cleanup in both Rust and N-API loopback tests. Its tracked TCP boundary also
+reports a peer-aware `Connection` transport event on reset-on-close, verified
+by the Rust gateway test; the N-API bridge and callback ownership pass the
+rebuilt package integration, while direct JavaScript peer-fault injection
+remains unqualified. The
+WebDAV server-object follow-up now exposes a typed buffered
+`WebdavSession.handleRequest` and materializes file-backed response bodies for
+the N-API boundary; a direct PUT plus the existing loopback PUT/GET lane pass.
+Streaming bodies/direct method coverage beyond that packet remains open. The
+`@mount-rs/core/webdav` subpath now also exposes the WebDAV constants/status
+barrel, with oracle-matched literals, limits, status/errno tables and server
+defaults; protocol/XML/lock helper exports remain open.
+
+Next W01.1 action: close the next smallest remaining mount-free export or
+behavior gap, then rerun the pinned oracle and generated type/build checks
+before touching broader native acceptance. Production readiness remains **NO-GO**
+until every applicable W01 gate below is green or explicitly accepted outside
+the supported scope; local component passes do not override hosted, native,
+provider, or cross-platform blockers.
+
+### W01.2 — Upstream skip classification and required coverage
+
+Current estimate: **65%**. The skip inventory is documented and several
+capability-limited rows now have exact oracle-backed assertions, but the
+inventory is not yet closed as a reviewed, executable boundary for every row.
+
+| Skip/gate family | State | Current evidence | Remaining action |
+| --- | --- | --- | --- |
+| No-PGlite upstream baseline | In progress | 990 passed, 79 skipped on the pinned oracle suite | Keep the count current while each skip is executed or explicitly covered |
+| PGlite rows | In progress | Refreshed PGlite-enabled upstream stage passed 1,200 with 82 skips; the bounded provider/CLI packet also passed Rust SDK 6/6, Node SDK 5/5, and CLI 11/11 while R2 rows remained explicit skips | Keep root-only, live-R2, and hosted rows classified; rerun when those prerequisites exist |
+| Unstorage hardlinks | Done as boundary | Four exact `ENOSYS` rows, zero skips/mismatches | Preserve the capability declaration until alias semantics exist |
+| Unstorage remaining capability inventory | Done as focused boundary | Fresh 25-row remaining-skip, 14-row next-capability, 4-row hardlink, 13-row aggregate-capability, and 11-row edge packets all matched the pinned oracle with zero skipped rows or mismatches | Reconcile the focused packets with the latest upstream inventory and retain the explicit unsupported capability declarations |
+| Symlink, link-timestamp, statfs, and special-node skips | In progress | Capability reasons and focused first-operation assertions exist | Decide per row between implementation and an explicitly reviewed unsupported contract |
+| NFS handle skips | Open/external | Classified as a handle/session capability gap | Add/refresh focused NFS handle boundary evidence or implement the missing state semantics |
+| Root-only permission/lchown rows | External gate | Current macOS runner is non-root; ordinary ownership tests are not substitutes | Run unchanged tests in a controlled Linux uid-0 lane |
+| Native/provider opt-ins | External gate | macOS NFS passed; Linux FUSE, live R2, hosted platform lanes remain | Execute with prerequisites and record failures as failures, not skips |
+
+### W01.3 — Seeded cross-engine traces
+
+Current estimate: **75%**. All currently enabled local backends pass the fixed
+seed matrix at the pinned oracle revision.
+
+| Backend lane | State | Evidence / remaining action |
+| --- | --- | --- |
+| Memory | Done | Five seeds, 621 operations per seed |
+| SQLite | Done | Five seeds, 621 operations per seed |
+| Object-store | Done locally | Five seeds, 621 operations per seed |
+| Chunked memory | Done locally | Five seeds, 621 operations per seed |
+| Chunked SQLite | Done locally | Five seeds, 621 operations per seed |
+| Chunked object-store | Done locally | Five seeds, 621 operations per seed |
+| PGlite and chunked-PGlite | Done locally | Five seeds, 621 operations per seed for each backend; current revision-matched trace refresh passed |
+| Live R2 | Blocked by prerequisite | Requires dedicated credentials and bucket-scoped cleanup/verification |
+
+Recorded local result: **40 combinations, 621 operations each**, oracle
+revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, oracle SHA
+`85361a8212ff9b9ff8e69f62fa8993ef2c2ec51e8`.
+
+### W01.4 — Supported macOS/Linux behavior and lifecycle
+
+Current estimate: **35%**. This is the largest remaining acceptance item because
+it combines behavior verification with host and kernel prerequisites.
+
+| Boundary | State | Evidence / remaining action |
+| --- | --- | --- |
+| macOS NFS structural N-API mount | Done | Actual mount, write/read rewrite, positive NFS `Mounted.port` readback, adoption of an existing NFS server with matching port identity, unmount, `unmountAll`, live-mount cleanup, nested NFS option bag, shared `useDriverIno: false` option propagation, child-process signal teardown, and `Mounted[Symbol.asyncDispose]()` passed |
+| Rust CLI macOS NFS | Done | Independent Rust and Node clients passed mounted I/O and persistence |
+| Node SDK CLI macOS NFS | Done | Native self-test passed mount/read/write/unmount/persistence |
+| Linux FUSE native mount | External gate | Structural job and CI wiring exist; hosted `/dev/fuse` result is still required |
+| Linux 9P and native NFS | External gate | Prerequisite-gated; native client/kernel results remain unverified here |
+| macOS FSKit/macFUSE boundary | Open/external | Current implementation does not claim FSKit or macFUSE FUSE-protocol parity |
+| Hosted Windows runtime | External gate | Windows-target checks exist; hosted runtime evidence remains required |
+| Errors, paths, bytes, links, timestamps | In progress | Strong mount-free and macOS NFS evidence; cross-platform/native coverage remains |
+| Handles and lifecycle | In progress | Mount-free inode/handle readback, NFS `Mounted.port`, signal teardown, async disposal, and NFS evidence exist; NFS handle parity and native cleanup races remain |
+| Cross-process/crash, cancellation/close, exact append ordering, durability/restart | Open/classified | Package-level NFS signal teardown now passes in a child process; cross-process I/O/crash, cancellation/close races, exact append ordering, and failure durability remain |
+| Transport/native concurrency | Open/classified | Requires native Linux/macOS and hosted execution rather than local userspace traces |
+
+### W01.5 — Bounded deterministic concurrency packet
+
+Status: **100% complete for the defined packet**. Six scenarios, five explicit
+unsupported classifications, zero oracle mismatches, and five consecutive
+pinned-oracle runs passed. The following are deliberately not silently counted
+as complete: cross-process/crash behavior, exact append ordering,
+cancellation/close races, durability/restart under failure, and native
+transport concurrency. Those remain listed under W01.4.
+
+## Time tracking
+
+Add one row after each work session. Use wall-clock engineering time, not time
+spent waiting for a hosted job or credential approval.
+
+| Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
+| --- | --- | --- | ---: | ---: | --- |
+| 2026-09-21 | Baseline | Created this ledger from the current W01 tracker and evidence | — | 61% planning view | Hosted/native/live-provider gates remain open |
+| 2026-09-21 | W01.1 / W01.4 | Added shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source`, package-level signal teardown, `Mounted.port` readback, and `Mounted[Symbol.asyncDispose]()` to the N-API auto facade; 16 N-API unit tests, affected Rust crates, strict Clippy, Linux-target transport check, build/typecheck, authorized macOS NFS lifecycle, and the opt-in child-process signal lane passed | — | 65% planning view | Automatic error/transport callbacks, shared-server handles, remaining option/session members, hosted Linux native lanes, FSKit, PGlite, and live R2 remain open |
+| 2026-09-21 | W01.2 / W01.3 | Refreshed the pinned PGlite-enabled upstream suite (4 files, 1,200 passed, 82 skipped), the bounded PGlite provider/CLI packet (Rust SDK 6/6, Node SDK 5/5, CLI 11/11 with R2 skips), and all 40 seeded trace lanes across eight local backends at the pinned oracle revision | — | 65% planning view | Root-only skip rows, live R2, hosted platforms, and native transport acceptance remain open |
+| 2026-09-21 | W01.2 | Re-ran the pinned Unstorage boundary packets: remaining-skip (25 rows), next-capability (14), hardlink (4), aggregate capability (13), and edge (11); every packet passed with zero skipped rows or oracle mismatches | — | 65% planning view | The upstream 82 skipped rows remain classified capability/protocol or environment boundaries; root-only and hosted/provider gates remain open |
+| 2026-09-21 | W01.1 / W01.4 | Added shared NFS server adoption, already-listened 9P server-handle mapping, transport-specific automatic `onTransportError` hook ownership for FUSE/9P/NFS, and root auto `onTransportError` adaptation to the selected transport; locked FUSE/9P/NFS/auto/N-API tests, strict FUSE/auto Clippy, Linux-target transport check, release build, and generated typecheck passed, with the authorized macOS NFS mount/read/write/port/teardown lane still green | — | 65% planning view | FUSE/root callback event delivery needs hosted Linux/native fault evidence; remaining option/session members, hosted Linux FUSE/9P, FSKit, and other native lifecycle gates remain open |
+| 2026-09-21 | W01.1 / W01.2 | Re-ran `MOUNTX_SOURCE=/private/tmp/mountx-source.uWiHfX pnpm test` with host listener permission: the pinned oracle-enabled N-API package harness passed through distribution aggregation, including server callback packets, all FUSE codec/session packets, fresh Unstorage boundaries, differential checks, and restart parity; PGlite/R2/native mount rows remained explicit skips | — | 65% planning view | Live PGlite/R2 credentials, hosted Linux FUSE/9P, FSKit, and root callback runtime event delivery remain open |
+| 2026-09-21 | W01.1 / W01.4 | Fixed the automatic NFS shared-server callback lifetime: an ignored mount-level hook is released when an already-created server is adopted; locked NFS/auto/N-API tests (30/5/16), strict FUSE/9P/NFS/auto Clippy, release build, generated typecheck, and the host-enabled pinned package harness passed. The authorized macOS NFS lane passed mounted I/O, matching port, async disposal, cleanup, and exited with status 0 while root and focused callbacks were configured | — | 65% planning view | FUSE/root callback event delivery, hosted Linux FUSE/9P, FSKit, live providers, and the remaining option/session surface remain open |
+| 2026-09-21 | W01.1 / W01.4 | Added WebDAV `onTransportError` hooks with a real malformed-HTTP connection test, plus S3 `drainTimeout` and transport-hook ownership through the native server and N-API wrapper; WebDAV/S3 Rust tests, N-API tests, strict S3/WebDAV Clippy, release build, generated typecheck, loopback server integration, and the host-enabled pinned package harness passed | — | 65% planning view | S3 peer-level transport-event delivery, complete S3/WebDAV session/object parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open |
+| 2026-09-21 | W01.1 | Added N-API `S3Session` and `WebdavSession` read-only views behind their server objects; S3 bucket names and request/reply/error/operation counters, WebDAV method counters and lock count, assertions, generated declarations, release build, and real loopback PUT/GET/404 integration all passed | — | 65% planning view | S3 assertion retention, S3 connections/peer events, direct session request APIs, complete transport option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open |
+| 2026-09-21 | W01.1 / W01.4 | Added N-API `NfsSession` read-only stats/mounts/destroyed views and live `NfsServer.connections`; loopback NULL/MOUNT/GETATTR, live-count/post-close assertions, malformed-record callback and cleanup passed. NFS package targets, N-API library/server integration, release build, generated typecheck, formatting, and focused cross-transport Clippy passed | — | 65% planning view | NFS/9P direct session and connection-object/handle parity, S3/WebDAV direct APIs and peer parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 | Closed the NFS subpath export gap: `@mount-rs/core/nfs` now re-exports `NfsServer`, `NfsSession`, and `NfsSessionStats` alongside codecs; the pinned NFS codec differential, root-export immutability check, and generated typecheck passed | — | 65% planning view | The subpath exposes read-only state plus raw-v3 `handleCall`; unified v3/v4 parity and all broader production gates remain open |
+| 2026-09-21 | W01.1 / W01.4 | Added direct N-API `NfsSession.handleCall` for raw unframed NFSv3 records; a direct NULL reply and counter update passed independently of socket framing, alongside the rebuilt addon, generated typecheck, NFS differential, NFS/N-API tests, formatting, and Clippy | — | 65% planning view | Unified NFS v3/v4 routing, connection objects/handles, 9P and S3/WebDAV direct APIs, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 / W01.4 | Added direct N-API `P9Session.handleCall` for raw 9P frames; a direct Rversion reply on a live connection session passed independently of socket framing. The full 9P Rust integration target, pinned 44-case differential, N-API server/typecheck, release build, and combined 9P/NFS/N-API Clippy passed | — | 65% planning view | NFS v3/v4 unification, 9P stream/attach parity, connection objects/handles, S3/WebDAV direct APIs, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 | Added typed buffered N-API `S3Session.handleRequest`; direct PUT with an explicit content-length, real loopback PUT/GET/404 traffic, generated typecheck, N-API tests, S3 gateway 12/12, release build, and S3/N-API Clippy passed | — | 65% planning view | Streaming request bodies, direct WebDAV methods, S3 assertion retention/connections/peer events, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 | Added typed buffered N-API `WebdavSession.handleRequest` with normalized headers and materialized response bodies; direct PUT plus loopback PUT/GET, WebDAV integration 12/12, N-API tests/typecheck, release build, and S3/WebDAV/N-API Clippy passed | — | 65% planning view | Streaming bodies, broader direct WebDAV methods, S3 assertion retention/connections/peer events, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 | Added the `@mount-rs/core/webdav` constants/status barrel while preserving root server/class identity; the pinned WebDAV constants differential matched literals, limits, status/errno tables and server defaults, the public Rust constants test and WebDAV integration suite passed 13/13, strict WebDAV Clippy passed, and generated typecheck plus package distribution/export checks passed | — | 66% planning view | Protocol/XML/lock helper exports, streaming bodies, S3 assertion retention/connections/peer events, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 / W01.4 | Added live S3 TCP connection tracking through the Axum listener, including idle sockets and disconnect cleanup; Rust S3 gateway tests passed 13/13, release N-API build regenerated `S3Server.connections`, the host-enabled N-API server integration passed, generated typecheck/distribution checks passed, and strict S3/N-API Clippy passed | — | 66% planning view | S3 peer-level transport events, streaming direct-session bodies, S3 assertion retention, protocol/XML/lock helper exports, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-21 | W01.1 / W01.4 | Added peer-aware S3 connection transport errors on the tracked TCP boundary: a reset-on-close loopback fault produced one `Connection` event with the accepted peer, and the full Rust gateway target passed 14/14; strict S3/N-API Clippy, release N-API build, host-enabled server integration, generated typecheck, and distribution/export checks also passed | — | 77% W01.1 planning view | Direct JavaScript peer-fault injection remains unqualified; streaming direct-session bodies, S3 assertion retention, protocol/XML/lock helper exports, complete option/member parity, FUSE/root callback events, hosted native lanes, FSKit, and live providers remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-S3 | Reconciled the current `origin/main` S3 loopback-only hardening with the Rust peer-fault packet; bounded drain timeout, live TCP connection tracking, peer-aware transport hooks, and reset-on-close evidence passed in the locked S3 target (4 unit, 6 chunked, 17 gateway, 5 public-API tests) | — | 70% W01.1 planning view | S3 N-API streaming/member parity, direct JavaScript peer-fault evidence, live AWS/R2, and broader fault/restart/durability/concurrency/native gates remain open; W01 stays NO-GO |
+
+## Definition of W01 complete
+
+W01 can move to complete only when each of these is true:
+
+1. W01.1’s applicable exports and behaviors are either implemented and
+   oracle-verified or explicitly removed from the supported scope.
+2. W01.2’s skipped rows are executed or have a reviewed, focused capability or
+   protocol boundary; a raw skip count alone is not completion.
+3. W01.3 has revision-matched seeded results for every backend still claimed as
+   supported, including separately gated PGlite and live R2 where claimed.
+4. W01.4 has current macOS/Linux native evidence for every claimed transport,
+   plus explicit hosted/unsupported results for the others.
+5. W01.5 remains green, and its classified follow-up races have either been
+   verified or moved into an explicitly unsupported scope.
+
+Until then, the percentage is a progress aid only and the W01 status remains
+**Open**.
+
+## Production-readiness decision
+
+Current decision: **NO-GO**. W01 is being tracked toward production release,
+not merely toward local test completion. A production-ready decision requires
+all five W01 work items to meet their closure evidence, the applicable public
+API ledger to be implemented or explicitly scoped out, and the release/build,
+generated API, focused integration, platform/native, hosted, provider, and
+durability/concurrency gates to be green for every claimed deployment target.
+
+The following evidence is useful but does not by itself authorize release:
+local unit tests, loopback transport tests, generated typechecks, release
+builds, component Clippy, an allocated workstream being complete in another
+task, or a documented unsupported boundary. Each remaining blocker must be
+resolved, or explicitly accepted as outside the supported production scope,
+before the decision can change to **GO**.

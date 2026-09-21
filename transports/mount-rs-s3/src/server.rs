@@ -9,7 +9,9 @@
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::{
     Router,
@@ -18,10 +20,12 @@ use axum::{
     http::{HeaderName, HeaderValue, Request, Response, StatusCode},
     response::IntoResponse,
     routing::any,
+    serve::Listener,
 };
 use futures_core::Stream;
 use thiserror::Error;
 use tokio::{
+    io::{AsyncRead, AsyncWrite, ReadBuf},
     net::TcpListener,
     sync::{Mutex, oneshot},
     task::JoinHandle,
@@ -31,11 +35,13 @@ use crate::session::{S3RequestBody, S3RequestHead, S3Session, S3StreamBody, S3St
 use crate::sigv4::{Credentials, HeaderEntry};
 
 pub const DEFAULT_HOST: IpAddr = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+pub const DEFAULT_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct S3ServerOptions {
     pub host: IpAddr,
     pub port: u16,
+    pub drain_timeout: Duration,
 }
 
 impl Default for S3ServerOptions {
@@ -43,8 +49,36 @@ impl Default for S3ServerOptions {
         Self {
             host: DEFAULT_HOST,
             port: 0,
+            drain_timeout: DEFAULT_DRAIN_TIMEOUT,
         }
     }
+}
+
+/// The transport phase that terminated an S3 listener task.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum S3TransportErrorKind {
+    Server,
+    Connection,
+}
+
+/// A transport failure reported to an embedding server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct S3TransportError {
+    pub kind: S3TransportErrorKind,
+    pub peer: Option<String>,
+    pub message: String,
+}
+
+/// Synchronous callback used by the transport task to report a terminal
+/// listener or HTTP-service failure.
+pub type S3TransportErrorHook = Arc<dyn Fn(S3TransportError) + Send + Sync + 'static>;
+
+/// Optional hooks for an [`S3Server`]. Kept separate from
+/// [`S3ServerOptions`] so callback ownership remains distinct from binding
+/// and lifecycle settings.
+#[derive(Clone, Default)]
+pub struct S3ServerHooks {
+    pub on_transport_error: Option<S3TransportErrorHook>,
 }
 
 #[derive(Debug, Error)]
@@ -62,6 +96,8 @@ pub enum S3BindError {
 pub struct S3Server {
     session: Arc<S3Session>,
     address: SocketAddr,
+    drain_timeout: Duration,
+    active_connections: Arc<AtomicUsize>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     task: Mutex<Option<JoinHandle<Result<(), std::io::Error>>>>,
 }
@@ -70,6 +106,14 @@ impl S3Server {
     pub async fn start(
         session: Arc<S3Session>,
         options: S3ServerOptions,
+    ) -> Result<Self, S3BindError> {
+        Self::start_with_hooks(session, options, S3ServerHooks::default()).await
+    }
+
+    pub async fn start_with_hooks(
+        session: Arc<S3Session>,
+        options: S3ServerOptions,
+        hooks: S3ServerHooks,
     ) -> Result<Self, S3BindError> {
         if !options.host.is_loopback() {
             return Err(if session.options.credentials.is_none() {
@@ -82,20 +126,40 @@ impl S3Server {
             .await
             .map_err(S3BindError::Bind)?;
         let address = listener.local_addr().map_err(S3BindError::Bind)?;
+        let active_connections = Arc::new(AtomicUsize::new(0));
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let app = Router::new()
             .fallback(any(handle_http))
             .with_state(session.clone());
+        let hooks_for_task = hooks.clone();
+        let tracked_listener = TrackedListener {
+            listener,
+            active_connections: Arc::clone(&active_connections),
+            hooks: hooks.clone(),
+        };
         let task = tokio::spawn(async move {
-            axum::serve(listener, app)
+            let result = axum::serve(tracked_listener, app)
                 .with_graceful_shutdown(async {
                     let _ = shutdown_rx.await;
                 })
-                .await
+                .await;
+            if let Err(error) = &result {
+                report(
+                    &hooks_for_task,
+                    S3TransportError {
+                        kind: S3TransportErrorKind::Server,
+                        peer: None,
+                        message: error.to_string(),
+                    },
+                );
+            }
+            result
         });
         Ok(Self {
             session,
             address,
+            drain_timeout: options.drain_timeout,
+            active_connections,
             shutdown: Mutex::new(Some(shutdown_tx)),
             task: Mutex::new(Some(task)),
         })
@@ -124,12 +188,21 @@ impl S3Server {
         &self.session
     }
 
+    /// Number of accepted TCP connections that are still owned by the HTTP
+    /// server. The count follows the connection lifetime, including idle
+    /// keep-alive sockets, rather than counting requests.
+    pub fn connections(&self) -> usize {
+        self.active_connections.load(Ordering::Acquire)
+    }
+
     pub async fn close(&self) -> Result<(), S3BindError> {
         if let Some(sender) = self.shutdown.lock().await.take() {
             let _ = sender.send(());
         }
         if let Some(task) = self.task.lock().await.take() {
-            task.await
+            tokio::time::timeout(self.drain_timeout, task)
+                .await
+                .map_err(|_| S3BindError::Task("S3 server close timed out".to_owned()))?
                 .map_err(|error| S3BindError::Task(error.to_string()))?
                 .map_err(|error| S3BindError::Task(error.to_string()))?;
         }
@@ -148,6 +221,124 @@ impl Drop for S3Server {
         if let Some(task) = self.task.get_mut().take() {
             task.abort();
         }
+    }
+}
+
+struct TrackedListener {
+    listener: TcpListener,
+    active_connections: Arc<AtomicUsize>,
+    hooks: S3ServerHooks,
+}
+
+impl Listener for TrackedListener {
+    type Io = TrackedIo;
+    type Addr = SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.listener.accept().await {
+                Ok((stream, peer)) => {
+                    self.active_connections.fetch_add(1, Ordering::AcqRel);
+                    return (
+                        TrackedIo {
+                            stream,
+                            active_connections: Arc::clone(&self.active_connections),
+                            hooks: self.hooks.clone(),
+                            peer: peer.to_string(),
+                            reported: false,
+                        },
+                        peer,
+                    );
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::ConnectionAborted
+                            | std::io::ErrorKind::ConnectionReset
+                    ) => {}
+                Err(_) => tokio::time::sleep(Duration::from_secs(1)).await,
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.listener.local_addr()
+    }
+}
+
+struct TrackedIo {
+    stream: tokio::net::TcpStream,
+    active_connections: Arc<AtomicUsize>,
+    hooks: S3ServerHooks,
+    peer: String,
+    reported: bool,
+}
+
+impl TrackedIo {
+    fn report_io_error<T>(&mut self, result: Poll<std::io::Result<T>>) -> Poll<std::io::Result<T>> {
+        if let Poll::Ready(Err(error)) = &result
+            && !self.reported
+        {
+            self.reported = true;
+            report(
+                &self.hooks,
+                S3TransportError {
+                    kind: S3TransportErrorKind::Connection,
+                    peer: Some(self.peer.clone()),
+                    message: error.to_string(),
+                },
+            );
+        }
+        result
+    }
+}
+
+impl AsyncRead for TrackedIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.stream).poll_read(context, buffer);
+        self.report_io_error(result)
+    }
+}
+
+impl AsyncWrite for TrackedIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let result = Pin::new(&mut self.stream).poll_write(context, buffer);
+        self.report_io_error(result)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.stream).poll_flush(context);
+        self.report_io_error(result)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let result = Pin::new(&mut self.stream).poll_shutdown(context);
+        self.report_io_error(result)
+    }
+}
+
+impl Drop for TrackedIo {
+    fn drop(&mut self) {
+        let _ =
+            self.active_connections
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                    count.checked_sub(1)
+                });
     }
 }
 
@@ -239,4 +430,30 @@ where
     };
     let session = Arc::new(S3Session::new_with_options(driver, session_options));
     S3Server::start(session, options).await
+}
+
+/// Convenience constructor with transport failure reporting.
+pub async fn create_s3_server_with_hooks<D>(
+    driver: D,
+    options: S3ServerOptions,
+    credentials: Option<Credentials>,
+    region: Option<String>,
+    hooks: S3ServerHooks,
+) -> Result<S3Server, S3BindError>
+where
+    D: mount_rs_core::FsDriver + 'static,
+{
+    let session_options = crate::session::S3SessionOptions {
+        credentials,
+        region,
+        ..crate::session::S3SessionOptions::default()
+    };
+    let session = Arc::new(S3Session::new_with_options(driver, session_options));
+    S3Server::start_with_hooks(session, options, hooks).await
+}
+
+fn report(hooks: &S3ServerHooks, error: S3TransportError) {
+    if let Some(hook) = &hooks.on_transport_error {
+        hook(error);
+    }
 }
