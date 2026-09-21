@@ -146,7 +146,10 @@ restores `active`. A Linux-gated synthetic-helper regression covers the
 transition and terminal cleanup; host FUSE tests, host/Linux-target strict
 Clippy, Linux-target test check, formatting and diff checks pass, while the
 Linux-only runtime execution and hosted native close-race/callback,
-crash/restart and durability gates remain external, so W01 stays NO-GO.
+crash/restart and durability gates remain external. This active-state packet is
+published as `8ddf48febaedbd78dc22d889e8f3c822a4e6ad45`; exact-SHA CI run
+`35649715601` is pending and Fault injection run `35649715727` is queued, so
+W01 stays NO-GO.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
