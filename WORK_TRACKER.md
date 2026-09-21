@@ -360,6 +360,17 @@ requested path. W01-FUSE therefore explicitly supports Linux FUSE only; the
 macOS native path remains NFS, with no FSKit or macFUSE FUSE-protocol claim.
 This closes the macOS platform-scope decision but does not qualify any Linux
 hosted or lifecycle gate, so W01 remains NO-GO.
+The macOS FSKit boundary was refreshed locally: the locked Rust bridge target
+passed 12 tests, formatting and strict Clippy, the arm64 bridge build passed,
+the standalone Swift delegate seam and in-process XPC lifecycle test passed,
+and unsigned arm64 `MountRsFSKit`, `MountRsXPCService`, and `MountRsHost`
+Xcode schemes produced the expected extension/XPC artifacts. The diagnostic
+activation gate skipped its mount attempt and reported zero valid signing
+identities, an ad-hoc host bundle, and an unavailable `fskitd` connection;
+it ended `FSKIT_ACTIVATION=BLOCKED`. This is compile/in-process evidence only:
+signed installation, FSClient enablement, mounted read/write, hosted Linux
+FUSE, callback/lifecycle, crash/restart, concurrency, locks, and durability
+remain open, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
