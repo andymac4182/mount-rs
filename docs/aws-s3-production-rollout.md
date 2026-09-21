@@ -100,7 +100,10 @@ only the test bucket/prefix actions. The workflow intentionally references an
 environment role rather than embedding a long-lived AWS secret; configure and
 review that role before enabling hosted evidence. The workflow runs
 `scripts/validate-aws-s3-ci-config.sh` before the credential action, so missing
-or malformed protected inputs fail without making an AWS call.
+or malformed protected inputs fail without making an AWS call. Set the
+protected environment variable `MOUNT_RS_AWS_S3_ACCOUNT_ID` to the approved
+12-digit account and require it to match the account component of
+`MOUNT_RS_AWS_S3_CI_ROLE_ARN`; the preflight rejects a cross-account role ARN.
 
 ## Rollout sequence
 

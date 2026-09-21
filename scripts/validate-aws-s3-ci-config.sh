@@ -14,6 +14,7 @@ fail() {
 [ -n "${AWS_S3_TEST_REGION:-}" ] || fail "missing_region"
 [ -n "${AWS_S3_TEST_VERSIONING_STATUS:-}" ] || fail "missing_versioning_status"
 [ -n "${AWS_S3_CI_ROLE_ARN:-}" ] || fail "missing_role_arn"
+[ -n "${AWS_S3_CI_EXPECTED_ACCOUNT_ID:-}" ] || fail "missing_expected_account_id"
 [ -n "${MOUNT_RS_AWS_S3_TEST_PREFIX:-}" ] || fail "missing_test_prefix"
 
 case "$AWS_S3_TEST_BUCKET" in
@@ -47,6 +48,13 @@ case "$role_account" in
   ''|*[!0-9]*) fail "invalid_role_account_shape" ;;
 esac
 [ "${#role_account}" -eq 12 ] || fail "invalid_role_account_length"
+case "$AWS_S3_CI_EXPECTED_ACCOUNT_ID" in
+  ''|*[!0-9]*) fail "invalid_expected_account_id_shape" ;;
+esac
+[ "${#AWS_S3_CI_EXPECTED_ACCOUNT_ID}" -eq 12 ] ||
+  fail "invalid_expected_account_id_length"
+[ "$role_account" = "$AWS_S3_CI_EXPECTED_ACCOUNT_ID" ] ||
+  fail "role_account_mismatch"
 
 [ "${AWS_EC2_METADATA_DISABLED:-}" = "true" ] ||
   fail "AWS_EC2_METADATA_DISABLED_must_be_true"
@@ -72,4 +80,4 @@ if [ -n "${AWS_ACCESS_KEY_ID:-}${AWS_SECRET_ACCESS_KEY:-}${AWS_SESSION_TOKEN:-}"
   fail "preconfigured_credentials_detected"
 fi
 
-echo "AWS_S3_CI_CONFIG_PASS bucket=$AWS_S3_TEST_BUCKET region=$AWS_S3_TEST_REGION versioning=$AWS_S3_TEST_VERSIONING_STATUS role=redacted"
+echo "AWS_S3_CI_CONFIG_PASS bucket=$AWS_S3_TEST_BUCKET region=$AWS_S3_TEST_REGION account=$AWS_S3_CI_EXPECTED_ACCOUNT_ID versioning=$AWS_S3_TEST_VERSIONING_STATUS role=redacted"

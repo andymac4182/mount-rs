@@ -1772,7 +1772,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
   evidence. The workflow now has a secret-safe preflight validator that blocks
-  before AWS authentication when those inputs are absent or malformed. The
+  before AWS authentication when those inputs are absent or malformed, and it
+  rejects a role ARN whose account does not match the protected
+  `MOUNT_RS_AWS_S3_ACCOUNT_ID` value. The
   adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
