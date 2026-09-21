@@ -502,7 +502,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
-| W26 | Apache Ozone S3 backend | Local block/restart gate passed; SQLite/PGlite and durable FoundationDB composition gates added, hosted result pending; durable TiDB mixed store remains open | Main |
+| W26 | Apache Ozone S3 backend | Complete within documented scope: local and hosted Ozone gateway, SQLite/PGlite composition, durable FoundationDB, and Ozone-backed durable TiDB gates passed; production/native boundaries remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -1471,7 +1471,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   an Ubuntu CI gate. Main's real Linux-arm64 Docker run passed immutable
   blocks, conditional create/read/write and CAS, concurrent publication,
   service restart/reopen, and owned-resource cleanup. Hosted Linux-amd64
-  results and mixed metadata-provider/Node/CLI coverage remain open. The
+  run `35585066458` passed the Ozone gateway, mixed metadata-provider/Node/CLI,
+  and Ozone-backed durable TiDB jobs. The
   all-in-one non-secure test deployment is loopback-only, not production auth
   or replicated-durability acceptance.
 - [x] W26.1 Pin Apache Ozone 2.2.1 and architecture-specific container digests;
@@ -1506,7 +1507,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   real multi-node restart evidence, but remains loopback/non-secure test
   deployment evidence rather than production auth, TLS or power-loss proof;
   hosted CI remains revision-specific and pending.
-- The hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
+- Historical hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
   Linux-amd64 Ozone gateway (`ozone`, job `106274147767`) and the mixed
   SQLite/PGlite Ozone composition (`ozone-compositions`, job
   `106274147763`). Its durable TiDB job (`tidb`, `106274147942`) passed the
@@ -1521,13 +1522,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   durable restart/reopen so the restart gate is not contaminated by that
   test's intentionally unknown client outcome. Its first rerun
   `35582936271` was canceled when concurrent main commit `210c9cd` landed;
-  replacement run `35583109781` is the active W26 acceptance attempt and no
-  result from the canceled run is treated as evidence.
-- [ ] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
+  replacement run `35583109781` was superseded before terminal completion and
+  no result from the canceled runs is treated as evidence. Final W26
+  acceptance is recorded below.
+- [x] W26.3 Extend the real Ozone ChunkedFs composition gate to independent
   TiDB and FoundationDB metadata, including partial writes/truncation,
   revision CAS and stale-writer fencing. SQLite, PGlite, single-node TiDB and
-  durable three-node FoundationDB are covered above; durable multi-node TiDB
-  remains open.
+  durable three-node FoundationDB are covered above. Final run `35585066458`
+  on `9c098e5` passed hosted `ozone-compositions` job `106286459622` and
+  Ozone-backed durable `ozone-tidb` job `106286459540`; the latter emitted
+  `TIDB_ACCEPTANCE evidence=durable-multinode-restart`, Ozone integration and
+  cleanup markers. Generic durable TiDB job `106286459436` also passed.
 - [x] W26.4 Cover Node factories and CLI configuration; add required CI gates
   and document verified versions, limitations and platform evidence. The
   2026-09-21 arm64 live Ozone run passed the Node provider matrix (including
