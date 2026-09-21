@@ -955,7 +955,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, the latest terminal packet failed its hard 1,000-IOPS gate, and a replacement packet is active after concurrency remediation. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, and replacement run 35641941218 also failed the hard 1,000-IOPS gate after its first concurrency remediation. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -1031,12 +1031,15 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         all-in-one service is loopback-only and is not production
         authentication or durability evidence; durable FoundationDB remains
         test-deployment evidence and does not imply production auth, TLS, or
-        power-loss durability. W26.15 now requires a safe concurrency or
-        publication-path remediation, or production-like Ozone capacity
-        evidence, before a fresh one-revision packet. Replacement run
-        <code>35641941218</code> at <code>88b707ba</code> is active after the
-        published read/write-overlap and shutdown-ordering remediation; its
-        producer and aggregate results are not yet terminal acceptance.
+        power-loss durability. W26.15 remains open after the first safe concurrency/publication
+        remediation. Replacement run <code>35641941218</code> at exact W26 code
+        head <code>88b707ba</code> completed all four provider rows with
+        1,200/1,200 successful lifecycle operations and zero timeouts or cleanup
+        failures, but missed the hard 1,000-IOPS target: SQLite/R2 measured
+        <code>85.70</code>, PGlite/R2 <code>94.04</code>, TiDB/R2
+        <code>14.50</code>, and FoundationDB/R2 <code>30.46</code>. The producer
+        jobs and aggregate failed closed without <code>OZONE_IOPS_PASS</code>;
+        this is diagnostic evidence, not a new acceptance result.
       </>
     ),
     evidence: (
@@ -1073,12 +1076,14 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         five-minute RPO/RTO, TLS/SigV4, tenant-scoped prefixes, and
         three-node/three-replica/three-domain topology; these are
         customer/Ozone requirements, not proof of a deployed environment.
-        Fresh replacement run <code>35641941218</code> is now active on the
-        merged remediation tip, with Ozone, compositions, and FoundationDB
-        producers in progress and TiDB queued at the latest inspection; no
-        queued or in-progress result is promoted. W26.15, secure customer
-        topology, backup/DR, measured SLO/capacity, and release/canary/rollback
-        remain open.
+        Replacement run <code>35641941218</code> is terminal for W26 even
+        though unrelated native jobs kept the parent workflow active. Its
+        producer jobs <code>106473112920</code>, <code>106473112915</code>, and
+        <code>106473112409</code>, plus aggregate
+        <code>106477164582</code>, failed closed on the hard IOPS gate. The
+        local overlap/read/shutdown regression suite is green, but this first
+        remediation is insufficient; secure customer topology, backup/DR,
+        measured SLO/capacity, and release/canary/rollback remain open.
       </>
     ),
     sources: [

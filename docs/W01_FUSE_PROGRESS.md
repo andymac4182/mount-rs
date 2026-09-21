@@ -25,7 +25,8 @@ macOS/FSKit boundary is an explicit unsupported-scope decision recorded below.
 
 ## Current queue
 
-- Complete the remaining applicable FUSE session, callback, and mount members.
+- Complete the remaining applicable FUSE session/callback members and either
+  implement or explicitly classify each native mount member.
 - Run hosted Linux native mount and transport-error event qualification.
 - Qualify cancellation, close, crash/restart, concurrency, and durability
   behavior on every supported native runtime.
@@ -60,6 +61,7 @@ macOS/FSKit boundary is an explicit unsupported-scope decision recorded below.
 | 2026-09-22 | FUSE destroy/read-worker teardown boundary | The Linux request pump now aborts and drains registered positional-read workers before dispatching `FUSE_DESTROY`, preventing a pending backend read from blocking session cleanup; a Linux-gated Unix-stream regression proves destroy replies and bounded close while a read is blocked | Host all-target tests, host/Linux-target strict Clippy, formatting and diff checks pass; hosted kernel unmount/close-race and crash/restart execution remain external |
 | 2026-09-22 | Native blocked-read unmount harness | Added an ignored `/dev/fuse` scenario whose backend blocks one kernel `READ`; the harness waits until that request is active, calls bounded `Mounted::unmount`, requires the kernel read to finish with an error, and removes the mountpoint | Host all-target tests, host/Linux-target strict Clippy, formatting and diff checks pass; hosted execution must prove the kernel close race, then crash/restart and broader lifecycle evidence remain external |
 | 2026-09-22 | macOS FUSE/FSKit scope boundary | On the actual Darwin 27.0.0 arm64 host, `/dev/fuse` is absent and the non-Linux mount path returns `UnsupportedPlatform` without touching the requested path; the supported native macOS path remains NFS, and no FSKit or macFUSE FUSE-protocol parity is claimed | This closes the macOS FUSE/FSKit decision as explicitly outside supported scope; Linux hosted `/dev/fuse`, callback, lifecycle, concurrency, crash/restart and durability gates remain open |
+| 2026-09-22 | Native mount-object scope and async disposal (published as `4fd3e25e`) | Added `Mounted[Symbol.asyncDispose]()` to the root N-API lifecycle surface and covered it in the runtime/type declarations; source audit records the intentional boundary that the transport-neutral wrapper does not expose FUSE `session`, `/dev/fuse` `fd`, or invalidation methods because the native session/device remain owned by the serving task; final remote verification is `HEAD=origin/main=4fd3e25e` | FUSE-specific mount members remain outside the current N-API wrapper by design; exact-SHA hosted status is CI pending (`35646646162`), Fault injection in progress (`35646646113`), and no hosted Linux FUSE acceptance result is available; production remains NO-GO |
 
 ## Completion rule
 

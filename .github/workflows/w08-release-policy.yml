@@ -25,6 +25,10 @@ jobs:
         with:
           node-version: '24'
       - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Verify W08 rollout ledger policy
+        run: |
+          node scripts/verify-w08-rollout-ledger.mjs
+          node scripts/test-w08-rollout-ledger.mjs
       - name: Verify W08 release identity and provenance policy
         run: |
           set -euo pipefail

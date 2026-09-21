@@ -52,6 +52,9 @@ const server = createP9Server(Filesystem.memory(), {
 const connection = server.attach(stream, { own: false, peer: "observability-test" });
 
 try {
+  assert.ok(Array.isArray(server.clients));
+  assert.strictEqual(server.clients.length, 1);
+  assert.strictEqual(server.clients[0], connection);
   assert.equal(server.options.debug, true);
   assert.equal(connection.session.options.debug, true);
   assert.deepEqual(connection.session.assertions, []);
@@ -85,6 +88,7 @@ try {
   assert.deepEqual(assertions, []);
 } finally {
   await connection.close();
+  assert.equal(server.clients.length, 0);
   await server.close();
   stream.destroy();
 }

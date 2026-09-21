@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtemp, readFile, realpath, rm, rmdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import * as native from "../index.js"
 import {
   createNodeFsDriver,
   liveMounts,
@@ -39,6 +40,14 @@ try {
     assert.ok(probe[name].reason === undefined || typeof probe[name].reason === "string")
   }
   assert.deepEqual(await liveMounts(), [])
+  if (typeof Symbol.asyncDispose === "symbol") {
+    assert.equal(typeof native.Mounted.prototype[Symbol.asyncDispose], "function")
+    const fakeMounted = Object.create(native.Mounted.prototype)
+    let disposeCalls = 0
+    fakeMounted.unmount = async () => { disposeCalls += 1 }
+    await fakeMounted[Symbol.asyncDispose]()
+    assert.equal(disposeCalls, 1)
+  }
 
   await assert.rejects(
     () => mount(driver, mountpoint, { transport: "unknown" }),

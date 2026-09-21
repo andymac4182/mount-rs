@@ -91,3 +91,24 @@ operations, including `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
 boundary is covered by the Rust-backed facade; hosted native device/mount,
 callback, crash/restart, and durability qualification remain outside this
 scoped slice.
+
+## Native mount-object scope
+
+The root N-API `mount()` facade returns one transport-neutral `Mounted` object.
+Its supported lifecycle surface is `transport`, `mountpoint`, `source`,
+`active`, `unmount()`, and `Symbol.asyncDispose`. The async-disposal method is
+installed at the JavaScript boundary and delegates to the same idempotent
+`unmount()` operation; `test/native.mjs` and the generated declaration cover
+that contract.
+
+The facade intentionally does not claim the pinned mountx FUSE object's
+transport-specific `session`, `/dev/fuse` `fd`, or
+`notifyInvalInode`/`notifyInvalEntry` members. `mount-rs-auto::AutoMount` keeps
+the FUSE session and device inside the native serving task, while
+`mount-rs-fuse::FuseMount` exposes only mountpoint, mode, active state,
+`wait_closed()`, and teardown. The separate `./fuse` entry point is therefore
+the supported mount-free session/codec surface; it is not a native mount
+handle. Exposing nullable or fabricated FUSE members on the transport-neutral
+wrapper would misrepresent the 9P/NFS variants and the current native
+ownership boundary. Linux hosted mount/callback/lifecycle qualification is
+still required independently of this API-scope decision.

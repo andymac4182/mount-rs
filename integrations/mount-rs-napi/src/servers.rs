@@ -2615,7 +2615,7 @@ impl P9Server {
         server.local_addr().ok().map(|address| address.to_string())
     }
 
-    #[napi]
+    #[napi(getter)]
     pub fn clients(&self) -> napi::Result<Vec<P9Connection>> {
         let state = self.state.lock().expect("9P state lock");
         state.server.as_ref().map_or(Ok(Vec::new()), |server| {

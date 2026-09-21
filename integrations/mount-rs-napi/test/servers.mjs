@@ -496,7 +496,7 @@ async function exerciseP9() {
     assert.equal(versionBody.readUInt32LE(0), 65_536);
     assert.equal(versionBody.subarray(6).toString(), "9P2000.L");
 
-    [connection] = server.clients();
+    [connection] = server.clients;
     assert.ok(connection);
     assert.equal(connection.stream, undefined);
     const session = connection.session;
@@ -591,7 +591,7 @@ async function exerciseP9() {
       Buffer.concat([Buffer.from([0x00, 0x00, 0x01, 0x00]), p9String("9P2000.L")]),
       101,
     );
-    [connection] = server.clients();
+    [connection] = server.clients;
     assert.ok(connection);
 
     // A size below the 7-byte 9P header cannot be resynchronized and is a
@@ -646,7 +646,7 @@ async function exerciseP9AttachedStream() {
   assert.strictEqual(connection.stream, accepted);
   assert.equal(connection.peer, "attached-test");
   assert.equal(server.connections, 1);
-  assert.strictEqual(server.clients()[0], connection);
+  assert.strictEqual(server.clients[0], connection);
   assert.throws(
     () => server.attach(accepted),
     /already attached/,
