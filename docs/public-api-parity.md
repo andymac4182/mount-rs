@@ -384,8 +384,11 @@ Clippy and formatting. The N-API WebDAV wrapper also serializes its
 closed-state check with the transport lifecycle; a rebuilt 40-iteration
 real-loopback race test passes. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
-host-enabled WebDAV network/fault/restart matrix; N-API close-timeout,
-network/hosted concurrency and hosted lifecycle remain open.
+host-enabled WebDAV network/fault/restart matrix; N-API forced connection
+cancellation, network/hosted concurrency and hosted lifecycle remain open.
+The shared postbuild server facade keeps close idempotent while in flight but
+clears a rejected close promise so a timed-out N-API WebDAV close can be
+retried after the peer drains.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full
