@@ -5,7 +5,7 @@ import root from "../index.js";
 import p9 from "../p9.cjs";
 
 const { Filesystem, createP9Server } = root;
-const { encodeMessage } = p9;
+const { P9LockTable, encodeMessage } = p9;
 
 function waitUntil(predicate, label) {
   const deadline = Date.now() + 5_000;
@@ -31,10 +31,12 @@ const stream = new Duplex({
     callback();
   },
 });
+const sharedLocks = new P9LockTable({ maxLocksPerFile: 4 });
 const server = createP9Server(Filesystem.memory(), {
   maxInFlight: 3,
   readOnly: true,
   msize: 32 * 1024,
+  locks: sharedLocks,
 });
 const connection = server.attach(stream, { own: false, peer: "metadata-test" });
 
@@ -44,6 +46,21 @@ try {
   assert.equal(server.options.msize, 32 * 1024);
   assert.equal(connection.session.options.msize, 32 * 1024);
   assert.equal(connection.session.options.readOnly, true);
+  assert.ok(server.options.locks);
+  assert.ok(connection.session.options.locks);
+  const sharedClient = sharedLocks.client();
+  assert.equal(sharedClient.lock({
+    path: "/",
+    fid: 77,
+    type: 1,
+    start: 10n,
+    length: 1n,
+    procId: 18,
+    clientId: "injected-table",
+  }), 0);
+  assert.equal(server.options.locks.at("/").length, 1);
+  assert.equal(connection.session.options.locks.at("/").length, 1);
+  sharedClient.releaseAll();
   assert.equal(connection.session.userFor(1), null);
 
   stream.push(encodeMessage(100, 0xffff, (writer) => {

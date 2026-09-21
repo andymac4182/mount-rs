@@ -641,6 +641,14 @@ impl MountState {
                     )
                     .await,
                 );
+                self.record_transport_error(FuseTransportError::from_message(
+                    FuseTransportErrorKind::Task,
+                    format!(
+                        "FUSE unmount of '{}' exceeded {}ms; forced teardown was requested",
+                        self.mountpoint.display(),
+                        timeout.as_millis()
+                    ),
+                ));
                 Err(MountError::Timeout {
                     operation: "unmount",
                     after: timeout,
@@ -2648,6 +2656,8 @@ mod tests {
         std::fs::set_permissions(&helper, permissions).expect("make stuck helper executable");
 
         let timeout = Duration::from_millis(200);
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
         let state = Arc::new(MountState::new(
             MountMode::Rootless,
             PathBuf::from(format!("/tmp/mount-rs-fuse-stuck-unmount-{suffix}")),
@@ -2657,7 +2667,14 @@ mod tests {
                 ..MountOptions::default()
             },
             Some(helper.clone()),
-            FuseMountHooks::default(),
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("forced teardown callback lock")
+                        .push(error);
+                })),
+            },
         ));
         state.set_task(tokio::spawn(std::future::pending::<()>()));
 
@@ -2680,6 +2697,16 @@ mod tests {
         assert!(!state.active.load(Ordering::Acquire));
         assert!(state.closed.load(Ordering::Acquire));
         assert!(!state.mounted.load(Ordering::Acquire));
+        let observed = observed
+            .lock()
+            .expect("forced teardown callback observation");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
+        assert!(
+            observed[0]
+                .message
+                .contains("forced teardown was requested")
+        );
     }
 
     #[cfg(target_os = "linux")]

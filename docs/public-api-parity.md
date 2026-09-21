@@ -251,9 +251,10 @@ Current focused behavior:
   `driver`, debug-gated assertion readback/statistics, and request-error and
   assertion callbacks with Node error/header shapes across attached and native
   sessions. `P9Server.clients` is now a live property-shaped array combining
-  native and attached connections. Lock-table injection through session/server
-  option bags and the 9P mount helpers remain unresolved rather than being
-  treated as intentionally out of scope.
+  native and attached connections. `P9ServerOptions.locks` accepts a
+  `P9LockTable`, and the injected table is shared by native and attached
+  sessions and exposed through their live option handles. The 9P mount helpers
+  remain unresolved rather than being treated as intentionally out of scope.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
   error/drop/procedure stats, mount records, destroyed-state readback, the
