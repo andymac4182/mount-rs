@@ -1004,6 +1004,45 @@ async function exerciseWebdav() {
 
     const directRequest = (method, target, headers = [], body = null) =>
       server.session.handleRequest({ method, target, headers }, body);
+    const lockBody = Buffer.from('<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>');
+    const conflictLock = await directRequest(
+      "LOCK",
+      "/lock-conflict.txt",
+      [{ name: "depth", value: "0" }],
+      lockBody,
+    );
+    assert.ok([200, 201].includes(conflictLock.status));
+    const conflictToken = conflictLock.headers.find(({ name }) => name === "lock-token")?.value;
+    assert.match(conflictToken ?? "", /^<urn:uuid:/);
+    const blockedWrite = await directRequest(
+      "PUT",
+      "/lock-conflict.txt",
+      [],
+      Buffer.from("blocked by the active lock"),
+    );
+    assert.equal(blockedWrite.status, 423);
+    const conflictUnlock = await directRequest(
+      "UNLOCK",
+      "/lock-conflict.txt",
+      [{ name: "lock-token", value: conflictToken }],
+    );
+    assert.equal(conflictUnlock.status, 204);
+
+    const expiringLock = await directRequest(
+      "LOCK",
+      "/lock-expiring.txt",
+      [
+        { name: "depth", value: "0" },
+        { name: "timeout", value: "Second-1" },
+      ],
+      lockBody,
+    );
+    assert.ok([200, 201].includes(expiringLock.status));
+    assert.equal(server.session.locks.length, 1);
+    assert.equal(server.session.locks[0].timeoutSeconds, 1);
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    assert.equal(server.session.locks.length, 0);
+
     const options = await directRequest("OPTIONS", "/direct-methods");
     assert.equal(options.status, 200);
     const mkcol = await directRequest("MKCOL", "/direct-methods");
