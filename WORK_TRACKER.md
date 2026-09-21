@@ -1237,6 +1237,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `35609172786`, source `66544b5`, `w08-release-policy` job `106363893748`
   passed. No tag publication, signing/SBOM, canary, rollback or approval is
   claimed.
+- [x] W08.13 **Dedicated non-cancelling hosted release-policy gate:** commit
+  `a9f51e4` moved the W08 policy job into
+  `.github/workflows/w08-release-policy.yml`, removed the duplicate cancellable
+  job from monolithic CI and set `cancel-in-progress: false`. Hosted run
+  `35611883547`, source `f432441`, `w08-release-policy` job `106372777281`
+  reached terminal success after building a real Ubuntu CLI artifact,
+  packaging and checksumming it, generating/verifying the artifact-derived
+  manifest, checking direct and extracted `mount-rs --version`, and running
+  the policy fixtures. This is stable hosted artifact-path evidence; tag
+  publication, signing/SBOM, target-platform acceptance, canary, rollback and
+  approval remain W08-P09 gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1330,12 +1341,14 @@ reproducible in a production-like environment.
 - [ ] **W08-P09 (10%) — release/canary/go-no-go:** produce immutable signed
   artifacts and SBOM, verify target-platform packages, run a staged canary with
   live SLO telemetry, rehearse rollback and record explicit approval. The
-  credential-free W08.11 policy verifier and hosted job `106356402785` now
-  reject placeholder source identity and require explicit verified signature,
-  SBOM and passed-canary states in strict mode; W08.12 wires the same verifier
-  to the actual CLI preview artifact path and hosted generator policy job
-  `106363893748`. Neither slice creates signing/SBOM evidence or runs a real
-  tag release, canary, rollback or approval. *(Release implementation + hosted;
+  credential-free W08.11 policy verifier and hosted job `106356402785` reject
+  placeholder source identity and require explicit verified signature, SBOM and
+  passed-canary states in strict mode; W08.12 wires the same verifier to the
+  actual CLI preview artifact path and hosted generator policy job
+  `106363893748`; W08.13 runs a real Ubuntu artifact path in dedicated
+  non-cancelling hosted job `106372777281` from run `35611883547`, source
+  `f432441`. These slices do not create signing/SBOM evidence or run a real tag
+  release, canary, rollback or approval. *(Release implementation + hosted;
   registry, signing, SBOM tooling, deployment controller and approvers are
   external.)*
 
