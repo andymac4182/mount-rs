@@ -1070,6 +1070,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the hosted durable composition additionally passed the RustFS restart/reopen
   phases. Persisted fixtures require explicit volume/prefix/manifest scope and
   reject transient or symlink paths.
+- [x] W08.6 **Production deployment-contract policy:**
+  `scripts/verify-w08-production-config.mjs` now validates the production
+  `splitstore` shape, durable TiDB and block declarations, HTTPS object
+  storage, external secret references, no placeholders/inline secrets and
+  TLS-required TiDB input without opening a provider connection. The positive
+  fixture passed, the insecure fixture failed closed, and the public Rust CLI
+  schema accepted the positive fixture. The hosted CI positive/negative gate
+  is implementation evidence only; P01/P02/P07 remain open for real
+  topology, IAM, certificates and provider/security sign-off.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1081,17 +1090,23 @@ are in [`docs/W08-production-rollout.md`](docs/W08-production-rollout.md). No
 production gate is checked until its exit evidence is terminal, owned and
 reproducible in a production-like environment.
 
-- [ ] **W08-P01 (20%) — deployment contract/topology:** choose and document the
+- [ ] **W08-P01 (25%) — deployment contract/topology:** choose and document the
   managed or self-hosted TiDB/PD/TiKV and object-storage architecture, HA,
   regions, TLS/network policy, resource limits, versions, tenancy and IaC;
   prove a staging deployment and smoke/restart gate. The hosted
   `tidb-tls-compile` job `106298487587` in run `35588858142` confirms that the
   public consumers can include the TLS client graph, but not a deployment or
-  handshake. *(Implementation + hosted/provider; target platform not supplied.)*
-- [ ] **W08-P02 (15%) — secrets/IAM/rotation:** bind production credentials
+  handshake. The local `verify-w08-production-config.mjs` positive fixture and
+  public CLI schema check pass, while its insecure fixture fails closed; this
+  validates contract shape only. *(Implementation + hosted/provider; target
+  platform not supplied.)*
+- [ ] **W08-P02 (20%) — secrets/IAM/rotation:** bind production credentials
   through the approved secret manager; prove least privilege, rotation,
-  revocation, audit and redaction without data loss. *(Implementation +
-  provider; secret manager and IAM owner are external.)*
+  revocation, audit and redaction without data loss. The production-config
+  policy requires external `MOUNT_RS_TIDB_TLS_URL`, `R2_ACCESS_KEY_ID` and
+  `R2_SECRET_ACCESS_KEY` references and rejects inline secret strings; it does
+  not prove that the secret manager or IAM policy is configured. *(Implementation
+  + provider; secret manager and IAM owner are external.)*
 - [ ] **W08-P03 (10%) — backup/restore/DR:** define RPO/RTO and retention;
   configure backups/versioning and complete an isolated restore, corruption and
   region-loss/recovery drill with metadata/block consistency evidence. *(Hosted
@@ -1108,14 +1123,16 @@ reproducible in a production-like environment.
   peak, saturation, failover and multi-hour soak workloads; record latency,
   throughput, errors, headroom and scaling limits. *(Hosted/provider +
   implementation; workload and production-sized capacity are open.)*
-- [ ] **W08-P07 (15%) — security/hardening:** enforce TLS/certificate
+- [ ] **W08-P07 (20%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,
   image and SBOM scanning, threat-model review and security sign-off. *(Provider
   + implementation; hosted TLS compile and guard job `106304951579` in run
   `35590919645` passed, while the actual endpoint, certificates, security
   approval and network controls are external.
   `scripts/test-tidb-tls.sh` now provides the guarded credentialed provider
-  gate and rejects missing TLS/CA/hostname verification before connecting.)*
+  gate and rejects missing TLS/CA/hostname verification before connecting;
+  `scripts/verify-w08-production-config.mjs` also requires HTTPS block storage
+  and TLS-required TiDB input without contacting either provider.)*
 - [ ] **W08-P08 (15%) — failure drills/runbooks/on-call:** exercise client and
   provider loss, stale leases, partitions, partial writes, rolling restart and
   restore; publish operator runbooks and complete an on-call tabletop/timed
