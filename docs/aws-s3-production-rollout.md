@@ -146,6 +146,15 @@ the configured lifecycle expiry and multipart-abort days, and reports rather
 than changes bucket versioning. It is safe to run during review, but a passing
 qualification-bucket audit does not close the production-resource gate.
 
+The latest current-tree qualification at pushed head `2633bec` passed this
+audit in account `922978963556`, then passed the scoped sibling-prefix denial,
+public Rust CLI write/shutdown/reopen/read, composed AWS S3 block, and
+fresh-process reopen checks. Owned-prefix cleanup completed with
+`AWS_S3_TEST_PASS` for
+`mount-rs-tests/aws-s3/20260921T124037Z-88398-91d73f60bde3b905c3af2cc78b38b224`.
+This is qualification-account evidence only; production resource, metadata,
+identity, hosted release, and deployment operations gates remain open.
+
 The live acceptance harness reads bucket versioning before it assumes the
 prefix-scoped runtime role. Hosted jobs that use a separate audit identity must
 provide the reviewed `None`, `Enabled`, or `Suspended` result as the protected

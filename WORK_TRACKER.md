@@ -1682,6 +1682,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   AWS block test passed, and the cross-process reopen test passed. The run
   cleaned its owned prefix and emitted `AWS_S3_TEST_PASS` at
   `mount-rs-tests/aws-s3/20260921T120543Z-65309-0663df4c1d84504983babd5ff88f4e02`.
+- [x] The current pushed head `2633bec` refreshed the live qualification in the
+  selected `myroot` account. The read-only resource audit passed with caller
+  account `922978963556`, the scoped role denied the sibling prefix, the public
+  Rust CLI self-test wrote/shut down/reopened/read successfully, the composed
+  AWS S3 block test passed, the fresh-process reopen test passed, and owned
+  prefix cleanup emitted `AWS_S3_TEST_PASS` at
+  `mount-rs-tests/aws-s3/20260921T124037Z-88398-91d73f60bde3b905c3af2cc78b38b224`.
+  This is current test-account evidence, not production resource or hosted
+  deployment acceptance.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
