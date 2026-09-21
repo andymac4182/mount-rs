@@ -276,8 +276,11 @@ Current focused behavior:
   fields, lock table, and direct session `onError`/`onAssertion` callbacks from
   the same option bag. This is not full oracle mount parity: automatic
   cross-transport signal ownership and the remaining mount controls are
-  explicitly unsupported in this packet, and
-  hosted N-API native mount lifecycle evidence remains unverified.
+  explicitly unsupported in this packet. Exact SHA
+  `1dcf4dee4d01fb5e3807335579659b54efd74351` passed the hosted N-API Linux
+  automatic, direct `./9p`, and structural-driver 9P mounted-I/O/cleanup gate
+  in run `35664614270`, job `106547449823`; crash/reset/half-close recovery
+  remains supervisor-owned.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
   routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
   session views, server-owned driver wrappers, effective scalar options,

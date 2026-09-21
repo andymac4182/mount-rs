@@ -35,8 +35,11 @@ client set. Direct and automatic mount-created listeners now also receive the
 bounded scalar policy and direct session `onError`/`onAssertion` callbacks from
 the mount option bag; injected shared servers retain their own hooks. It
 deliberately does not claim automatic cross-transport signal ownership,
-remaining mount controls, or full hosted native-mount lifecycle. The direct
-`./9p` facade now owns the bounded `signals` teardown option.
+remaining mount controls, or unsupported native platforms. Exact SHA
+`1dcf4dee4d01fb5e3807335579659b54efd74351` passed hosted Linux automatic,
+direct `./9p`, and structural-driver N-API mounted I/O/cleanup in Native 9P
+run `35664614270`, job `106547449823`; the direct `./9p` facade now owns the
+bounded `signals` teardown option.
 The `./9p`
 constants/message-name
 barrel is now complete against the pinned upstream surface, with all 124
@@ -755,7 +758,7 @@ patch):
 | Main | W01 N-API 9P mount-created server policy | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options map scalar server policy and injected lock tables to mount-created listeners, preserving the prior `./9p` probe/refusal/option/helper and configured shared-server behavior; Rust/N-API mapping tests, generated typecheck/build, focused runtime checks, host-enabled server integration, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 N-API 9P mount-created session callbacks | `integrations/mount-rs-napi/**`, `transports/mount-rs-9p/**`, `transports/mount-rs-auto/**`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct and automatic 9P mount options carry `onError`/`onAssertion` into mount-created listeners through the existing Rust session-hook path, while configured shared servers retain their own callbacks; debug build, generated typecheck, focused runtime checks, host-enabled server integration, N-API/Rust tests, formatting and strict Clippy passed; process signals, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
 | Main | W01 N-API 9P direct-facade signal teardown | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: direct `./9p` mounts support `signals` with process-wide `SIGINT`/`SIGTERM` cleanup, unmount-all dispatch, last-mount handler removal, and default-signal re-raise; the signal and mount-helper regressions plus syntax/diff checks passed; automatic cross-transport signal ownership, remaining mount controls and hosted N-API native-mount lifecycle evidence remain open |
-| Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the stable hosted `Native 9P` workflow now loads `9p`/`9pnet_fd`, builds the public addon, and runs automatic, direct `./9p`, and structural-driver mounted-I/O/cleanup checks as root; local direct-test syntax/diff checks pass, but the exact-SHA hosted N-API result is still pending, so production remains NO-GO |
+| Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
