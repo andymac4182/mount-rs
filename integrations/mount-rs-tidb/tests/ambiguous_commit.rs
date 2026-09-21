@@ -201,7 +201,22 @@ async fn start_commit_drop_proxy(database_url: &str) -> (String, JoinHandle<IoRe
     let task = tokio::spawn(async move {
         let (client, _) = listener.accept().await?;
         let upstream = TcpStream::connect((target_host.as_str(), target_port)).await?;
-        relay_until_commit_response(client, upstream).await
+        // mysql_async may try to acquire another pooled connection after the
+        // commit connection is dropped. Close those extra attempts instead
+        // of leaving an established socket queued behind the single relay,
+        // which would make the failure-injection test wait forever.
+        let reject_extra: JoinHandle<IoResult<()>> = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((extra, _)) => drop(extra),
+                    Err(error) => return Err(error),
+                }
+            }
+        });
+        let result = relay_until_commit_response(client, upstream).await;
+        reject_extra.abort();
+        let _ = reject_extra.await;
+        result
     });
     (proxy_url.to_string(), task)
 }
