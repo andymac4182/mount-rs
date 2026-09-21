@@ -2040,6 +2040,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   canary, rollback or owner approval. *(Hosted/provider qualification;
   release approval and production deployment are external gates.)*
 
+- [x] W08.27 **Latest integrated-main workspace verification:** on source
+  `5c7cc7053523a92c8f4da13f09993910dfdb541a`, the full locked workspace test
+  command and strict workspace Clippy command both exited 0 using bounded
+  target `/private/tmp/mount-rs-w08-current-cargo-target`. All non-ignored
+  tests passed and Clippy reported no diagnostics with `-D warnings` after the
+  latest integrated FUSE/S3/N-API changes; TiDB, RustFS, PGlite, R2, FUSE, NFS
+  and other capability-gated rows remained explicit skips/ignores. This is
+  source-health evidence only; it does not close live provider, native-kernel
+  or W08-P01–P09 production gates. *(Implementation verification; provider,
+  native and production environments remain external.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the
