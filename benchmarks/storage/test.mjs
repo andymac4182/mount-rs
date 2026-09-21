@@ -5,6 +5,7 @@ import {
   W26_IOPS_MINIMUM,
   W26_IOPS_PROFILE,
 } from "../../scripts/verify-w26-ozone-iops-artifact.mjs"
+import { validateEvidencePacket } from "../../scripts/verify-w26-ozone-evidence-packet.mjs"
 
 import {
   BenchmarkTimeoutError,
@@ -189,8 +190,13 @@ async function testRequiredProviderConfiguration() {
   )
 }
 
-function qualificationArtifact() {
-  const provider = "mount-rs-split-sqlite-r2"
+const W26_TEST_REVISION = "a".repeat(40)
+
+function qualificationArtifact(
+  provider = "mount-rs-split-sqlite-r2",
+  revision = W26_TEST_REVISION,
+) {
+  const providers = Array.isArray(provider) ? provider : [provider]
   const size = {
     status: "ok",
     summary: {
@@ -206,6 +212,16 @@ function qualificationArtifact() {
   return {
     schemaVersion: "mount-rs.storage-benchmark.v1",
     status: "ok",
+    environment: {
+      sourceControl: {
+        mountRs: {
+          revision,
+          revisionVerified: true,
+          dirty: false,
+          dirtyEntryCount: 0,
+        },
+      },
+    },
     config: {
       sizesMiB: [1],
       payloadBytes: W26_IOPS_PROFILE.payloadBytes,
@@ -215,7 +231,7 @@ function qualificationArtifact() {
       requireConfigured: true,
     },
     counts: {
-      providersRequested: 1,
+      providersRequested: providers.length,
       providersFailed: 0,
       providersSkipped: 0,
       configurationFailures: 0,
@@ -223,18 +239,16 @@ function qualificationArtifact() {
       sizeResultsSkipped: 0,
     },
     configurationFailures: [],
-    providers: [
-      {
-        provider,
-        status: "ok",
-        cleanup: {
-          remainingPaths: 0,
-          failures: [],
-          resource: { status: "ok" },
-        },
-        sizes: [size],
+    providers: providers.map((providerId) => ({
+      provider: providerId,
+      status: "ok",
+      cleanup: {
+        remainingPaths: 0,
+        failures: [],
+        resource: { status: "ok" },
       },
-    ],
+      sizes: [size],
+    })),
   }
 }
 
@@ -263,6 +277,69 @@ async function testQualificationArtifact() {
       providers: ["mount-rs-split-sqlite-r2"],
     }),
     /counts\.providersSkipped-must-equal-0/,
+  )
+}
+
+async function testEvidencePacket() {
+  const packet = {
+    expectedRevision: W26_TEST_REVISION,
+    policyLog: [
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_PASS metadata=sqlite blocks=r2",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_PASS metadata=pglite blocks=r2",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_PASS metadata=tidb blocks=r2",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_PASS metadata=foundationdb blocks=r2",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=insecure-blocks",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=inline-secret",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=foundationdb-unsafe",
+      "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=tidb-tls-weak",
+    ].join("\n"),
+    baseLog: [
+      "OZONE_FAULT_WINDOW_PASS container=ozone",
+      "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
+      "OZONE_CLEANUP_PASS container=ozone",
+    ].join("\n"),
+    compositionsLog: [
+      "OZONE_COMPOSITION_PGLITE_READY endpoint=127.0.0.1:1",
+      "OZONE_IOPS_PASS providers=mount-rs-split-sqlite-r2,mount-rs-split-pglite-r2 target=1000 output=artifacts/ozone-iops.json",
+      "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
+      "OZONE_CLEANUP_PASS container=ozone",
+      "OZONE_COMPOSITION_CLEANUP_PASS",
+    ].join("\n"),
+    compositionsArtifact: qualificationArtifact([
+      "mount-rs-split-sqlite-r2",
+      "mount-rs-split-pglite-r2",
+    ]),
+    tidbLog: [
+      "TIDB_ACCEPTANCE evidence=durable",
+      "TIDB_OZONE_IOPS_PASS provider=tidb-r2 target=1000 output=artifacts/ozone-tidb-iops.json",
+      "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
+      "OZONE_CLEANUP_PASS container=ozone",
+    ].join("\n"),
+    tidbArtifact: qualificationArtifact("mount-rs-split-tidb-r2"),
+    foundationdbLog: [
+      "FOUNDATIONDB_NAPI_PASS image=node:24-bookworm",
+      "FOUNDATIONDB_OZONE_IOPS_PASS provider=foundationdb-r2 target=1000 output=artifacts/ozone-foundationdb-iops.json",
+      "FOUNDATIONDB_TEST_PASS topology=durable",
+      "OZONE_INTEGRATION_PASS endpoint=https://ozone.example.test",
+      "OZONE_CLEANUP_PASS container=ozone",
+    ].join("\n"),
+    foundationdbArtifact: qualificationArtifact("mount-rs-split-foundationdb-r2"),
+  }
+
+  assert.deepEqual(validateEvidencePacket(packet), {
+    revision: W26_TEST_REVISION,
+    artifacts: ["ozone-compositions", "ozone-tidb", "ozone-foundationdb"],
+    policyMarkers: 8,
+  })
+  assert.throws(
+    () => validateEvidencePacket({ ...packet, tidbLog: packet.tidbLog.replace("TIDB_ACCEPTANCE ", "") }),
+    /tidb-log-missing-marker=TIDB_ACCEPTANCE/,
+  )
+  const mismatchedFoundationDb = structuredClone(packet.foundationdbArtifact)
+  mismatchedFoundationDb.environment.sourceControl.mountRs.revision = "b".repeat(40)
+  assert.throws(
+    () => validateEvidencePacket({ ...packet, foundationdbArtifact: mismatchedFoundationDb }),
+    /foundationdb-artifact-source-revision-does-not-match-packet/,
   )
 }
 
@@ -352,6 +429,7 @@ await testErrors()
 await testCli()
 await testRequiredProviderConfiguration()
 await testQualificationArtifact()
+await testEvidencePacket()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()

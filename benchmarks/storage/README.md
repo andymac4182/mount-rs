@@ -114,6 +114,19 @@ machine-readable result for every size. This protects the CI evidence marker;
 it does not replace hosted provider, customer-capacity, availability or
 recovery evidence.
 
+The CI workflow retains one evidence packet for the W26 Ozone lanes: the
+policy/recovery log from the base Ozone job, plus the acceptance log and IOPS
+JSON for SQLite/PGlite, TiDB and FoundationDB. The aggregate
+`w26-ozone-evidence` job runs
+`scripts/verify-w26-ozone-evidence-packet.mjs`, which requires every retained
+file, the exact provider sets, a clean and matching `git rev-parse HEAD` in
+each benchmark artifact, the positive and negative production-policy markers,
+provider acceptance markers, Ozone integration/recovery markers, and cleanup
+markers. Missing artifacts, a cross-revision packet, or a missing marker fails
+the aggregate job. Logs are retained as evidence only; this gate does not
+claim customer Ozone capacity, 99.99% availability, 5-minute RPO/RTO, backup
+or DR ownership, deployment, or release readiness.
+
 ## Provider matrix and evidence boundaries
 
 | Provider id | Implementation/binding | Metadata | Blocks | Topology | Configuration |

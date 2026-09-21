@@ -32,6 +32,9 @@ jobs:
             --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
       - name: Verify W26 Ozone production config policy without credentials or network
         run: |
+          set -o pipefail
+          mkdir -p artifacts
+          {
           export MOUNT_RS_TIDB_TLS_URL='mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true&verify_ca=true&verify_identity=true&built_in_roots=true'
           for config in \
             tests/ozone/production-config-policy-sqlite.json \
@@ -47,18 +50,21 @@ jobs:
             echo 'W26 Ozone production config policy accepted an insecure fixture' >&2
             exit 1
           fi
+          echo 'W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=insecure-blocks'
           if node scripts/verify-w26-ozone-production-config.mjs \
             tests/ozone/production-config-policy-inline-secret.invalid.json
           then
             echo 'W26 Ozone production config policy accepted an inline secret fixture' >&2
             exit 1
           fi
+          echo 'W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=inline-secret'
           if node scripts/verify-w26-ozone-production-config.mjs \
             tests/ozone/production-config-policy-foundationdb.invalid.json
           then
             echo 'W26 Ozone production config policy accepted an unsafe FoundationDB fixture' >&2
             exit 1
           fi
+          echo 'W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=foundationdb-unsafe'
           if MOUNT_RS_TIDB_TLS_URL='mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true&verify_ca=true&verify_identity=false&built_in_roots=true' \
             node scripts/verify-w26-ozone-production-config.mjs \
             tests/ozone/production-config-policy-tidb-tls.invalid.json
@@ -66,6 +72,8 @@ jobs:
             echo 'W26 Ozone production config policy accepted a weak TiDB TLS fixture' >&2
             exit 1
           fi
+          echo 'W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=tidb-tls-weak'
+          } 2>&1 | tee artifacts/ozone-policy.log
       - name: Verify W04 PGlite production config policy without credentials or network
         run: |
           node scripts/verify-w04-pglite-production-config.mjs \
@@ -81,7 +89,19 @@ jobs:
             exit 1
           fi
       - name: Verify real Apache Ozone block contract and restart recovery
-        run: sh scripts/test-ozone.sh
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-base.log
+      - name: Preserve W26 Ozone base evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: w26-ozone-base-evidence
+          path: |
+            artifacts/ozone-base.log
+            artifacts/ozone-policy.log
+          if-no-files-found: error
 
   ozone-compositions:
     runs-on: ubuntu-latest
@@ -119,13 +139,18 @@ jobs:
           MOUNT_RS_OZONE_IOPS_ITERATIONS: '400'
           MOUNT_RS_OZONE_IOPS_CONCURRENCY: '64'
           MOUNT_RS_OZONE_IOPS_PAYLOAD_BYTES: '4096'
-        run: sh scripts/test-ozone-compositions.sh
-      - name: Preserve Ozone IOPS evidence
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          sh scripts/test-ozone-compositions.sh 2>&1 | tee artifacts/ozone-compositions.log
+      - name: Preserve W26 Ozone composition evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ozone-iops
-          path: artifacts/ozone-iops.json
+          name: w26-ozone-compositions-evidence
+          path: |
+            artifacts/ozone-compositions.log
+            artifacts/ozone-iops.json
           if-no-files-found: error
 
   ozone-tidb:
@@ -164,13 +189,18 @@ jobs:
           MOUNT_RS_TIDB_TOPOLOGY: durable
           MOUNT_RS_TIDB_VERSION: v8.5.7
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
-        run: sh scripts/test-ozone.sh
-      - name: Preserve Ozone TiDB IOPS evidence
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-tidb.log
+      - name: Preserve W26 Ozone TiDB evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ozone-tidb-iops
-          path: artifacts/ozone-tidb-iops.json
+          name: w26-ozone-tidb-evidence
+          path: |
+            artifacts/ozone-tidb.log
+            artifacts/ozone-tidb-iops.json
           if-no-files-found: error
 
   ozone-foundationdb:
@@ -200,14 +230,76 @@ jobs:
           MOUNT_RS_FOUNDATIONDB_IOPS_CONCURRENCY: '64'
           MOUNT_RS_FOUNDATIONDB_IOPS_PAYLOAD_BYTES: '4096'
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
-        run: sh scripts/test-ozone.sh
-      - name: Preserve Ozone FoundationDB IOPS evidence
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          sh scripts/test-ozone.sh 2>&1 | tee artifacts/ozone-foundationdb.log
+      - name: Preserve W26 Ozone FoundationDB evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ozone-foundationdb-iops
-          path: artifacts/ozone-foundationdb-iops.json
+          name: w26-ozone-foundationdb-evidence
+          path: |
+            artifacts/ozone-foundationdb.log
+            artifacts/ozone-foundationdb-iops.json
           if-no-files-found: error
+
+  w26-ozone-evidence:
+    # A provider job can pass while another provider, policy, recovery, or
+    # cleanup surface is absent. Assemble one fail-closed packet from all W26
+    # Ozone jobs before CI can report the production-readiness evidence.
+    if: always()
+    needs:
+      - ozone
+      - ozone-compositions
+      - ozone-tidb
+      - ozone-foundationdb
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Download W26 Ozone base evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w26-ozone-base-evidence
+          path: evidence/base
+      - name: Download W26 Ozone composition evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w26-ozone-compositions-evidence
+          path: evidence/compositions
+      - name: Download W26 Ozone TiDB evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w26-ozone-tidb-evidence
+          path: evidence/tidb
+      - name: Download W26 Ozone FoundationDB evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: w26-ozone-foundationdb-evidence
+          path: evidence/foundationdb
+      - name: Verify complete W26 Ozone evidence packet
+        if: always()
+        run: |
+          set -eu
+          node scripts/verify-w26-ozone-evidence-packet.mjs \
+            --revision "$(git rev-parse HEAD)" \
+            --policy-log evidence/base/ozone-policy.log \
+            --base-log evidence/base/ozone-base.log \
+            --compositions-log evidence/compositions/ozone-compositions.log \
+            --compositions-artifact evidence/compositions/ozone-iops.json \
+            --tidb-log evidence/tidb/ozone-tidb.log \
+            --tidb-artifact evidence/tidb/ozone-tidb-iops.json \
+            --foundationdb-log evidence/foundationdb/ozone-foundationdb.log \
+            --foundationdb-artifact evidence/foundationdb/ozone-foundationdb-iops.json
 
   rustfs:
     runs-on: ubuntu-latest
