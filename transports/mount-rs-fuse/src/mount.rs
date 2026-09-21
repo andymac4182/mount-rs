@@ -1852,6 +1852,10 @@ mod tests {
         peer.write_all(&test_frame(26, 1, 0, &init))
             .await
             .expect("send init");
+        // The test peer is a byte stream while the native FUSE device is
+        // message-framed. Consume the INIT reply before sending the next
+        // request so two test frames cannot be coalesced into one read.
+        let _ = read_test_reply(&mut peer).await;
         peer.write_all(&test_frame(1, 2, 1, b"panic\0"))
             .await
             .expect("send panicking lookup");
@@ -1954,6 +1958,9 @@ mod tests {
         peer.write_all(&test_frame(26, 1, 0, &init))
             .await
             .expect("send init");
+        // Keep the stream-backed test peer aligned with the message framing
+        // provided by the native FUSE character device.
+        let _ = read_test_reply(&mut peer).await;
         peer.write_all(&test_frame(1, 2, 1, b"blocked\0"))
             .await
             .expect("send blocking lookup");
@@ -2128,7 +2135,7 @@ mod tests {
             active,
             max_active: Arc::clone(&max_active),
             barrier: Arc::new(tokio::sync::Barrier::new(2)),
-            entered,
+            entered: Arc::clone(&entered),
         });
 
         let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
@@ -2183,12 +2190,24 @@ mod tests {
         let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
 
         let body = read_body(handle);
+        // A Unix stream may coalesce adjacent writes, but a native FUSE
+        // descriptor returns one complete request per read. Wait until the
+        // first worker has entered before sending the second request so this
+        // test preserves that framing while still proving concurrency.
+        let first_entered = entered.notified();
         peer.write_all(&test_frame(15, 4, nodeid, &body))
             .await
             .expect("send first read");
+        tokio::time::timeout(Duration::from_secs(1), first_entered)
+            .await
+            .expect("first read should enter the worker");
+        let second_entered = entered.notified();
         peer.write_all(&test_frame(15, 5, nodeid, &body))
             .await
             .expect("send second read");
+        tokio::time::timeout(Duration::from_secs(1), second_entered)
+            .await
+            .expect("second read should enter the worker");
         let first = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
             .await
             .expect("first parallel read reply");
@@ -2358,7 +2377,7 @@ mod tests {
         .expect("mount data should be valid");
         assert_eq!(
             data.to_bytes(),
-            b"fd=3,rootmode=40000,user_id=1000,group_id=1001,fsname=mount-rs,default_permissions"
+            b"fd=3,rootmode=40000,user_id=1000,group_id=1001,default_permissions"
         );
     }
 

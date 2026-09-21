@@ -1414,7 +1414,7 @@ async fn real_http_fragmented_upload_reaches_driver_before_body_end() {
         inner: MemoryFs::empty(),
         signals: signals.clone(),
     }));
-    let server = S3Server::start(session, S3ServerOptions::default())
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
         .await
         .expect("loopback listener");
     let payload = vec![0x5a; 4 * 1024 * 1024];
@@ -1453,6 +1453,8 @@ async fn real_http_fragmented_upload_reaches_driver_before_body_end() {
         Some("0")
     );
     assert!(signals.writes.load(Ordering::Relaxed) > 0);
+    let stats = session.stats().await;
+    assert_eq!(stats.request_bytes, payload.len() as u64);
     server.close().await.expect("clean shutdown");
 }
 
@@ -1533,7 +1535,7 @@ async fn real_http_download_sends_first_chunk_before_next_driver_read() {
         inner: memory,
         signals: signals.clone(),
     }));
-    let server = S3Server::start(session, S3ServerOptions::default())
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
         .await
         .expect("loopback listener");
     let mut stream = TcpStream::connect(server.address())
@@ -1573,6 +1575,8 @@ async fn real_http_download_sends_first_chunk_before_next_driver_read() {
     let response = parse_wire_response(raw);
     assert_eq!(response.status, 200);
     assert_eq!(response.body, payload);
+    let stats = session.stats().await;
+    assert_eq!(stats.response_bytes, payload.len() as u64);
     server.close().await.expect("clean shutdown");
 }
 

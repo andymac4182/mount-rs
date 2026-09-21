@@ -530,8 +530,8 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     slug: 'tidb',
     name: 'TiDB',
     eyebrow: 'Provider / distributed SQL',
-    maturity: 'Experimental',
-    maturityNote: 'Provider and single-node ARM64 checks exist; bounded Node and CLI consumer matrices plus dedicated service jobs and a durable Ozone composition gate are wired, with restart-order and schema-setup hardening landed; durable hosted acceptance remains open.',
+    maturity: 'Preview',
+    maturityNote: 'Functional qualification is complete for the defined hosted TiDB/RustFS scope, including durable 3PD/3TiKV restart, fencing/ambiguous commit, and Linux/macOS consumer rows; production topology, IAM, DR, SLO/capacity, release, canary, and rollback gates remain open.',
     summary: (
       <>
         TiDB can supply either side of the split store using the MySQL wire
@@ -595,41 +595,27 @@ LIMIT 20;`,
         A MySQL-compatible server is not TiDB acceptance. The durable 3PD/3TiKV
         topology and provider restart promotion remain capacity-gated. A bounded
         Node/CLI consumer slice now covers configuration, partial write,
-        truncate, shutdown/reopen, and owned RustFS-prefix cleanup, but native
-        mount and hosted restart coverage remain open. Its live TiDB/RustFS
-        rows require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS
-        credentials. The dedicated <code>tidb</code>,
-        <code>tidb-rustfs</code>, and <code>ozone-tidb</code> jobs are the
-        service-evidence boundary; a durable TiDB run counts only when it emits
-        <code>TIDB_ACCEPTANCE evidence=durable-multinode-restart</code>. The
-        Ozone/TiDB job is wired for the real gateway and three-PD/three-TiKV
-        topology, but its hosted result remains open.
+        truncate, shutdown/reopen, and owned RustFS-prefix cleanup. The
+        terminal W08 hosted packet qualifies the defined Linux/macOS consumer
+        and durable-service scope, but native mount beyond that matrix and
+        production deployment remain separate. Its live TiDB/RustFS rows
+        require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS credentials;
+        do not treat those credentials or hosted fixtures as production IAM.
       </>
     ),
     evidence: (
       <>
-        The real single-node v8.5.7 service run passed TiDB metadata/block
-        composition with durable-scope checks, block-absence assertions,
-        metadata-row cleanup, and symlink-path rejection. The bounded consumer
-        matrix records Node <code>pass=4 skip=3 fail=0</code> and CLI
-        <code>pass=10 skip=3 fail=0</code>; its live TiDB/RustFS rows are
-        explicit credential-gated skips. The maturity label stays Experimental
-        until replicated/durable topology and broader consumer gates are
-        complete; the generic workspace job does not substitute for those
-        dedicated service runs. A separate single-node TiDB/Ozone run also
-        passed the direct TiDB contract, ChunkedFs partial/truncate/CAS/
-        stale-fencing/reopen, ambiguous-commit handling, and cleanup; it is
-        not replicated-durability evidence. The durable recovery sequence now
-        restarts TiDB before TiKV and PD, then rechecks TiDB readiness;
-        top-level provider schema setup is also serialized so concurrent DDL
-        does not obscure restart status. The latest CI durable
-        <code>tidb</code>, <code>tidb-rustfs</code>, and
-        <code>ozone-tidb</code> steps were canceled before their evidence
-        markers, and the corrected post-unmount CLI run was canceled as well;
-        no durable hosted pass is counted.
-        A dedicated <code>ozone-tidb</code> CI job is now wired on Ubuntu 24.04
-        with Node 24 and TiDB v8.5.7 durable-topology settings against the real
-        Ozone gateway; no green hosted result is counted yet.
+        W08 is 100% complete for its defined functional acceptance scope:
+        terminal hosted jobs qualify the durable 3PD/3TiKV restart sequence,
+        provider fencing and ambiguous-commit behavior, live Linux TiDB/RustFS
+        Node/CLI/FUSE composition, ARM Node, Ubuntu NFS, and macOS native-NFS
+        rows. Authoritative hosted runs include
+        <code>35624385556</code>, <code>35627761501</code>, and
+        <code>35631063978</code>; each remains revision- and scope-specific.
+        Production is still NO-GO: topology, secret management/IAM, backup and
+        restore, upgrade/rollback, SLOs/capacity, security sign-off, on-call,
+        canary, and release-owner approval remain open. A green functional
+        packet is not production deployment evidence.
       </>
     ),
     sources: [
@@ -638,6 +624,7 @@ LIMIT 20;`,
       { label: 'TiDB/RustFS consumer matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w08--tidb' },
       { label: 'Durable Ozone/TiDB CI gate', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
       { label: 'TiDB progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-progress-ledger.md' },
+      { label: 'TiDB production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-production-rollout.md' },
     ],
   },
   foundationdb: {
@@ -888,18 +875,19 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         production collector and alert routing, workload-identity rotation,
         approved metadata ownership, staging drills, canary, rollback, and
         post-deploy smoke open. The latest hosted qualification run
-        <code>35625592317</code> passed provenance and the four synthetic
-        contract suites, then failed closed at
+        <code>35629600687</code> at <code>62383df</code> passed provenance and
+        the four synthetic contract suites, then failed closed at
         <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code> before AWS
-        authentication; it is therefore not AWS identity or production
-        acceptance evidence.
+        authentication; its retained artifact is
+        <code>aws-s3-qualification-35629600687-1</code>. It does not close AWS
+        identity or production acceptance.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35625592317' },
+      { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35629600687' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },
@@ -911,7 +899,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and current arm64 block/restart/CAS/range checkpoint; SQLite/PGlite/TiDB and durable FoundationDB composition plus Node/Rust CLI consumer evidence now exist locally. Hosted Ozone and SQLite/PGlite composition jobs passed on one revision, while durable TiDB and retained-head acceptance remain open.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the retained W26 packet qualifies the documented Ozone/provider scope, while the customer topology, 1,000-IOPS/SLO, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -1018,7 +1006,17 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         and Rust CLI against live Ozone/PGlite/R2-compatible services, but the
         hosted result is still pending and revision-specific. Durable
         multi-node TiDB, secure/replicated Ozone deployment, and the broader
-        backend matrix are not yet accepted.
+        backend matrix are not yet accepted. The retained W26 packet on
+        <code>9c098e5</code> / hosted run <code>35585066458</code> passed the
+        documented Ozone, Ozone-compositions, Ozone-TiDB, and generic TiDB
+        qualification jobs within their stated scope. W26's credential-free
+        rollout contract fixes the Tier 1 99.99% availability objective,
+        1,000 IOPS per drive, five-minute RPO/RTO, TLS/SigV4, tenant-scoped
+        prefixes, and three-node/three-replica/three-domain topology; these are
+        customer/Ozone requirements, not proof of a deployed environment.
+        Later current-tip pushes have no terminal all-provider packet, and
+        secure customer topology, backup/DR, measured SLO/capacity, and
+        release/canary/rollback remain open.
       </>
     ),
     sources: [
@@ -1027,6 +1025,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone composition CI job', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
       { label: 'Durable FoundationDB composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
+      { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

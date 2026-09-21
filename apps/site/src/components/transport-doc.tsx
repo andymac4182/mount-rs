@@ -175,6 +175,12 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         panic and stop-aware cancellation into bounded session cleanup. Local
         macOS and Linux-target checks pass; hosted Linux callback, fault,
         crash/restart, and concurrent native execution remain external.
+        The mount-free N-API session keeps INIT defaults conservative rather
+        than advertising asynchronous or parallel capabilities that the
+        serialized path cannot provide. Native FUSE now has up to 16
+        positional read workers with a serialized reply writer and targeted
+        interrupt handling; the eight-client native harness compiles and
+        remains awaiting hosted <code>/dev/fuse</code> execution.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
         The no-reply <code>FORGET</code> path follows the pinned session
@@ -200,7 +206,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
     name: 'NFS',
     eyebrow: 'Transport / network filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Native macOS NFSv3 and Linux checkpoints plus shared v3/v4 session and connection views exist; rootless reconnect and bounded pipelining pass, while the current workstream remains NO-GO pending native NFSv4.1, hosted lifecycle, and crash/durability qualification.',
+    maturityNote: 'Native macOS NFSv3 and Linux checkpoints plus shared v3/v4 session and connection views exist; rootless reconnect, bounded pipelining, and v4 channel/state knobs pass, while the current workstream remains NO-GO pending native NFSv4.1, hosted lifecycle, and crash/durability qualification.',
     summary: (
       <>
         NFS is the current native macOS path and a Linux option when the host
@@ -265,20 +271,24 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         Current-tree Rust and N-API checks retain backend handles across NFSv3
         unlink and NFSv4 rename, expose shared v3/v4 state, and exercise live
         connection/client close and wait behavior. The focused package packet
-        passed 31 unit, rootless wire 1, transport concurrency 1,
-        transport-error 4, v4 barrier 1, and v4 wire 3 cases; the release
+        passed 33 unit, rootless wire 1, transport concurrency 1,
+        transport-error 4, v4 barrier 1, and v4 wire 5 cases; the release
         addon, generated typecheck, and live N-API server integration also
         pass. Rootless NFSv4.1 survives an orderly TCP reconnect while the
         server remains alive, and eight pipelined NFSv3 MOUNT NULL calls pass
         with <code>max_in_flight=4</code>. A restart-boundary test confirms
         the old v4 session is rejected with <code>NFS4ERR_BADSESSION</code> by
         a replacement server, proving that session/lease state is process-local
-        rather than crash-durable. The refreshed opt-in macOS native NFSv3
-        loopback mount passed 1/1 in 0.11s with filesystem round trips and
-        bounded cleanup. The pinned oracle passes 266 NFSv3/MOUNT and NFSv4.1
-        TCP cases with 18 capability/root skips; bounded <code>maxHandles</code>
-        LRU and NFSv4 open-state pinning are covered. Native Linux NFSv4.1,
-        the full stateful/member matrix, hosted lifecycle, and
+        rather than crash-durable. The v4 state packet now covers lease,
+        session, fore-slot, COMPOUND, replay-cache, open/lock, and reclaim
+        ceilings, including <code>NFS4ERR_TOOSMALL</code>,
+        <code>NFS4ERR_NOSPC</code>, refused-session replay, and per-file lock
+        enforcement. The refreshed opt-in macOS native NFSv3 loopback mount
+        passed 1/1 in 0.11s with filesystem round trips and bounded cleanup.
+        The pinned oracle passes 266 NFSv3/MOUNT and NFSv4.1 TCP cases with 18
+        capability/root skips; bounded <code>maxHandles</code> LRU and NFSv4
+        open-state pinning are covered. Native Linux NFSv4.1, the full
+        stateful/member matrix, hosted lifecycle, and
         crash/concurrency/durability remain external gates.
       </>
     ),
@@ -295,7 +305,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
     name: '9P2000.L',
     eyebrow: 'Transport / lightweight TCP filesystem protocol',
     maturity: 'Experimental',
-    maturityNote: 'Rootless protocol/server, attached Node Duplex, and a prior hosted Linux lifecycle checkpoint exist; the current packet exposed a server-close cleanup failure and its corrective hosted reruns were canceled, so the transport remains experimental with no full production mount claim.',
+    maturityNote: 'Rootless protocol/server, attached Node Duplex, and a hosted Linux lifecycle qualification now pass for the supported scope; public parity remains partial, and crash/reset/half-close recovery is supervisor-owned rather than a library guarantee.',
     summary: (
       <>
         9P is a mount-free-friendly transport: the server and per-connection
@@ -357,17 +367,18 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       <>
         The current attached-stream/session packet passed focused Rust/N-API
         lifecycle and fault tests, strict Clippy, generated typechecks, and
-        the pinned 44-case 9P codec differential. Hosted run
-        <code>35616832528</code> passed the prior Linux kernel-client
-        <code>9p</code>/<code>9pnet_fd</code> mount/read/write/unmount packet,
-        but the current shutdown/reaping and eight-worker concurrent
-        mounted-I/O harness requires a fresh revision-matched hosted run. The
-        latest hosted packet found a live mountpoint after
-        <code>P9Mount::unmount()</code> reported success; the local
-        cancellation-safe unmount fix passes 28/28 focused tests, but runs
-        <code>35626340158</code> and <code>35626765411</code> were canceled
-        before jobs materialized. Native reset, half-close, process-crash, and
-        broader W01 evidence remain open.
+        the pinned 44-case 9P codec differential. Dedicated hosted run
+        <code>35628187344</code> at the exact published revision passed
+        <code>9p</code>/<code>9pnet_fd</code> probing and all four ignored native
+        tests: eight-worker concurrent mounted I/O, server-close/kernel-
+        connection release, ordinary mount/unmount, and external umount. This
+        closes the supported Linux lifecycle scope; automatic recovery after a
+        process crash, arbitrary kernel reset, or half-close remains outside
+        the library contract and needs supervisor-level evidence. The N-API
+        surface now also exposes scalar options, <code>userFor</code>, and a
+        transport-backed live lock client, while upstream driver/fid/debug,
+        full fid-graph, option-injection, and property-shaped client parity
+        remain open. Overall production status remains NO-GO.
       </>
     ),
     sources: [
@@ -375,8 +386,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'W01 9P progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_9P_PROGRESS.md' },
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
-      { label: 'Current hosted 9P cleanup packet', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35625437327' },
-      { label: 'Canceled corrective 9P rerun', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35626340158' },
+      { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35628187344' },
     ],
   },
   fskit: {
@@ -556,7 +566,7 @@ curl -H 'Authorization: Bearer demo-memory' \
     name: 'WebDAV',
     eyebrow: 'Transport / HTTP filesystem protocol',
     maturity: 'Preview',
-    maturityNote: 'Buffered protocol/session and Rust lifecycle evidence exists; direct N-API streaming, active-lock, method, and peer-fault slices now pass locally, while restart/durability, oracle, provider, and native/hosted gates remain open.',
+    maturityNote: 'Pinned pure protocol differential, direct N-API streaming, active-lock, method, peer-fault, and same-session concurrency slices pass locally; member parity, restart/durability, provider, and native/hosted gates remain open.',
     summary: (
       <>
         WebDAV makes the filesystem contract available through standard HTTP
@@ -612,8 +622,8 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       <>
         The current tracker records 13 Rust WebDAV tests, a passing isolated
         locked N-API check, release addon/declaration generation, and a direct
-        buffered session/options/driver/auth slice. The pinned oracle
-        differential is explicitly skipped without <code>MOUNTX_SOURCE</code>.
+        buffered session/options/driver/auth slice. The pinned pure protocol
+        differential now passes at the recorded oracle revision.
         The direct streaming facade passes a three-chunk PUT, multi-chunk GET,
         early response-iterator return, and deliberate request-body failure
         mapping for async iterables and Web ReadableStreams. Active
@@ -622,11 +632,15 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         session view to zero, and the direct method matrix covers OPTIONS,
         MKCOL, PUT, HEAD, GET, PROPFIND, PROPPATCH, COPY, MOVE, LOCK, UNLOCK,
         DELETE, and explicit PATCH refusal. A peer reset produces exactly one
-        typed transport callback with the accepted loopback peer. The N-API
-        listener remains blocked in this sandbox by its loopback bind
-        prerequisite; complete member parity, restart/durability, provider,
-        and native/hosted qualification remain open, and no local protocol
-        pass is promoted to a production mount claim.
+        typed transport callback with the accepted loopback peer. A malformed
+        HTTP request produces one typed callback and clean socket/server
+        teardown. Same-driver recreation preserves file bytes while resetting
+        session locks, and eight parallel direct-session PUTs followed by GETs
+        all return matching bodies. The N-API listener remains blocked in this
+        sandbox by its loopback bind prerequisite; complete member parity,
+        restart/durability, provider, and native/hosted qualification remain
+        open, and no local protocol pass is promoted to a production mount
+        claim.
       </>
     ),
     sources: [

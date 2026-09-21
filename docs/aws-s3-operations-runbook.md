@@ -35,7 +35,7 @@ or backend error messages as metric labels.
 | --- | --- | --- |
 | Provider block latency, success, error, read/write bytes | `mount_rs.operations`, `mount_rs.errors`, `mount_rs.operation.duration_ms`, `mount_rs.bytes.*` with `boundary=provider.blocks` | Dashboard p50/p95/p99 and an error-budget alert for the approved workload SLO |
 | Orphan scan/protection/recent/delete counts | `mount_rs.blocks.reconcile.*` and `mount_rs.blocks.reconciled` | Alert on failed reconciliation, unexpected growth in recent/unprotected objects, and delete volume outside the approved window |
-| S3 gateway request/error/latency classes | bounded `S3Session::stats()` when the gateway is deployed | Alert separately on authentication, conditional conflict, throttling, client, and server classes; never alert on raw object paths |
+| S3 gateway request/error/latency classes | bounded `S3Session::stats()` when the gateway is deployed, including consumed streaming request/response bytes | Alert separately on authentication, conditional conflict, throttling, client, and server classes; never alert on raw object paths |
 | Credential expiry and identity | workload identity health check plus AWS identity/audit logs | Page before expiry/rotation failure; verify the account, role, region, and bucket without printing tokens |
 | Capacity, retention, and cost | S3 storage/request metrics, lifecycle reports, version inventory, and an approved budget | Alert on retained bytes/versions, incomplete multipart uploads, request-rate anomalies, and budget/headroom thresholds |
 
@@ -114,8 +114,9 @@ prefix as a rollback shortcut.
 
 ## Current boundary
 
-The repository currently has local telemetry tests, a reviewable CloudFormation
-resource contract, and live qualification-account AWS tests including PGlite
+The repository currently has local telemetry tests, including streamed S3
+gateway byte accounting, a reviewable CloudFormation resource contract, and
+live qualification-account AWS tests including PGlite
 fencing and a local metadata restore/reopen drill. Production collector
 wiring, retry measurement, credential-rotation evidence, cost/retention
 alerts, approved metadata ownership, staging drills, canary, rollback, and
