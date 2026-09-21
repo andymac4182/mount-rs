@@ -128,6 +128,14 @@ MOUNT_RS_OZONE_TIDB_COMPOSITION=1 ./scripts/test-ozone.sh
 MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION=1 ./scripts/test-ozone.sh
 ```
 
+The CI workflow runs the durable FoundationDB mode in the dedicated
+`ozone-foundationdb` job. A terminal pass must include the
+`FOUNDATIONDB_TEST_PASS topology=durable ... service_restart=pass` marker,
+the Ozone integration marker, and cleanup; queued, canceled, skipped, or
+failed jobs are not provider acceptance. The hosted lane is still controlled
+CI qualification, not customer Ozone availability, TLS, power-loss, or
+replication evidence.
+
 The TiDB mode delegates topology, restart, and cleanup to
 `scripts/test-tidb.sh` (the default is three PD nodes and three TiKV nodes)
 and runs the real `mount-rs-tidb` ChunkedFs composition twice: seed against
@@ -137,9 +145,8 @@ container, cluster, and cleanup to `scripts/test-foundationdb.sh`; its
 ChunkedFs composition uses Ozone through the Docker host gateway and deletes
 only its scoped object prefix. That explicit mode publishes the Ozone port on
 the local Docker bridge so the disposable client container can reach it; the
-default contract remains loopback-only. These distributed-provider modes are
-manual opt-ins; neither Ozone CI job claims their live acceptance. Both
-modes retain explicit CAS, stale-writer
+default contract remains loopback-only. Both modes retain explicit CAS,
+stale-writer
 fencing, partial-write/truncation, binary multi-chunk, reopen, and cleanup
 assertions. TiDB replication and FoundationDB durability remain deployment
 properties; the tests do not turn a local development cluster into a

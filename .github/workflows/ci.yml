@@ -98,6 +98,28 @@ jobs:
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: sh scripts/test-ozone.sh
 
+  ozone-foundationdb:
+    # W26 requires a provider-specific Ozone packet for every feasible
+    # metadata provider. Keep FoundationDB separate because its harness owns
+    # a multi-container cluster and a disposable native-client image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify durable FoundationDB metadata over Apache Ozone chunks
+        env:
+          MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
+          MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
+          MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
+        run: sh scripts/test-ozone.sh
+
   rustfs:
     runs-on: ubuntu-latest
     timeout-minutes: 25

@@ -1669,6 +1669,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   real multi-node restart evidence, but remains loopback/non-secure test
   deployment evidence rather than production auth, TLS or power-loss proof;
   hosted CI remains revision-specific and pending.
+- A dedicated hosted `ozone-foundationdb` CI job is now wired for the durable
+  three-node FoundationDB metadata path over the live Ozone gateway. It must
+  reach a terminal pass with the durable restart and cleanup markers before
+  the all-feasible-provider production gate can close; no queued, canceled or
+  diagnostic result is promoted to evidence.
 - Historical hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
   Linux-amd64 Ozone gateway (`ozone`, job `106274147767`) and the mixed
   SQLite/PGlite Ozone composition (`ozone-compositions`, job
@@ -1718,7 +1723,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | --- | --- | ---: | --- |
 | P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
 | P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
-| P2 — all-feasible-provider Ozone CI matrix | Open | 20% | Each provider needs its own terminal Ozone CI packet; provider images/versions and CI capacity required |
+| P2 — all-feasible-provider Ozone CI matrix | Ozone CI matrix wired; terminal evidence pending | 30% | SQLite/PGlite and durable TiDB lanes are retained; `ozone-foundationdb` now provides the dedicated durable FoundationDB lane, which still needs a terminal retained result |
 | P3 — authentication, TLS, secrets and redaction | Open | 20% | Secure endpoint/auth, secret references, least privilege, redaction and negative CI tests |
 | P4 — durability/storage failure contract | Partial qualification | 10% | CI client recovery/error evidence plus customer Ozone replication/storage requirements |
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
