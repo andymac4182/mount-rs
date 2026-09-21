@@ -6,6 +6,7 @@
 
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_core::driver::FsDriver;
 use mount_rs_core::storage::{BlockId, BlockStore, MetadataStore};
 use mount_rs_core::{ErrorCode, Loopback, MkdirOptions};
 use mount_rs_r2::{R2BlockStore, R2Config};
@@ -115,6 +116,34 @@ fn expected_after_writes() -> Vec<u8> {
     let final_patch = [0xde, 0xad, 0x00, 0xbe, 0xef];
     expected[2..2 + final_patch.len()].copy_from_slice(&final_patch);
     expected
+}
+
+async fn assert_bounded_listing(filesystem: &dyn FsDriver, phase: &str) {
+    let entries = filesystem
+        .readdir_bounded("/chunks", 2)
+        .await
+        .unwrap_or_else(|_| panic!("TiDB/RustFS {phase} bounded listing failed"));
+    let names = entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        names,
+        BTreeSet::from(["binary", "bounded"]),
+        "TiDB/RustFS {phase} bounded listing returned unexpected entries"
+    );
+    let overflow = filesystem
+        .readdir_bounded("/chunks", 1)
+        .await
+        .expect_err("TiDB/RustFS bounded listing exceeded its configured limit");
+    assert!(
+        overflow.is(ErrorCode::Eoverflow),
+        "TiDB/RustFS {phase} bounded listing returned the wrong overflow error: {overflow}"
+    );
+    println!(
+        "TIDB_RUSTFS_CHUNKED_BOUNDED_READDIR_PASS phase={phase} entries={}",
+        entries.len()
+    );
 }
 
 fn local_rustfs_config() -> R2Config {
@@ -405,6 +434,18 @@ async fn seed_chunked_filesystem(
     file.close()
         .await
         .unwrap_or_else(|_| panic!("could not close the chunked binary file"));
+    let bounded_file = loopback
+        .open("/chunks/bounded", "w+", 0o640)
+        .await
+        .unwrap_or_else(|_| panic!("could not open the bounded-listing fixture file"));
+    bounded_file
+        .write(b"bounded listing fixture", Some(0))
+        .await
+        .unwrap_or_else(|_| panic!("could not write the bounded-listing fixture file"));
+    bounded_file
+        .close()
+        .await
+        .unwrap_or_else(|_| panic!("could not close the bounded-listing fixture file"));
     loopback
         .syncfs()
         .await
@@ -413,6 +454,7 @@ async fn seed_chunked_filesystem(
         loopback.read_file("/chunks/binary").await.unwrap(),
         expected
     );
+    assert_bounded_listing(&filesystem, "seed").await;
     drop(loopback);
     filesystem
         .shutdown()
@@ -583,6 +625,7 @@ async fn reopen_chunked_filesystem(
         .unwrap_or_else(|_| panic!("could not read the reopened RustFS chunks"));
     assert_eq!(actual, expected);
     assert_eq!(loopback.stat("/chunks/binary").await.unwrap().size, 63);
+    assert_bounded_listing(&filesystem, "reopen").await;
     loopback
         .syncfs()
         .await

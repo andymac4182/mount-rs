@@ -82,6 +82,33 @@ impl OperationMetrics {
     }
 }
 
+async fn assert_bounded_listing(filesystem: &dyn FsDriver, phase: &str) -> Result<()> {
+    let entries = filesystem.readdir_bounded("/", 2).await?;
+    let names = entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        names,
+        BTreeSet::from(["binary", "bounded"]),
+        "FoundationDB/RustFS {phase} bounded listing returned unexpected entries"
+    );
+    let overflow = filesystem
+        .readdir_bounded("/", 1)
+        .await
+        .expect_err("FoundationDB/RustFS bounded listing exceeded its configured limit");
+    assert_eq!(
+        overflow.code,
+        ErrorCode::Eoverflow,
+        "FoundationDB/RustFS {phase} bounded listing returned the wrong overflow error: {overflow}"
+    );
+    println!(
+        "FOUNDATIONDB_RUSTFS_CHUNKED_BOUNDED_READDIR_PASS phase={phase} entries={}",
+        entries.len()
+    );
+    Ok(())
+}
+
 #[derive(Debug)]
 struct DeterministicLeaseOracle {
     now_ms: AtomicU64,
@@ -293,6 +320,15 @@ async fn composition_round_trip(
         )));
 
     metrics.measure(file.close()).await?;
+    let bounded_file = metrics
+        .measure(loopback.open("/bounded", "w+", 0o640))
+        .await?;
+    metrics
+        .measure(bounded_file.write(b"bounded listing fixture", Some(0)))
+        .await?;
+    metrics.measure(bounded_file.sync()).await?;
+    metrics.measure(bounded_file.close()).await?;
+    assert_bounded_listing(&filesystem, "composition").await?;
     metrics.emit("composition");
     drop(loopback);
     let revision = metadata.load().await?.revision;
@@ -324,6 +360,7 @@ async fn verify_reopen(
     let loopback = Loopback::new(filesystem.clone());
     assert_eq!(loopback.read_file("/binary").await?, expected);
     assert_eq!(loopback.stat("/binary").await?.size, expected.len() as u64);
+    assert_bounded_listing(&filesystem, "reopen").await?;
     drop(loopback);
     filesystem.shutdown().await?;
     drop(filesystem);
