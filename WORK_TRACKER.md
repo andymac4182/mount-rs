@@ -1076,8 +1076,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
 The demo and W08 functional acceptance are not production approval. Track the
 following gates separately from implementation, hosted provider, and native
 platform evidence; the detailed ledger and evidence boundaries are in
-`docs/W08-progress-ledger.md`. No production gate is checked until its exit
-evidence is terminal, owned and reproducible in a production-like environment.
+`docs/W08-progress-ledger.md`; the deployment contract and rollout sequence
+are in [`docs/W08-production-rollout.md`](docs/W08-production-rollout.md). No
+production gate is checked until its exit evidence is terminal, owned and
+reproducible in a production-like environment.
 
 - [ ] **W08-P01 (20%) — deployment contract/topology:** choose and document the
   managed or self-hosted TiDB/PD/TiKV and object-storage architecture, HA,

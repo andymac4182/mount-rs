@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-21 10:44 UTC / 20:44 AEST**
+Status snapshot: **2026-09-21 10:50 UTC / 20:50 AEST**
 Repository: `andymac4182/mount-rs`  
 Functional evidence tip (before this documentation chunk): `origin/main` at
 `bb27fe0`
@@ -56,6 +56,8 @@ a release-readiness measurement and must not be used to approve a rollout. Each
 production item below remains open until its required evidence is produced in a
 production-like environment. “Implementation” rows are repository work; the
 hosted/provider/native rows require external systems or platform evidence.
+The executable deployment contract and rollout sequence are also maintained in
+[`docs/W08-production-rollout.md`](W08-production-rollout.md).
 
 | ID | Production work item | Gate class | Status and completion | Evidence currently available | Remaining actions / exit evidence | Provisional engineering time | External blockers / dependency |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -130,6 +132,7 @@ for a real TiDB, RustFS, PD/TiKV restart, or native kernel mount:
 | CI `35585066458` aggregate | Cancelled after W08 jobs completed | `main` concurrency superseded the workflow; unrelated FoundationDB, Windows Node and macOS/Windows Rust jobs were also reported separately. The W08 job conclusions above are terminal successes and are the evidence counted here. |
 | CI `35588858142`, source `e515036`, `tidb-tls-compile` job `106298487587` | PASS — P01/P07 implementation capability | Hosted compile gate passed for `mount-rs-tidb`, Rust SDK, CLI and N-API with `rustls`. This proves feature propagation, not certificates, secret injection, a live TLS handshake, provider IAM, or production deployment. |
 | CI `35589825356`, source `ea062c0`, `tidb-tls-compile` job `106301529923` | PASS — P07 implementation guard | Hosted compile and credential-free positive/negative URL-policy checks passed. The guard requires `require_ssl=true` and rejects disabled CA, hostname, or built-in-root verification; no live endpoint or production identity was used. |
+| CI `35590503133`, source `c54c1a4`, `tidb-tls-compile` job `106303655177` | PASS — P07 implementation guard | A later current-main run again passed the TLS-enabled provider/SDK/CLI/N-API compile and credential-free positive/negative URL-policy checks. This remains implementation/guard evidence, not a live provider or production pass. |
 
 The W08 rows above use exact terminal job IDs and markers. The aggregate
 workflow conclusion is retained as `Cancelled` because later `main` pushes
@@ -199,6 +202,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-21 10:29–10:37 | Added `scripts/test-tidb-tls.sh`, validated its positive and fail-closed URL-policy paths without credentials, and added the guardrail checks to the hosted TLS compile job. | ~8 min | ~0 min | A reproducible live TLS-provider command now exists; no live endpoint or production IAM/certificate evidence is available here. |
 | 2026-09-21 10:37–10:41 | Followed hosted run `35589825356` and retained `tidb-tls-compile` job `106301529923` as terminal success for source `ea062c0`. | ~1 min | ~3 min hosted wait | The fail-closed TLS deployment guard is remotely verified; live credentials, certificates and production provider evidence remain open. |
 | 2026-09-21 10:41–10:44 | Ran the TLS-enabled TiDB provider unit suite and strict-Clippy gate locally; the six unit tests passed and the ignored service tests remained explicit. | ~3 min | ~0 min | Repository TLS implementation is locally tested and lint-clean; no live endpoint is available for P07 closure. |
+| 2026-09-21 10:44–10:50 | Reconciled the current-main hosted TLS pass and added `docs/W08-production-rollout.md` with the deployment contract, executable evidence matrix, rollout sequence and explicit NO-GO/blocker rules; linked it from `WORK_TRACKER.md`. | ~6 min | ~3 min hosted/remote observation | Production tracking now has both a detailed ledger and an operational rollout contract; external deployment gates remain open. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
