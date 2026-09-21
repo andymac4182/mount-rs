@@ -1791,9 +1791,17 @@ reproducible in a production-like environment.
   accounting, peer-aware `Connection`/`Server` transport hooks, and a
   reset-on-close gateway fault. The locked S3 target passed 4 unit, 6
   chunked, 17 gateway, and 5 public-API tests with host loopback permission.
-  S3 N-API streaming/member parity, direct JavaScript peer-fault evidence,
-  live AWS/R2, and broader restart/durability/concurrency/native gates remain
-  open; W01-S3 remains **NO-GO**.
+- [x] The W01-S3 N-API streaming packet exposes `S3Server.session`, buffered
+  and incremental `S3Session` request/response methods, async-iterable and
+  `ReadableStream` request bodies, response cancellation, generator-failure
+  mapping, and async metrics snapshots. The release N-API binding loaded
+  directly from the locked Rust build, and the host-enabled N-API server
+  integration passed streamed PUT/GET, bucket isolation, cancellation, and
+  metrics-delta checks. The generated `pnpm build`, package typecheck, and
+  strict TypeScript fixture check passed. Direct JavaScript peer-fault
+  evidence, complete S3 member parity, live AWS/R2, and broader
+  restart/durability/concurrency/native gates remain open; W01-S3 remains
+  **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.

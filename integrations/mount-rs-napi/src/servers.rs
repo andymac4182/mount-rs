@@ -11,6 +11,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use mount_rs_9p::{
@@ -28,8 +29,12 @@ use mount_rs_nfs::{
     NfsTransportErrorHook as TransportNfsErrorHook,
 };
 use mount_rs_s3::{
-    Credentials as TransportS3Credentials, S3Server as TransportS3Server,
-    S3ServerOptions as TransportS3ServerOptions, S3Session, S3SessionOptions,
+    Credentials as TransportS3Credentials, HeaderEntry as TransportS3HeaderEntry,
+    S3RequestBody as TransportS3RequestBody, S3RequestHead as TransportS3RequestHead,
+    S3Response as TransportS3Response, S3ResponseBodyStream as TransportS3ResponseBodyStream,
+    S3Server as TransportS3Server, S3ServerOptions as TransportS3ServerOptions,
+    S3Session as TransportS3Session, S3SessionOptions, S3StreamBody as TransportS3StreamBody,
+    S3StreamResponse as TransportS3StreamResponse,
 };
 use mount_rs_webdav::{
     WebdavRequestHead as TransportWebdavRequestHead, WebdavResponse as TransportWebdavResponse,
@@ -39,8 +44,10 @@ use mount_rs_webdav::{
     WebdavTransportErrorHook as TransportWebdavErrorHook,
 };
 use napi::bindgen_prelude::{
-    BigInt, Buffer, Either, FnArgs, Function, JsObjectValue, Object, Reference, Unknown,
+    BigInt, Buffer, Either, FnArgs, Function, JsObjectValue, Object, ReadableStream, Reader,
+    Reference, Unknown,
 };
+use napi::futures_core::Stream as FuturesStream;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi::{Error, Status, sys};
 use napi_derive::napi;
@@ -1215,9 +1222,299 @@ fn s3_buckets(
     }
 }
 
+#[napi(object)]
+pub struct S3SessionStats {
+    pub requests: f64,
+    pub replies: f64,
+    pub errors: f64,
+    pub operations: HashMap<String, f64>,
+    pub duration_ms_total: f64,
+    pub duration_ms_max: f64,
+    pub request_bytes: f64,
+    pub response_bytes: f64,
+    pub error_classes: HashMap<String, f64>,
+}
+
+#[derive(Clone)]
+#[napi(object)]
+pub struct S3Header {
+    pub name: String,
+    pub value: String,
+}
+
+#[napi(object)]
+pub struct S3RequestHead {
+    pub method: String,
+    pub target: String,
+    pub headers: Vec<S3Header>,
+}
+
+#[napi(object)]
+pub struct S3Response {
+    pub status: u32,
+    pub headers: Vec<S3Header>,
+    #[napi(ts_type = "Buffer")]
+    pub body: Buffer,
+}
+
+impl From<TransportS3Response> for S3Response {
+    fn from(response: TransportS3Response) -> Self {
+        Self {
+            status: response.status as u32,
+            headers: response
+                .headers
+                .into_iter()
+                .map(|(name, value)| S3Header { name, value })
+                .collect(),
+            body: Buffer::from(response.body),
+        }
+    }
+}
+
+/// Adapt a JavaScript Web ReadableStream to the transport's incremental S3
+/// request-body contract. `Reader` performs one JS read at a time, preserving
+/// the transport's existing backpressure and avoiding a second body buffer at
+/// the N-API boundary.
+struct NapiS3RequestBody {
+    reader: Reader<Buffer>,
+}
+
+impl FuturesStream for NapiS3RequestBody {
+    type Item = std::result::Result<Vec<u8>, String>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.reader).poll_next(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Ready(Some(Ok(buffer))) => Poll::Ready(Some(Ok(buffer.to_vec()))),
+            Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.to_string()))),
+        }
+    }
+}
+
+enum S3ResponseBodyState {
+    Bytes(Option<Vec<u8>>),
+    Stream(Option<TransportS3ResponseBodyStream>),
+    Closed,
+}
+
+/// A pull-based S3 response body retained by the JavaScript facade. Buffered
+/// protocol responses and file-backed object streams share the same async
+/// iterator shape, while stream variants remain owned by the transport until
+/// JavaScript asks for each next chunk.
+#[derive(Clone)]
+#[napi]
+pub struct S3BodyStream {
+    inner: Arc<tokio::sync::Mutex<S3ResponseBodyState>>,
+}
+
+impl S3BodyStream {
+    fn new(body: TransportS3StreamBody) -> Self {
+        let state = match body {
+            TransportS3StreamBody::Bytes(bytes) => S3ResponseBodyState::Bytes(Some(bytes)),
+            TransportS3StreamBody::Stream(stream) => S3ResponseBodyState::Stream(Some(stream)),
+        };
+        Self {
+            inner: Arc::new(tokio::sync::Mutex::new(state)),
+        }
+    }
+}
+
+#[napi]
+impl S3BodyStream {
+    /// Read one response chunk, or `null` after EOF. A single mutex prevents
+    /// concurrent JavaScript pulls from advancing the transport stream twice.
+    #[napi]
+    pub async fn read_chunk(&self) -> napi::Result<Option<Buffer>> {
+        let mut state = self.inner.lock().await;
+        let current = std::mem::replace(&mut *state, S3ResponseBodyState::Closed);
+        match current {
+            S3ResponseBodyState::Bytes(Some(bytes)) => Ok(Some(Buffer::from(bytes))),
+            S3ResponseBodyState::Bytes(None)
+            | S3ResponseBodyState::Stream(None)
+            | S3ResponseBodyState::Closed => Ok(None),
+            S3ResponseBodyState::Stream(Some(mut stream)) => {
+                let next = std::future::poll_fn(|cx| stream.as_mut().poll_next(cx)).await;
+                match next {
+                    None => Ok(None),
+                    Some(Ok(bytes)) => {
+                        *state = S3ResponseBodyState::Stream(Some(stream));
+                        Ok(Some(Buffer::from(bytes)))
+                    }
+                    Some(Err(error)) => Err(transport_error("S3 response body", error)),
+                }
+            }
+        }
+    }
+
+    /// Close an unread or partially-read response body. The JavaScript
+    /// async-iterator facade calls this from `return()` on cancellation;
+    /// dropping the transport stream also signals file-reader cancellation.
+    #[napi]
+    pub async fn close(&self) -> napi::Result<()> {
+        let mut state = self.inner.lock().await;
+        let _ = std::mem::replace(&mut *state, S3ResponseBodyState::Closed);
+        Ok(())
+    }
+}
+
+#[napi]
+pub struct S3StreamResponse {
+    status: u32,
+    headers: Vec<S3Header>,
+    body: Option<S3BodyStream>,
+}
+
+#[napi]
+impl S3StreamResponse {
+    #[napi(getter)]
+    pub fn status(&self) -> u32 {
+        self.status
+    }
+
+    #[napi(getter)]
+    pub fn headers(&self) -> Vec<S3Header> {
+        self.headers.clone()
+    }
+
+    #[napi(getter, ts_return_type = "AsyncIterable<Uint8Array> | null")]
+    pub fn body(&self) -> Option<S3BodyStream> {
+        self.body.clone()
+    }
+}
+
+fn s3_stream_response(response: TransportS3StreamResponse) -> S3StreamResponse {
+    S3StreamResponse {
+        status: response.status as u32,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|(name, value)| S3Header { name, value })
+            .collect(),
+        body: response.body.map(S3BodyStream::new),
+    }
+}
+
+struct S3StreamRequestState {
+    session: Arc<TransportS3Session>,
+    head: TransportS3RequestHead,
+    body: TransportS3RequestBody,
+}
+
+/// The synchronous N-API entrypoint safely captures the JavaScript stream
+/// reader. The transport future runs through `run` after that non-Send JS
+/// wrapper has left the N-API call frame.
+#[napi]
+pub struct S3StreamRequest {
+    inner: tokio::sync::Mutex<Option<S3StreamRequestState>>,
+}
+
+#[napi]
+impl S3StreamRequest {
+    #[napi]
+    pub async fn run(&self) -> napi::Result<S3StreamResponse> {
+        let request = self
+            .inner
+            .lock()
+            .await
+            .take()
+            .ok_or_else(|| transport_error("S3 request stream", "request already run"))?;
+        let response = request
+            .session
+            .handle_request_stream(request.head, request.body)
+            .await;
+        Ok(s3_stream_response(response))
+    }
+}
+
+fn transport_s3_head(head: S3RequestHead) -> TransportS3RequestHead {
+    TransportS3RequestHead {
+        method: head.method,
+        target: head.target,
+        headers: head
+            .headers
+            .into_iter()
+            .map(|header| TransportS3HeaderEntry::new(header.name, header.value))
+            .collect(),
+    }
+}
+
+/// Read-only N-API view of the in-process S3 session shared by a server.
+/// Request dispatch remains owned by the Rust session; this view exposes the
+/// streaming boundary without taking ownership of the underlying drivers.
+#[napi]
+pub struct S3Session {
+    inner: Arc<TransportS3Session>,
+}
+
+#[napi]
+impl S3Session {
+    /// Handle one in-process, buffered S3 request without an HTTP socket.
+    #[napi]
+    pub async fn handle_request(&self, head: S3RequestHead, body: Option<Buffer>) -> S3Response {
+        self.inner
+            .handle_request(
+                transport_s3_head(head),
+                body.map(|value| value.to_vec()).unwrap_or_default(),
+            )
+            .await
+            .into()
+    }
+
+    /// Capture one in-process S3 request body stream without entering the
+    /// async N-API future while it still owns a JavaScript stream wrapper.
+    #[napi]
+    pub fn handle_request_stream(
+        &self,
+        head: S3RequestHead,
+        body: ReadableStream<'_, Buffer>,
+    ) -> napi::Result<S3StreamRequest> {
+        let reader = body
+            .read()
+            .map_err(|error| transport_error("S3 request body", error))?;
+        Ok(S3StreamRequest {
+            inner: tokio::sync::Mutex::new(Some(S3StreamRequestState {
+                session: Arc::clone(&self.inner),
+                head: transport_s3_head(head),
+                body: Box::pin(NapiS3RequestBody { reader }),
+            })),
+        })
+    }
+
+    #[napi(getter)]
+    pub fn bucket_names(&self) -> Vec<String> {
+        self.inner.bucket_names()
+    }
+
+    /// Read a coherent snapshot of the transport-owned session metrics.
+    #[napi]
+    pub async fn stats(&self) -> S3SessionStats {
+        let stats = self.inner.stats().await;
+        S3SessionStats {
+            requests: stats.requests as f64,
+            replies: stats.replies as f64,
+            errors: stats.errors as f64,
+            operations: stats
+                .operations
+                .into_iter()
+                .map(|(name, count)| (name, count as f64))
+                .collect(),
+            duration_ms_total: stats.duration_ms_total as f64,
+            duration_ms_max: stats.duration_ms_max as f64,
+            request_bytes: stats.request_bytes as f64,
+            response_bytes: stats.response_bytes as f64,
+            error_classes: stats
+                .error_classes
+                .into_iter()
+                .map(|(class, count)| (format!("{class:?}"), count as f64))
+                .collect(),
+        }
+    }
+}
+
 #[napi]
 pub struct S3Server {
-    session: Arc<S3Session>,
+    session: Arc<TransportS3Session>,
     options: TransportS3ServerOptions,
     host: String,
     requested_port: u16,
@@ -1229,6 +1526,13 @@ pub struct S3Server {
 
 #[napi]
 impl S3Server {
+    #[napi(getter)]
+    pub fn session(&self) -> S3Session {
+        S3Session {
+            inner: Arc::clone(&self.session),
+        }
+    }
+
     #[napi(getter)]
     pub fn host(&self) -> String {
         self.host.clone()
@@ -1327,7 +1631,7 @@ pub fn create_s3_server(
 ) -> napi::Result<S3Server> {
     let (host, requested_port, bucket, server_options, session_options) = s3_options(options)?;
     let buckets = s3_buckets(source, bucket)?;
-    let session = Arc::new(S3Session::from_buckets_with_options(
+    let session = Arc::new(TransportS3Session::from_buckets_with_options(
         buckets,
         session_options,
     ));

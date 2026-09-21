@@ -151,16 +151,15 @@ pub struct S3Request {
     pub body: Vec<u8>,
 }
 
-pub(crate) type S3RequestBody = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + Send>>;
-pub(crate) type S3ResponseBodyStream =
-    Pin<Box<dyn Stream<Item = Result<Vec<u8>, std::io::Error>> + Send>>;
+pub type S3RequestBody = Pin<Box<dyn Stream<Item = Result<Vec<u8>, String>> + Send>>;
+pub type S3ResponseBodyStream = Pin<Box<dyn Stream<Item = Result<Vec<u8>, std::io::Error>> + Send>>;
 
-pub(crate) enum S3StreamBody {
+pub enum S3StreamBody {
     Bytes(Vec<u8>),
     Stream(S3ResponseBodyStream),
 }
 
-pub(crate) struct S3StreamResponse {
+pub struct S3StreamResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: Option<S3StreamBody>,
@@ -353,7 +352,7 @@ impl S3Session {
     /// byte-buffer API.  The Axum boundary uses this sibling entry point so
     /// uploads are handed to the driver as the HTTP body arrives and object
     /// downloads are pulled from the driver only as Axum asks for more data.
-    pub(crate) async fn handle_request_stream(
+    pub async fn handle_request_stream(
         &self,
         head: S3RequestHead,
         body: S3RequestBody,

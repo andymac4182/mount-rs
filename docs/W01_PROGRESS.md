@@ -106,7 +106,7 @@ surfaces.
 | Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
 | Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
 | NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with v3/v4-aware direct request routing, shared v3/v4 counters and sorted BigInt handle snapshots, a v4 session view, mounts, destroyed state, live connection objects/count, and close/wait lifecycle; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; the full upstream object/session/handle/attach surface and native qualification remain | 75% | — |
-| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and the WebDAV subpath now exposes pinned constants/status tables; S3 Rust gateway connection/peer-fault coverage is green, while streaming N-API bodies, protocol/XML/lock helper barrels, direct JavaScript peer-fault injection, and complete option/member parity remain | 70% | — |
+| S3 and WebDAV public Node surfaces | Partial | Native server facades exist; S3/WebDAV `drainTimeout` and `onTransportError` option shapes now map, both expose buffered direct `handleRequest`, WebDAV malformed-connection evidence passes, both server objects expose shared session/statistics views, S3/WebDAV expose live connection views, S3 peer-aware connection-error reporting passes at the Rust transport boundary, and the WebDAV subpath now exposes pinned constants/status tables; S3 now also exposes an incremental N-API `handleRequestStream` boundary with cancellation and async metrics, while protocol/XML/lock helper barrels, direct JavaScript peer-fault injection, generated package typecheck, and complete option/member parity remain | 72% | — |
 | CLI parity and native consumer behavior | Partial | SDK-backed Rust/Node CLI and macOS NFS self-tests pass; exact oracle/native/hosted coverage remains | 65% | — |
 
 Latest W01.1 action: the shared `useDriverIno` option was added to the public
@@ -160,10 +160,12 @@ connection session with a direct `Rversion` reply, while the Rust/N-API 9P
 integration, pinned 44-case differential, generated typecheck, release build,
 and combined 9P/NFS/N-API Clippy remain green. These direct methods still do
 not establish the oracle's v3/v4 NFS router or 9P stream/attach parity. The S3
-server-object follow-up now exposes a typed buffered `S3Session.handleRequest`
-with header/response mapping; a direct PUT with its required content-length
-and the existing loopback PUT/GET/404 lane pass. Streaming request bodies and
-S3 assertion retention remain unqualified; the S3 server's live
+server-object follow-up now exposes typed buffered `S3Session.handleRequest`
+and incremental `S3Session.handleRequestStream` request/response bodies with
+header mapping, cancellation, and an async metrics snapshot; direct streamed
+PUT/GET, response cancellation, generator failure mapping, and the existing
+loopback PUT/GET/404 lane pass. S3 assertion retention remains unqualified;
+the S3 server's live
 `connections` count now follows accepted TCP socket lifetimes and disconnect
 cleanup in both Rust and N-API loopback tests. Its tracked TCP boundary also
 reports a peer-aware `Connection` transport event on reset-on-close, verified
@@ -288,6 +290,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-NFS | Added active NFS socket-task accounting with abort-safe close draining and read-only sorted BigInt shared-handle snapshots on both the v3 and v4 N-API views. Rust NFS tests passed 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; the release addon, generated typecheck, and live N-API server integration passed | — | 72% W01.1 planning view | Full v3/v4 stateful matrix, remaining upstream session/member parity, hosted lifecycle, Linux NFSv4.1 and crash/durability gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Added live NFS connection objects with stable id/peer/shared-session views and abort-safe `close`/`waitClosed`; the `./nfs` subpath identity check, release addon, generated typecheck, distribution check, and host-enabled N-API server integration passed | — | 75% W01.1 planning view | Full v3/v4 stateful matrix, hosted lifecycle, Linux NFSv4.1, crash/durability, and any remaining upstream member differences remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | The refreshed opt-in macOS native NFSv3 loopback mount gate passed 1/1 in 0.14s, including filesystem round trips and bounded cleanup | — | 75% W01.4 planning view | Linux NFSv4.1, Linux 9P, hosted lifecycle, full stateful parity, crash/concurrency/durability, and live-provider gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-S3 | Exposed the Rust S3 streaming request/response boundary through the N-API session: async-iterable/`ReadableStream` request bodies, incremental response iteration, cancellation, generator-failure mapping, `S3Server.session`, and async metrics snapshots; the generated release package build, package typecheck, direct release binding load, and host-enabled `node test/servers.mjs` passed, while N-API Rust check/Clippy, formatting, the strict TypeScript fixture check, and the locked S3 Rust target remained green | — | 72% W01.1 planning view | Direct JavaScript peer-fault evidence, complete S3 member parity, live AWS/R2, and broader fault/restart/durability/concurrency/native gates remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 

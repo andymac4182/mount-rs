@@ -195,6 +195,14 @@ export interface FuseSessionInodeTable {
 }
 `
 if (!types.includes("export interface FuseSessionStats")) types += fuseSessionTypes
+const s3RequestStreamTypes = `
+export type S3RequestStreamBody = AsyncIterable<Uint8Array> | ReadableStream<Uint8Array>
+`
+types = types.replace(
+  /handleRequestStream\(head: S3RequestHead, body: ReadableStream<Buffer>\): S3StreamRequest/g,
+  "handleRequestStream(head: S3RequestHead, body: S3RequestStreamBody): Promise<S3StreamResponse>",
+)
+if (!types.includes("export type S3RequestStreamBody =")) types += s3RequestStreamTypes
 const utilityTypes = 'import type { FsError, FsErrorOptions } from "./types/root.js"'
 if (!types.includes(utilityTypes)) {
   types += `\n${utilityTypes}\nexport type { ErrnoCode, FsError, FsErrorOptions } from "./types/root.js"\nexport { ERRNO_CODES, joinPath } from "./types/root.js"\n`
