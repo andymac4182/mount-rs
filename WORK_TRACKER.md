@@ -2975,6 +2975,21 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `04c7ba9d-ad9f-40aa-a5b2-d28b9a46a564` found zero reportable findings.
   Hosted provider performance, artifact review and customer capacity remain
   open; no current-tip hosted result is promoted.
+- [x] W26.13 Add the credential-free customer production-rollout contract.
+  `scripts/verify-w26-ozone-rollout-contract.mjs` requires the Tier-1
+  99.99%-availability/5-minute-RPO/5-minute-RTO envelope, qualified Ozone
+  version and secure TLS/SigV4 references, tenant-scoped prefixes, three-node/
+  three-replica/three-failure-domain durable topology, all four advertised
+  metadata providers, operational controls and customer-owned backup/restore
+  drills. The positive declaration and independent weak-RTO and inline-secret
+  negative fixtures run without provider connections or credential values; the
+  policy log and one-revision evidence packet require their markers. Local
+  contract, packet, benchmark, YAML and syntax checks passed. Commit `8d2cfbb`
+  was reconciled with concurrent mainline changes and published at `0398d94`;
+  security diff scan `33c09a35-77f5-417c-862c-e5848185f50e` found zero
+  reportable findings. The PASS is declaration-only; customer topology,
+  certificates/IAM/rotation, hosted provider evidence, measured SLO/RPO/RTO and
+  backup/DR remain external or pending.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed
@@ -3036,17 +3051,19 @@ another stream owns releases. The detailed evidence ledger, product decisions,
 provisional estimates and blockers are in
 [`docs/w26-progress-ledger.md`](docs/w26-progress-ledger.md). Do not mark a
 production/integration gate complete from the demo or from the hosted
-qualification packet alone. W26 has CI only and no staging environment.
+qualification packet alone. The machine-checked customer handoff contract is
+in [`docs/w26-production-rollout.md`](docs/w26-production-rollout.md); its
+PASS is declaration-only. W26 has CI only and no staging environment.
 
 | Gate | Status | Completion | Exit evidence / primary blocker |
 | --- | --- | ---: | --- |
-| P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
-| P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
+| P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; machine contract gate added; CI baseline open | 68% | Convert the contract into provider/platform assertions and obtain support-owner sign-off |
+| P1 — customer Ozone topology contract | Contract documented; deployment external | 20% W26 contract / 0% deployment evidence | `docs/w26-production-rollout.md` and the credential-free validator define secure endpoint, tenant, replication and ownership requirements; customer supplies and operates the actual Ozone topology |
 | P2 — all-feasible-provider Ozone CI matrix | Ozone provider matrix and durable-provider hard-threshold paths expanded; terminal evidence pending | 62% | Benchmark rows cover SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2. The generic Ozone composition now requests its configured SQLite/R2 and PGlite/R2 rows with `--require-configured`; dedicated TiDB/FoundationDB paths are also strict, so a requested but unavailable provider fails the qualification result instead of being promoted as a pass. The artifact verifier independently requires the exact requested provider set and rejects skipped/configuration-failed rows before any wrapper pass marker. The optional key-value bounded-listing contract is locally tested, and the SQLite/PGlite plus `d1c9e44` TiDB/RustFS and FoundationDB/RustFS composition paths contain provider-backed bounded-listing assertions. The feature-built FoundationDB and TiDB Node/N-API Ozone lanes exercise the same contract with scoped cleanup prefixes, and `de9d267` at `414a469` adds dedicated TiDB/FoundationDB Ozone IOPS artifacts and pass-marker paths. The `b8d8fb1` policy fixtures cover all four metadata-provider shapes without provider connections; `66f3670` at `00d2b80` validates the retained artifact. Hosted provider parity, terminal IOPS artifacts and each configured row still need retained evidence |
 | P3 — authentication, TLS, secrets and redaction | Local transport and credential-free production-config policy hardened; secure integration open | 60% | Static and runtime R2/Ozone validation rejects malformed, credential-bearing and remote plaintext-HTTP endpoints before client construction; HTTP config/runtime now reject non-loopback binds and require a TLS reverse proxy for remote clients; the all-provider policy gate requires HTTPS R2 blocks, exact external secret references, durable metadata and TLS-required TiDB input without contacting a provider, and its four independent negative fixtures reject HTTP, inline credentials, unsafe FoundationDB authority and TLS verification downgrade; secure endpoint/auth, least privilege, rotation and customer runtime readback remain open |
 | P4 — durability/storage failure contract | Lifecycle protection implemented; durability qualification open | 35% | Lease-protected root reconciliation and R2/Ozone scoped cleanup are locally tested; CI client recovery/error evidence plus customer Ozone replication/storage requirements remain open |
 | P5 — fencing, ambiguous commit and failover recovery | Lease-protected reconciliation implemented; failover matrix open | 35% | Reconciliation renews the writer lease and never runs implicitly on shutdown; concurrent/retry/failover evidence across feasible Ozone/provider CI lanes remains open |
-| P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |
+| P6 — backup, restore and DR | External Ozone/customer dependency; prerequisites documented | 10% W26 contract / 0% W26 DR evidence | The rollout contract requires customer-owned backup/restore, a 30-day restore-drill cadence and measured RPO/RTO evidence; W26 does not build or operate a competing backup system |
 | P7 — integration observability and error contract | Local HTTP/OTLP and provider-boundary evidence passed; production integration open | 45% | `mount-rs-http` passed 8 unit and 12 integration tests; OTLP-enabled HTTP passed 11 integration tests; full-feature observability/local collector/exporter-failure tests and CLI observability passed locally, including bounded timeout/connection/listing behavior; `reconcileBlocks` returns scanned/protected/recent/deleted counts and fails closed when unsupported, `readdir_bounded` is forwarded through observability/CLI wrappers, and N-API unstorage preserves `EOVERFLOW`; deployed collector, retry/fencing/recovery dashboards and customer operations handoff remain open |
 | P8 — 1,000 IOPS per-drive CI workload | Per-provider hard-threshold gates implemented; hosted result pending | 47% | Benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000 for each configured Ozone-backed metadata provider. The generic Ozone composition requests SQLite/R2 and PGlite/R2 with 4 KiB payloads, 400 iterations, concurrency 64, `--min-iops 1000` and `--require-configured`; dedicated TiDB/FoundationDB Ozone jobs request their own rows with the same strict mode. Wrapper settings cannot lower the target below 1,000 or weaken the fixed profile. `scripts/verify-w26-ozone-iops-artifact.mjs` requires the exact provider set, zero skipped/configuration-failed rows, successful cleanup, per-size lifecycle success and a valid retained JSON artifact before the generic or dedicated pass marker is emitted. The three W26 IOPS uploads now fail the CI job when expected JSON is absent. `de9d267` at `414a469` adds dedicated durable-provider artifact paths; `66f3670` at `00d2b80` adds the fixed-profile/artifact gate and `c0f8370` at `12ba117` makes retention fail closed. Local benchmark/unit, verifier negative cases and syntax checks pass; local live Ozone evidence is blocked by missing service credentials/provider topologies. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
