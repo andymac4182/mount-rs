@@ -6,9 +6,9 @@ use mount_rs_fuse::{
     RequestHeader,
     constants::{
         FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE, FUSE_FORGET,
-        FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD,
-        FUSE_POLL, FUSE_READLINK, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_STATFS, FUSE_SYMLINK,
-        FUSE_UNLINK,
+        FUSE_GETLK, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR,
+        FUSE_MKNOD, FUSE_POLL, FUSE_READLINK, FUSE_RELEASE, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR,
+        FUSE_SETLK, FUSE_SETLKW, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::{FuseFlushMechanism, FuseSession, FuseSessionOptions},
@@ -77,6 +77,33 @@ fn link_body(oldnodeid: u64, name: &str) -> Vec<u8> {
 fn access_body(mask: u32) -> Vec<u8> {
     let mut body = mask.to_le_bytes().to_vec();
     body.extend([0; 4]);
+    body
+}
+fn lock_body(
+    fh: u64,
+    owner: u64,
+    start: u64,
+    end: u64,
+    type_: u32,
+    pid: u32,
+    flags: u32,
+) -> Vec<u8> {
+    let mut body = Vec::with_capacity(48);
+    body.extend(fh.to_le_bytes());
+    body.extend(owner.to_le_bytes());
+    body.extend(start.to_le_bytes());
+    body.extend(end.to_le_bytes());
+    body.extend(type_.to_le_bytes());
+    body.extend(pid.to_le_bytes());
+    body.extend(flags.to_le_bytes());
+    body.extend([0; 4]);
+    body
+}
+fn lock_release_body(fh: u64, owner: u64) -> Vec<u8> {
+    let mut body = Vec::with_capacity(24);
+    body.extend(fh.to_le_bytes());
+    body.extend([0; 8]);
+    body.extend(owner.to_le_bytes());
     body
 }
 async fn negotiate(session: &mut FuseSession) {
@@ -571,6 +598,122 @@ async fn access_dispatch_checks_credentials_and_fixed_wire_mask() {
         .unwrap()
         .unwrap();
     assert_eq!(errno(&root_execute), -13);
+}
+
+#[tokio::test]
+async fn byte_range_locks_report_conflicts_and_release_by_owner() {
+    let fs = Arc::new(MemoryFs::empty());
+    let file = fs.open("/locked", "w", 0o644).await.unwrap();
+    file.close().await.unwrap();
+    let mut session = FuseSession::new(fs);
+    let inode = number(&request(&mut session, FUSE_LOOKUP, 1, b"locked\0").await, 0);
+    let open = request(&mut session, 14, inode, &[0; 8]).await;
+    let fh = number(&open, 0);
+
+    request(
+        &mut session,
+        FUSE_SETLK,
+        inode,
+        &lock_body(fh, 10, 10, 19, 1, 111, 0),
+    )
+    .await;
+
+    let conflict = request(
+        &mut session,
+        FUSE_GETLK,
+        inode,
+        &lock_body(fh, 20, 15, 25, 0, 222, 0),
+    )
+    .await;
+    let FuseReplyBody::Lk(conflict) = decode_reply_body(
+        FUSE_GETLK,
+        &conflict,
+        Some(ProtocolContext {
+            minor: 41,
+            setxattr_ext: false,
+        }),
+    )
+    .unwrap() else {
+        panic!("GETLK returned a non-lock reply");
+    };
+    assert_eq!(conflict.lk.start, 10);
+    assert_eq!(conflict.lk.end, 19);
+    assert_eq!(conflict.lk.type_, 1);
+    assert_eq!(conflict.lk.pid, 111);
+
+    let same_owner = request(
+        &mut session,
+        FUSE_GETLK,
+        inode,
+        &lock_body(fh, 10, 15, 25, 0, 222, 0),
+    )
+    .await;
+    let FuseReplyBody::Lk(same_owner) = decode_reply_body(
+        FUSE_GETLK,
+        &same_owner,
+        Some(ProtocolContext {
+            minor: 41,
+            setxattr_ext: false,
+        }),
+    )
+    .unwrap() else {
+        panic!("GETLK returned a non-lock reply");
+    };
+    assert_eq!(same_owner.lk.type_, 2);
+
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_SETLK,
+            inode,
+            &lock_body(fh, 20, 15, 25, 1, 222, 0),
+        )
+        .await,
+        -11
+    );
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_SETLKW,
+            inode,
+            &lock_body(fh, 20, 15, 25, 1, 222, 0),
+        )
+        .await,
+        -11
+    );
+    assert_eq!(
+        failed_request(
+            &mut session,
+            FUSE_SETLK,
+            inode,
+            &lock_body(fh, 20, 15, 25, 1, 222, 2),
+        )
+        .await,
+        -22
+    );
+
+    request(
+        &mut session,
+        FUSE_SETLK,
+        inode,
+        &lock_body(fh, 10, 10, 19, 2, 111, 0),
+    )
+    .await;
+    request(
+        &mut session,
+        FUSE_SETLK,
+        inode,
+        &lock_body(fh, 20, 15, 25, 1, 222, 0),
+    )
+    .await;
+    request(
+        &mut session,
+        FUSE_RELEASE,
+        inode,
+        &lock_release_body(fh, 20),
+    )
+    .await;
+    assert_eq!(session.open_handles(), 0);
 }
 
 #[tokio::test]

@@ -206,6 +206,16 @@ facade test, and focused FUSE suite pass locally. `MOUNTX_SOURCE` codec rows
 remain explicit skips, and hosted Linux callback-event delivery, native
 mount/lifecycle, FSKit, cancellation, concurrency, crash/restart and durability
 remain open; W01 stays NO-GO.
+
+The follow-up mount-free FUSE session packet adds `GETLK`/`SETLK` byte-range
+conflict tracking, same-owner replacement/unlock, and `RELEASE`/`DESTROY`
+cleanup with strict lock-body and flag validation. `SETLKW` returns explicit
+`EAGAIN` instead of blocking the serialized session, and native POSIX/flock
+flags remain unadvertised until a concurrent blocking path is implemented and
+qualified on Linux. The focused session target passed 19/19, the complete
+locked FUSE target and strict Clippy passed, and the packet remains separate
+from hosted native mount, callback-event, FSKit, crash/restart and durability
+acceptance; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
