@@ -1291,7 +1291,8 @@ Evidence landed without closing the remaining W01 acceptance gates:
   replacement session, close sweeps every bucket idempotently while the
   session remains usable, and Complete/Abort has one terminal winner across
   concurrent session calls; the filesystem-visible exclusive finalization
-  marker returns `NoSuchUpload` to the loser and late part writes.
+  marker returns `NoSuchUpload` to the loser and late part writes, while a
+  validation-failing Complete releases the marker so a correct retry succeeds.
 - [x] The same multipart replacement flow is exercised through the generated
   N-API S3 facade: release build/declarations, direct session create/part/list/
   complete/GET, streamed traffic, cancellation, bucket isolation, connection

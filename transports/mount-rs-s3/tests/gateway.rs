@@ -783,6 +783,68 @@ async fn multipart_uploads_survive_session_replacement_and_complete_from_disk() 
 }
 
 #[tokio::test]
+async fn invalid_multipart_complete_releases_finalization_claim_for_retry() {
+    let driver = MemoryFs::empty();
+    let session = S3Session::new(driver.clone());
+    let initiated = session
+        .handle(request("POST", "/mountx/retry.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let part = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/retry.bin?uploadId={upload_id}&partNumber=1"),
+            b"retryable staged bytes",
+            &[],
+        ))
+        .await;
+    assert_eq!(part.status, 200);
+    let part_etag = header(&part, "etag").expect("part ETag");
+
+    let invalid = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/retry.bin?uploadId={upload_id}"),
+            b"<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>wrong</ETag></Part></CompleteMultipartUpload>",
+            &[],
+        ))
+        .await;
+    assert_eq!(invalid.status, 400);
+    assert!(String::from_utf8_lossy(&invalid.body).contains("<Code>InvalidPart</Code>"));
+    assert!(
+        driver
+            .stat(&format!("/.mountx-multipart/{upload_id}/.finalizing"))
+            .await
+            .is_err()
+    );
+
+    let complete_body = format!(
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{part_etag}</ETag></Part></CompleteMultipartUpload>"
+    );
+    let completed = session
+        .handle(request(
+            "POST",
+            &format!("/mountx/retry.bin?uploadId={upload_id}"),
+            complete_body.as_bytes(),
+            &[],
+        ))
+        .await;
+    assert_eq!(completed.status, 200);
+    let object = session
+        .handle(request("GET", "/mountx/retry.bin", [], &[]))
+        .await;
+    assert_eq!(object.status, 200);
+    assert_eq!(object.body, b"retryable staged bytes");
+    assert!(
+        driver
+            .stat(&format!("/.mountx-multipart/{upload_id}"))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn multipart_complete_and_abort_race_has_one_terminal_winner() {
     let driver = MemoryFs::empty();
     let session = Arc::new(S3Session::new(driver.clone()));
