@@ -12,11 +12,12 @@ for engineering planning, not a commitment.
 | Workstream | W26 — Apache Ozone S3 backend |
 | Ledger snapshot | 2026-09-21, Australia/Brisbane |
 | Repository | `mount-rs` |
-| Snapshot base | `a4bc4d1` (pushed W26 HTTP/Ozone chunk; the security-boundary implementation in this working chunk is being qualified before publication) |
+| Snapshot base | `b997696` (security-boundary implementation merged with concurrent mainline changes and pushed to `origin/main`) |
 | Checklist completion | 4 of 4 W26 tracker rows checked: 100% |
 | Provisional execution completion | W26 qualification: 100%; production-rollout readiness: 15% (scope and CI acceptance baseline captured; no terminal production gates yet). Customer deployment, native, provider-durability and release-stream gates remain separately bounded |
 | Current acceptance state | Local Ozone, SQLite/PGlite, single-node TiDB/Ozone, durable three-node FoundationDB/Ozone, hosted Ozone, hosted SQLite/PGlite, Ozone-backed durable TiDB, generic durable TiDB, Node SDK, and CLI evidence passed; W26 is complete within its documented provider/platform boundaries |
 | Latest hosted workflow | GitHub Actions run `35585066458` on `9c098e5`; W26 jobs `ozone` `106286459564`, `ozone-compositions` `106286459622`, and `ozone-tidb` `106286459540` completed successfully, with generic `tidb` job `106286459436` also green. Unrelated provider/native jobs are tracked separately and are not required to close W26. |
+| Current-head CI attempt | Run `35596862651` for `b997696` is currently `in_progress`; a second later push-created run is `pending`. Neither is terminal evidence, so the retained W26 packet above remains the last accepted hosted result. |
 | Local Docker boundary | Docker Desktop capacity was about 5 CPUs and 8.2 GiB; this is sufficient for the durable FoundationDB proof but below the TiDB harness's 10 GiB durable-topology minimum |
 | Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 15% figure reflects scope decisions and an acceptance baseline, not deployable readiness |
 | W26 production target | Customer-deployed Ozone integration; W26 owns provider/client correctness and CI qualification, not customer deployment, backup/DR or release promotion |
@@ -279,3 +280,8 @@ the open gate ledger above is the source of truth for production work, estimates
 and blockers. Product direction now makes W26 a customer-deployed integration
 qualification stream: its next acceptance target is a complete, secure,
 all-feasible-provider, end-to-end CI packet, not a customer deployment.
+
+The HTTP security-boundary chunk was committed as `f74ffce`, merged with
+concurrent mainline changes, and pushed as `b997696`. The current-head hosted
+workflow is tracked separately above; a queued or in-progress run is not
+promoted to production evidence.
