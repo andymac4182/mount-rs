@@ -13,7 +13,7 @@ pub mod storage;
 pub mod types;
 pub mod versioning;
 
-pub use driver::{FileHandle, FsDriver, Loopback};
+pub use driver::{FileHandle, FsDriver, Loopback, collect_bounded_dir_entries};
 pub use error::{ErrorCode, FsError, Result, backend_error};
 pub use handle::OpenFlags;
 pub use memory::{MemoryFs, MemoryOptions};

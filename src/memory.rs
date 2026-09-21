@@ -808,36 +808,11 @@ impl FsDriver for MemoryFs {
     }
 
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
-        let mut state = self.lock()?;
-        let node_id = Self::resolve(&state, path, true, "scandir")?;
-        let children = {
-            let node = state
-                .nodes
-                .get_mut(&node_id)
-                .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
-            if !node.is_directory() {
-                return Err(FsError::new(ErrorCode::Enotdir)
-                    .with_syscall("scandir")
-                    .with_path(normalize_path(path)));
-            }
-            node.atime_ms = now_ms();
-            node.children
-                .iter()
-                .map(|(name, child)| (name.clone(), *child))
-                .collect::<Vec<_>>()
-        };
-        let parent_path = normalize_path(path);
-        let entries = children
-            .into_iter()
-            .filter_map(|(name, child)| {
-                state.nodes.get(&child).map(|node| DirEntry {
-                    name,
-                    parent_path: parent_path.clone(),
-                    file_type: node.file_type(),
-                })
-            })
-            .collect();
-        Ok(entries)
+        self.readdir_with_limit(path, None)
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        self.readdir_with_limit(path, Some(max_entries))
     }
 
     async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
@@ -1273,5 +1248,51 @@ impl MemoryFs {
         target.mtime_ms = mtime_ms;
         target.ctime_ms = now_ms();
         Ok(())
+    }
+
+    fn readdir_with_limit(&self, path: &str, max_entries: Option<usize>) -> Result<Vec<DirEntry>> {
+        if max_entries == Some(0) {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("scandir")
+                .with_path(normalize_path(path))
+                .with_message("directory entry limit must be positive"));
+        }
+        let mut state = self.lock()?;
+        let node_id = Self::resolve(&state, path, true, "scandir")?;
+        let children = {
+            let node = state
+                .nodes
+                .get_mut(&node_id)
+                .ok_or_else(|| FsError::new(ErrorCode::Estale))?;
+            if !node.is_directory() {
+                return Err(FsError::new(ErrorCode::Enotdir)
+                    .with_syscall("scandir")
+                    .with_path(normalize_path(path)));
+            }
+            node.atime_ms = now_ms();
+            let mut children = Vec::new();
+            for (name, child) in node.children.iter() {
+                if max_entries.is_some_and(|limit| children.len() == limit) {
+                    return Err(FsError::new(ErrorCode::Eoverflow)
+                        .with_syscall("scandir")
+                        .with_path(normalize_path(path))
+                        .with_message("directory exceeds the configured entry limit"));
+                }
+                children.push((name.clone(), *child));
+            }
+            children
+        };
+        let parent_path = normalize_path(path);
+        let entries = children
+            .into_iter()
+            .filter_map(|(name, child)| {
+                state.nodes.get(&child).map(|node| DirEntry {
+                    name,
+                    parent_path: parent_path.clone(),
+                    file_type: node.file_type(),
+                })
+            })
+            .collect();
+        Ok(entries)
     }
 }

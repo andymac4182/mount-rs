@@ -345,6 +345,41 @@ where
         .map_err(|error| FsError::backend(format!("host filesystem worker failed: {error}")))?
 }
 
+fn read_dir_host(
+    real: &Path,
+    parent_path: &str,
+    max_entries: Option<usize>,
+) -> Result<Vec<DirEntry>> {
+    if max_entries == Some(0) {
+        return Err(FsError::new(ErrorCode::Einval)
+            .with_syscall("scandir")
+            .with_path(parent_path)
+            .with_message("directory entry limit must be positive"));
+    }
+    let entries = fs::read_dir(real)
+        .map_err(|error| fs_error_from_io(error, "scandir", real.display().to_string()))?;
+    let mut result = Vec::new();
+    for entry in entries {
+        if max_entries.is_some_and(|limit| result.len() == limit) {
+            return Err(FsError::new(ErrorCode::Eoverflow)
+                .with_syscall("scandir")
+                .with_path(parent_path)
+                .with_message("directory exceeds the configured entry limit"));
+        }
+        let entry = entry
+            .map_err(|error| fs_error_from_io(error, "scandir", real.display().to_string()))?;
+        let entry_type = entry
+            .file_type()
+            .map_err(|error| fs_error_from_io(error, "scandir", real.display().to_string()))?;
+        result.push(DirEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            parent_path: parent_path.to_owned(),
+            file_type: file_type(entry_type),
+        });
+    }
+    Ok(result)
+}
+
 async fn run_blocking_io<T, F>(operation: F) -> io::Result<T>
 where
     T: Send + 'static,
@@ -1228,27 +1263,13 @@ impl FsDriver for HostFs {
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
         let parent_path = normalize_path(path);
         let real = self.secure(path, true, "scandir").await?;
-        let error_path = real.clone();
-        run_blocking(move || {
-            let entries = fs::read_dir(&real)
-                .map_err(|error| fs_error_from_io(error, "scandir", path_string(&error_path)))?;
-            let mut result = Vec::new();
-            for entry in entries {
-                let entry = entry.map_err(|error| {
-                    fs_error_from_io(error, "scandir", path_string(&error_path))
-                })?;
-                let entry_type = entry.file_type().map_err(|error| {
-                    fs_error_from_io(error, "scandir", path_string(&error_path))
-                })?;
-                result.push(DirEntry {
-                    name: entry.file_name().to_string_lossy().into_owned(),
-                    parent_path: parent_path.clone(),
-                    file_type: file_type(entry_type),
-                });
-            }
-            Ok(result)
-        })
-        .await
+        run_blocking(move || read_dir_host(&real, &parent_path, None)).await
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        let parent_path = normalize_path(path);
+        let real = self.secure(path, true, "scandir").await?;
+        run_blocking(move || read_dir_host(&real, &parent_path, Some(max_entries))).await
     }
 
     async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {

@@ -1119,6 +1119,41 @@ where
             .await
     }
 
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        self.lifetime
+            .with_operation(false, "scandir", || async {
+                if max_entries == 0 {
+                    return Err(FsError::new(ErrorCode::Einval)
+                        .with_syscall("scandir")
+                        .with_path(normalize_path(path))
+                        .with_message("directory entry limit must be positive"));
+                }
+                let normalized = normalize_path(path);
+                let inode = self.resolve(&normalized, true, "scandir")?;
+                let node = self.node(inode, "scandir", &normalized)?;
+                let NodeData::Directory { entries } = &node.data else {
+                    return Err(error_with_path(ErrorCode::Enotdir, "scandir", &normalized));
+                };
+                let mut result = Vec::new();
+                for entry in entries {
+                    if result.len() == max_entries {
+                        return Err(FsError::new(ErrorCode::Eoverflow)
+                            .with_syscall("scandir")
+                            .with_path(&normalized)
+                            .with_message("directory exceeds the configured entry limit"));
+                    }
+                    let child = self.node(entry.inode, "scandir", &normalized)?;
+                    result.push(DirEntry {
+                        name: entry.name.clone(),
+                        parent_path: normalized.clone(),
+                        file_type: child.stats.file_type(),
+                    });
+                }
+                Ok(result)
+            })
+            .await
+    }
+
     async fn open(&self, path: &str, flags: &str, _mode: u32) -> Result<Arc<dyn FileHandle>> {
         let operation = self.lifetime.begin(false, "open").await?;
         let normalized = normalize_path(path);

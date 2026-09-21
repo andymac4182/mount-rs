@@ -619,6 +619,17 @@ impl FsDriver for InstrumentedDriver {
             .await
     }
 
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        self.telemetry
+            .observe_fs(
+                "core",
+                "readdir_bounded",
+                Some(path),
+                self.inner.readdir_bounded(path, max_entries),
+            )
+            .await
+    }
+
     async fn open(&self, path: &str, flags: &str, mode: u32) -> Result<Arc<dyn FileHandle>> {
         let result = self
             .telemetry

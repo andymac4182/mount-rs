@@ -297,6 +297,9 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
     async fn readdir(&self, path: &str) -> Result<Vec<DirEntry>> {
         self.core.readdir(path).await
     }
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> Result<Vec<DirEntry>> {
+        self.core.readdir_bounded(path, max_entries).await
+    }
     async fn statfs(&self, path: &str) -> Result<StatsFs> {
         self.core.statfs(path).await
     }
