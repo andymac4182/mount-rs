@@ -73,6 +73,12 @@ canary, rollback or GO decision. The evidence capture was committed as
 `ad45bf06` and published in merge tip
 `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`.
 
+The subsequent public-tip source verification at
+`76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
+tests and strict Clippy with `-D warnings` using a bounded external Cargo
+target. This is implementation evidence only; credentialed provider,
+production topology, operational, canary and approval gates remain open.
+
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or

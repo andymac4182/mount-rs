@@ -2234,6 +2234,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   capture was committed as `ad45bf06` and published in merge tip
   `d68f14de3c13c0510237e9a88c615c1a8e74c9a3`.
 
+- [x] W08.30 **Current public-tip source verification:** on source
+  `76c2b1a863c23afe71c0591d0a480433e1b9078d`,
+  `CARGO_TARGET_DIR=/private/tmp/mount-rs-w08-final-cargo-target
+  ./scripts/cargo-shared test --workspace --all-targets --locked --offline`
+  completed successfully with all executed tests passing, and the matching
+  strict workspace Clippy command with `-D warnings` completed successfully
+  with no diagnostics. The bounded target stayed outside the worktree. Tests
+  that require TiDB/RustFS/PGlite/R2 credentials or FUSE/NFS/native services
+  remained explicit ignored prerequisites; this is source-level verification,
+  not live-provider or production-rollout evidence. *(Implementation
+  verification; provider, native and production gates remain external.)*
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the
