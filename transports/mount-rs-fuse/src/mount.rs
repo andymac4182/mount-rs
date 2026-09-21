@@ -24,6 +24,8 @@ use std::time::Duration;
 #[cfg(target_os = "linux")]
 use std::time::Instant;
 
+#[cfg(target_os = "linux")]
+use futures_util::FutureExt;
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{S_IFDIR, S_IFMT};
@@ -650,6 +652,46 @@ impl MountState {
 
 #[cfg(target_os = "linux")]
 async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<MountState>) {
+    let mut failure =
+        match std::panic::AssertUnwindSafe(run_session_loop(&mut session, &device, &state))
+            .catch_unwind()
+            .await
+        {
+            Ok(failure) => failure,
+            Err(_) => Some(FuseTransportError::from_message(
+                FuseTransportErrorKind::Task,
+                "FUSE session task panicked".to_owned(),
+            )),
+        };
+
+    if std::panic::AssertUnwindSafe(session.destroy())
+        .catch_unwind()
+        .await
+        .is_err()
+    {
+        failure.get_or_insert_with(|| {
+            FuseTransportError::from_message(
+                FuseTransportErrorKind::Task,
+                "FUSE session cleanup panicked".to_owned(),
+            )
+        });
+    }
+
+    if let Some(error) = failure {
+        state.record_transport_error(error);
+    }
+    state.active.store(false, Ordering::Release);
+    state.closed.store(true, Ordering::Release);
+    state.closed_notify.notify_waiters();
+    state.ready_notify.notify_waiters();
+}
+
+#[cfg(target_os = "linux")]
+async fn run_session_loop(
+    session: &mut FuseSession,
+    device: &FuseDevice,
+    state: &MountState,
+) -> Option<FuseTransportError> {
     let mut failure = None;
     loop {
         if state.stop.load(Ordering::Acquire) {
@@ -693,14 +735,7 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
             state.ready_notify.notify_waiters();
         }
     }
-    session.destroy().await;
-    if let Some(error) = failure {
-        state.record_transport_error(error);
-    }
-    state.active.store(false, Ordering::Release);
-    state.closed.store(true, Ordering::Release);
-    state.closed_notify.notify_waiters();
-    state.ready_notify.notify_waiters();
+    failure
 }
 
 #[cfg(target_os = "linux")]
@@ -1451,6 +1486,9 @@ fn unescape_mount_path(path: &str) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    use async_trait::async_trait;
+
     #[test]
     fn defaults_are_safe_for_a_single_mount() {
         let options = MountOptions::default();
@@ -1541,6 +1579,122 @@ mod tests {
                 .expect("transport error lock")
                 .as_deref(),
             Some(observed[0].message.as_str())
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    struct PanicDriver {
+        inner: Arc<mount_rs_core::MemoryFs>,
+    }
+
+    #[cfg(target_os = "linux")]
+    #[async_trait]
+    impl mount_rs_core::FsDriver for PanicDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            self.inner.capabilities()
+        }
+
+        async fn stat(&self, _path: &str) -> mount_rs_core::Result<mount_rs_core::Stats> {
+            panic!("injected FUSE backend panic");
+        }
+
+        async fn readdir(&self, path: &str) -> mount_rs_core::Result<Vec<mount_rs_core::DirEntry>> {
+            self.inner.readdir(path).await
+        }
+
+        async fn open(
+            &self,
+            path: &str,
+            flags: &str,
+            mode: u32,
+        ) -> mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>> {
+            self.inner.open(path, flags, mode).await
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn test_frame(opcode: u32, unique: u64, nodeid: u64, body: &[u8]) -> Vec<u8> {
+        let mut frame = crate::RequestHeader {
+            len: (crate::IN_HEADER_SIZE + body.len()) as u32,
+            opcode,
+            unique,
+            nodeid,
+            uid: 0,
+            gid: 0,
+            pid: 0,
+            total_extlen: 0,
+        }
+        .encode()
+        .to_vec();
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn session_panic_closes_state_and_reports_one_owned_task_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-panic-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let driver = Arc::new(PanicDriver {
+            inner: Arc::new(mount_rs_core::MemoryFs::empty()),
+        });
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        peer.write_all(&test_frame(1, 2, 1, b"panic\0"))
+            .await
+            .expect("send panicking lookup");
+
+        task.await
+            .expect("session task should absorb backend panic");
+
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Task);
+        assert_eq!(observed[0].message, "FUSE session task panicked");
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+        assert_eq!(
+            state
+                .transport_error
+                .lock()
+                .expect("transport error lock")
+                .as_deref(),
+            Some("FUSE session task panicked")
         );
     }
 

@@ -7,6 +7,7 @@ license = "Apache-2.0"
 description = "FUSE protocol implementation for mount-rs"
 
 [dependencies]
+futures-util = "0.3"
 mount-rs-core = { path = "../.." }
 tokio = { version = "1", default-features = false, features = ["io-util", "macros", "net", "process", "rt", "signal", "sync", "time"] }
 

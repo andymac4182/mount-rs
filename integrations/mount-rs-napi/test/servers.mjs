@@ -258,6 +258,7 @@ async function exerciseNfs() {
     host: "127.0.0.1",
     port: 0,
     maxRecord: 256,
+    maxHandles: 2,
     onTransportError(error, peer) {
       reports.push({ error, peer });
       throw new Error("NFS hook callback deliberately threw");

@@ -220,6 +220,14 @@ qualified on Linux. The focused session target passed 19/19, the complete
 locked FUSE target and strict Clippy passed, and the packet remains separate
 from hosted native mount, callback-event, FSKit, crash/restart and durability
 acceptance; W01 stays NO-GO.
+The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
+session destroy in unwind isolation. A backend or cleanup panic now becomes
+one owned `Task` transport error, still closes the session, marks the mount
+inactive/closed, and wakes lifecycle waiters; a Linux-gated Unix-stream panic
+harness covers the callback and state boundary. The macOS all-target FUSE
+suite, strict Clippy, formatting, and Linux-target test type-check passed;
+hosted Linux native fault/crash/restart, callback-event, concurrency, lock and
+durability evidence remain external, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -990,6 +998,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   addon, generated typecheck, and live N-API server integration passed; native
   mount, hosted/provider, full v4 state, connection-object, crash, and
   durability gates remain open.
+- [x] The current NFS parity packet adds the shared `maxHandles` option with
+  LRU eviction, root/current-entry protection, and NFSv4 open-state pins so a
+  bounded table cannot silently split share reservations or byte-range state.
+  The pinned oracle upstream NFS gate passed 266 cases with 18 explicit
+  capability/root skips, the N-API NFS codec differential passed, and the
+  focused NFS target passed 33 unit, rootless wire 1, pipelined concurrency 1,
+  transport errors 4, v4 barrier 1, and v4 wire 4 tests; richer `onError` and
+  NFSv4 lease/ID-map/state-limit/reclaim knobs plus native/hosted/crash gates
+  remain explicitly open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

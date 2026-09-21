@@ -30,6 +30,14 @@ in-flight bound. A restart-boundary test reuses the backend with a replacement
 server and confirms that the old v4 session is rejected with
 `NFS4ERR_BADSESSION`.
 
+The shared file-handle table accepts `max_handles` through
+`NfsSessionOptions`/`NfsServerOptions` (and `maxHandles` through the N-API
+server options). A positive value is a soft LRU cap: the root and the entry
+currently being returned are protected, and live NFSv4.1 open state pins its
+handle entry so the cap cannot silently break share reservations or locks.
+When every candidate is pinned the table may exceed the cap until state is
+released; with no value, the table remains uncapped for compatibility.
+
 ## Native macOS/Linux mount lifecycle
 
 `nfs_client_probe` reports host prerequisites and `mount_nfs` starts the
@@ -113,3 +121,8 @@ automatic reconnect, lease recovery, or crash-durable session/reply state;
 the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. Backend crash recovery and durability behavior remains outside
 the supported local scope until a separate qualification lane is accepted.
+
+The pinned upstream API also exposes richer `onError` reporting and optional
+NFSv4.1 lease, ID-map, state-limit, and reclaim-policy knobs. Those controls
+are not silently mapped to the Rust defaults: they remain explicit parity work
+until their behavior has dedicated wire tests and supported N-API plumbing.

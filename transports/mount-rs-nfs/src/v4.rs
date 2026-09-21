@@ -669,6 +669,7 @@ struct ExclusiveV4 {
 struct OpenState {
     stateid: Stateid4,
     clientid: u64,
+    handle_id: u64,
     file_id: u64,
     path: String,
     handle: Arc<dyn FileHandle>,
@@ -1659,13 +1660,14 @@ impl Nfs4Session {
             let open_handles = state
                 .opens
                 .drain()
-                .map(|(_, open)| open.handle)
+                .map(|(_, open)| (open.handle_id, open.handle))
                 .collect::<Vec<_>>();
             state.locks.clear();
             state.exclusive_creates.clear();
             open_handles
         };
-        for handle in open_handles {
+        for (handle_id, handle) in open_handles {
+            self.handles.unpin(handle_id);
             let _ = handle.close().await;
         }
     }
@@ -3748,6 +3750,9 @@ impl Nfs4Session {
             }
         };
         let entry = self.handles.bind(&path, &stats);
+        // Pin before taking the state lock: a concurrent v3 lookup may bind
+        // more names while this OPEN is checking share conflicts.
+        self.handles.pin(entry.id);
         let clientid = cursor.clientid.unwrap_or(args.owner_clientid);
         let share_conflict = self
             .state
@@ -3761,6 +3766,7 @@ impl Nfs4Session {
                     && (open.deny & access != 0 || args.share_deny & open.access != 0)
             });
         if share_conflict {
+            self.handles.unpin(entry.id);
             if let Some(handle) = handle.take() {
                 let _ = handle.close().await;
             }
@@ -3778,6 +3784,7 @@ impl Nfs4Session {
                 })
                 .map(|(key, _)| *key);
             if let Some(key) = existing_key {
+                self.handles.unpin(entry.id);
                 let open = state
                     .opens
                     .get_mut(&key)
@@ -3805,6 +3812,7 @@ impl Nfs4Session {
                     OpenState {
                         stateid: stateid.clone(),
                         clientid,
+                        handle_id: entry.id,
                         file_id: entry.fileid,
                         path: path.clone(),
                         handle: handle.take().expect("new open backend handle"),
@@ -3857,12 +3865,17 @@ impl Nfs4Session {
                     && lock.file_id == open.file_id
                     && lock.open_other == open.stateid.other)
             });
-            state.opens.remove(&stateid.other).map(|open| open.handle)
+            state
+                .opens
+                .remove(&stateid.other)
+                .map(|open| (open.handle_id, open.handle))
         };
-        if let Some(handle) = handle
-            && let Err(error) = handle.close().await
-        {
-            return V4OpResult::new(OP_CLOSE, error_status(&error));
+        if let Some((handle_id, handle)) = handle {
+            let result = handle.close().await;
+            self.handles.unpin(handle_id);
+            if let Err(error) = result {
+                return V4OpResult::new(OP_CLOSE, error_status(&error));
+            }
         }
         cursor.stateid = Stateid4::zero();
         let mut body = XdrWriter::with_capacity(16);
