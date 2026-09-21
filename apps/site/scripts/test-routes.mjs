@@ -26,6 +26,13 @@ const routes = [
   },
   { path: '/downloads/', status: 307, redirectTo: '/downloads' },
   {
+    path: '/brand-lab',
+    status: 200,
+    contentType: 'text/html',
+    expected: ['Choose the visual system', 'mount-rs-brand-directions-v1.webp', 'mount-rs-logo-options-v2.webp', 'Brand directions 01–10', 'Logo explorations 01–20'],
+  },
+  { path: '/brand-lab/', status: 307, redirectTo: '/brand-lab' },
+  {
     path: '/docs/rust',
     status: 200,
     contentType: 'text/html',
