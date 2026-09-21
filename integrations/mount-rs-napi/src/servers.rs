@@ -37,9 +37,10 @@ use mount_rs_s3::{
     Credentials as TransportS3Credentials, HeaderEntry as TransportS3HeaderEntry,
     S3RequestBody as TransportS3RequestBody, S3RequestHead as TransportS3RequestHead,
     S3Response as TransportS3Response, S3ResponseBodyStream as TransportS3ResponseBodyStream,
-    S3Server as TransportS3Server, S3ServerOptions as TransportS3ServerOptions,
-    S3Session as TransportS3Session, S3SessionOptions, S3StreamBody as TransportS3StreamBody,
-    S3StreamResponse as TransportS3StreamResponse,
+    S3Server as TransportS3Server, S3ServerHooks as TransportS3ServerHooks,
+    S3ServerOptions as TransportS3ServerOptions, S3Session as TransportS3Session, S3SessionOptions,
+    S3StreamBody as TransportS3StreamBody, S3StreamResponse as TransportS3StreamResponse,
+    S3TransportError as TransportS3Error, S3TransportErrorHook as TransportS3ErrorHook,
 };
 use mount_rs_webdav::{
     WebdavBody as TransportWebdavBody, WebdavError as TransportWebdavBodyError, WebdavRequestBody,
@@ -50,7 +51,7 @@ use mount_rs_webdav::{
     WebdavTransportErrorHook as TransportWebdavErrorHook,
 };
 use napi::bindgen_prelude::{
-    BigInt, Buffer, Either, FnArgs, Function, JsObjectValue, Object, ReadableStream, Reader,
+    BigInt, Buffer, Either, Env, FnArgs, Function, JsObjectValue, Object, ReadableStream, Reader,
     Reference, Unknown,
 };
 use napi::futures_core::Stream as FuturesStream;
@@ -106,6 +107,13 @@ impl From<TransportFuseError> for TransportErrorEvent {
             message: error.message,
             peer: None,
         }
+    }
+}
+
+impl From<TransportS3Error> for TransportErrorEvent {
+    fn from(error: TransportS3Error) -> Self {
+        let TransportS3Error { message, peer, .. } = error;
+        Self { message, peer }
     }
 }
 
@@ -239,6 +247,16 @@ pub(crate) fn fuse_hooks(
             let callback = Arc::clone(callback);
             Arc::new(move |error: TransportFuseError| callback.report(error.into()))
                 as TransportFuseErrorHook
+        }),
+    }
+}
+
+fn s3_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportS3ServerHooks {
+    TransportS3ServerHooks {
+        on_transport_error: callback.map(|callback| {
+            let callback = Arc::clone(callback);
+            Arc::new(move |error: TransportS3Error| callback.report(error.into()))
+                as TransportS3ErrorHook
         }),
     }
 }
@@ -1157,20 +1175,21 @@ pub struct S3ServerOptions {
     pub max_xml_bytes: Option<f64>,
     pub read_chunk_bytes: Option<f64>,
     pub drain_timeout: Option<f64>,
+    pub debug: Option<bool>,
+    #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
+    pub on_transport_error: Option<JsTransportErrorCallback>,
 }
 
-fn s3_options(
-    options: Option<S3ServerOptions>,
-) -> Result<
-    (
-        String,
-        u16,
-        Option<String>,
-        TransportS3ServerOptions,
-        S3SessionOptions,
-    ),
-    Error,
-> {
+type S3FactoryOptions = (
+    String,
+    u16,
+    Option<String>,
+    TransportS3ServerOptions,
+    S3SessionOptions,
+    Option<JsTransportErrorCallback>,
+);
+
+fn s3_options(options: Option<S3ServerOptions>) -> Result<S3FactoryOptions, Error> {
     let options = options.unwrap_or(S3ServerOptions {
         bucket: None,
         host: None,
@@ -1181,7 +1200,10 @@ fn s3_options(
         max_xml_bytes: None,
         read_chunk_bytes: None,
         drain_timeout: None,
+        debug: None,
+        on_transport_error: None,
     });
+    let on_transport_error = options.on_transport_error;
     let (host, address) = ip_host(options.host, "127.0.0.1")?;
     let port = u16_number("port", options.port, 0)?;
     let credentials = options.credentials.map(|credentials| {
@@ -1207,6 +1229,7 @@ fn s3_options(
         options.read_chunk_bytes,
         session.read_chunk_bytes,
     )?;
+    session.debug = options.debug.unwrap_or(session.debug);
     let mut server_options = TransportS3ServerOptions {
         host: address,
         port,
@@ -1217,7 +1240,14 @@ fn s3_options(
         options.drain_timeout,
         server_options.drain_timeout,
     )?;
-    Ok((host, port, options.bucket, server_options, session))
+    Ok((
+        host,
+        port,
+        options.bucket,
+        server_options,
+        session,
+        on_transport_error,
+    ))
 }
 
 type S3BucketEntries = Vec<(String, Arc<dyn FsDriver>)>;
@@ -1263,11 +1293,26 @@ pub struct S3SessionStats {
     pub replies: f64,
     pub errors: f64,
     pub operations: HashMap<String, f64>,
+    pub assertions: f64,
     pub duration_ms_total: f64,
     pub duration_ms_max: f64,
     pub request_bytes: f64,
     pub response_bytes: f64,
     pub error_classes: HashMap<String, f64>,
+}
+
+#[napi(object)]
+pub struct S3SessionOptionsView {
+    /// Whether SigV4 credentials were configured. Secret material is never
+    /// returned through the inspection surface.
+    pub credentials_configured: bool,
+    pub region: Option<String>,
+    pub max_body_bytes: f64,
+    pub max_xml_bytes: f64,
+    pub read_chunk_bytes: f64,
+    pub multipart_staging_ttl_ms: f64,
+    pub multipart_staging_max_bytes: f64,
+    pub debug: bool,
 }
 
 #[derive(Clone)]
@@ -1521,6 +1566,41 @@ impl S3Session {
         self.inner.bucket_names()
     }
 
+    /// Read-only N-API wrappers for the session-owned bucket drivers. Each
+    /// wrapper shares the transport's driver state; shutting down the view
+    /// does not tear down the server-owned session driver.
+    #[napi(getter, ts_return_type = "Record<string, Filesystem>")]
+    pub fn buckets(&self, env: Env) -> napi::Result<Object<'_>> {
+        let mut buckets = Object::new(&env)?;
+        for (name, driver) in self.inner.buckets.iter() {
+            buckets.set(
+                name,
+                Filesystem::from_driver(Arc::clone(driver), None, None),
+            )?;
+        }
+        Ok(buckets)
+    }
+
+    #[napi(getter)]
+    pub fn options(&self) -> S3SessionOptionsView {
+        let options = &self.inner.options;
+        S3SessionOptionsView {
+            credentials_configured: options.credentials.is_some(),
+            region: options.region.clone(),
+            max_body_bytes: options.max_body_bytes as f64,
+            max_xml_bytes: options.max_xml_bytes as f64,
+            read_chunk_bytes: options.read_chunk_bytes as f64,
+            multipart_staging_ttl_ms: options.multipart_staging_ttl_ms as f64,
+            multipart_staging_max_bytes: options.multipart_staging_max_bytes as f64,
+            debug: options.debug,
+        }
+    }
+
+    #[napi(getter)]
+    pub fn assertions(&self) -> Vec<String> {
+        self.inner.assertions()
+    }
+
     /// Read a coherent snapshot of the transport-owned session metrics.
     #[napi]
     pub async fn stats(&self) -> S3SessionStats {
@@ -1534,6 +1614,7 @@ impl S3Session {
                 .into_iter()
                 .map(|(name, count)| (name, count as f64))
                 .collect(),
+            assertions: stats.assertions as f64,
             duration_ms_total: stats.duration_ms_total as f64,
             duration_ms_max: stats.duration_ms_max as f64,
             request_bytes: stats.request_bytes as f64,
@@ -1557,6 +1638,7 @@ pub struct S3Server {
     running: Mutex<Option<Arc<TransportS3Server>>>,
     binding: AtomicBool,
     closed: AtomicBool,
+    transport_error: Option<Arc<TransportErrorCallback>>,
 }
 
 #[napi]
@@ -1579,6 +1661,15 @@ impl S3Server {
         running
             .as_ref()
             .map_or(self.requested_port, |server| server.address().port()) as u32
+    }
+
+    #[napi(getter)]
+    pub fn connections(&self) -> u32 {
+        self.running
+            .lock()
+            .expect("S3 server lock")
+            .as_ref()
+            .map_or(0, |server| server.connections()) as u32
     }
 
     #[napi(getter)]
@@ -1609,10 +1700,14 @@ impl S3Server {
         {
             return Err(transport_error("S3 listen", "server is already starting"));
         }
-        let result = TransportS3Server::start(Arc::clone(&self.session), self.options.clone())
-            .await
-            .map(Arc::new)
-            .map_err(|error| transport_error("S3 listen", error));
+        let result = TransportS3Server::start_with_hooks(
+            Arc::clone(&self.session),
+            self.options.clone(),
+            s3_hooks(self.transport_error.as_ref()),
+        )
+        .await
+        .map(Arc::new)
+        .map_err(|error| transport_error("S3 listen", error));
         match result {
             Ok(server) => {
                 if self.closed.load(Ordering::Acquire) {
@@ -1640,6 +1735,9 @@ impl S3Server {
     #[napi]
     pub async fn close(&self) -> napi::Result<()> {
         self.closed.store(true, Ordering::Release);
+        if let Some(callback) = &self.transport_error {
+            callback.release();
+        }
         let running = self.running.lock().expect("S3 server lock").take();
         if let Some(server) = running {
             server
@@ -1664,13 +1762,17 @@ pub fn create_s3_server(
     >,
     options: Option<S3ServerOptions>,
 ) -> napi::Result<S3Server> {
-    let (host, requested_port, bucket, server_options, session_options) = s3_options(options)?;
+    let (host, requested_port, bucket, server_options, session_options, on_transport_error) =
+        s3_options(options)?;
     let buckets = s3_buckets(source, bucket)?;
     let session = Arc::new(TransportS3Session::from_buckets_with_options(
         buckets,
         session_options,
     ));
     let buckets = session.bucket_names();
+    let transport_error = on_transport_error
+        .map(TransportErrorCallback::new)
+        .transpose()?;
     Ok(S3Server {
         session,
         options: server_options,
@@ -1680,6 +1782,7 @@ pub fn create_s3_server(
         running: Mutex::new(None),
         binding: AtomicBool::new(false),
         closed: AtomicBool::new(false),
+        transport_error,
     })
 }
 

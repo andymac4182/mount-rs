@@ -22,7 +22,8 @@ restart/concurrency boundaries.
 
 ## Current queue
 
-- Close remaining applicable S3 session/server/member parity.
+- Close any remaining oracle-specific S3 session/server/member parity and keep
+  unsupported members explicitly scoped.
 - Qualify live AWS/R2 behavior with fresh credentials and record any service
   limitations separately from local structural-driver evidence.
 - Run fault, cancellation, concurrency, restart, and durability matrices.
@@ -33,7 +34,8 @@ restart/concurrency boundaries.
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
 | 2026-09-22 | Reconciled peer-fault and connection packet | Remote S3 loopback-only hardening preserved; Rust S3 gateway now exposes bounded drain timeout, live accepted-connection tracking, peer-aware `Connection`/`Server` transport hooks, and reset-on-close coverage; `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-s3-target ./scripts/cargo-shared test -p mount-rs-s3 --all-targets --locked --offline` passed 4 unit, 6 chunked, 17 gateway, and 5 public-API tests with loopback host permission | Complete member parity, streaming N-API binding, direct JavaScript peer-fault evidence, live AWS/R2, and broader fault/durability/concurrency/native gates |
-| 2026-09-22 | Exposed streaming S3 session through N-API | `S3Session.handleRequestStream` now accepts async iterables or Web `ReadableStream` request bodies, returns an async-iterable response body with cancellation, exposes coherent `stats()` snapshots, and preserves `S3Server.session`; generated release `pnpm build`, package typecheck, focused release binding load, and host-enabled `node test/servers.mjs` passed streamed PUT/GET, multi-chunk backpressure, response cancellation, generator failure mapping, bucket isolation, and metric deltas; S3 Rust tests passed 4 unit, 6 chunked, 17 gateway, and 5 public-API cases; N-API `cargo check`/Clippy, formatting, and the strict TypeScript fixture check passed | Direct JavaScript peer-fault evidence, complete member parity, live AWS/R2, and broader fault/durability/concurrency/native gates remain open |
+| 2026-09-22 | Exposed streaming S3 session through N-API | `S3Session.handleRequestStream` now accepts async iterables or Web `ReadableStream` request bodies, returns an async-iterable response body with cancellation, exposes coherent `stats()` snapshots, and preserves `S3Server.session`; generated release `pnpm build`, package typecheck, focused release binding load, and host-enabled `node test/servers.mjs` passed streamed PUT/GET, multi-chunk backpressure, response cancellation, generator failure mapping, bucket isolation, and metric deltas; S3 Rust tests passed 4 unit, 6 chunked, 17 gateway, and 5 public-API cases; N-API `cargo check`/Clippy, formatting, and the strict TypeScript fixture check passed | Direct JavaScript peer-fault evidence was still pending for this earlier chunk; complete oracle parity, live AWS/R2, and broader fault/durability/concurrency/native gates remained open |
+| 2026-09-22 | Closed the applicable S3 N-API member and peer-fault packet | Added `S3Server.connections`, `onTransportError`, debug-gated assertion accounting, non-secret effective session options, session-owned bucket wrappers, and generated declarations. The Rust gateway target passed 4 unit, 6 chunked, 18 gateway, and 5 public-API tests; N-API library tests passed 16/16; release `pnpm build`, package typecheck, strict Clippy, formatting/diff checks, and host-enabled `node test/servers.mjs` passed idle connection cleanup, bucket/session views, streamed traffic, cancellation, and one typed peer-aware callback after a direct Node socket reset | Live AWS/R2, complete oracle-specific codec/member parity, restart/durability/concurrency matrices, and native/hosted lifecycle evidence remain open; production decision stays NO-GO |
 
 ## Explicit boundaries
 

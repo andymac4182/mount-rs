@@ -902,6 +902,37 @@ async fn http_server_reports_live_connections_and_cleans_them_after_disconnect()
 }
 
 #[tokio::test]
+async fn session_assertion_tracking_stays_clean_across_concurrent_replies() {
+    let session = Arc::new(S3Session::new(MemoryFs::empty()));
+    let (missing_a, missing_b) = tokio::join!(
+        session.handle(S3Request::new("GET", "/mountx/missing-a", Vec::new())),
+        session.handle(S3Request::new("GET", "/mountx/missing-b", Vec::new())),
+    );
+    assert_eq!(missing_a.status, 404);
+    assert_eq!(missing_b.status, 404);
+    let stats = session.stats().await;
+    assert_eq!(stats.requests, 2);
+    assert_eq!(stats.replies, 2);
+    assert_eq!(stats.errors, 2);
+    assert_eq!(stats.assertions, 0);
+    assert!(session.assertions().is_empty());
+
+    let disabled = S3Session::new_with_options(
+        MemoryFs::empty(),
+        S3SessionOptions {
+            debug: false,
+            ..S3SessionOptions::default()
+        },
+    );
+    let response = disabled
+        .handle(S3Request::new("GET", "/mountx/missing", Vec::new()))
+        .await;
+    assert_eq!(response.status, 404);
+    assert_eq!(disabled.stats().await.assertions, 0);
+    assert!(disabled.assertions().is_empty());
+}
+
+#[tokio::test]
 async fn http_server_reports_peer_for_connection_io_failure() {
     let reports = Arc::new(std::sync::Mutex::new(Vec::new()));
     let notified = Arc::new(Notify::new());
