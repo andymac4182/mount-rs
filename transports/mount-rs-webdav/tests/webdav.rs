@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use mount_rs_core::MemoryFs;
 use mount_rs_webdav::protocol::{
@@ -6,14 +6,31 @@ use mount_rs_webdav::protocol::{
     parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
 };
 use mount_rs_webdav::{
-    DavFault, Depth, WebdavRequestHead, WebdavServer, WebdavServerOptions, WebdavSessionOptions,
-    create_webdav_server,
+    ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, Depth, WebdavRequestHead, WebdavServer,
+    WebdavServerHooks, WebdavServerOptions, WebdavSessionOptions, WebdavTransportErrorKind,
+    create_webdav_server, create_webdav_server_with_hooks, status_for_error, status_line,
+    status_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Notify;
+use tokio::time::{Duration, timeout};
 
 fn method(name: &str) -> reqwest::Method {
     reqwest::Method::from_bytes(name.as_bytes()).expect("valid HTTP method")
+}
+
+#[test]
+fn public_constants_and_status_helpers_match_the_transport_contract() {
+    assert_eq!(DAV_NS, "DAV:");
+    assert_eq!(DAV_COMPLIANCE, "1, 2, 3");
+    assert_eq!(
+        ALLOW_HEADER,
+        "OPTIONS, HEAD, GET, PUT, DELETE, MKCOL, COPY, MOVE, PROPFIND, PROPPATCH, LOCK, UNLOCK"
+    );
+    assert_eq!(status_text(207), Some("Multi-Status"));
+    assert_eq!(status_line(423), "HTTP/1.1 423 Locked");
+    assert_eq!(status_for_error(mount_rs_core::ErrorCode::Enoent), 404);
 }
 
 async fn server() -> WebdavServer {
@@ -21,6 +38,57 @@ async fn server() -> WebdavServer {
     let server = create_webdav_server(fs, WebdavServerOptions::default()).expect("loopback bind");
     server.listen().await.expect("listen");
     server
+}
+
+#[tokio::test]
+async fn transport_connection_failures_are_reported() {
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let notified = Arc::new(Notify::new());
+    let callback_reports = Arc::clone(&reports);
+    let callback_notified = Arc::clone(&notified);
+    let hooks = WebdavServerHooks {
+        on_transport_error: Some(Arc::new(move |error| {
+            callback_reports
+                .lock()
+                .expect("WebDAV hook lock")
+                .push(error);
+            callback_notified.notify_waiters();
+        })),
+    };
+    let server = create_webdav_server_with_hooks(
+        Arc::new(MemoryFs::empty()),
+        WebdavServerOptions::default(),
+        hooks,
+    )
+    .expect("loopback bind");
+    server.listen().await.expect("listen");
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .expect("connect");
+    stream
+        .write_all(b"not a valid HTTP request\r\n\r\n")
+        .await
+        .expect("write malformed request");
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if !reports.lock().expect("WebDAV report lock").is_empty() {
+                break;
+            }
+            notified.notified().await;
+        }
+    })
+    .await
+    .expect("transport callback");
+    let report = reports.lock().expect("WebDAV report lock")[0].clone();
+    assert_eq!(report.kind, WebdavTransportErrorKind::Connection);
+    assert!(
+        report
+            .peer
+            .as_deref()
+            .is_some_and(|peer| peer.starts_with("127.0.0.1:"))
+    );
+    server.close().await.expect("close");
 }
 
 async fn read_http_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {

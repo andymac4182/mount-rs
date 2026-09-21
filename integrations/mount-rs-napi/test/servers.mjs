@@ -11,6 +11,7 @@ import {
   createP9Server,
   createS3Server,
   createWebdavServer,
+  WebdavSession,
 } from "../index.js";
 
 let memoryFilesystem = () => Filesystem.memory();
@@ -769,14 +770,53 @@ async function exerciseS3() {
 
 async function exerciseWebdav() {
   const filesystem = memoryFilesystem();
-  const server = createWebdavServer(filesystem, { host: "127.0.0.1", port: 0 });
+  const reports = [];
+  const server = createWebdavServer(filesystem, {
+    host: "127.0.0.1",
+    port: 0,
+    realm: "mount-rs-integration",
+    readChunkBytes: 16 * 1024,
+    maxXmlBytes: 128 * 1024,
+    maxBodyBytes: 1024 * 1024,
+    locks: {
+      defaultTimeoutSeconds: 30,
+      maxTimeoutSeconds: 60,
+      maxLocks: 4,
+    },
+    debug: true,
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+    },
+  });
   let listening;
   try {
     listening = (await listenLifecycle(server, "WebDAV")).listening;
     assert.ok(server.port > 0);
     assert.equal(server.url.endsWith("/"), false);
+    assert.ok(server.session instanceof WebdavSession);
+    assert.ok(server.session.driver instanceof Filesystem);
+    assert.deepEqual(server.session.assertions, []);
+    assert.deepEqual(server.session.options, {
+      realm: "mount-rs-integration",
+      readChunkBytes: 16 * 1024,
+      maxXmlBytes: 128 * 1024,
+      maxBodyBytes: 1024 * 1024,
+      locks: {
+        defaultTimeoutSeconds: 30,
+        maxTimeoutSeconds: 60,
+        maxLocks: 4,
+      },
+      debug: true,
+    });
 
     const object = Buffer.from("WebDAV over the real loopback HTTP listener");
+    const direct = await server.session.handleRequest(
+      { method: "PUT", target: "/direct-webdav.txt", headers: [] },
+      object,
+    );
+    assert.ok([200, 201, 204].includes(direct.status));
+    assert.equal(direct.body ?? null, null);
+
     const put = await fetchBody(
       `${server.url}/servers-webdav.txt`,
       { method: "PUT", body: object },
@@ -791,6 +831,41 @@ async function exerciseWebdav() {
     );
     assert.equal(get.response.status, 200);
     assert.deepEqual(get.body, object);
+
+    const authServer = createWebdavServer(filesystem, {
+      host: "127.0.0.1",
+      credentials: { username: "alice", password: "secret" },
+      realm: "private",
+    });
+    try {
+      assert.deepEqual(authServer.session.options.credentials, {
+        username: "alice",
+        password: "secret",
+      });
+      const unauthenticated = await authServer.session.handleRequest(
+        { method: "OPTIONS", target: "/", headers: [] },
+        null,
+      );
+      assert.equal(unauthenticated.status, 401);
+      assert.match(
+        unauthenticated.headers.find(({ name }) => name === "www-authenticate")?.value ?? "",
+        /^Basic realm="private"/,
+      );
+      const authenticated = await authServer.session.handleRequest(
+        {
+          method: "OPTIONS",
+          target: "/",
+          headers: [{
+            name: "authorization",
+            value: `Basic ${Buffer.from("alice:secret").toString("base64")}`,
+          }],
+        },
+        null,
+      );
+      assert.equal(authenticated.status, 200);
+    } finally {
+      await authServer.close();
+    }
   } finally {
     await runPhase("WebDAV cleanup: server lifecycle", () =>
       closeLifecycle(server, "WebDAV", listening),

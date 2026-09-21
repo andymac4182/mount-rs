@@ -202,6 +202,18 @@ impl WebdavSession {
             .unwrap_or(0)
     }
 
+    /// Return the active write locks in this session after expiring stale
+    /// entries. The transport keeps the lock table private to request
+    /// dispatch, but embedders need a read-only state view for lifecycle and
+    /// parity inspection.
+    pub fn lock_records(&self) -> Vec<DavLock> {
+        let now = self.now();
+        self.locks
+            .lock()
+            .map(|mut locks| locks.all(now))
+            .unwrap_or_default()
+    }
+
     /// Answer one request and never reject.  Driver and protocol errors become
     /// one response, matching the upstream exactly-one-reply contract.
     pub async fn handle_request<B>(&self, head: WebdavRequestHead, body: B) -> WebdavResponse

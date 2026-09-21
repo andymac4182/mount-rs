@@ -610,6 +610,18 @@ transport tracker together.
   cancellation/close races, durability/restart and transport/native concurrency
   remain open by classification.
 
+WebDAV-owned W01 tracking is maintained in
+[`docs/W01_WEBDAV_PROGRESS.md`](docs/W01_WEBDAV_PROGRESS.md). The current
+bounded slice adds the low-level `./webdav` barrel and generated declarations,
+the N-API `WebdavSession`/server session view, buffered request handling,
+serializable session and lock policy, driver access, Basic-auth challenge and
+acceptance, and Rust transport-hook plumbing. The Rust WebDAV target passed
+13/13 tests and the isolated locked N-API check plus release generation passed;
+the oracle differential is explicitly skipped without `MOUNTX_SOURCE`, the
+sandbox blocks the live N-API loopback bind with `Operation not permitted`, and
+streaming, peer-fault, restart/durability, provider, hosted, and native gates
+remain open. W01 and production status remain **NO-GO**.
+
 Evidence landed without closing the remaining W01 acceptance gates:
 
 - [x] `0de1832` plus `6ba3d62` now provide a mount-free core parity harness:
