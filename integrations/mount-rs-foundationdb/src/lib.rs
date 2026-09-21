@@ -334,6 +334,7 @@ pub struct FoundationDbLeaseAuthority {
     db: Arc<Database>,
     key: Vec<u8>,
     limits: FoundationDbLimits,
+    _network: Option<Arc<NetworkAutoStop>>,
 }
 
 impl FoundationDbLeaseAuthority {
@@ -344,7 +345,33 @@ impl FoundationDbLeaseAuthority {
         limits: FoundationDbLimits,
     ) -> Result<Self> {
         let (db, key, limits) = lease_oracle_parts(db, prefix, limits)?;
-        Ok(Self { db, key, limits })
+        Ok(Self {
+            db,
+            key,
+            limits,
+            _network: None,
+        })
+    }
+
+    /// Boot the process-wide FoundationDB client network and connect the
+    /// write-side authority service from a cluster file.
+    pub fn connect(
+        path: impl AsRef<Path>,
+        prefix: impl AsRef<[u8]>,
+        limits: FoundationDbLimits,
+    ) -> Result<Self> {
+        let network = client_network()?;
+        let path = path.as_ref().to_str().ok_or_else(|| {
+            FsError::new(ErrorCode::Einval).with_message("cluster path is not UTF-8")
+        })?;
+        let db = Database::from_path(path).map_err(fdb_error)?;
+        let (db, key, limits) = lease_oracle_parts(Arc::new(db), prefix, limits)?;
+        Ok(Self {
+            db,
+            key,
+            limits,
+            _network: Some(network),
+        })
     }
 
     /// Publish a provider-time sample, retaining the larger value already in
@@ -392,7 +419,7 @@ impl FoundationDbLeaseAuthority {
             db: Arc::clone(&self.db),
             key: self.key.clone(),
             limits: self.limits,
-            _network: None,
+            _network: self._network.clone(),
         }
     }
 }

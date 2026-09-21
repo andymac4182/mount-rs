@@ -1,6 +1,5 @@
 #![cfg(feature = "foundationdb")]
 
-use foundationdb::Database;
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
 use mount_rs_core::storage::{
     BlockStore, DirectoryEntry, MetadataStore, Namespace, NodeData, NodeMetadata,
@@ -136,25 +135,16 @@ impl LeaseOracle for DeterministicLeaseOracle {
 }
 
 async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()> {
-    let db = Arc::new(Database::from_path(cluster_file).map_err(|error| {
-        mount_rs_core::FsError::backend(format!(
-            "open FoundationDB shared-authority test database: {error}"
-        ))
-    })?);
     let authority_prefix = format!("{prefix}/shared-authority");
     let volume_prefix = format!("{prefix}/shared-authority-volume");
-    let authority = FoundationDbLeaseAuthority::from_database(
-        Arc::clone(&db),
+    let authority = FoundationDbLeaseAuthority::connect(
+        cluster_file,
         &authority_prefix,
         FoundationDbLimits::default(),
     )?;
-    let reader_a = FoundationDbSharedLeaseOracle::from_database(
-        Arc::clone(&db),
-        &authority_prefix,
-        FoundationDbLimits::default(),
-    )?;
-    let reader_b = FoundationDbSharedLeaseOracle::from_database(
-        Arc::clone(&db),
+    let reader_a = authority.shared_oracle();
+    let reader_b = FoundationDbSharedLeaseOracle::connect(
+        cluster_file,
         &authority_prefix,
         FoundationDbLimits::default(),
     )?;
@@ -176,12 +166,12 @@ async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()>
     // Both independent storage handles consume the same published time. A
     // local clock skew on either host cannot move the shared oracle because the
     // reader path never proposes or writes a time value.
-    let first = FoundationDbStorage::from_cluster_file(
+    let first = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(&volume_prefix)
             .with_production_lease_oracle(reader_a.clone()),
     )?;
-    let second = FoundationDbStorage::from_cluster_file(
+    let second = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(&volume_prefix)
             .with_production_lease_oracle(reader_b.clone()),
@@ -235,7 +225,7 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
     // The default is intentionally checked against a live storage handle: a
     // distributed deployment must not accidentally acquire a lease with a
     // process-local wall clock or the persisted single-authority oracle.
-    let default_without_clock = FoundationDbStorage::from_cluster_file(
+    let default_without_clock = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(format!("{prefix}/no-clock-default")),
     )?;
@@ -247,7 +237,7 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
     assert_eq!(error.code, ErrorCode::Enotsup);
     drop(default_without_clock);
 
-    let explicit_without_clock = FoundationDbStorage::from_cluster_file(
+    let explicit_without_clock = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(format!("{prefix}/no-clock-explicit"))
             .without_lease_oracle(),
@@ -265,7 +255,7 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
     // The persisted FoundationDB oracle is an explicit single-authority/test
     // choice. It is not a production cross-host clock authority, so the
     // ordinary constructor above remains fail closed.
-    let storage = FoundationDbStorage::from_cluster_file(
+    let storage = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(&prefix).with_persisted_lease_oracle(),
     )?;
@@ -353,7 +343,7 @@ async fn exercise_real_cluster(cluster_file: &str) -> Result<()> {
     // FoundationDB provider.
     let lease_clock = Arc::new(DeterministicLeaseOracle::new(1_000_000));
     let oracle: Arc<dyn LeaseOracle> = lease_clock.clone();
-    let lease_storage = FoundationDbStorage::from_cluster_file(
+    let lease_storage = FoundationDbStorage::connect(
         cluster_file,
         FoundationDbStorageOptions::new(format!("{prefix}/lease-expiry"))
             .with_oracle_arc(Arc::clone(&oracle)),
@@ -400,13 +390,11 @@ async fn foundationdb_real_cluster_contract() {
         return;
     };
 
-    let network = unsafe { foundationdb::boot() };
     let result = tokio::time::timeout(
         Duration::from_secs(60),
         exercise_real_cluster(&cluster_file),
     )
     .await
     .expect("FoundationDB integration exceeded its bounded test timeout");
-    drop(network);
     result.expect("FoundationDB real-cluster contract failed");
 }

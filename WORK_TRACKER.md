@@ -913,8 +913,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   read-only `FoundationDbSharedLeaseOracle`; the real-cluster integration test
   exercises two independent readers, missing-authority fail-closed behavior,
   backward-sample clamping, forward recovery and stale-writer fencing. Hosted
-  runtime evidence and deployment-level authority credential/clock-skew
-  controls remain pending, so this item is not yet marked complete.
+  runtime evidence now also exercises the process-owned authority, reader and
+  storage `connect` paths. Deployment-level authority credential/clock-skew
+  controls and hosted runtime evidence remain pending, so this item is not yet
+  marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.

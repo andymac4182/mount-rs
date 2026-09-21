@@ -34,13 +34,14 @@ The initial provider gate follows the platform support published by
 
 The Rust feature selects the 7.4 C API headers, but it does not install or
 embed the native client library or a cluster. The runtime must be able to load
-the matching `libfdb_c` and read a cluster file. The application must boot the
-FoundationDB network once and keep the returned `NetworkAutoStop` guard alive
-until every database handle has been dropped:
+the matching `libfdb_c` and read a cluster file. Caller-owned handles must boot
+the FoundationDB network once and keep the returned `NetworkAutoStop` guard
+alive until every database handle has been dropped. Consumer-facing code can
+use `FoundationDbStorage::connect`, which owns the process-scoped network
+guard:
 
 ```rust,no_run
-let _network = unsafe { foundationdb::boot() };
-let storage = mount_rs_foundationdb::FoundationDbStorage::from_cluster_file(
+let storage = mount_rs_foundationdb::FoundationDbStorage::connect(
     "/etc/foundationdb/fdb.cluster",
     mount_rs_foundationdb::FoundationDbStorageOptions::new("my-volume"),
 )?;
@@ -77,15 +78,20 @@ write-side publisher and `FoundationDbSharedLeaseOracle` is the read-only
 consumer view:
 
 ```rust,no_run
-let authority = mount_rs_foundationdb::FoundationDbLeaseAuthority::from_database(
-    std::sync::Arc::clone(&db),
+let authority = mount_rs_foundationdb::FoundationDbLeaseAuthority::connect(
+    "/etc/foundationdb/fdb.cluster",
     "mount-rs/lease-authority",
     mount_rs_foundationdb::FoundationDbLimits::default(),
 )?;
 authority.publish_system_now_ms().await?;
-let oracle = authority.shared_oracle();
-let storage = mount_rs_foundationdb::FoundationDbStorage::from_database(
-    db_for_volume,
+// In a separate worker process, use read-only FoundationDB credentials.
+let oracle = mount_rs_foundationdb::FoundationDbSharedLeaseOracle::connect(
+    "/etc/foundationdb/fdb.cluster",
+    "mount-rs/lease-authority",
+    mount_rs_foundationdb::FoundationDbLimits::default(),
+)?;
+let storage = mount_rs_foundationdb::FoundationDbStorage::connect(
+    "/etc/foundationdb/fdb.cluster",
     mount_rs_foundationdb::FoundationDbStorageOptions::new("my-volume")
         .with_production_lease_oracle(oracle),
 )?;
