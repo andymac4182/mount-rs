@@ -133,11 +133,19 @@ not with the runtime prefix-scoped role:
 AWS_PROFILE=<approved-audit-profile> \
 AWS_S3_AUDIT_BUCKET=<private-bucket> \
 AWS_S3_AUDIT_REGION=<aws-region> \
+AWS_S3_AUDIT_EXPECTED_ACCOUNT_ID=<approved-audit-account-id> \
 ./scripts/audit-aws-s3-resource.sh
 ```
 
-The command checks all four Block Public Access settings, BucketOwnerEnforced
-ownership, default server-side encryption, the configured lifecycle expiry and
-multipart-abort days, and reports rather than changes bucket versioning. It is
-safe to run during review, but a passing qualification-bucket audit does not
-close the production-resource gate.
+The command fails closed on inherited AWS endpoint or service-profile overrides,
+checks the caller account and bucket region, then checks all four Block Public
+Access settings, BucketOwnerEnforced ownership, default server-side encryption,
+the configured lifecycle expiry and multipart-abort days, and reports rather
+than changes bucket versioning. It is safe to run during review, but a passing
+qualification-bucket audit does not close the production-resource gate.
+
+The live acceptance harness reads bucket versioning before it assumes the
+prefix-scoped runtime role. Hosted jobs that use a separate audit identity must
+provide the reviewed `None`, `Enabled`, or `Suspended` result as the protected
+`AWS_S3_TEST_VERSIONING_STATUS` environment value; an absent or invalid value
+blocks the run rather than weakening cleanup verification.

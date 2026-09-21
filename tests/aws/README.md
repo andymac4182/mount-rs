@@ -110,6 +110,14 @@ sibling `mount-rs-tests/aws-s3-denied/` prefix and requires AWS authorization
 failure. A successful service run therefore proves both the required
 prefix-scoped operations and the configured role's list boundary.
 
+Before assuming the prefix-scoped role, the harness reads the bucket's
+versioning state with the audit identity. A separated hosted audit identity may
+instead provide the reviewed `None`, `Enabled`, or `Suspended` value through
+`AWS_S3_TEST_VERSIONING_STATUS`; an absent or invalid value blocks the run.
+When versioning is enabled or suspended, cleanup enumerates and removes both
+object versions and delete markers, and the cleanup identity must have the
+corresponding version-delete permission.
+
 The corresponding versioned CLI provider shape is:
 
 ```json
@@ -163,7 +171,8 @@ already reserved run prefix with `MOUNT_RS_AWS_S3_TEST_PREFIX`, but it must be
 below that root and empty; a non-empty prefix is refused rather than deleted.
 
 The script removes only `s3://$AWS_S3_TEST_BUCKET/$MOUNT_RS_AWS_S3_TEST_PREFIX/`
-and verifies that `ListObjectsV2` returns zero current objects. It does not
+and verifies that `ListObjectsV2` returns zero current objects. For versioned
+buckets it also verifies zero object versions and delete markers. It does not
 delete the bucket or any object outside the exact run prefix. An invocation
 without `MOUNT_RS_RUN_AWS_S3=1` reports `AWS_S3_TEST_SKIPPED`; an opted-in run
 whose local credential chain cannot authenticate reports

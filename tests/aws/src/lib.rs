@@ -14,9 +14,8 @@ use std::time::Duration;
 
 use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::{Loopback, MkdirOptions};
-use mount_rs_r2::R2BlockStore;
+use mount_rs_r2::{AwsS3Config, R2BlockStore};
 use mount_rs_sdk::{Filesystem, SplitOptions, StoreConfig};
-use object_store::aws::{AmazonS3Builder, S3ConditionalPut};
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
 
@@ -71,23 +70,12 @@ fn object_path(prefix: &str, name: &str) -> ObjectPath {
 }
 
 fn aws_store() -> Arc<dyn ObjectStore> {
-    let mut builder = AmazonS3Builder::new()
-        .with_bucket_name(required_env("AWS_S3_TEST_BUCKET"))
-        .with_region(required_env("AWS_S3_TEST_REGION"))
-        .with_access_key_id(required_env("AWS_ACCESS_KEY_ID"))
-        .with_secret_access_key(required_env("AWS_SECRET_ACCESS_KEY"))
-        .with_virtual_hosted_style_request(true)
-        .with_conditional_put(S3ConditionalPut::ETagMatch);
-    if let Ok(token) = env::var("AWS_SESSION_TOKEN")
-        && !token.is_empty()
-    {
-        builder = builder.with_token(token);
+    AwsS3Config {
+        bucket: required_env("AWS_S3_TEST_BUCKET"),
+        region: required_env("AWS_S3_TEST_REGION"),
     }
-    Arc::new(
-        builder
-            .build()
-            .unwrap_or_else(|error| panic!("build actual AWS S3 client: {error}")),
-    )
+    .build_store()
+    .unwrap_or_else(|error| panic!("build actual AWS S3 client: {error}"))
 }
 
 fn patterned_bytes(length: usize) -> Vec<u8> {
