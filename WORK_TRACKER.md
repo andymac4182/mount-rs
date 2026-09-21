@@ -3262,6 +3262,16 @@ listing a source does not mean it has been reviewed or its code can be reused.
   and bounded acceptance log as a pinned 14-day artifact even when the
   preflight safely refuses to authenticate; a successful run is still
   required before this becomes release evidence.
+- [x] The sealed W25 Standard scan
+  `4ba52479-904a-41d2-82d2-9afc20a82931` at pushed source
+  `aa529c58ce6801c69d3e6cc0ed8bb5ac7a8d9cf8` on 2026-09-22 reported zero
+  reportable findings across six W25 surfaces with partial coverage of the
+  659-file repository inventory. Independent baseline/architecture coverage
+  did not complete within the bounded review window and is explicitly
+  deferred; non-W25 repository surfaces and live AWS/GitHub deployment state
+  remain open. This closes the source-review evidence item only; hosted
+  release, production identity, load/soak/fault/restore, canary, rollback, and
+  post-deploy smoke gates remain open.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
