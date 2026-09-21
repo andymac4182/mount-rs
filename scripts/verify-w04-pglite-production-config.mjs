@@ -8,6 +8,7 @@ import { lstat, readFile } from "node:fs/promises";
 import path from "node:path";
 
 const configPath = process.argv[2];
+const MAX_LEASE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function fail(reason) {
   console.error(`W04_PGLITE_PRODUCTION_CONFIG_POLICY_FAIL reason=${reason}`);
@@ -145,7 +146,7 @@ if (driver.kind !== "splitstore") {
 const storage = requireObject(driver.storage, "config.driver.storage");
 rejectUnknown(
   storage,
-  ["metadata", "blocks", "chunk_size_bytes", "owner"],
+  ["metadata", "blocks", "chunk_size_bytes", "lease_ttl_ms", "owner"],
   "config.driver.storage",
 );
 const metadataKey = validatePgliteProvider(
@@ -169,11 +170,21 @@ if (
     "config.driver.storage.chunk_size_bytes-must-be-positive-safe-integer-at-most-64MiB",
   );
 }
+if (
+  storage.lease_ttl_ms !== undefined &&
+  (!Number.isSafeInteger(storage.lease_ttl_ms) ||
+    storage.lease_ttl_ms <= 0 ||
+    storage.lease_ttl_ms > MAX_LEASE_TTL_MS)
+) {
+  fail(
+    "config.driver.storage.lease_ttl_ms-must-be-positive-safe-integer-at-most-24h",
+  );
+}
 requireString(storage.owner, "config.driver.storage.owner");
 
 console.log(
   "W04_PGLITE_PRODUCTION_CONFIG_POLICY_PASS " +
     "scope=pglite-only metadata=pglite blocks=pglite " +
     "durable_metadata=true durable_blocks=true secrets=external " +
-    "mountpoint=absolute chunk_size=bounded",
+    "mountpoint=absolute chunk_size=bounded lease_ttl=bounded",
 );

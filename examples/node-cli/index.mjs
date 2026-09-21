@@ -317,6 +317,15 @@ function configDriver(driver, baseDirectory, resolveValue) {
             "driver.storage.chunk_size_bytes",
             64 * 1024,
           ),
+          ...(storage.lease_ttl_ms === undefined
+            ? {}
+            : {
+                ttlMs: configPositiveInteger(
+                  storage.lease_ttl_ms,
+                  "driver.storage.lease_ttl_ms",
+                  undefined,
+                ),
+              }),
           owner: storage.owner === undefined
             ? `mount-rs-node-cli-${process.pid}-${Date.now()}`
             : configString(storage.owner, "driver.storage.owner"),

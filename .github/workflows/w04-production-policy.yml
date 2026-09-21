@@ -38,3 +38,8 @@ jobs:
             echo 'W04 PGlite production config policy accepted an inline-secret fixture' >&2
             exit 1
           fi
+          if node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy-invalid-ttl.json; then
+            echo 'W04 PGlite production config policy accepted an invalid lease TTL fixture' >&2
+            exit 1
+          fi

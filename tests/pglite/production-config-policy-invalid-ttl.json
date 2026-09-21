@@ -22,7 +22,7 @@
         "durable": true
       },
       "chunk_size_bytes": 4194304,
-      "lease_ttl_ms": 120000,
+      "lease_ttl_ms": 0,
       "owner": "mount-rs-production-w04"
     }
   }

@@ -101,6 +101,7 @@ pub struct SplitStorageConfig {
     pub metadata: StorageProvider,
     pub blocks: StorageProvider,
     pub chunk_size_bytes: usize,
+    pub lease_ttl_ms: Option<u64>,
     pub owner: Option<String>,
 }
 
@@ -518,7 +519,13 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
     let object = object(value, "config.driver.storage")?;
     reject_unknown(
         object,
-        &["metadata", "blocks", "chunk_size_bytes", "owner"],
+        &[
+            "metadata",
+            "blocks",
+            "chunk_size_bytes",
+            "lease_ttl_ms",
+            "owner",
+        ],
         "config.driver.storage",
     )?;
     let metadata = parse_provider(
@@ -542,6 +549,10 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         .map(|value| positive_usize(value, "config.driver.storage.chunk_size_bytes"))
         .transpose()?
         .unwrap_or(DEFAULT_CHUNK_SIZE_BYTES);
+    let lease_ttl_ms = object
+        .get("lease_ttl_ms")
+        .map(|value| positive_u64(value, "config.driver.storage.lease_ttl_ms"))
+        .transpose()?;
     let owner = object
         .get("owner")
         .map(|value| required_value_string(value, "config.driver.storage.owner"))
@@ -553,6 +564,7 @@ fn parse_storage(value: &Value, base_dir: &Path) -> Result<SplitStorageConfig, C
         metadata,
         blocks,
         chunk_size_bytes,
+        lease_ttl_ms,
         owner,
     })
 }
@@ -1865,6 +1877,44 @@ mod tests {
         let spec = parse_config_str(SPLIT_MEMORY, Path::new("/tmp")).unwrap();
         assert_eq!(spec.storage.as_ref().unwrap().chunk_size_bytes, 4096);
         assert!(validate_resolved_options(&spec.to_options()).is_ok());
+    }
+
+    #[test]
+    fn explicit_lease_ttl_is_positive_milliseconds() {
+        let spec = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {"kind": "memory"},
+                        "blocks": {"kind": "memory"},
+                        "lease_ttl_ms": 120000
+                    }
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap();
+        assert_eq!(spec.storage.as_ref().unwrap().lease_ttl_ms, Some(120_000));
+
+        let error = parse_config_str(
+            r#"{
+                "version": 1,
+                "driver": {
+                    "kind": "splitstore",
+                    "storage": {
+                        "metadata": {"kind": "memory"},
+                        "blocks": {"kind": "memory"},
+                        "lease_ttl_ms": 0
+                    }
+                }
+            }"#,
+            Path::new("/tmp"),
+        )
+        .unwrap_err();
+        assert!(error.message().contains("lease_ttl_ms"));
+        assert!(error.message().contains("greater than zero"));
     }
 
     #[test]
