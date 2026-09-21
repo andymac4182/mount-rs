@@ -52,6 +52,8 @@ import {
   encodeFlushIn as namedEncodeFlushIn,
   decodeFsyncIn as namedDecodeFsyncIn,
   encodeFsyncIn as namedEncodeFsyncIn,
+  decodeSyncfsIn as namedDecodeSyncfsIn,
+  encodeSyncfsIn as namedEncodeSyncfsIn,
   decodeLkIn as namedDecodeLkIn,
   encodeLkIn as namedEncodeLkIn,
   decodeLkOut as namedDecodeLkOut,
@@ -157,6 +159,8 @@ for (const [name, value] of [
   ["encodeFlushIn", namedEncodeFlushIn],
   ["decodeFsyncIn", namedDecodeFsyncIn],
   ["encodeFsyncIn", namedEncodeFsyncIn],
+  ["decodeSyncfsIn", namedDecodeSyncfsIn],
+  ["encodeSyncfsIn", namedEncodeSyncfsIn],
   ["decodeLkIn", namedDecodeLkIn],
   ["encodeLkIn", namedEncodeLkIn],
   ["decodeLkOut", namedDecodeLkOut],
@@ -778,6 +782,9 @@ const lifecycleInput = {
     fh: 0x4142434445464748n,
     fsyncFlags: fuse.FUSE_FSYNC_FDATASYNC,
   },
+  syncfs: {
+    padding: 0x0102030405060708n,
+  },
 };
 const lifecycleCases = [
   ["RELEASE", fuse.FUSE_RELEASE, lifecycleInput.release, fuse.decodeReleaseIn, fuse.encodeReleaseIn, 24],
@@ -785,12 +792,20 @@ const lifecycleCases = [
   ["FLUSH", fuse.FUSE_FLUSH, lifecycleInput.flush, fuse.decodeFlushIn, fuse.encodeFlushIn, 24],
   ["FSYNC", fuse.FUSE_FSYNC, lifecycleInput.fsync, fuse.decodeFsyncIn, fuse.encodeFsyncIn, 16],
   ["FSYNCDIR", fuse.FUSE_FSYNCDIR, lifecycleInput.fsync, fuse.decodeFsyncIn, fuse.encodeFsyncIn, 16],
+  ["SYNCFS", fuse.FUSE_SYNCFS, lifecycleInput.syncfs, fuse.decodeSyncfsIn, fuse.encodeSyncfsIn, 8],
 ];
 for (const [name, , input, decodeIn, encodeIn, expectedLength] of lifecycleCases) {
   const body = encodeIn(input);
   assert.equal(body.length, expectedLength, `${name} request length`);
   assert.deepEqual(decodeIn(body), input, `${name} request round trip`);
 }
+const syncfsBody = fuse.encodeSyncfsIn(lifecycleInput.syncfs);
+assert.deepEqual([...syncfsBody], [8, 7, 6, 5, 4, 3, 2, 1]);
+assert.throws(() => fuse.decodeSyncfsIn(syncfsBody.subarray(0, 7)), fuse.ProtocolError);
+assert.throws(
+  () => fuse.decodeSyncfsIn(Buffer.concat([syncfsBody, Buffer.from([0])])),
+  fuse.ProtocolError,
+);
 assert.equal(fuse.encodeReply(99n).length, fuse.FUSE_OUT_HEADER_SIZE);
 
 const source = process.env.MOUNTX_SOURCE;
@@ -799,6 +814,9 @@ if (source) {
   const oracleIoctlIsTyped =
     typeof oracle.encodeRequestBody === "function" &&
     !Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(fuse.FUSE_IOCTL);
+  const oracleSyncfsIsUnsupported = Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(
+    fuse.FUSE_SYNCFS,
+  );
 
   const typedRequestCases = [
     ["SYMLINK", fuse.FUSE_SYMLINK, symlinkInput, undefined, fuse.encodeSymlinkIn, fuse.decodeSymlinkIn],
@@ -1575,7 +1593,9 @@ if (source) {
   }
 
   const lifecycleContext = { minor: 41, setxattrExt: false };
-  for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases) {
+  for (const [name, opcode, input, decodeIn, encodeIn] of lifecycleCases.filter(
+    ([, opcode]) => !Array.from(oracle.UNIMPLEMENTED_OPCODES ?? []).includes(opcode),
+  )) {
     const oracleRequest = oracle.encodeRequestBody(opcode, input, lifecycleContext);
     const actualRequest = encodeIn(input);
     assert.deepEqual(
@@ -1811,6 +1831,9 @@ if (source) {
   console.log("mount-rs N-API FUSE GETLK/SETLK/SETLKW request/typed-reply differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE SETXATTR/GETXATTR/LISTXATTR/REMOVEXATTR differential: PASS (pinned oracle)");
   console.log("mount-rs N-API FUSE RELEASE/RELEASEDIR, FLUSH, FSYNC/FSYNCDIR request/status differential: PASS (pinned oracle)");
+  if (oracleSyncfsIsUnsupported) {
+    console.log("mount-rs N-API FUSE SYNCFS request differential: SKIP (pinned oracle unimplemented)");
+  }
 } else {
   console.log("mount-rs N-API FUSE READDIR body differential: SKIP (MOUNTX_SOURCE unset)");
   console.log("mount-rs N-API FUSE READDIRPLUS body differential: SKIP (MOUNTX_SOURCE unset)");

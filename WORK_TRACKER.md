@@ -254,6 +254,15 @@ codec and routes the native request to the existing `FsDriver::syncfs` barrier.
 Success, backend failure, malformed/trailing bodies and empty replies are
 covered by focused tests; hosted kernel syncfs and the remaining native
 lifecycle/crash/durability gates remain external, so W01 stays NO-GO.
+The follow-up N-API FUSE packet exposes the same request as typed
+`NativeFuseSyncfsIn` `decodeSyncfsIn`/`encodeSyncfsIn` bindings, with explicit
+`./fuse` CommonJS/ESM aliases and regenerated declarations. Exact eight-byte,
+truncated and trailing-body checks pass alongside the release addon rebuild,
+focused codec test, generated typecheck and locked N-API Rust check. The
+pinned mountx oracle still classifies `SYNCFS` as unimplemented, so no oracle
+differential is claimed for this operation; hosted kernel syncfs behavior and
+the remaining native lifecycle, callback, crash/restart and durability gates
+remain open, and W01 stays NO-GO.
 The latest FUSE lifecycle packet wraps the Linux request loop and asynchronous
 session destroy in unwind isolation. A backend or cleanup panic now becomes
 one owned `Task` transport error, still closes the session, marks the mount

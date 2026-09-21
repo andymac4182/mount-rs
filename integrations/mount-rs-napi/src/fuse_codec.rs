@@ -1386,6 +1386,25 @@ fn fsync_in(value: NativeFuseFsyncIn) -> protocol::FuseFsyncIn {
 }
 
 #[napi(object)]
+pub struct NativeFuseSyncfsIn {
+    pub padding: BigInt,
+}
+
+impl From<protocol::FuseSyncfsIn> for NativeFuseSyncfsIn {
+    fn from(value: protocol::FuseSyncfsIn) -> Self {
+        Self {
+            padding: bigint(value.padding),
+        }
+    }
+}
+
+fn syncfs_in(value: NativeFuseSyncfsIn) -> protocol::FuseSyncfsIn {
+    protocol::FuseSyncfsIn {
+        padding: u64_from_bigint(&value.padding),
+    }
+}
+
+#[napi(object)]
 pub struct NativeFuseSetxattrIn {
     pub flags: u32,
     #[napi(js_name = "setxattrFlags")]
@@ -2646,6 +2665,31 @@ pub fn fuse_encode_fsync_in(value: NativeFuseFsyncIn) -> napi::Result<Buffer> {
     protocol::encode_request_body(
         mount_rs_fuse::FUSE_FSYNC,
         &protocol::FuseRequestBody::Fsync(fsync_in(value)),
+        None,
+    )
+    .map(Buffer::from)
+    .map_err(protocol_error)
+}
+
+#[napi(js_name = "fuseDecodeSyncfsIn")]
+pub fn fuse_decode_syncfs_in(
+    #[napi(ts_arg_type = "Uint8Array")] body: Buffer,
+) -> napi::Result<NativeFuseSyncfsIn> {
+    match protocol::decode_request_body(mount_rs_fuse::FUSE_SYNCFS, body.as_ref(), None)
+        .map_err(protocol_error)?
+    {
+        protocol::FuseRequestBody::Syncfs(value) => Ok(value.into()),
+        _ => Err(protocol_error(ProtocolError::new(
+            "FUSE_SYNCFS did not decode as a syncfs request",
+        ))),
+    }
+}
+
+#[napi(js_name = "fuseEncodeSyncfsIn")]
+pub fn fuse_encode_syncfs_in(value: NativeFuseSyncfsIn) -> napi::Result<Buffer> {
+    protocol::encode_request_body(
+        mount_rs_fuse::FUSE_SYNCFS,
+        &protocol::FuseRequestBody::Syncfs(syncfs_in(value)),
         None,
     )
     .map(Buffer::from)

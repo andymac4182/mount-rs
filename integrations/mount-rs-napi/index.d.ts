@@ -925,6 +925,8 @@ export declare function fuseDecodeSymlinkIn(body: Uint8Array): NativeFuseSymlink
 
 export declare function fuseDecodeSymlinkOut(body: Uint8Array, context?: NativeFuseProtocolContext | undefined | null): NativeFuseEntryOut
 
+export declare function fuseDecodeSyncfsIn(body: Uint8Array): NativeFuseSyncfsIn
+
 export declare function fuseDecodeTranscript(bytes: Uint8Array): Array<NativeFuseTranscriptFrame>
 
 export declare function fuseDecodeUnlinkIn(body: Uint8Array): NativeFuseNameIn
@@ -1062,6 +1064,8 @@ export declare function fuseEncodeStatfsOut(value: NativeFuseKstatfs, context?: 
 export declare function fuseEncodeSymlinkIn(value: NativeFuseSymlinkIn): Buffer
 
 export declare function fuseEncodeSymlinkOut(value: NativeFuseEntryOut, context?: NativeFuseProtocolContext | undefined | null): Buffer
+
+export declare function fuseEncodeSyncfsIn(value: NativeFuseSyncfsIn): Buffer
 
 export declare function fuseEncodeTranscript(frames: Array<NativeFuseTranscriptFrame>): Buffer
 
@@ -1763,6 +1767,10 @@ export interface NativeFuseSplitInitFlags {
 export interface NativeFuseSymlinkIn {
   name: string
   target: string
+}
+
+export interface NativeFuseSyncfsIn {
+  padding: bigint
 }
 
 export interface NativeFuseTranscriptFrame {
