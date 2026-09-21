@@ -88,6 +88,17 @@ non-self-hosted-runner constraints. This is a fresh hosted qualification
 result only; it does not execute the protected candidate-tag publication,
 registry acceptance, canary, rollback or release-owner approval.
 
+W08.32 adds the fail-closed repository consistency control for the production
+tracking documents. Hosted run `35647096385`, source
+`2641962a6a65179abf4b8d785345fbe6af4be9b8`, job `106490142559`, completed
+successfully: the current NO-GO state, all 32 implementation items, nine
+production-gate rows and six simulated invalid/GO transitions passed the
+rollout-ledger verifier/test, and the existing release-identity/provenance
+policy step also passed. The earlier run `35646848615` was cancelled before
+job creation (`jobs=[]`) and is not evidence. This is hosted tracking-control
+qualification only; it does not close P01–P09 or establish candidate release,
+registry, canary, rollback or release-owner approval.
+
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
 tests and strict Clippy with `-D warnings` using a bounded external Cargo

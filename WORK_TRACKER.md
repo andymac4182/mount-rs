@@ -2404,8 +2404,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   documents disagree. The dedicated W08 release-policy workflow now runs both
   the current NO-GO verifier and simulated invalid/GO transitions. This is a
   repository tracking control only; it does not close any provider, hosted,
-  native or production gate. *(Implementation/static qualification; production
-  evidence and approval remain external.)*
+  native or production gate. Hosted run `35647096385` from source
+  `2641962a6a65179abf4b8d785345fbe6af4be9b8`, job `106490142559`, reached
+  terminal `success` and passed both the rollout-ledger verifier/test and the
+  existing release-identity/provenance policy step. The earlier push-triggered
+  run `35646848615` was cancelled before creating jobs (`jobs=[]`) and is not
+  evidence. *(Implementation/static qualification; production evidence and
+  approval remain external.)*
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
