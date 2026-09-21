@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { readFile } from "node:fs/promises"
 
 import {
   validateArtifact,
@@ -6,6 +7,7 @@ import {
   W26_IOPS_PROFILE,
 } from "../../scripts/verify-w26-ozone-iops-artifact.mjs"
 import { validateEvidencePacket } from "../../scripts/verify-w26-ozone-evidence-packet.mjs"
+import { validateContract } from "../../scripts/verify-w26-ozone-rollout-contract.mjs"
 
 import {
   BenchmarkTimeoutError,
@@ -338,6 +340,9 @@ async function testEvidencePacket() {
       "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=inline-secret",
       "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=foundationdb-unsafe",
       "W26_OZONE_PRODUCTION_CONFIG_POLICY_NEGATIVE_PASS case=tidb-tls-weak",
+      "W26_OZONE_PRODUCTION_ROLLOUT_CONTRACT_PASS providers=sqlite,pglite,tidb,foundationdb",
+      "W26_OZONE_PRODUCTION_ROLLOUT_CONTRACT_NEGATIVE_PASS case=slo",
+      "W26_OZONE_PRODUCTION_ROLLOUT_CONTRACT_NEGATIVE_PASS case=inline-secret",
     ].join("\n"),
     baseLog: [
       "OZONE_FAULT_WINDOW_PASS container=ozone",
@@ -375,7 +380,7 @@ async function testEvidencePacket() {
   assert.deepEqual(validateEvidencePacket(packet), {
     revision: W26_TEST_REVISION,
     artifacts: ["ozone-compositions", "ozone-tidb", "ozone-foundationdb"],
-    policyMarkers: 8,
+    policyMarkers: 11,
   })
   assert.throws(
     () => validateEvidencePacket({ ...packet, tidbLog: packet.tidbLog.replace("TIDB_ACCEPTANCE ", "") }),
@@ -386,6 +391,37 @@ async function testEvidencePacket() {
   assert.throws(
     () => validateEvidencePacket({ ...packet, foundationdbArtifact: mismatchedFoundationDb }),
     /foundationdb-artifact-source-revision-does-not-match-packet/,
+  )
+}
+
+async function testProductionRolloutContract() {
+  const fixturePath = new URL(
+    "../../tests/ozone/production-rollout-contract.json",
+    import.meta.url,
+  )
+  const contract = JSON.parse(await readFile(fixturePath, "utf8"))
+  assert.deepEqual(validateContract(contract), {
+    status: "pass",
+    metadataProviders: ["sqlite", "pglite", "tidb", "foundationdb"],
+    customerOwnedRecovery: true,
+  })
+
+  assert.throws(
+    () => validateContract({
+      ...contract,
+      service: { ...contract.service, rtoMinutes: 10 },
+    }),
+    /service\.rtoMinutes-must-be-5/,
+  )
+  assert.throws(
+    () => validateContract({
+      ...contract,
+      ozone: {
+        ...contract.ozone,
+        auth: { ...contract.ozone.auth, secretKeyRef: "inline-secret" },
+      },
+    }),
+    /secretKeyRef-must-not-be-inline/,
   )
 }
 
@@ -476,6 +512,7 @@ await testCli()
 await testRequiredProviderConfiguration()
 await testQualificationArtifact()
 await testEvidencePacket()
+await testProductionRolloutContract()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()

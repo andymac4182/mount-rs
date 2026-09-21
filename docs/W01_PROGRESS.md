@@ -82,6 +82,12 @@ callback-silent. Host all-target FUSE tests, strict Clippy, formatting/diff,
 and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior,
 native mutation/write concurrency, close/crash/restart, callback events, locks
 and durability remain external, so W01 stays NO-GO.
+The ignored Linux FUSE harness now starts eight concurrent blocking kernel
+clients; each writes, reads, renames, and rereads a distinct file, then the
+harness checks that all eight entries are visible through the mounted root.
+The host harness compiles and Linux-target strict Clippy passes, but only the
+hosted `native-fuse` execution can qualify this as native runtime evidence;
+W01 remains NO-GO until that result and the other lifecycle gates are green.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
@@ -203,14 +209,23 @@ preserves the recursive namespaced owner XML tree, including predefined entity
 text. Eight parallel unique-file PUTs and
 GETs through one direct WebDAV session also pass with byte-for-byte readback;
 this is in-process same-driver concurrency evidence only. Complete
-session/member parity, direct listener lifecycle, network/native/hosted
-concurrency, and the external provider/native/restart gates remain open.
+session/member parity remains open: the current N-API scope does not claim the
+oracle's injectable `now`, `onError`, `onAssertion`, live `DavLockTable`, or
+`Map`-shaped method counters. Direct listener lifecycle, network/native/hosted
+concurrency, and the external provider/native/restart gates also remain open.
 Same-driver server recreation preserves file bytes but resets session locks;
 crash/power-loss and provider durability remain unqualified. The pinned pure
 WebDAV barrel/protocol differential now passes with
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; broader session/server member
-differential remains open.
+differential remains open. A read-only status check for the published tip
+`9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5` found [CI run
+35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088)
+and [fault-injection run
+35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044)
+cancelled, while [Live Cloudflare R2 run
+35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090)
+failed; no hosted WebDAV PASS is claimable from this tip.
 
 Next W01.1 action: close the next smallest remaining mount-free export or
 behavior gap, then rerun the pinned oracle and generated type/build checks
@@ -347,6 +362,9 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | The host-enabled `node test/servers.mjs` WebDAV phase created `/concurrent`, completed eight parallel unique-file PUTs and eight parallel GETs through one `WebdavSession.handleRequest`, and verified every body byte-for-byte | — | 72% W01.1 planning view | This is in-process same-driver evidence only; network-client, native, hosted, crash/power-loss restart, provider durability, complete session/member parity, and oracle differential remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node test/webdav-codec.mjs` passed the complete pure WebDAV constants/path/header/XML/lock/document differential at oracle `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`; source-backed host-enabled `node test/servers.mjs` also passed | — | 72% W01.1 planning view | Full session/server member differential, native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Added recursive N-API `WebdavXmlNode` owner readback to `WebdavLockView`; host-enabled local and pinned structural-driver `node test/servers.mjs` runs accepted namespaced `A&amp;B` owner text, while the Rust 13-test target and strict WebDAV/N-API Clippy passed after bounded predefined/numeric XML reference decoding | — | 72% W01.1 planning view | Complete session/member parity beyond lock-owner readback, native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Classified the remaining session member boundary against the pinned source: N-API exposes scalar options, snapshot lock records, stats and assertions, but does not claim injectable `now`, `onError`, `onAssertion`, a live `DavLockTable`, or `Map`-shaped method counters | — | 72% W01.1 planning view | These public-parity items remain OPEN pending implementation or explicit supported-scope acceptance; native/hosted lifecycle, provider qualification, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Read-only status for published tip `9e8e4592cd8d4fe5b42c2734621ac1cd1bce02b5`: [CI run 35631845088](https://github.com/andymac4182/mount-rs/actions/runs/35631845088) and [fault-injection run 35631845044](https://github.com/andymac4182/mount-rs/actions/runs/35631845044) were cancelled, and [Live Cloudflare R2 run 35631845090](https://github.com/andymac4182/mount-rs/actions/runs/35631845090) failed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Read-only status for current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871`: [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914) and [fault-injection run 35633305962](https://github.com/andymac4182/mount-rs/actions/runs/35633305962) were cancelled; the unrelated [W04 production-policy run 35633305932](https://github.com/andymac4182/mount-rs/actions/runs/35633305932) succeeded, and no fresh Live Cloudflare R2 run was listed | — | 72% W01.1 planning view | No hosted WebDAV PASS is claimable from the current tip; hosted/native lifecycle, provider, crash/power-loss durability, and broader concurrency remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 
