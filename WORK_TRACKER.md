@@ -2693,6 +2693,15 @@ listing a source does not mean it has been reviewed or its code can be reused.
   gateway, SDK/CLI, N-API, W01, W04, W26, and other non-ignored workspace rows.
   Explicitly ignored native/service rows remain separate prerequisites and are
   not promoted to production evidence.
+- [x] Current credential-free W25 rollout-contract fixtures at pushed source
+  `70d37fefe26e41a2406bde32b27de5f563c3ab2f` passed on 2026-09-22:
+  CloudFormation template structure (`AWS_S3_TEMPLATE_CONTRACT_PASS`),
+  synthetic bucket-policy contract and tamper cases
+  (`AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`), the seven-case CI-input
+  validator (`AWS_S3_CI_CONFIG_TEST_PASS cases=7`), and the three-case
+  protected-environment fixture (`AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`).
+  These are credential-free fail-closed safeguards only; they do not approve
+  the external GitHub environment, IAM trust, or production parameters.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

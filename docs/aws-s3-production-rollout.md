@@ -169,6 +169,11 @@ selection on 2026-09-22; no stack or change set was created.
 The template bucket-name constraint and the read-only resource auditor now
 reject consecutive dots and invalid length or edge characters consistently
 with the hosted preflight.
+At pushed source `70d37fe`, the credential-free template contract, synthetic
+bucket-policy contract/tamper cases, seven-case CI-input validator, and
+three-case protected-environment fixture all passed locally. These safeguards
+prove fail-closed validation only; they do not approve external GitHub or AWS
+deployment state.
 Validation does not approve
 the production parameters, role trust policies, metadata topology, backup
 plan, or deployment promotion. Those remain W25.5-W25.9 gates.
