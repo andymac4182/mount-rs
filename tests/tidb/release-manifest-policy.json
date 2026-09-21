@@ -1,0 +1,32 @@
+{
+  "schema": "mount-rs.release-manifest.v1",
+  "workstream": "W08",
+  "repository": "andymac4182/mount-rs",
+  "source_commit": "0123456789abcdef0123456789abcdef01234567",
+  "version": "0.1.0",
+  "tag": "v0.1.0-cli-preview",
+  "target": "aarch64-apple-darwin",
+  "workflow": "Publish CLI preview release",
+  "workflow_run_id": 123456,
+  "artifact": {
+    "name": "mount-rs-0.1.0-aarch64-apple-darwin.tar.gz",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "size_bytes": 1234
+  },
+  "checksums": {
+    "algorithm": "sha256",
+    "file": "SHA256SUMS"
+  },
+  "provenance": {
+    "builder": "github-actions",
+    "repository": "andymac4182/mount-rs",
+    "source_commit": "0123456789abcdef0123456789abcdef01234567",
+    "workflow": "Publish CLI preview release",
+    "run_id": 123456
+  },
+  "release_controls": {
+    "signature_status": "pending",
+    "sbom_status": "pending",
+    "canary_status": "not-run"
+  }
+}
