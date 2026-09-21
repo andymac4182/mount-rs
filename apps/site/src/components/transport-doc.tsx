@@ -162,6 +162,11 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         so full request/reply, session, and native-mount surfaces stay open.
         Plain-flag <code>RENAME2</code> is now supported at session dispatch;
         unsupported flags remain explicit <code>ENOSYS</code> with no mutation.
+        The no-reply <code>FORGET</code> path follows the pinned session
+        behavior: a malformed body is ignored without releasing the inode,
+        while valid <code>FORGET</code> releases its lookup count. Malformed
+        <code>BATCH_FORGET</code> frames remain validated before any inode
+        release. This is a session-boundary behavior, not native mount proof.
         <code>FALLOCATE</code>, <code>LSEEK</code>, and
         <code>COPY_FILE_RANGE</code> remain unsupported boundaries.
       </>

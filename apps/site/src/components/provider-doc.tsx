@@ -310,7 +310,7 @@ SQL`,
     name: 'Cloudflare R2 / S3-compatible blocks',
     eyebrow: 'Provider / object storage',
     maturity: 'Validated',
-    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, and both metadata-provider composition gates passed; broader benchmark and release gates remain separate.',
+    maturityNote: 'Authenticated live R2 block, configuration-driven CLI, both metadata-provider composition gates, and the public-NAPI benchmark passed; hosted credentials, broader benchmark, and release gates remain separate.',
     summary: (
       <>
         R2 is the remote block plane in the current split-store design. It is
@@ -392,7 +392,14 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         <code>R2_ENDPOINT</code> unset. The portable provider matrix also adds
         seeded positional writes, truncate, flush, and reopen checks. Local
         object-store tests and RustFS results are not substituted for recorded
-        live Cloudflare results.
+        live Cloudflare results. The current live rerun additionally passed
+        the complete Node/N-API suite with live R2 and isolated PGlite, all
+        <code>3,105/3,105</code> operations across five seeded differential
+        traces, the configuration-driven live-R2 CLI, and the public-NAPI
+        benchmark's <code>8/8</code> iterations across 1, 4, 10, and 16 MiB
+        with fixed 64 KiB chunks and verified cleanup. Hosted CI does not
+        receive the dedicated R2 credentials, so those results remain a
+        separately authenticated acceptance boundary.
       </>
     ),
     sources: [
@@ -502,7 +509,7 @@ aws s3api get-object --endpoint-url "$S3_ENDPOINT" \
     name: 'TiDB',
     eyebrow: 'Provider / distributed SQL',
     maturity: 'Experimental',
-    maturityNote: 'Provider and single-node ARM64 checks exist; bounded Node and CLI consumer matrices are wired, while live credential-gated rows, durable topology, and native/hosted acceptance remain open.',
+    maturityNote: 'Provider and single-node ARM64 checks exist; bounded Node and CLI consumer matrices plus dedicated service jobs are wired, while live credential-gated rows, durable topology, and native/hosted acceptance remain open.',
     summary: (
       <>
         TiDB can supply either side of the split store using the MySQL wire
@@ -569,7 +576,10 @@ LIMIT 20;`,
         truncate, shutdown/reopen, and owned RustFS-prefix cleanup, but native
         mount and hosted restart coverage remain open. Its live TiDB/RustFS
         rows require <code>MOUNT_RS_TIDB_URL</code> and loopback RustFS
-        credentials.
+        credentials. The dedicated <code>tidb</code> and
+        <code>tidb-rustfs</code> jobs are the service-evidence boundary; a
+        durable run counts only when it emits
+        <code>TIDB_ACCEPTANCE evidence=durable-multinode-restart</code>.
       </>
     ),
     evidence: (
@@ -581,7 +591,8 @@ LIMIT 20;`,
         <code>pass=10 skip=3 fail=0</code>; its live TiDB/RustFS rows are
         explicit credential-gated skips. The maturity label stays Experimental
         until replicated/durable topology and broader consumer gates are
-        complete.
+        complete; the generic workspace job does not substitute for those
+        dedicated service runs.
       </>
     ),
     sources: [
@@ -595,7 +606,7 @@ LIMIT 20;`,
     name: 'FoundationDB',
     eyebrow: 'Provider / transactional key-value store',
     maturity: 'Experimental',
-    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, including exact owned-prefix cleanup; production lease authority is now guarded by an explicit shared-provider declaration, while protected multi-host evidence remains open.',
+    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, and shared-provider consumer selection with opt-in Node/Linux CLI gates are present; hosted runtime and multi-host deployment evidence remain open.',
     summary: (
       <>
         FoundationDB stores the split filesystem in a volume-scoped keyspace.
@@ -638,7 +649,15 @@ LIMIT 20;`,
         point rejects unverified, development, and single-authority clocks
         unless <code>LeaseOracle::authority_kind</code> declares
         <code>SharedProvider</code>; that declaration is a trust boundary, not
-        proof of distributed safety.
+        proof of distributed safety. The integration now exposes a write-side
+        <code>FoundationDbLeaseAuthority</code> and a read-only
+        <code>FoundationDbSharedLeaseOracle</code>. The authority publishes
+        monotonic provider time under its protected keyspace; workers fail
+        closed when the record is absent or unavailable and never fall back to
+        a local clock. Consumer configuration selects
+        <code>lease_authority: "shared-provider"</code> with an explicit
+        <code>authority_prefix</code>; the persisted single-authority mode is
+        reserved for an owned test cluster.
       </>
     ),
     inspectLabel: 'Inspect a volume-scoped key range with fdbcli',
@@ -662,25 +681,38 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       <>
         The feature is opt-in and requires a matching FoundationDB 7.4 native
         client and cluster. The production path now fails closed for
-        unverified, development, and single-authority clocks. A concrete
-        protected shared authority, multi-host clock-skew/recovery evidence,
-        service restart, hosted root integration, Node/CLI, and broader
-        platform coverage remain open; commit versions are not wall-clock
-        expiry.
+        unverified, development, and single-authority clocks. Hosted runtime,
+        deployment-enforced read-only authority credentials,
+        multi-host clock-skew/recovery controls, service restart, hosted root
+        integration, and broader platform coverage remain open; commit versions
+        are not wall-clock expiry. The shared-provider Rust SDK/CLI and Node
+        selection paths are opt-in native features, not portable-default
+        support, and the authority service must enforce the read-only worker
+        boundary outside the library API.
       </>
     ),
     evidence: (
       <>
         The real pinned Linux ARM64 provider and RustFS composition checks cover
-        blocks, metadata, CAS, fencing, reopen, and the latest exact owned-
-        prefix cleanup with sibling/parent sentinel preservation. A focused
-        safety regression now covers the guarded production lease-oracle path.
-        This is not yet a general production or release-readiness claim.
+        blocks, metadata, CAS, fencing, reopen, and the latest exact
+        <code>owned-prefix cleanup</code> with sibling/parent sentinel
+        preservation. The real
+        cluster authority test covers two independent readers, an absent-
+        authority fail-closed result, backward-sample clamping, forward
+        recovery, and stale-writer fencing. A hosted FoundationDB lane now
+        builds the feature-enabled Node addon and can run the configuration-
+        driven Linux FUSE CLI lifecycle when <code>/dev/fuse</code> is present;
+        consumer configuration now also exposes the protected
+        <code>shared-provider</code> authority mode with an
+        <code>authority_prefix</code>. The hosted result and macOS NFS
+        acceptance remain open. This is not yet a general production or
+        release-readiness claim.
       </>
     ),
     sources: [
       { label: 'FoundationDB integration README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-foundationdb/README.md' },
       { label: 'FoundationDB keyspace implementation', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-foundationdb/src/lib.rs' },
+      { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
     ],
   },
   'aws-s3': {
@@ -777,7 +809,7 @@ aws s3api get-object --bucket "$S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway block/restart checkpoint; a dedicated hosted SQLite/PGlite composition job is wired, but its result, mixed stores, and hosted topology remain open.',
+    maturityNote: 'Pinned 2.2.1 gateway block/restart checkpoint; hosted SQLite/PGlite composition and live Node/Rust CLI consumer gates are wired, but their results, mixed stores, and hosted topology remain open.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -839,8 +871,12 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
     limitations: (
       <>
         Hosted Linux-amd64 results and the dedicated
-        <code>ozone-compositions</code> job result remain open. Node/CLI
-        acceptance and mixed TiDB/FoundationDB stores also remain open. The
+        <code>ozone-compositions</code> job result remain open. The job now
+        builds the public N-API addon and can run the live Node provider matrix,
+        the Node CLI's <code>--sdk-self-test --reopen</code>, and the matching
+        Rust CLI self-test when <code>MOUNT_RS_OZONE_NODE_COMPOSITION=1</code>;
+        those consumer results are still pending. Mixed TiDB/FoundationDB
+        stores also remain open. The
         non-secure all-in-one service is loopback-only and is not production
         authentication or durability evidence; the CI composition job covers
         SQLite/PGlite only and does not imply TiDB/FoundationDB coverage.
@@ -850,10 +886,12 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       <>
         The current maturity is Experimental: the real gateway harness has a
         meaningful block/restart checkpoint. A dedicated hosted
-        <code>ozone-compositions</code> job now installs PGlite and runs the
-        real SQLite/PGlite mixed-metadata gate; its result is still pending, so
-        the broader backend matrix and deployment topology are not yet
-        accepted.
+        <code>ozone-compositions</code> job now installs PGlite, builds the
+        public Node addon, and runs the real SQLite/PGlite mixed-metadata gate.
+        Its opt-in consumer phase covers the Node provider matrix, Node CLI,
+        and Rust CLI against live Ozone/PGlite/R2-compatible services, but the
+        hosted result is still pending. The broader backend matrix and
+        deployment topology are not yet accepted.
       </>
     ),
     sources: [
