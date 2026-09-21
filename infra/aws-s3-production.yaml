@@ -47,7 +47,9 @@ Parameters:
     ConstraintDescription: Must be empty or a valid commercial AWS KMS key or alias ARN.
   ObjectExpirationDays:
     Type: Number
-    Description: Reviewed retention period for current objects under OwnedPrefix.
+    Description: >-
+      Reviewed retention period for current objects and noncurrent versions
+      under OwnedPrefix.
     MinValue: 1
     MaxValue: 3650
   IncompleteMultipartAbortDays:
@@ -88,6 +90,8 @@ Resources:
             Status: Enabled
             Prefix: !Sub '${OwnedPrefix}/'
             ExpirationInDays: !Ref ObjectExpirationDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref ObjectExpirationDays
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: !Ref IncompleteMultipartAbortDays
       Tags:

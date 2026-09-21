@@ -331,6 +331,18 @@ export declare class NativeP9Writer {
   writeRgetlock(value: NativeP9Rgetlock): void
 }
 
+/** Read-only N-API view of the NFSv4.1 session routed by an [`NfsServer`]. */
+export declare class Nfs4Session {
+  /**
+   * Handle one unframed NFSv4 RPC record. Malformed records return `null`;
+   * decoded calls return one encoded RPC reply.
+   */
+  handleCall(bytes: Buffer): Promise<Buffer | null>
+  get stats(): NfsSessionStats
+  get handles(): Array<NfsHandleEntry>
+  get destroyed(): boolean
+}
+
 export declare class NfsRecordAssembler {
   constructor(limit?: number | undefined | null)
   get pending(): number
@@ -338,11 +350,34 @@ export declare class NfsRecordAssembler {
 }
 
 export declare class NfsServer {
+  get session(): NfsSession
   get host(): string
   get port(): number
+  get connections(): number
   listen(): Promise<NfsServer>
   close(): Promise<void>
   [Symbol.asyncDispose](): Promise<void>
+}
+
+export declare class NfsSession {
+  /**
+   * Handle one unframed NFSv3 or NFSv4 RPC record. Malformed records return
+   * `null`; decoded calls return one encoded RPC reply.
+   */
+  handleCall(bytes: Buffer): Promise<Buffer | null>
+  /**
+   * The NFSv4.1 session routed by this server. Its state is read-only at the
+   * N-API boundary and shares the server-owned driver lifetime.
+   */
+  get v4(): Nfs4Session
+  get stats(): NfsSessionStats
+  get mounts(): Array<Array<string>>
+  /**
+   * Stable read-only snapshots of the shared v3/v4 file-handle table.
+   * Handles are BigInts because the transport identity is u64.
+   */
+  get handles(): Array<NfsHandleEntry>
+  get destroyed(): boolean
 }
 
 /**
@@ -1763,6 +1798,13 @@ export declare function nfsFrameFragments(message: Uint8Array, size: number): Bu
 
 export declare function nfsFrameRecord(message: Uint8Array): Buffer
 
+export interface NfsHandleEntry {
+  id: bigint
+  fileid: bigint
+  key?: string
+  path: string
+}
+
 export interface NfsOpaqueAuth {
   flavor: number
   body: Uint8Array
@@ -1861,6 +1903,14 @@ export interface NfsServerOptions {
   snapshotCache?: number
   claimOwnership?: boolean
   onTransportError?: (error: unknown, peer: string | undefined) => void
+}
+
+export interface NfsSessionStats {
+  requests: number
+  replies: number
+  errors: number
+  dropped: number
+  procedures: Record<string, number>
 }
 
 export declare function nfsStringByteLength(value: string): number

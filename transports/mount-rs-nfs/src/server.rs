@@ -9,7 +9,7 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use mount_rs_core::{FsDriver, Loopback};
@@ -109,6 +109,7 @@ pub struct NfsServer {
     shutdown: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     accept_task: Arc<Mutex<Option<JoinHandle<()>>>>,
     connections: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    active_connections: Arc<AtomicUsize>,
 }
 
 /// Construct an NFSv3/MOUNTv3 and NFSv4.1 TCP server backed by an [`FsDriver`].
@@ -155,8 +156,12 @@ impl NfsServer {
         options: NfsServerOptions,
         hooks: NfsServerHooks,
     ) -> Self {
-        let v4_session =
-            Nfs4Session::from_loopback(session.driver.clone(), options.session.clone());
+        let shared = session.shared_state();
+        let v4_session = Nfs4Session::from_loopback_shared(
+            session.driver.clone(),
+            options.session.clone(),
+            &shared,
+        );
         Self {
             session,
             v4_session,
@@ -166,6 +171,7 @@ impl NfsServer {
             shutdown: Arc::new(Mutex::new(None)),
             accept_task: Arc::new(Mutex::new(None)),
             connections: Arc::new(Mutex::new(Vec::new())),
+            active_connections: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -201,6 +207,13 @@ impl NfsServer {
         self.local_addr().map(|address| address.port())
     }
 
+    /// Return the number of accepted TCP connections whose serving task has
+    /// not finished yet. This is deliberately an active count rather than the
+    /// number of retained join handles.
+    pub fn connections(&self) -> usize {
+        self.active_connections.load(Ordering::Acquire)
+    }
+
     pub async fn listen(&self) -> io::Result<SocketAddr> {
         if let Some(address) = self.local_addr() {
             return Ok(address);
@@ -217,6 +230,7 @@ impl NfsServer {
         let allow_remote = self.options.allow_remote;
         let hooks = self.hooks.clone();
         let connections = self.connections.clone();
+        let active_connections = self.active_connections.clone();
         let task = tokio::spawn(async move {
             loop {
                 tokio::select! {
@@ -236,7 +250,16 @@ impl NfsServer {
                         let session = session.clone();
                         let v4_session = v4_session.clone();
                         let hooks = hooks.clone();
+                        let active_connections = active_connections.clone();
+                        active_connections.fetch_add(1, Ordering::AcqRel);
+                        let guard = ConnectionGuard {
+                            counter: active_connections,
+                        };
                         let task = tokio::spawn(async move {
+                            // The guard is constructed before spawning so an
+                            // abort before the task is first polled still
+                            // drops it and decrements the active count.
+                            let _guard = guard;
                             serve_tcp_connection(NfsTcpConnectionRuntime {
                                 stream,
                                 peer,
@@ -266,13 +289,17 @@ impl NfsServer {
         if let Some(task) = accept_task {
             let _ = task.await;
         }
-        for task in self
+        let tasks = self
             .connections
             .lock()
             .expect("NFS connection lock")
             .drain(..)
-        {
+            .collect::<Vec<_>>();
+        for task in &tasks {
             task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
         }
         self.session.destroy().await;
         self.v4_session.destroy().await;
@@ -320,6 +347,16 @@ struct NfsTcpConnectionRuntime {
     max_in_flight: usize,
     allow_remote: bool,
     hooks: NfsServerHooks,
+}
+
+struct ConnectionGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 async fn serve_tcp_connection(runtime: NfsTcpConnectionRuntime) {
@@ -606,7 +643,17 @@ mod tests {
         assert_eq!(reply.xid, 42);
         assert_eq!(reply.accept_stat, Some(0));
         results.end("NULL reply").unwrap();
+        assert_eq!(server.connections(), 1);
+        drop(stream);
+        timeout(Duration::from_secs(1), async {
+            while server.connections() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("connection task closes");
         server.close().await.unwrap();
+        assert_eq!(server.connections(), 0);
     }
 
     #[derive(Clone)]

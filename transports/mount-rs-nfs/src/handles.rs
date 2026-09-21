@@ -89,6 +89,27 @@ impl FileHandleTable {
         self.state.lock().expect("handle table lock").by_id.len()
     }
 
+    /// Return one stable snapshot of every live handle, ordered by handle id.
+    ///
+    /// The table is shared by the NFSv3 and NFSv4.1 sessions owned by one
+    /// server. Keeping the snapshot sorted makes read-only embedding views
+    /// deterministic without exposing the table's internal mutex or maps.
+    pub fn entries(&self) -> Vec<HandleEntry> {
+        let state = self.state.lock().expect("handle table lock");
+        let mut entries = state
+            .by_id
+            .values()
+            .map(|entry| HandleEntry {
+                id: entry.id,
+                fileid: entry.fileid,
+                key: entry.key.clone(),
+                path: entry.paths.iter().next().cloned().unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| entry.id);
+        entries
+    }
+
     pub fn root(&self) -> HandleEntry {
         self.entry(ROOT_HANDLE_ID).expect("root handle")
     }
@@ -522,6 +543,22 @@ mod tests {
             "/b" | "/c"
         ));
         assert_eq!(table.resolve(&table.encode(&second)).unwrap(), "/b");
+    }
+
+    #[test]
+    fn entries_are_sorted_and_snapshot_live_handles() {
+        let table = FileHandleTable::default();
+        let second = table.bind("/second", &stats(2));
+        let first = table.bind("/first", &stats(1));
+
+        let entries = table.entries();
+        assert_eq!(
+            entries.iter().map(|entry| entry.id).collect::<Vec<_>>(),
+            vec![ROOT_HANDLE_ID, second.id, first.id]
+        );
+        assert_eq!(entries[0], table.root());
+        assert_eq!(entries[1].path, "/second");
+        assert_eq!(entries[2].path, "/first");
     }
 
     #[test]

@@ -14,6 +14,9 @@ const rootKeys = Object.keys(root)
 const native = require("@mount-rs/core/nfs")
 assert.deepEqual(Object.keys(root), rootKeys, "NFS facade must not mutate root exports")
 assert.equal(native.createNfsServer, root.createNfsServer)
+assert.equal(native.NfsServer, root.NfsServer)
+assert.equal(native.NfsSession, root.NfsSession)
+assert.equal(native.Nfs4Session, root.Nfs4Session)
 
 const [upstreamXdr, upstreamRpc] = await Promise.all([
   import(pathToFileURL(`${source}/src/nfs/xdr.ts`).href),

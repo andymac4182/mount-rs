@@ -98,7 +98,9 @@ The template defaults to BucketOwnerEnforced ownership, all four S3 public
 access blocks, versioning enabled, retained state on stack deletion or
 replacement, a one-day incomplete-multipart abort, and SSE-S3. Its bucket
 policy denies insecure transport for the bucket and every object key. It can select
-SSE-KMS and an optional customer-managed key ARN. The runtime role can list,
+SSE-KMS and an optional customer-managed key ARN. The reviewed retention
+period applies to current objects and noncurrent versions under the owned
+prefix. The runtime role can list,
 read, and publish only objects below the owned prefix; version listing and
 deletion are reserved for the maintenance role.
 

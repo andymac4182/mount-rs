@@ -81,4 +81,6 @@ module.exports.RecordAssembler = binding.RecordAssembler
 // helpers. Preserve those runtime exports while the declarations below
 // re-export their types from the root generated declaration.
 module.exports.NfsServer = rootBinding.NfsServer
+module.exports.NfsSession = rootBinding.NfsSession
+module.exports.Nfs4Session = rootBinding.Nfs4Session
 module.exports.createNfsServer = rootBinding.createNfsServer
