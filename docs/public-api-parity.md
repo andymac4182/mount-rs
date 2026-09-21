@@ -288,10 +288,10 @@ Current focused behavior:
   wire operations, effective knobs, lease sweeping, and live callback tests
   qualify the supported behavior. Hosted `native-nfs` jobs on macOS and Ubuntu
   now pass the privileged native NFSv3/NFSv4.1 and SQLite-over-NFS checks;
-  the host-backed NFSv3 process-crash/restart test also recovers a `FILE_SYNC`
-  payload through a replacement server. NFSv4 lease/replay/file-handle
-  recovery, power-loss durability, and whole-workflow release acceptance
-  remain open. S3 now
+  the host-backed NFSv3 process-crash/restart test rejects the old file handle
+  with `NFS3ERR_STALE` and then recovers a `FILE_SYNC` payload through a
+  replacement server. NFSv4 lease/replay/file-handle recovery, power-loss
+  durability, and whole-workflow release acceptance remain open. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
   safe effective options, debug-gated assertions, buffered `handleRequest`,
   streaming `handleRequestStream`, async session metrics, live `connections`,
