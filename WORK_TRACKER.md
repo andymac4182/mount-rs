@@ -2368,6 +2368,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   production-candidate tag, protected-environment approval, registry
   publication, canary, rollback or GO evidence is claimed. *(Hosted/provider
   qualification and implementation policy; production gates remain external.)*
+  The evidence documentation commit `d293fe5b` was reconciled into public
+  merge tip `682d2441` for other workstreams to consume.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

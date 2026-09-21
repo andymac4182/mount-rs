@@ -1,8 +1,11 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 05:11 AEST**
+Status snapshot: **2026-09-22 05:34 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: W08.30 source-verification documentation commit
+Publication snapshot: W08.31 evidence documentation commit `d293fe5b` was
+reconciled into public merge tip
+`682d2441afdeb8f158d37cd54c8bd94d6cf4ca66` (the ref verified at **05:34
+AEST**). W08.30 source-verification documentation commit
 `8b4fac35` was reconciled into public merge tip
 `d4de2e75623ebfe730166bec696f4f43b25ea4fc` (the ref verified at **04:51
 AEST**). W08.29 evidence commit `ad45bf06` was previously reconciled into
@@ -403,6 +406,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 04:35–04:47 AEST | Reconciled the W08.29 evidence commit with concurrent `origin/main`, pushed the public merge tip, synchronized the ledger and rollout notes to the publication baseline, reconciled one further concurrent mainline update, and verified the resulting public ref. | ~7 min | ~4 min remote fetch/merge/push wait | W08.29 evidence is publicly integrated; pointer-synchronized documentation is present in verified merge tip `3cd43779a8f440b47278e5112f9ec48b12f43e23`. Production candidate publication, canary, rollback and approval remain open. |
 | 2026-09-22 04:47–04:51 AEST | Ran the locked offline workspace test and strict workspace Clippy with `-D warnings` on public source `76c2b1a863c23afe71c0591d0a480433e1b9078d`, using bounded target `/private/tmp/mount-rs-w08-final-cargo-target`. | ~0.15 engineer-day | ~46s test execution after compilation plus ~35s Clippy execution | W08.30 source verification passed. Explicit provider/native prerequisites and all production P01–P09 gates remain open; no live-provider or production claim is added. |
 | 2026-09-22 04:51–05:11 AEST | Rechecked the production-config policy with a policy-only TLS URL: the positive fixture passed, the insecure fixture failed closed and the negative assertion passed. Followed hosted run `35641555767` to terminal success, downloaded both target bundles, independently verified checksums/manifests/288-component SBOMs/archive contents and the extracted macOS runtime, and ran exact-identity SLSA/CycloneDX attestation verification. | ~0.15 engineer-day | ~9 min hosted build/download/attestation execution plus queue/remote observation | W08.31 hosted target qualification passed. Candidate-tag publication, protected-environment approval, registry acceptance, staging/provider operations, canary, rollback, on-call and release-owner approval remain open. |
+| 2026-09-22 05:11–05:34 AEST | Committed the W08.31 tracker, ledger and rollout evidence as `d293fe5b`, reconciled concurrent `origin/main` changes twice, handled one non-fast-forward push rejection without force, and published the reconciled result. | ~0.1 engineer-day | ~0.15 engineer-day concurrent-main fetch/merge/push wait | The W08.31 evidence is publicly integrated at `682d2441`; `HEAD` and `origin/main` match and the worktree is clean. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
