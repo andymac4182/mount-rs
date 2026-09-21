@@ -261,6 +261,15 @@ all-target FUSE tests, strict Clippy, formatting, and Linux-target test
 type-check pass, while hosted `/dev/fuse`, native mutation/write concurrency,
 close/crash/restart, callback-event, lock and durability evidence remain
 external; W01 stays NO-GO.
+The follow-up interrupt packet registers those read workers by request unique:
+`FUSE_INTERRUPT` aborts a known in-flight read, unknown targets retain the
+existing `EAGAIN` boundary, and serial stateful requests drain read workers
+before mutation or release. A Linux-gated Unix-stream regression proves that
+interrupting a blocked read leaves the session open and that orderly stop stays
+callback-silent. Host all-target FUSE tests, strict Clippy, formatting/diff,
+and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior,
+native mutation/write concurrency, close/crash/restart, callback events, locks
+and durability remain external, so W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure

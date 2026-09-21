@@ -46,6 +46,10 @@ pub(crate) struct PreparedRead {
 
 #[cfg(target_os = "linux")]
 impl PreparedRead {
+    pub(crate) const fn unique(&self) -> u64 {
+        self.unique
+    }
+
     pub(crate) async fn reply(self) -> Vec<u8> {
         let mut body = vec![0; self.size];
         match self.handle.read(&mut body, Some(self.offset)).await {
@@ -679,6 +683,26 @@ impl FuseSession {
         }))
     }
 
+    /// Extract a cancellable target for the native request pump. The normal
+    /// dispatcher still owns the wire reply, including `EAGAIN` for unknown
+    /// targets and the fixed-body error boundary.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn interrupt_target(
+        &self,
+        bytes: &[u8],
+    ) -> std::result::Result<Option<u64>, crate::ProtocolError> {
+        let request = Request::decode(bytes, self.max_request)?;
+        if request.header.opcode != FUSE_INTERRUPT
+            || validate_body(FUSE_INTERRUPT, request.body).is_err()
+        {
+            return Ok(None);
+        }
+        let Ok(target) = u64_at(request.body, 0) else {
+            return Ok(None);
+        };
+        Ok(Some(target))
+    }
+
     /// Returns no frame for FORGET and BATCH_FORGET. Malformed FORGET bodies
     /// are ignored to match the pinned no-reply oracle; malformed
     /// BATCH_FORGET bodies remain rejected before changing inode state.
@@ -1094,10 +1118,11 @@ impl FuseSession {
             }
             FUSE_INTERRUPT => {
                 let target_unique = u64_at(r.body, 0)?;
-                // This request pump is deliberately serial and has no
-                // in-flight registry. Never guess which operation an
-                // interrupt refers to or cancel a reused unique ID. FUSE
-                // permits EAGAIN when the original request cannot be found.
+                // The mount-free dispatcher deliberately has no in-flight
+                // registry. The Linux native request pump may abort a
+                // registered read before reaching this boundary, but this
+                // serialized session still returns EAGAIN for the wire
+                // request when the original operation is not found here.
                 Err(FsError::new(ErrorCode::Eagain).with_message(format!(
                     "FUSE_INTERRUPT target {target_unique} is not safely cancellable"
                 )))
