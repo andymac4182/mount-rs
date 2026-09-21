@@ -217,10 +217,8 @@ fn actual_binary_uses_the_public_rust_sdk_for_mount_free_self_tests() {
 fn actual_binary_runs_live_ozone_split_provider_self_test() {
     let endpoint = std::env::var("R2_ENDPOINT").expect("R2_ENDPOINT must be set");
     let bucket = std::env::var("R2_BUCKET").expect("R2_BUCKET must be set");
-    let pglite_url =
-        std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL must be set");
-    let access_key_id =
-        std::env::var("R2_ACCESS_KEY_ID").expect("R2_ACCESS_KEY_ID must be set");
+    let pglite_url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL must be set");
+    let access_key_id = std::env::var("R2_ACCESS_KEY_ID").expect("R2_ACCESS_KEY_ID must be set");
     let secret_access_key =
         std::env::var("R2_SECRET_ACCESS_KEY").expect("R2_SECRET_ACCESS_KEY must be set");
     let run_id = std::env::var("MOUNT_RS_PROVIDER_MATRIX_RUN_ID")
@@ -278,7 +276,9 @@ fn actual_binary_runs_live_ozone_split_provider_self_test() {
         .args([
             "sdk-self-test",
             "--config",
-            config_path.to_str().expect("UTF-8 live Ozone CLI config path"),
+            config_path
+                .to_str()
+                .expect("UTF-8 live Ozone CLI config path"),
             "--reopen",
         ])
         .env("PGLITE_DATABASE_URL", pglite_url)
