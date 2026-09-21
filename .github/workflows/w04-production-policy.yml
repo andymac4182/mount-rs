@@ -1,0 +1,40 @@
+name: W04 production policy
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+# The policy gate is intentionally independent of the long provider matrix.
+# Do not cancel a terminal config result merely because another main-branch
+# push starts a newer full CI run.
+concurrency:
+  group: w04-production-policy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pglite-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Verify W04 PGlite production config policy without credentials or network
+        run: |
+          node --check scripts/verify-w04-pglite-production-config.mjs
+          node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy.json
+          if node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy.invalid.json; then
+            echo 'W04 PGlite production config policy accepted a non-durable fixture' >&2
+            exit 1
+          fi
+          if node scripts/verify-w04-pglite-production-config.mjs \
+            tests/pglite/production-config-policy-inline-secret.invalid.json; then
+            echo 'W04 PGlite production config policy accepted an inline-secret fixture' >&2
+            exit 1
+          fi
