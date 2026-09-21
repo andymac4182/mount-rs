@@ -55,6 +55,51 @@ are enabled, the cleanup, restore, key-policy, and cost procedures must cover
 object versions and KMS access rather than treating current-object deletion as
 complete cleanup.
 
+## Minimum IAM policy shapes
+
+The runtime role should be limited to the one volume prefix. Replace the
+placeholders during an approved infrastructure change; do not paste live
+values or credentials into this repository.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "VolumeObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::<private-bucket>/<volume-prefix>/*"
+    },
+    {
+      "Sid": "VolumeListing",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::<private-bucket>",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["<volume-prefix>", "<volume-prefix>/*"]
+        }
+      }
+    }
+  ]
+}
+```
+
+The cleanup/maintenance role should be separately approved and audited. If
+bucket versioning is enabled, its policy and runbook must explicitly cover
+object-version listing and deletion; a successful current-object delete is not
+proof that historical versions are gone. If SSE-KMS is selected, add only the
+required `kms:Encrypt`, `kms:Decrypt`, and `kms:GenerateDataKey` permissions
+on the named key and test the key policy with the runtime role.
+
+For the protected GitHub OIDC workflow, the trust policy should restrict the
+`token.actions.githubusercontent.com` subject to this repository and the
+`aws-s3-ci` environment, require the `sts.amazonaws.com` audience, and grant
+only the test bucket/prefix actions. The workflow intentionally references an
+environment role rather than embedding a long-lived AWS secret; configure and
+review that role before enabling hosted evidence.
+
 ## Rollout sequence
 
 1. Review the resource and identity change, including region, bucket, prefix,

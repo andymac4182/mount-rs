@@ -311,6 +311,18 @@ async fn actual_aws_s3_block_and_composed_filesystem() {
             assert_eq!(shared.get(&id).await.unwrap(), body);
         }
 
+        // Keep a small bounded workload sample in the live packet so the
+        // provider is exercised across repeated fresh immutable publications,
+        // not only one large write and four concurrent calls. The full
+        // production load/soak target remains a deployment-specific gate.
+        for round in 0..24_usize {
+            let mut body = patterned_bytes(4096 + round * 257);
+            body[0] ^= round as u8;
+            let id = blocks.put(&body).await.unwrap();
+            assert_eq!(blocks.get(&id).await.unwrap(), body);
+        }
+        blocks.flush().await.unwrap();
+
         let restart_id = blocks.put(&restart_payload()).await.unwrap();
         std::fs::write(restart_fixture(), &restart_id.0).unwrap();
 

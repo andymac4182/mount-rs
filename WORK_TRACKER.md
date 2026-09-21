@@ -1565,7 +1565,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   block/range/conditional/CAS, composed SQLite metadata, fresh-process reopen,
   the public SDK and CLI configuration paths, nonce-owned cleanup and
   credential-safe validation, and a non-mutating sibling-prefix authorization
-  denial check. The harness emits the secret-free
+  denial check. The live packet also includes a bounded repeated write/read
+  workload sample; a production load/soak result remains a deployment gate.
+  The harness emits the secret-free
   `AWS_S3_TEST_BLOCKED` result when local credentials are absent, while the
   renewed `myroot` run above provides the live Rust acceptance.
 - [x] The harness accepts an optional `AWS_S3_TEST_ROLE_ARN`, assumes that
