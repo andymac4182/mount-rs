@@ -270,6 +270,12 @@ callback-silent. Host all-target FUSE tests, strict Clippy, formatting/diff,
 and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior,
 native mutation/write concurrency, close/crash/restart, callback events, locks
 and durability remain external, so W01 stays NO-GO.
+The ignored Linux FUSE harness now starts eight concurrent blocking kernel
+clients; each writes, reads, renames, and rereads a distinct file, then the
+harness checks that all eight entries are visible through the mounted root.
+The host harness compiles and Linux-target strict Clippy passes, but only the
+hosted `native-fuse` execution can qualify this as native runtime evidence;
+W01 remains NO-GO until that result and the other lifecycle gates are green.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure

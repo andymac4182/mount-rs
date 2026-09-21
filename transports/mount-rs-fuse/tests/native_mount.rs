@@ -60,26 +60,52 @@ mod linux {
     }
 
     async fn client_round_trip(path: PathBuf) -> Result<(), String> {
-        tokio::task::spawn_blocking(move || {
-            let file = path.join("through-kernel.txt");
-            std::fs::write(&file, b"native fuse")
-                .map_err(|error| format!("write through mount: {error}"))?;
-            let bytes =
-                std::fs::read(&file).map_err(|error| format!("read through mount: {error}"))?;
-            if bytes != b"native fuse" {
-                return Err(format!("unexpected bytes through mount: {bytes:?}"));
-            }
-            let names = std::fs::read_dir(Path::new(&path))
-                .map_err(|error| format!("readdir through mount: {error}"))?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|error| format!("collect readdir through mount: {error}"))?;
-            if names.len() != 1 {
-                return Err(format!("expected one mounted entry, found {}", names.len()));
-            }
-            Ok(())
-        })
-        .await
-        .map_err(|error| format!("native client worker failed: {error}"))?
+        let mut workers = Vec::new();
+        for index in 0..8_u32 {
+            let path = path.clone();
+            workers.push(tokio::task::spawn_blocking(move || {
+                let source = path.join(format!("through-kernel-{index}.txt"));
+                let renamed = path.join(format!("through-kernel-{index}-renamed.txt"));
+                let payload = format!("native fuse {index}").into_bytes();
+                std::fs::write(&source, &payload)
+                    .map_err(|error| format!("write through mount for worker {index}: {error}"))?;
+                let bytes = std::fs::read(&source)
+                    .map_err(|error| format!("read through mount for worker {index}: {error}"))?;
+                if bytes != payload {
+                    return Err(format!(
+                        "unexpected bytes through mount for worker {index}: {bytes:?}"
+                    ));
+                }
+                std::fs::rename(&source, &renamed).map_err(|error| {
+                    format!("rename through mount for worker {index}: {error}")
+                })?;
+                let renamed_bytes = std::fs::read(&renamed).map_err(|error| {
+                    format!("read renamed file through mount for worker {index}: {error}")
+                })?;
+                if renamed_bytes != payload {
+                    return Err(format!(
+                        "unexpected renamed bytes through mount for worker {index}: {renamed_bytes:?}"
+                    ));
+                }
+                Ok::<(), String>(())
+            }));
+        }
+        for (index, worker) in workers.into_iter().enumerate() {
+            worker
+                .await
+                .map_err(|error| format!("native client worker {index} failed: {error}"))??;
+        }
+        let names = std::fs::read_dir(Path::new(&path))
+            .map_err(|error| format!("readdir through mount: {error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("collect readdir through mount: {error}"))?;
+        if names.len() != 8 {
+            return Err(format!(
+                "expected eight concurrent mounted entries, found {}",
+                names.len()
+            ));
+        }
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

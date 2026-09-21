@@ -82,6 +82,12 @@ callback-silent. Host all-target FUSE tests, strict Clippy, formatting/diff,
 and Linux-target strict Clippy pass; hosted `/dev/fuse` interrupt behavior,
 native mutation/write concurrency, close/crash/restart, callback events, locks
 and durability remain external, so W01 stays NO-GO.
+The ignored Linux FUSE harness now starts eight concurrent blocking kernel
+clients; each writes, reads, renames, and rereads a distinct file, then the
+harness checks that all eight entries are visible through the mounted root.
+The host harness compiles and Linux-target strict Clippy passes, but only the
+hosted `native-fuse` execution can qualify this as native runtime evidence;
+W01 remains NO-GO until that result and the other lifecycle gates are green.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
