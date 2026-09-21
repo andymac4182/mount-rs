@@ -321,6 +321,7 @@ non-overlapping packet. The current bounded allocation is:
 
 | Worker | Packet | Write scope | Handoff state |
 | --- | --- | --- | --- |
+| `24c8a6b` | Public napi-rs FUSE request/reply codecs for SYMLINK/MKNOD/MKDIR/UNLINK/RMDIR/RENAME/RENAME2/LINK/ACCESS/FALLOCATE/LSEEK | Pinned mountx differential plus typed round-trip coverage passed; full oracle-enabled N-API test chain, typecheck and artifact aggregation passed. Native FUSE session/device/mount remains open |
 | Peirce | W12/W15 SQLite VFS and WAL/reliability seam | `integrations/mount-rs-sqlite-vfs/**`, related VFS plan | Integrated |
 | Mill | W08 TiDB provider and RustFS composition harness | `integrations/mount-rs-tidb/**`, `tests/tidb/**`, TiDB harness | Integrated; bounded TiDB + RustFS composition passed |
 | Aristotle | W13 macOS FSKit seam | `integrations/mount-rs-fskit/**` | Integrated checkpoint |
