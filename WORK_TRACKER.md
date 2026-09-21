@@ -1156,11 +1156,13 @@ reproducible in a production-like environment.
   retention and redaction; exercise an alert end to end. The HTTP transport
   now implements unauthenticated `GET`/`HEAD /healthz` (listener/process
   liveness) and `/readyz` (non-empty configured drive registry, with `503`
-  for an empty registry); `mount-rs-http` passed 8 unit tests, 10 integration
-  tests and strict Clippy. This is a process/configuration implementation
-  slice only: provider-aware readiness, collector, SLO, paging, redaction and
-  end-to-end alert evidence remain open. *(Implementation + hosted/provider;
-  collector and on-call route are not configured.)*
+  for an empty registry); the default `mount-rs-http` suite passed 8 unit and
+  10 integration tests, and its all-features observability/OTLP suite passed 8
+  unit and 13 integration tests; strict Clippy passed in both configurations.
+  This is process/configuration and local exporter-path evidence only:
+  provider-aware readiness, collector, SLO, paging, redaction and end-to-end
+  alert evidence remain open. *(Implementation + hosted/provider; collector
+  and on-call route are not configured.)*
 - [ ] **W08-P06 (20%) — capacity/load/soak:** run representative baseline,
   peak, saturation, failover and multi-hour soak workloads; record latency,
   throughput, errors, headroom and scaling limits. The bounded public-N-API

@@ -146,6 +146,7 @@ not inferred from a URL or from a successful `SELECT 1` acknowledgement.
 | Hosted `tidb-tls-compile` job `106311076905` in run `35592902494` | Terminal TLS feature, URL-guard and production-config policy evidence for source `4326c54` | Live provider, IAM, certificate trust, topology, capacity, observability or release gates |
 | Hosted `tidb-rustfs` job `106319766691` in run `35595664981` | Terminal bounded seed/reopen TiDB/RustFS soak evidence for source `c5532e3`; both phases recorded 64 operations, concurrency 8, 65,536-byte payloads and zero errors with p50/p95/p99/throughput markers | Production workload representativeness, resource headroom/cost, multi-hour soak, failover, SLO approval or production capacity |
 | `./scripts/cargo-shared test --locked -p mount-rs-http` plus strict Clippy | Local HTTP health/readiness contract: 8 unit tests and 10 integration tests passed, including healthy/not-ready and method-boundary cases | Provider/object-store/TLS health, collector/dashboard/pager, SLO/error-budget approval and production alert execution |
+| `./scripts/cargo-shared test --locked -p mount-rs-http --all-features` plus strict Clippy | Local application telemetry and OTLP propagation path: 8 unit tests and 13 integration tests passed with `-D warnings` | Deployed collector/exporter, provider/object-store/TLS health, dashboard/pager, SLO/error-budget approval and production alert execution |
 
 The retained W08 functional evidence is CI run `35585066458` at source
 `9c098e5`, where the W08-relevant jobs were terminal successes. Its aggregate
