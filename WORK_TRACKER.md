@@ -772,25 +772,23 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Terminate-frame cleanup path plus an I/O-turn barrier. The readiness slot test
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
-- [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  The latest published-revision run [35587575994](https://github.com/andymac4182/mount-rs/actions/runs/35587575994)
-  is running on `bdfcb11`: Linux Node job
-  [106294483397](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483397),
+- [x] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
+  Isolated qualification run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864)
+  on `andymac4182/c/w04-production-gate` contains the published W04 fix
+  `bdfcb11`. Linux Node job
+  [106298858958](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298858958),
   macOS-latest Node job
-  [106294483486](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483486),
+  [106298859119](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859119),
   and macOS-15-intel Node job
-  [106294483435](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483435)
-  have started. The historical run [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894)
-  is not closure evidence: macOS-latest passed its PGlite step, but
-  macOS-15-intel failed earlier in `test-http-early-rejection.mjs` with
-  `EPIPE`; the published `bdfcb11` fixture-shutdown fix is being requalified.
-  Close W04.2 only after all three fresh Node jobs complete successfully and
-  their exact `Verify PGlite integration and restart recovery` logs pass;
-  queued, skipped, cancelled, partial, or pre-fix evidence does not count.
-  Production rollout remains separately tracked in
-  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and is NO-GO
-  until its artifact, persistence/rollback, provider, and operational gates
-  also close.
+  [106298859135](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859135)
+  completed successfully. Direct logs and job metadata confirm the exact
+  `Verify PGlite integration and restart recovery` step passed on all three
+  platforms, as did fragmented HTTP early rejection; the prior Intel EPIPE
+  failure did not recur. W04.2 is closed on this evidence. Production rollout
+  remains separately tracked in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
+  NO-GO until artifact/package, persistence/rollback, provider, and
+  operational gates also close.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
