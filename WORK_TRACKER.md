@@ -1910,11 +1910,13 @@ listing a source does not mean it has been reviewed or its code can be reused.
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. Latest
-  hosted run `35608516727` at head `8e271cd` stopped before AWS authentication
-  with `AWS_S3_CI_CONFIG_BLOCKED`; this is a successful safety refusal, not
-  acceptance evidence. A fresh Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42`
-  was launched against the then-current W25 head and remains in preflight; it
-  has no result yet and cannot be used as release evidence. The existing test
+  hosted run `35610661014` at current pushed head `428ce6d` stopped before AWS
+  authentication with `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a
+  successful safety refusal, not acceptance evidence. The preceding hosted run
+  `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
+  Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
+  current head `428ce6d`; it therefore cannot be used as current-head release
+  evidence, regardless of its eventual result. The existing test
   role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
