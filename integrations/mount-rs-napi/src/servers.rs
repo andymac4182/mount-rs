@@ -47,7 +47,7 @@ use mount_rs_webdav::{
     WebdavServer as TransportWebdavServer, WebdavServerHooks as TransportWebdavServerHooks,
     WebdavServerOptions as TransportWebdavServerOptions, WebdavSession as TransportWebdavSession,
     WebdavTransportError as TransportWebdavError,
-    WebdavTransportErrorHook as TransportWebdavErrorHook,
+    WebdavTransportErrorHook as TransportWebdavErrorHook, XmlNode as TransportWebdavXmlNode,
 };
 use napi::bindgen_prelude::{
     BigInt, Buffer, Either, FnArgs, Function, JsObjectValue, Object, ReadableStream, Reader,
@@ -1966,12 +1966,30 @@ pub struct WebdavSessionStats {
 }
 
 #[napi(object)]
+pub struct WebdavXmlNode {
+    pub name: String,
+    pub ns: String,
+    pub text: String,
+    pub children: Vec<WebdavXmlNode>,
+}
+
+fn webdav_xml_node(node: TransportWebdavXmlNode) -> WebdavXmlNode {
+    WebdavXmlNode {
+        name: node.name,
+        ns: node.ns,
+        text: node.text,
+        children: node.children.into_iter().map(webdav_xml_node).collect(),
+    }
+}
+
+#[napi(object)]
 pub struct WebdavLockView {
     pub token: String,
     pub path: String,
     pub collection: bool,
     pub depth: String,
     pub exclusive: bool,
+    pub owner: Option<WebdavXmlNode>,
     pub timeout_seconds: f64,
     pub expires_at: f64,
 }
@@ -2369,6 +2387,7 @@ impl WebdavSession {
                 collection: lock.collection,
                 depth: lock.depth.to_string(),
                 exclusive: lock.exclusive,
+                owner: lock.owner.map(webdav_xml_node),
                 timeout_seconds: lock.timeout_seconds as f64,
                 expires_at: lock.expires_at as f64,
             })

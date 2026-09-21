@@ -2335,6 +2335,7 @@ export interface WebdavLockView {
   collection: boolean
   depth: string
   exclusive: boolean
+  owner?: WebdavXmlNode
   timeoutSeconds: number
   expiresAt: number
 }
@@ -2381,6 +2382,13 @@ export interface WebdavSessionStats {
   errors: number
   methods: Record<string, number>
   assertions: number
+}
+
+export interface WebdavXmlNode {
+  name: string
+  ns: string
+  text: string
+  children: Array<WebdavXmlNode>
 }
 
 export type FuseFlushMechanism = "sync" | "enosys" | "noflush"

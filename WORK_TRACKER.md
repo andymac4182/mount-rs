@@ -765,7 +765,10 @@ session/member parity, provider, hosted, native, network-client concurrency,
 and restart/durability gates remain open. The host-enabled WebDAV session
 packet also completes eight parallel unique-file PUTs and GETs through one
 direct session with exact byte-for-byte readback; that is same-process
-same-driver evidence only. W01 and production status remain **NO-GO**.
+same-driver evidence only. The active lock view now preserves a recursive
+namespaced owner XML tree, and bounded predefined/numeric XML references are
+accepted while DTD/custom entities remain refused. W01 and production status
+remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -1131,8 +1134,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   peer-aware callback event for both S3 and WebDAV. Complete WebDAV
   session/member parity remains open; active lock-record readback and
   post-UNLOCK cleanup, eight parallel unique-file direct-session PUT/GET
-  requests, plus the session-owned driver wrapper, are verified. The
-  parallel packet is limited to in-process same-driver concurrency.
+  requests, recursive owner XML readback, plus the session-owned driver
+  wrapper, are verified. The parallel packet is limited to in-process
+  same-driver concurrency.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated

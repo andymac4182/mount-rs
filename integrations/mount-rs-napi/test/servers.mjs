@@ -997,7 +997,7 @@ async function exerciseWebdav() {
         target: "/direct-webdav.txt",
         headers: [{ name: "depth", value: "0" }],
       },
-      Buffer.from('<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype></D:lockinfo>'),
+      Buffer.from('<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner><Z:name xmlns:Z="urn:test">A&amp;B</Z:name></D:owner></D:lockinfo>'),
     );
     assert.equal(lock.status, 200);
     const lockToken = lock.headers.find(({ name }) => name === "lock-token")?.value;
@@ -1017,6 +1017,12 @@ async function exerciseWebdav() {
         timeoutSeconds: 30,
       },
     );
+    assert.deepEqual(server.session.locks[0].owner, {
+      name: "owner",
+      ns: "DAV:",
+      text: "",
+      children: [{ name: "name", ns: "urn:test", text: "A&B", children: [] }],
+    });
     const unlock = await server.session.handleRequest(
       {
         method: "UNLOCK",

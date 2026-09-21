@@ -303,13 +303,17 @@ root server/class identity while exposing the low-level constants/status,
 path/header/XML/lock helpers and generated declarations. The N-API session now
 accepts async-iterable or Web ReadableStream request bodies and returns a
 pull-based response iterator; the session also exposes read-only active lock
-records with expiry cleanup. The direct probe covers the class 1/2/3 method
+records with expiry cleanup and recursive namespaced owner XML trees. The
+direct probe covers the class 1/2/3 method
 matrix, LOCK/UNLOCK cleanup, chunked PUT, multi-chunk GET, early iterator
 return, deliberate request-body failure mapping, one typed peer-aware callback
 from a Node socket reset, one malformed-HTTP callback, and same-driver server
 recreation preserving file bytes while resetting session locks. It also
 completes eight parallel unique-file PUT/GET requests through one direct
 session with exact body readback; this is in-process same-driver evidence only.
+The Rust XML boundary accepts the five predefined and bounded numeric
+references used by valid WebDAV owner documents while refusing DTD/custom
+entities.
 The pinned pure barrel/protocol differential passes at oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` when
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` is supplied; full
