@@ -880,10 +880,15 @@ return, and deliberate body failure. The oracle differential is explicitly
 skipped without `MOUNTX_SOURCE`; with the pinned source at
 `/private/tmp/mountx-source-w01-20260921` (oracle
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
-differential and source-backed host-enabled server phase pass. The sandbox
-blocks the live N-API loopback bind with `Operation not permitted`, and full
-session/member parity, provider, hosted, network-client concurrency, and
-restart/durability gates remain open. The explicit ignored native WebDAV
+differential and source-backed host-enabled server phase pass. The supported
+N-API session/server member differential also passes with
+`MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node
+test/webdav-session-parity.mjs`, covering effective credentials/lock/session
+options, driver and lifecycle members, Map-shaped method counters, supported
+direct methods, recursive owner lock snapshots, and request/reply/error/assertion
+counters. The sandbox blocks the live N-API loopback bind with
+`Operation not permitted`, while provider, hosted, network-client concurrency,
+and restart/durability gates remain open. The explicit ignored native WebDAV
 round-trip now passes locally on this macOS arm64 host using
 `/sbin/mount_webdav`; this does not substitute for hosted macOS/Linux
 acceptance. The host-enabled WebDAV session
@@ -922,9 +927,10 @@ request-level `onError(error, head)` are implemented. The oracle's injectable
 the supported N-API scope: the Rust transport retains deterministic clock
 injection, current Rust request paths have no externally triggerable assertion
 site, and the N-API lock view is intentionally expiry-aware but read-only so
-request token/ownership checks remain authoritative. Broader member parity,
-hosted/native lifecycle, provider, restart/durability, and concurrency remain
-open rather than being silently accepted.
+request token/ownership checks remain authoritative. The injectable `now`,
+`onAssertion`, and live `DavLockTable` remain explicit outside-scope controls.
+Hosted/native lifecycle, provider, restart/durability, and broader concurrency
+remain open rather than being silently accepted.
 The current docs-only tip `f76a637fdc6d62f400b75505579628facb3cc871` also has
 [CI run 35633305914](https://github.com/andymac4182/mount-rs/actions/runs/35633305914)
 and [fault-injection run
