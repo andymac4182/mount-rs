@@ -213,6 +213,14 @@ The newest CI and fault-injection runs for `83466d7` are queued, not green
 evidence. These packets further reduce W01 but do not close W01 or establish a
 privileged native FUSE mount, FSKit activation, live R2, or hosted Windows run.
 
+The Windows HostFs follow-up was then published as `44cef6e` (from sidecar
+`d64d3bb`). It aligns long-path symlink fallback, Windows unlink disposition,
+and read-only hard-link metadata/lifetime behavior, with Windows-gated
+regressions. The focused macOS suite passed 10/10, the installed
+`x86_64-pc-windows-gnu` target compiled all HostFs targets, strict Clippy and
+format/diff checks passed. Hosted Windows runtime execution remains open, so
+this packet is target-compile evidence rather than Windows platform acceptance.
+
 Fresh macOS demo evidence on this checkout: `bash scripts/demo-end-to-end.sh`
 exited 0 after building the Rust CLI. The CLI mounted the local HostFs through
 native NFS; an independent Rust process wrote/read `rust-process.txt`, an
