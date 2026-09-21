@@ -780,6 +780,7 @@ module.exports.__napiBindingTarget = __napiStampBindingTarget(nativeBinding, __n
 module.exports = nativeBinding
 module.exports.FileHandle = nativeBinding.FileHandle
 module.exports.Filesystem = nativeBinding.Filesystem
+module.exports.FuseSession = nativeBinding.FuseSession
 module.exports.JsDirEntry = nativeBinding.JsDirEntry
 module.exports.JsMountx = nativeBinding.JsMountx
 module.exports.JsStats = nativeBinding.JsStats

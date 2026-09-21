@@ -173,6 +173,14 @@ options and lifecycle/error observability while preserving the established
 durable `FLUSH` sync default. Its focused package evidence is mount-free only;
 native Linux FUSE, callback events, hosted platform gates, FSKit activation,
 cancellation, concurrency, crash/restart and durability remain open.
+The follow-up N-API chunk adds the Rust-backed `FuseSession` class and public
+`./fuse` facade with typed options/defaults, negotiated state, inode views,
+request/reply/error counters, assertion/error callbacks, notification encoders,
+destroy-state readback, generated declarations, and raw INIT/LOOKUP/READLINK
+coverage. Its locked N-API check/Clippy, debug addon build, focused session/
+codec/typecheck tests, FUSE tests, formatting and diff checks pass; the full
+`MOUNTX_SOURCE` package suite, native Linux callback events, FSKit, cancellation,
+concurrency, crash/restart and durability remain open.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 

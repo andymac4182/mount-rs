@@ -1,5 +1,6 @@
 pub mod fuse_codec;
 pub mod fuse_inodes;
+pub mod fuse_session;
 pub mod js_driver;
 pub mod kv_binding;
 pub mod memory_factory;

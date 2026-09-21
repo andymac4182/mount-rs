@@ -63,9 +63,13 @@ The canonical detailed FUSE ledger is
 [docs/W01_FUSE_PROGRESS.md](./W01_FUSE_PROGRESS.md). Its 2026-09-22
 session-controls chunk adds public construction options and lifecycle/error
 observability while preserving the established durable `FLUSH` sync default.
-The package tests and strict scoped Clippy pass, but native Linux FUSE,
-macOS/FSKit activation, callbacks, cancellation, concurrency, crash/restart
-and durability remain open.
+The follow-up N-API chunk adds the Rust-backed `FuseSession` class and public
+`./fuse` facade with generated declarations, typed options/defaults, negotiated
+state, inode views, request/reply/error counters, callbacks, notification
+encoders, destroy-state readback, and raw INIT/LOOKUP/READLINK coverage. The
+focused package/build/typecheck evidence passes, but native Linux FUSE,
+macOS/FSKit activation, callback events, cancellation, concurrency,
+crash/restart and durability remain open.
 
 The detailed 9P ledger is [docs/W01_9P_PROGRESS.md](./W01_9P_PROGRESS.md).
 Its 2026-09-22 packet adds the N-API `attach(stream, options)` boundary,
@@ -91,7 +95,7 @@ surfaces.
 | Core Rust, Node, memory, and oracle contract | Done | 101-step pinned trace: 79 successful results, 22 expected errors, zero mismatches/skips | 100% | — |
 | Local persistence and consumer paths | Done locally | Rust/Node SDK, CLI, SQLite, object-store, and chunked local paths pass; live providers remain separate | 90% | — |
 | FUSE wire codecs and whole-message framing | Done focused | Typed body table, raw/unknown framing, protocol-minor differentials, malformed/trailing checks | 95% | — |
-| Rust-backed mount-free FUSE session | In progress | INIT, options, cache, negative lookup, flush, callbacks, counters, lifecycle readback, inode view, and plain RENAME2 pass; remaining operation/native-session parity is open | 80% | — |
+| Rust-backed mount-free FUSE session | In progress | INIT, options, cache, negative lookup, flush, callbacks, counters, lifecycle readback, inode view, generated N-API facade, and plain RENAME2 pass; remaining operation/native-session parity is open | 82% | — |
 | Structural driver adapter and server factories | In progress | Focused oracle tests and macOS NFS structural mount pass; hosted Linux/Windows and full factory lifecycle remain | 75% | — |
 | Auto/mount option and lifecycle surface | In progress | Shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source` mapping, package-level `signals` teardown, positive NFS `Mounted.port` readback, `Mounted[Symbol.asyncDispose]()` disposal, shared NFS plus already-listened 9P server handles, transport-specific automatic transport-error callbacks for FUSE/9P/NFS, and the root auto `onTransportError` adapter now pass through the N-API auto facade; FUSE request callbacks, runtime callback-event qualification, remaining option/session members, mount object details, and full lifecycle parity remain | 64% | — |
 | NFS and 9P complete session/server contracts | Partial | NFS now exposes a read-only N-API session view with v3/v4-aware direct request routing, shared v3/v4 counters and sorted BigInt handle snapshots, a v4 session view, mounts, destroyed state, and an active server connection count; 9P now exposes direct raw-frame handling, the bounded Node attached-stream contract, and the native-listener stream scope decision alongside its session/connection view; the full upstream object/session/handle/attach surface and native qualification remain | 72% | — |
@@ -247,6 +251,7 @@ spent waiting for a hosted job or credential approval.
 | Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
 | --- | --- | --- | ---: | ---: | --- |
 | 2026-09-22 | W01-FUSE | Added public Rust `FuseSessionOptions`/`FuseFlushMechanism`, configured inode identity, INIT preferences, cache/timeout policy, error readback, handle counts and destroy-state observability; the complete locked FUSE target (14 unit, 6 INIT, 6 notify/record, 11 protocol, 18 session, 3 sync-barrier tests), strict scoped Clippy, formatting and diff checks passed | — | 66% planning view | Native Linux/FSKit, callbacks, hosted platform, cancellation/concurrency, crash/restart and durability evidence remain open |
+| 2026-09-22 | W01-FUSE | Added the Rust-backed N-API `FuseSession` and public `./fuse` facade with typed options/defaults, negotiated state, inode views, request/reply/error counters, assertion/error callbacks, notification encoders, destroy-state readback, generated declarations, and raw INIT/LOOKUP/READLINK coverage; locked N-API check/Clippy, debug addon build, focused session/codec/typecheck tests, FUSE tests, formatting and diff checks passed | — | 68% planning view | `MOUNTX_SOURCE`-backed full package suite, native Linux FUSE/callback events, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-21 | Baseline | Created this ledger from the current W01 tracker and evidence | — | 61% planning view | Hosted/native/live-provider gates remain open |
 | 2026-09-21 | W01.1 / W01.4 | Added shared `useDriverIno`, focused native `fuse`/`9p`/`nfs` option bags, configured FUSE `Mounted.source`, package-level signal teardown, `Mounted.port` readback, and `Mounted[Symbol.asyncDispose]()` to the N-API auto facade; 16 N-API unit tests, affected Rust crates, strict Clippy, Linux-target transport check, build/typecheck, authorized macOS NFS lifecycle, and the opt-in child-process signal lane passed | — | 65% planning view | Automatic error/transport callbacks, shared-server handles, remaining option/session members, hosted Linux native lanes, FSKit, PGlite, and live R2 remain open |
 | 2026-09-21 | W01.2 / W01.3 | Refreshed the pinned PGlite-enabled upstream suite (4 files, 1,200 passed, 82 skipped), the bounded PGlite provider/CLI packet (Rust SDK 6/6, Node SDK 5/5, CLI 11/11 with R2 skips), and all 40 seeded trace lanes across eight local backends at the pinned oracle revision | — | 65% planning view | Root-only skip rows, live R2, hosted platforms, and native transport acceptance remain open |

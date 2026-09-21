@@ -21,7 +21,7 @@ fn hex(value: &str) -> String {
     output
 }
 
-fn invalid_argument(message: impl Into<String>) -> Error {
+pub(crate) fn invalid_argument(message: impl Into<String>) -> Error {
     Error::new(Status::InvalidArg, message.into())
 }
 
@@ -38,7 +38,7 @@ fn codec_error(kind: &str, message: &str, offset: Option<usize>) -> Error {
     )
 }
 
-fn protocol_error(error: ProtocolError) -> Error {
+pub(crate) fn protocol_error(error: ProtocolError) -> Error {
     codec_error("protocol", &error.message, error.offset)
 }
 
@@ -50,7 +50,7 @@ fn transcript_error(error: record::TranscriptError) -> Error {
     codec_error("transcript", &error.0, None)
 }
 
-fn usize_value(name: &str, value: Option<f64>, default: usize) -> napi::Result<usize> {
+pub(crate) fn usize_value(name: &str, value: Option<f64>, default: usize) -> napi::Result<usize> {
     let value = value.unwrap_or(default as f64);
     if !value.is_finite()
         || value.fract() != 0.0

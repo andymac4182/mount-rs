@@ -74,12 +74,14 @@ import {
   encodeLkOut,
   FUSE_LK_FLOCK,
   F_UNLCK,
+  FuseSession,
   F_WRLCK,
   InodeTable,
   type Inode,
   type NativeFuseFileLock,
   type NativeFuseLkIn,
   type NativeFuseLkOut,
+  type FuseSessionOptions,
 } from "@mount-rs/core/fuse"
 
 // node:fs/promises and minimal structural drivers satisfy the public boundary.
@@ -102,6 +104,23 @@ const nativeBindingTarget: "native" | "wasm32-wasi" | "wasm32-wasip1" =
 
 async function checkFilesystemAndHandles(): Promise<void> {
   const filesystem: Filesystem = Filesystem.memory()
+  const sessionOptions: FuseSessionOptions = {
+    maxRequest: 65_536,
+    useDriverIno: false,
+    attrTimeout: 1.25,
+    entryTimeout: 2.5,
+    negativeTimeout: 3.75,
+    keepCache: false,
+    flushMechanism: "noflush",
+    onError: (error, request) => {
+      void error
+      void request
+    },
+  }
+  const fuseSession = new FuseSession(filesystem, sessionOptions)
+  void fuseSession.handle(new Uint8Array())
+  void fuseSession.negotiated
+  void fuseSession.inodes
   const handle: FileHandle = await filesystem.open("/file", "w+", 0o644)
   const buffer = new Uint8Array(8)
 
