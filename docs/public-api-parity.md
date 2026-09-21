@@ -256,13 +256,14 @@ Current focused behavior:
   sessions and exposed through their live option handles. The 9P mount helpers
   remain unresolved rather than being treated as intentionally out of scope.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
-  routing, a read-only `v4` session view, synchronized v3/v4 request/reply/
-  error/drop/procedure stats, mount records, destroyed-state readback, the
-  server's active `connections` count, and live `clients()` objects with
-  stable id/peer/session views plus `close()`/`waitClosed()` lifecycle. Both
-  N-API session views expose deterministic BigInt-backed snapshots of the Rust
-  server's shared v3/v4 handle table; remaining upstream member differences
-  and the complete stateful/crash/durability surface remain open. S3 now
+  routing, direct `destroy()` on both the unified and v4 views, a read-only `v4`
+  session view, synchronized v3/v4 request/reply/error/drop/procedure stats,
+  mount records, destroyed-state readback, the server's active `connections`
+  count, and live `clients()` objects with stable id/peer/session views plus
+  `close()`/`waitClosed()` lifecycle. Both N-API session views expose
+  deterministic BigInt-backed snapshots of the Rust server's shared v3/v4
+  handle table; remaining upstream member differences and the complete
+  stateful/crash/durability surface remain open. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
   safe effective options, debug-gated assertions, buffered `handleRequest`,
   streaming `handleRequestStream`, async session metrics, live `connections`,
