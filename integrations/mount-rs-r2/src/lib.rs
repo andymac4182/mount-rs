@@ -56,21 +56,7 @@ impl AwsS3Config {
             .with_region(&self.region)
             .with_virtual_hosted_style_request(true)
             .with_conditional_put(S3ConditionalPut::ETagMatch);
-        if builder
-            .get_config_value(&AmazonS3ConfigKey::Endpoint)
-            .is_some()
-        {
-            return Err(FsError::backend(
-                "AWS S3 provider rejects custom endpoints; use the R2 provider for S3-compatible endpoints",
-            ));
-        }
-        if builder
-            .get_config_value(&AmazonS3ConfigKey::SkipSignature)
-            .as_deref()
-            == Some("true")
-        {
-            return Err(FsError::backend("AWS S3 provider requires signed requests"));
-        }
+        validate_aws_builder(&builder)?;
         Ok(Arc::new(builder.build().map_err(backend_error)?))
     }
 }
@@ -270,6 +256,33 @@ fn validate_aws_region(region: &str) -> Result<()> {
         return Err(FsError::backend(
             "invalid AWS S3 region: expected a non-empty DNS-compatible region",
         ));
+    }
+    Ok(())
+}
+
+fn validate_aws_builder(builder: &AmazonS3Builder) -> Result<()> {
+    if builder
+        .get_config_value(&AmazonS3ConfigKey::Endpoint)
+        .is_some()
+    {
+        return Err(FsError::backend(
+            "AWS S3 provider rejects custom endpoints; use the R2 provider for S3-compatible endpoints",
+        ));
+    }
+    if builder
+        .get_config_value(&AmazonS3ConfigKey::StsEndpoint)
+        .is_some()
+    {
+        return Err(FsError::backend(
+            "AWS S3 provider rejects custom STS endpoints; use the AWS STS endpoint",
+        ));
+    }
+    if builder
+        .get_config_value(&AmazonS3ConfigKey::SkipSignature)
+        .as_deref()
+        == Some("true")
+    {
+        return Err(FsError::backend("AWS S3 provider requires signed requests"));
     }
     Ok(())
 }
@@ -553,6 +566,22 @@ mod tests {
             };
             assert!(config.validate().is_err(), "accepted {bucket}/{region}");
         }
+    }
+
+    #[test]
+    fn aws_s3_builder_rejects_endpoint_and_unsigned_request_overrides() {
+        let endpoint = AmazonS3Builder::new().with_endpoint("http://localhost:9000");
+        let error = validate_aws_builder(&endpoint).unwrap_err();
+        assert!(error.to_string().contains("custom endpoints"));
+
+        let sts_endpoint = AmazonS3Builder::new()
+            .with_config(AmazonS3ConfigKey::StsEndpoint, "http://localhost:4566");
+        let error = validate_aws_builder(&sts_endpoint).unwrap_err();
+        assert!(error.to_string().contains("custom STS endpoints"));
+
+        let unsigned = AmazonS3Builder::new().with_skip_signature(true);
+        let error = validate_aws_builder(&unsigned).unwrap_err();
+        assert!(error.to_string().contains("signed requests"));
     }
 
     #[test]

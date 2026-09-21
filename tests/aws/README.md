@@ -105,6 +105,11 @@ profile overrides are refused. Use a short-lived SSO or assumed-role session
 where possible; the runner never creates access keys, prints credential
 values, or writes them to the repository.
 
+After role assumption, the harness also attempts a non-mutating list under a
+sibling `mount-rs-tests/aws-s3-denied/` prefix and requires AWS authorization
+failure. A successful service run therefore proves both the required
+prefix-scoped operations and the configured role's list boundary.
+
 The corresponding versioned CLI provider shape is:
 
 ```json

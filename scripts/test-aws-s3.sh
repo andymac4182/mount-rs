@@ -253,6 +253,22 @@ if ! AWS_EC2_METADATA_DISABLED=true aws sts get-caller-identity \
   exit 3
 fi
 
+# Prove the assumed role cannot list a sibling namespace. This is a
+# non-mutating authorization check: the role is expected to fail before any
+# test object is created, and the check never relies on a sentinel outside the
+# harness-owned prefix.
+denied_prefix="mount-rs-tests/aws-s3-denied/$run_nonce/"
+if AWS_EC2_METADATA_DISABLED=true aws s3api list-objects-v2 \
+  --bucket "${AWS_S3_TEST_BUCKET}" \
+  --prefix "$denied_prefix" \
+  --max-keys 1 \
+  --region "$region" \
+  --output text >/dev/null 2>&1; then
+  echo "AWS_S3_AUTHORIZATION_SCOPE_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$denied_prefix" >&2
+  exit 2
+fi
+echo "AWS_S3_AUTHORIZATION_SCOPE_PASS bucket=${AWS_S3_TEST_BUCKET}"
+
 if ! existing=$(AWS_EC2_METADATA_DISABLED=true aws s3api list-objects-v2 \
   --bucket "${AWS_S3_TEST_BUCKET}" \
   --prefix "$prefix/" \
