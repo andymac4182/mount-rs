@@ -23,6 +23,7 @@ use mount_rs_core::types::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -30,6 +31,7 @@ use std::time::Duration;
 const BLOCK_SIZE: u64 = 4096;
 const MAX_SYMLINK_DEPTH: usize = 40;
 const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
+const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
 
@@ -256,6 +258,7 @@ where
     lifecycle: tokio::sync::RwLock<()>,
     state: Mutex<RuntimeState>,
     lease: Mutex<Option<WriterLease>>,
+    lease_renewed: AtomicBool,
     mutations: Mutex<MutationQueue>,
 }
 
@@ -353,6 +356,7 @@ where
                     closed: false,
                 }),
                 lease: Mutex::new(Some(lease.clone())),
+                lease_renewed: AtomicBool::new(false),
                 mutations: Mutex::new(MutationQueue::new()),
             }),
         };
@@ -392,7 +396,7 @@ where
         // fence when our lease expired without another owner publishing a
         // revision; a fenced instance still fails closed.
         let refresh = if self.lock_lease()?.is_some() {
-            self.renew_lease().await.map(|_| ())
+            self.validate_lease().await
         } else {
             Ok(())
         };
@@ -432,7 +436,7 @@ where
                 .with_message("reconciliation grace period must be positive"));
         }
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
+        self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let live = {
             let state = self.lock_state()?;
@@ -514,10 +518,33 @@ where
     }
 
     async fn renew_lease(&self) -> Result<WriterLease> {
+        self.renew_lease_inner(false).await
+    }
+
+    async fn validate_lease(&self) -> Result<()> {
+        self.renew_lease_inner(true).await.map(|_| ())
+    }
+
+    async fn renew_lease_inner(&self, force: bool) -> Result<WriterLease> {
         let current = self
             .lock_lease()?
             .clone()
             .ok_or_else(|| FsError::new(ErrorCode::Ebadf).with_message("writer lease released"))?;
+        // A provider renewal is a serialized metadata transaction. Avoid
+        // paying that round trip for every read and optimistic block
+        // operation while the cached lease still has a conservative safety
+        // window. Publication still carries the provider-enforced owner,
+        // fence and expiry predicates, so a clock-skewed or fenced lease
+        // fails closed at the durable boundary.
+        let margin = self.inner.options.lease_ttl.min(LEASE_RENEWAL_MARGIN);
+        let margin_ms = u64::try_from(margin.as_millis()).unwrap_or(u64::MAX);
+        let now = u64::try_from(now_ms()).unwrap_or(0);
+        if !force
+            && self.inner.lease_renewed.load(Ordering::Acquire)
+            && current.expires_at_ms > now.saturating_add(margin_ms)
+        {
+            return Ok(current);
+        }
         let renewed = match self
             .inner
             .metadata
@@ -533,6 +560,7 @@ where
             }
         };
         *self.lock_lease()? = Some(renewed.clone());
+        self.inner.lease_renewed.store(true, Ordering::Release);
         Ok(renewed)
     }
 
@@ -622,6 +650,7 @@ where
         }
         if let Ok(mut lease) = self.lock_lease() {
             *lease = Some(acquired.clone());
+            self.inner.lease_renewed.store(true, Ordering::Release);
         } else {
             let error = FsError::new(ErrorCode::Eio).with_message("lease lock poisoned");
             let _ = self.inner.metadata.release_writer(&acquired).await;
@@ -1406,7 +1435,7 @@ where
             .flush()
             .await
             .map_err(|error| with_context(error, syscall, None))?;
-        self.renew_lease().await?;
+        self.validate_lease().await?;
         self.inner
             .metadata
             .flush()
@@ -1572,7 +1601,7 @@ where
             return Err(error_with_path(ErrorCode::Ebadf, "fstat", &self.path));
         }
         let _gate = self.filesystem.inner.gate.lock().await;
-        self.filesystem.ensure_operation_lease().await?;
+        self.filesystem.validate_lease().await?;
         self.filesystem.stat_inode(self.inode, "fstat", &self.path)
     }
 
@@ -1646,7 +1675,7 @@ where
 
     async fn stat(&self, path: &str) -> Result<Stats> {
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
+        self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, true, "stat")?;
         self.stat_inode(inode, "stat", &normalize_path(path))
@@ -1654,7 +1683,7 @@ where
 
     async fn lstat(&self, path: &str) -> Result<Stats> {
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
+        self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         let inode = resolve(&namespace, path, false, "lstat")?;
         self.stat_inode(inode, "lstat", &normalize_path(path))
@@ -1662,7 +1691,7 @@ where
 
     async fn statfs(&self, path: &str) -> Result<StatsFs> {
         let _gate = self.inner.gate.lock().await;
-        self.ensure_operation_lease().await?;
+        self.validate_lease().await?;
         let (namespace, _) = self.snapshot()?;
         resolve(&namespace, path, true, "statfs")?;
         const BLOCKS: u64 = 1024 * 1024;
