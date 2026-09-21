@@ -20,6 +20,7 @@ use mount_rs_9p::{
     P9TransportErrorHook as TransportP9ErrorHook,
 };
 use mount_rs_core::{ErrorCode, FsDriver, FsError};
+use mount_rs_fuse::{FuseTransportError, FuseTransportErrorHook};
 use mount_rs_nfs::{
     FileHandleTable as TransportNfsHandleTable, NFS_V4, NFS4_PROGRAM,
     Nfs3Session as TransportNfsSession, Nfs4Session as TransportNfs4Session,
@@ -56,7 +57,7 @@ use super::{Filesystem, MountDriver};
 
 const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
 
-type JsTransportErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
+pub(crate) type JsTransportErrorCallback = Function<'static, Unknown<'static>, Unknown<'static>>;
 type TransportErrorCall = FnArgs<(Error, Option<String>)>;
 type TransportErrorTsfn = ThreadsafeFunction<
     TransportErrorEvent,
@@ -91,6 +92,16 @@ impl From<TransportWebdavError> for TransportErrorEvent {
     fn from(error: TransportWebdavError) -> Self {
         let TransportWebdavError { message, peer, .. } = error;
         Self { message, peer }
+    }
+}
+
+impl From<FuseTransportError> for TransportErrorEvent {
+    fn from(error: FuseTransportError) -> Self {
+        let FuseTransportError { message, .. } = error;
+        Self {
+            message,
+            peer: None,
+        }
     }
 }
 
@@ -182,6 +193,18 @@ impl Drop for TransportErrorCallback {
     fn drop(&mut self) {
         self.release();
     }
+}
+
+pub(crate) fn fuse_hook(
+    function: Option<JsTransportErrorCallback>,
+) -> napi::Result<Option<FuseTransportErrorHook>> {
+    let Some(function) = function else {
+        return Ok(None);
+    };
+    let callback = Arc::new(TransportErrorCallback::new(function)?);
+    Ok(Some(Arc::new(move |error: FuseTransportError| {
+        callback.report(error.into());
+    }) as FuseTransportErrorHook))
 }
 
 fn nfs_hooks(callback: Option<&Arc<TransportErrorCallback>>) -> TransportNfsServerHooks {

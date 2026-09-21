@@ -26,7 +26,9 @@ task; the server-owned protocol state remains available to other clients. The
 rootless wire suite also proves that a v4.1 session can be used again after an
 orderly TCP transport reconnect while this server process remains alive, and
 that multiple v3 calls can be pipelined on one connection within the configured
-in-flight bound.
+in-flight bound. A restart-boundary test reuses the backend with a replacement
+server and confirms that the old v4 session is rejected with
+`NFS4ERR_BADSESSION`.
 
 ## Native macOS/Linux mount lifecycle
 
@@ -108,5 +110,6 @@ exclusive-create verifiers are process-local unless the caller supplies a
 stable handle verifier. A caller can reconnect to a still-running server and
 reuse the tested session, but `NfsConnection` close/wait state does not provide
 automatic reconnect, lease recovery, or crash-durable session/reply state;
-cross-process crash and durability behavior remains outside the supported local
-scope until a separate qualification lane is accepted.
+the restart-boundary test therefore classifies v4 session/lease/replay state as
+process-local. Backend crash recovery and durability behavior remains outside
+the supported local scope until a separate qualification lane is accepted.

@@ -47,6 +47,25 @@ jobs:
             echo 'W26 Ozone production config policy accepted an insecure fixture' >&2
             exit 1
           fi
+          if node scripts/verify-w26-ozone-production-config.mjs \
+            tests/ozone/production-config-policy-inline-secret.invalid.json
+          then
+            echo 'W26 Ozone production config policy accepted an inline secret fixture' >&2
+            exit 1
+          fi
+          if node scripts/verify-w26-ozone-production-config.mjs \
+            tests/ozone/production-config-policy-foundationdb.invalid.json
+          then
+            echo 'W26 Ozone production config policy accepted an unsafe FoundationDB fixture' >&2
+            exit 1
+          fi
+          if MOUNT_RS_TIDB_TLS_URL='mysql://tls-policy-user@tidb-policy.invalid:4000/app?require_ssl=true&verify_ca=true&verify_identity=false&built_in_roots=true' \
+            node scripts/verify-w26-ozone-production-config.mjs \
+            tests/ozone/production-config-policy-tidb-tls.invalid.json
+          then
+            echo 'W26 Ozone production config policy accepted a weak TiDB TLS fixture' >&2
+            exit 1
+          fi
       - name: Verify real Apache Ozone block contract and restart recovery
         run: sh scripts/test-ozone.sh
 

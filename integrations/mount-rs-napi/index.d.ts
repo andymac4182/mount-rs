@@ -459,7 +459,7 @@ export declare class NfsXdrWriter {
 export declare class P9Connection {
   get session(): P9Session
   get id(): number
-  get peer(): string | null
+  get peer(): string | null | undefined
   get isClosed(): boolean
   close(): Promise<void>
   waitClosed(): Promise<void>
@@ -981,6 +981,7 @@ export interface JsAutoMountOptions {
    * NFS. This does not enable WAL or distributed SQLite locking.
    */
   nfsSqliteSingleHost?: boolean
+  onTransportError?: (error: unknown, peer: string | undefined) => void
 }
 
 export interface JsAutoProbe {

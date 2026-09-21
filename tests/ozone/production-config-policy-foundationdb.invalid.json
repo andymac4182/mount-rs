@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "driver": {
+    "kind": "splitstore",
+    "storage": {
+      "metadata": {
+        "kind": "foundationdb",
+        "cluster_file": "/etc/mount-rs/foundationdb/fdb.cluster",
+        "volume_key": "mount-rs-production-w26-foundationdb-invalid",
+        "durable": true,
+        "lease_authority": "persisted-single-authority",
+        "authority_prefix": "mount-rs/production/w26/authority"
+      },
+      "blocks": {
+        "kind": "r2",
+        "endpoint": "https://ozone-policy.invalid",
+        "bucket": "mount-rs-production-w26",
+        "prefix": "volumes/foundationdb-invalid",
+        "access_key_id": {
+          "env": "R2_ACCESS_KEY_ID"
+        },
+        "secret_access_key": {
+          "env": "R2_SECRET_ACCESS_KEY"
+        },
+        "durable": true
+      },
+      "chunk_size_bytes": 4194304,
+      "owner": "mount-rs-production-w26-foundationdb-invalid"
+    }
+  }
+}

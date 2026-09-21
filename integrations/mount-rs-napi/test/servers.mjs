@@ -638,7 +638,7 @@ async function exerciseP9AttachedStream() {
 async function exerciseP9AttachedDuplex() {
   const server = createP9Server(memoryFilesystem(), { maxInFlight: 2 });
   const [serverSide, clientSide] = duplexPair();
-  const connection = server.attach(serverSide, { peer: "duplex-test" });
+  const connection = server.attach(serverSide);
   const reader = new BufferedSocket(clientSide);
   await p9Request(
     clientSide,
@@ -649,7 +649,7 @@ async function exerciseP9AttachedDuplex() {
     101,
   );
   assert.strictEqual(connection.stream, serverSide);
-  assert.equal(connection.peer, "duplex-test");
+  assert.equal(connection.peer, undefined);
   const peerEof = new Promise((resolve) => clientSide.once("end", resolve));
   await server.close();
   await within(connection.closed, "attached duplex server close");

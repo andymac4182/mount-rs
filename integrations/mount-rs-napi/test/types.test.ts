@@ -102,6 +102,13 @@ function checkStructuralFactories(driver: FsDriver): void {
   createS3Server(driver)
   createS3Server({ buckets: { structural: driver, native: Filesystem.memory() } })
   void mount(driver, "/typecheck-only")
+  void mount(driver, "/typecheck-fuse-callback", {
+    transport: "fuse",
+    onTransportError(error, peer) {
+      void error
+      void peer
+    },
+  })
 }
 const nodeStructural: FsDriver = nodeFs
 void nodeStructural
@@ -384,10 +391,11 @@ function checkServerAndKvSubpaths(): void {
 
   const p9Connection: P9Connection = p9Connections[0]
   const connectionId: number = p9Connection.id
-  const connectionPeer: string | null = p9Connection.peer
+  const connectionPeer: string | null | undefined = p9Connection.peer
   const connectionClosed: boolean = p9Connection.isClosed
   const connectionCompletion: Promise<void> = p9Connection.closed
   const attachedP9: P9Connection = p9Server.attach({} as Duplex)
+  const attachedP9Peer: string | null | undefined = attachedP9.peer
   const attachedP9Stream: Duplex | undefined = attachedP9.stream
   const attachedP9Call = attachedP9.session.handleCall(Buffer.alloc(0))
   const attachedP9Destroy: Promise<void> = attachedP9.session.destroy()
@@ -399,6 +407,7 @@ function checkServerAndKvSubpaths(): void {
   ]
   void connectionCompletion
   void attachedP9
+  void attachedP9Peer
   void attachedP9Stream
   void attachedP9Call
   void attachedP9Destroy
