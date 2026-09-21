@@ -6,7 +6,8 @@ set -eu
 # endpoint is passed through to a separate Rust client container.
 
 repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-fdb_image=${MOUNT_RS_FOUNDATIONDB_IMAGE:-foundationdb/foundationdb:7.4.7@sha256:7f1ce47f7f636351540423144a583141c255a4b314147972855e5388060f7677}
+fdb_image_override=${MOUNT_RS_FOUNDATIONDB_IMAGE:-}
+fdb_image=""
 rust_image=${MOUNT_RS_FOUNDATIONDB_RUST_IMAGE:-rust:1.95-bookworm}
 node_image=${MOUNT_RS_FOUNDATIONDB_NODE_IMAGE:-node:24-bookworm}
 run_napi=0
@@ -69,10 +70,24 @@ fi
 
 docker_arch=$(docker info --format '{{.Architecture}}')
 case "$docker_arch" in
-  amd64|x86_64) docker_platform=linux/amd64 ;;
-  arm64|aarch64) docker_platform=linux/arm64 ;;
+  amd64|x86_64)
+    docker_platform=linux/amd64
+    default_fdb_image='foundationdb/foundationdb:7.4.7@sha256:c13aed110fe17c6feb678f5dadc73dbcc2dbc42f2a3e952a877c116f63f052d3'
+    ;;
+  arm64|aarch64)
+    docker_platform=linux/arm64
+    default_fdb_image='foundationdb/foundationdb:7.4.7@sha256:25d9e2456ca923e70829fc07a15132c1a0c061474cd89826cdc4bbb45de870de'
+    ;;
   *) echo "Unsupported Docker architecture for FoundationDB gate: $docker_arch" >&2; exit 2 ;;
 esac
+if [ -n "$fdb_image_override" ]; then
+  fdb_image=$fdb_image_override
+else
+  # Use the official platform manifest rather than the multi-arch index. This
+  # keeps older Docker Desktop engines from re-resolving the index during
+  # container creation while preserving a digest pin for each architecture.
+  fdb_image=$default_fdb_image
+fi
 
 if [ -n "$provided_cluster_file" ]; then
   if [ "${MOUNT_RS_FOUNDATIONDB_ALLOW_EXTERNAL_CLUSTER:-0}" != "1" ]; then

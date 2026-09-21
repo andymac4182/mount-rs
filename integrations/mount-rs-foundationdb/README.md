@@ -221,11 +221,13 @@ The CI gate must be separate from the portable workspace gate:
 
 The repository-owned `scripts/test-foundationdb.sh` can run the real gate in
 isolated Docker containers. It pulls the pinned official
-`foundationdb/foundationdb:7.4.7` image, starts a disposable server, copies its
-cluster file and client library into a disposable Rust test image, and runs the
-feature-gated integration test against that server. The server and client are
-derived from the same pinned image digest; the script prints their image IDs
-before the test. The script removes only its explicitly named
+`foundationdb/foundationdb:7.4.7` platform manifest for the detected Linux
+architecture, starts a disposable server, copies its cluster file and client
+library into a disposable Rust test image, and runs the feature-gated
+integration test against that server. The server and client are derived from
+the same pinned image digest; the script prints their image IDs before the
+test. Set `MOUNT_RS_FOUNDATIONDB_IMAGE` only when an explicitly selected image
+is required. The script removes only its explicitly named
 container/network/temp paths on exit; it installs no host client and does not
 modify Docker configuration. Set `MOUNT_RS_FOUNDATIONDB_KEEP=1` when
 diagnosing a failed run. The feature gate remains separate from the client-free
