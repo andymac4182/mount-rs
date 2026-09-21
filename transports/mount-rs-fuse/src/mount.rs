@@ -1014,7 +1014,10 @@ fn mount_data(
     let mut parts = Vec::new();
     if let Some((fd, root_mode, uid, gid)) = privileged {
         parts.push(format!("fd={fd}"));
-        parts.push(format!("rootmode={root_mode:o}"));
+        // The kernel expects only the root inode's file-type bits here. The
+        // driver stat includes normal permission bits as well, so mask them
+        // before serializing the privileged mount boundary.
+        parts.push(format!("rootmode={:o}", root_mode & S_IFMT));
         parts.push(format!("user_id={uid}"));
         parts.push(format!("group_id={gid}"));
     }
@@ -1391,6 +1394,20 @@ mod tests {
             options.mount_options = vec!["fsname=caller-controlled".to_owned()];
             assert!(validate_options(&options).is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn privileged_mount_data_masks_root_permissions() {
+        let data = mount_data(
+            &MountOptions::default(),
+            Some((3, S_IFDIR | 0o755, 1000, 1001)),
+        )
+        .expect("mount data should be valid");
+        assert_eq!(
+            data.to_bytes(),
+            b"fd=3,rootmode=40000,user_id=1000,group_id=1001,fsname=mount-rs,default_permissions"
+        );
     }
 
     #[cfg(target_os = "linux")]
