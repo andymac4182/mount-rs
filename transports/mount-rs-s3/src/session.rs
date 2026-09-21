@@ -821,6 +821,10 @@ impl S3Session {
             ));
         }
         require_atomic_rename(&driver)?;
+        // Stage at the private root, but create the destination hierarchy
+        // before the final rename. A rename cannot create a missing parent and
+        // nested object keys are valid S3 keys.
+        ensure_parent(&driver, &target.path).await?;
         let exclusive = existing.is_none() && check_create_only(&head.headers);
         let staging_path = format!("/{STREAMING_STAGING_PREFIX}{}", new_upload_id());
         write_stream_body(StreamWriteRequest {
@@ -1293,6 +1297,7 @@ impl S3Session {
             parts.push((path, stats.size));
         }
         require_atomic_rename(&driver)?;
+        ensure_parent(&driver, &target.path).await?;
         // Assemble through a private staging file instead of collecting all
         // parts into one Vec. This bounds memory by read_chunk_bytes and keeps
         // the existing destination unchanged if a part read or metadata update
@@ -1610,9 +1615,15 @@ fn is_upload_id(value: &str) -> bool {
 }
 
 async fn ensure_parent(driver: &Arc<dyn FsDriver>, path: &str) -> S3Result<()> {
+    let parent = dirname(path);
+    if parent == "/" {
+        // The root already exists. Avoid requiring an otherwise optional
+        // mkdir implementation just to publish an object at the bucket root.
+        return Ok(());
+    }
     driver
         .mkdir(
-            &dirname(path),
+            &parent,
             MkdirOptions {
                 recursive: true,
                 mode: Some(0o777),
