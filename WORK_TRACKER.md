@@ -1002,7 +1002,7 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and cleanup also completed. This remains local qualification evidence only.
   The dedicated manually dispatched
   [W07 hosted qualification workflow](.github/workflows/foundationdb-production.yml)
-  now runs this durable composition, one bounded soak round, the live Node
+  now runs this durable composition, five isolated bounded soak rounds, the live Node
   addon, the Linux native CLI/FUSE lifecycle and the service-restart/fresh-
   client checks with non-cancelling concurrency. It retains the terminal
   redacted log as a run artifact so a long W07 result is not invalidated by an
@@ -1042,8 +1042,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   at revision `2d4ca9f` reached the policy, prerequisite and N-API steps but
   stopped before provider execution because `tests/rustfs/Cargo.lock` was
   missing the `futures-util` dependency declared by `mount-rs-r2`. It is not
-  runtime acceptance evidence; the lockfile correction is being published
-  before the guarded-authority run is retried.
+  runtime acceptance evidence; the lockfile correction was published in
+  `4aadbb1` before the guarded-authority retry.
   The retry
   [35606741719](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719)
   at revision `4aadbb1` completed green in 10m55s. It emitted
@@ -1059,6 +1059,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   bounded workload/clock-guard evidence only; production identity/ACL/TLS,
   backup/recovery, capacity, observability, macOS and release-owner gates
   remain open.
+  The current published workflow revision `976725e` expanded the dedicated
+  qualification to five isolated real-provider rounds. Hosted run
+  [35608336345](https://github.com/andymacclenaghan/mount-rs/actions/runs/35608336345)
+  (job
+  [106360895920](https://github.com/andymacclenaghan/mount-rs/actions/runs/35608336345/job/106360895920))
+  completed green on `ubuntu-24.04` in 11m38s. It emitted the expected
+  positive/negative config-policy markers, shared-network endpoint reachability
+  (`403`),
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=9990
+  p95_us=85061 p99_us=85061 total_ms=167 throughput_ops_per_sec=65.76`,
+  `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_NAPI_PASS image=node:24-bookworm`, service restart readiness,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. This is a stronger bounded hosted qualification
+  signal, not production-duration, capacity, failover, or release acceptance.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
