@@ -1322,6 +1322,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   filesystem driver/session lists, completes, and reads the object through
   `node test/s3-restart.mjs`. This is restart evidence, not power-loss,
   provider, hosted-native, or crash-consistency acceptance.
+- [x] The S3 Node `./s3` public-boundary packet now runs the pinned runtime
+  audit in `node test/s3-barrel-scope.mjs`: 155 oracle exports and 255 package
+  exports are compared, the exact 153 oracle-only codec/helper names are
+  pinned as Rust-owned/out of the Node subpath, and the supported N-API S3
+  server/session/streaming classes plus factory identity are retained. This is
+  an explicit scope decision, not complete JavaScript codec parity; live
+  provider, crash/power-loss, broader concurrency, and native/hosted evidence
+  remain open.
 - [x] The WebDAV session view now exposes typed buffered `handleRequest` and
   true streamed `handleRequestStream` with normalized headers, positional file
   response chunks, cancellation cleanup, and body-error propagation. The N-API
