@@ -1748,8 +1748,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
   smoke. The fresh targeted security scan at baseline `89992ce` identified
   an AWS transport-override finding and mutable non-AWS workflow action
-  references. Both remediations and the secret-safe CI preflight are landed at
-  current head `82ffeb9`; the follow-up Standard scan reports zero reportable
+  references. Both remediations and the secret-safe CI preflight are landed;
+  current pushed head `b46e37f` is covered by Standard scan
+  `f73dd069-4102-4465-aaf7-8d6165282a36`, which reports zero reportable
   findings in the 21 directly reviewed W25 surfaces, with partial repository
   coverage (592 files, 21 closed review rows). Hosted OIDC trust, the protected
   versioning-status input, and the deployment evidence remain open. The latest
