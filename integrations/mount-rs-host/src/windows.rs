@@ -185,7 +185,16 @@ fn wide_path(path: &Path, extended: bool) -> io::Result<Vec<u16>> {
     // ordinary host operations do not regress at MAX_PATH; CreateSymbolicLinkW
     // follows Node/libuv's normal Win32 path form and only falls back to the
     // extended namespace when a link name is actually too long.
-    let absolute = std::path::absolute(path)?;
+    // `path` is normally already rooted by HostFs::secure. Avoid asking the
+    // Windows path-normalization API to resolve an already absolute long path:
+    // on hosts without long-path normalization enabled that API can fail with
+    // ERROR_FILE_NOT_FOUND before the extended `\\?\\` namespace is applied.
+    // Resolve only relative inputs, then add the extended prefix below.
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::path::absolute(path)?
+    };
     let mut wide: Vec<u16> = absolute.as_os_str().encode_wide().collect();
     if wide.contains(&0) {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
