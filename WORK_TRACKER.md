@@ -57,7 +57,8 @@ backend durability, crash injection, and durable-restart qualification. The
 new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
 session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
-options; the wire suite passes 5/5. Upstream ID-map, deterministic clock/seed,
+options; the wire suite passes 5/5, including rejection of an additional
+range on an existing lock state at `maxLocksPerFile`. Upstream ID-map, deterministic clock/seed,
 and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
@@ -1053,6 +1054,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   transport errors 4, v4 barrier 1, and v4 wire 4 tests; richer `onError` and
   NFSv4 lease/ID-map/state-limit/reclaim knobs plus native/hosted/crash gates
   remain explicitly open.
+- [x] The NFSv4 lock-cap follow-up applies `maxLocksPerFile` to extensions of
+  existing lock state, preserves conflict-before-cap ordering, and adds a
+  rootless wire assertion for the additional-range rejection. The complete
+  NFS target and scoped Clippy pass; native Linux/hosted/crash gates remain
+  open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -2899,6 +2905,20 @@ listing a source does not mean it has been reviewed or its code can be reused.
   published in `12ba117`; focused scan
   `18010cad-ed69-4da3-b0a9-57163091e878` found zero reportable findings.
   Hosted artifact retention/access and terminal provider results remain open.
+- [x] W26.11 Aggregate the complete Ozone evidence packet on one revision.
+  `scripts/verify-w26-ozone-evidence-packet.mjs` validates the exact
+  SQLite/PGlite, TiDB and FoundationDB provider sets, clean matching source
+  revisions, all positive/negative production-policy markers, provider
+  acceptance, Ozone fault/integration and cleanup markers. The CI jobs retain
+  policy/base/provider logs and IOPS JSON artifacts, and the `always()`
+  `w26-ozone-evidence` job downloads every artifact and fails closed on any
+  missing or cross-revision evidence. Local benchmark/evidence tests, Node and
+  shell syntax, YAML parsing and diff checks pass. Commit `08f4530` was merged
+  with concurrent mainline changes and published at `097ed00`; security scan
+  `c67ae8e0-99af-4ade-8284-a612d599b5e4` found zero reportable findings.
+  Terminal hosted provider/aggregate results and customer security/capacity
+  evidence remain open; current CI `35630094815` is pending and no result is
+  promoted from it.
 - [x] W26.5 Add explicit opt-in immutable-block reconciliation before production
   use. `BlockStore::reconcile` fails closed by default; `ChunkedFs` renews the
   writer lease, rejects zero grace at the coordinator, and protects committed

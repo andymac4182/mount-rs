@@ -282,7 +282,9 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                 .build()
                 .expect("build v4 wire test runtime")
                 .block_on(async {
-                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_locks_per_file = 1;
+                    let server = NfsServer::new(MemoryFs::empty(), options);
                     let address = server.listen().await.expect("listen rootless NFS server");
                     let mut stream = TcpStream::connect(address)
                         .await
@@ -634,6 +636,40 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     let lock_stateid = response.fixed_opaque(16, "lock stateid").unwrap();
                     response.end("lock response").unwrap();
 
+                    // maxLocksPerFile applies to every granted range, even
+                    // when an existing lock stateid is being extended.
+                    client.sequence += 1;
+                    let lock_limit = op(OP_LOCK, |writer| {
+                        writer.u32(1);
+                        writer.bool(false);
+                        writer.u64(8);
+                        writer.u64(4);
+                        writer.bool(false);
+                        writer.fixed_opaque(&lock_stateid, 16);
+                        writer.u32(0);
+                    });
+                    let mut response = rpc(
+                        &mut stream,
+                        11,
+                        compound(
+                            "lock-limit",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                lock_limit,
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 3), NFS4ERR_RESOURCE);
+                    consume_sequence_result(&mut response, "lock-limit");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    assert_eq!(
+                        parse_result_status(&mut response, OP_LOCK),
+                        NFS4ERR_RESOURCE
+                    );
+                    response.end("lock limit response").unwrap();
+
                     client.sequence += 1;
                     let open_two = op(OP_OPEN, |writer| {
                         writer.u32(1);
@@ -646,7 +682,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     });
                     let mut response = rpc(
                         &mut stream,
-                        11,
+                        12,
                         compound(
                             "open-two",
                             &[
@@ -688,7 +724,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     });
                     let mut response = rpc(
                         &mut stream,
-                        12,
+                        13,
                         compound(
                             "lock-denied",
                             &[
@@ -716,7 +752,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     client.sequence += 1;
                     let mut response = rpc(
                         &mut stream,
-                        13,
+                        14,
                         compound(
                             "unlock",
                             &[
@@ -743,7 +779,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     client.sequence += 1;
                     let mut response = rpc(
                         &mut stream,
-                        14,
+                        15,
                         compound(
                             "free-lock-state",
                             &[
@@ -763,7 +799,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     client.sequence += 1;
                     let mut response = rpc(
                         &mut stream,
-                        15,
+                        16,
                         compound(
                             "close-two",
                             &[
@@ -791,7 +827,7 @@ fn nfs_v4_1_tcp_session_and_file_round_trip_is_rootless() {
                     });
                     let mut response = rpc(
                         &mut stream,
-                        16,
+                        17,
                         compound(
                             "close",
                             &[
