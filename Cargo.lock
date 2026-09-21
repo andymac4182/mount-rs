@@ -1422,6 +1422,7 @@ dependencies = [
  "mount-rs-auto",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-foundationdb",
  "mount-rs-fuse",
  "mount-rs-host",
  "mount-rs-kv",

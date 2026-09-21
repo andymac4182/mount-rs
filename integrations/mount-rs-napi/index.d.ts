@@ -854,11 +854,13 @@ export interface JsChunkedOptions {
  * backend never falls back to an in-memory store.
  */
 export interface JsChunkedStoreOptions {
-  /** Supported values are memory, sqlite, pglite, tidb, and r2 (blocks only). */
+  /** Supported values are memory, sqlite, pglite, tidb, foundationdb, and r2 (blocks only). */
   kind: string
   uri?: string
   key?: string
   durable?: boolean
+  /** FoundationDB only: currently persisted-single-authority. */
+  leaseAuthority?: string
   endpoint?: string
   bucket?: string
   accessKeyId?: string
