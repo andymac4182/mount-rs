@@ -22,7 +22,7 @@ import {
   providerSummary,
   DEFAULT_CHUNK_SIZE_BYTES,
 } from "./providers.mjs"
-import { computeStats, roundStats } from "./stats.mjs"
+import { computeStats, round, roundStats } from "./stats.mjs"
 
 export const REFERENCE_REVISION = "92fbbc9ba7739111899121195236acb4fc6a8bb5"
 export const FILE_SIZE_MIB = Object.freeze([1, 4, 10, 16])
@@ -83,6 +83,8 @@ export function parseArgs(argv) {
   let output
   let payloadSeed = "mount-rs-storage-benchmark"
   let networkContext = "not-provided"
+  let payloadBytes
+  let minIops
   let help = false
 
   for (let index = 0; index < argv.length; index += 1) {
@@ -116,6 +118,12 @@ export function parseArgs(argv) {
         break
       case "--chunk-size-bytes":
         chunkSizeBytes = integer(takeValue(argv, index++, argument), argument)
+        break
+      case "--payload-bytes":
+        payloadBytes = integer(takeValue(argv, index++, argument), argument)
+        break
+      case "--min-iops":
+        minIops = integer(takeValue(argv, index++, argument), argument)
         break
       case "--providers":
       case "--provider":
@@ -153,6 +161,8 @@ export function parseArgs(argv) {
     output,
     payloadSeed,
     networkContext,
+    payloadBytes,
+    minIops,
   }
 }
 
@@ -173,6 +183,8 @@ Options:
   --timeout-ms N            write/read operation timeout (default 30000)
   --cleanup-timeout-ms N   delete and cleanup timeout (default 10000)
   --chunk-size-bytes N     fixed chunk size for split providers (default 65536)
+  --payload-bytes N         override the generated payload size for each lifecycle
+  --min-iops N              fail a result below the successful lifecycle IOPS target
   --output PATH             also write machine-readable JSON to PATH
   --payload-seed TEXT       deterministic payload seed
   --network-context TEXT    recorded remote network context
@@ -520,6 +532,7 @@ async function runSize(
   ownedPaths,
   pendingOperations,
 ) {
+  const measurementStarted = performance.now()
   const sizeBytes = payload.byteLength
   const tasks = Array.from({ length: options.iterations }, (_, index) => ({
     iteration: index + 1,
@@ -549,6 +562,13 @@ async function runSize(
   const successfulIterations = samples.filter((sample) => sample.success).length
   const timeoutCount = samples.reduce((total, sample) => total + sample.timeoutCount, 0)
   const cleanupFailureCount = samples.filter((sample) => sample.cleanupFailure).length
+  const elapsedMs = performance.now() - measurementStarted
+  const operationsPerLifecycle = 3
+  const successfulOperations = successfulIterations * operationsPerLifecycle
+  const attemptedOperations = samples.length * operationsPerLifecycle
+  const iops = elapsedMs > 0 ? successfulOperations / (elapsedMs / 1000) : 0
+  const iopsTargetMet = options.minIops == null ? null : iops >= options.minIops
+  const iopsTargetFailure = iopsTargetMet === false
   const summary = {
     writeMs: computeStats(writeValues),
     readMs: computeStats(readValues),
@@ -560,6 +580,13 @@ async function runSize(
     successRate: successfulIterations / options.iterations,
     successfulIterations,
     failedIterations: samples.length - successfulIterations,
+    elapsedMs,
+    operationsPerLifecycle,
+    successfulOperations,
+    attemptedOperations,
+    iops,
+    iopsTarget: options.minIops ?? null,
+    iopsTargetMet,
     timeoutCount,
     cleanupFailureCount,
     operationSuccess: {
@@ -583,12 +610,28 @@ async function runSize(
     fileSizeBytes: sizeBytes,
     iterationsRequested: options.iterations,
     concurrency: options.concurrency,
-    status: successfulIterations === samples.length ? "ok" : "failed",
+    status: successfulIterations === samples.length && !iopsTargetFailure ? "ok" : "failed",
     payloadSha256: digest(payload),
     payloadPreparation: "excluded-from-timed-operations",
     payloadVerification: "outside-read-timer",
     chunkSizeBytes:
       definition.chunking.algorithm === "fixed-size" ? options.chunkSizeBytes : null,
+    ...(iopsTargetFailure
+      ? {
+          failures: [
+            {
+              operation: "iops-target",
+              error: {
+                name: "IopsTargetError",
+                message: `successful lifecycle IOPS ${iops.toFixed(2)} was below target ${options.minIops}`,
+                code: "IOPS_TARGET_NOT_MET",
+                actual: iops,
+                target: options.minIops,
+              },
+            },
+          ],
+        }
+      : {}),
     summary,
     summaryRounded: {
       writeMs: roundStats(summary.writeMs),
@@ -597,6 +640,8 @@ async function runSize(
       downloadMs: roundStats(summary.downloadMs),
       throughputMbps: roundStats(summary.throughputMbps),
       deleteMs: roundStats(summary.deleteMs),
+      elapsedMs: round(summary.elapsedMs),
+      iops: round(summary.iops),
     },
     rawSamples: samples,
   }
@@ -655,7 +700,7 @@ function skippedSizeResult(definition, sizeMiBValue, options, availability) {
     chunkSizeBytes:
       definition.chunking.algorithm === "fixed-size" ? options.chunkSizeBytes : null,
     sizeMiB: sizeMiBValue,
-    fileSizeBytes: sizeMiBValue * 1024 * 1024,
+    fileSizeBytes: options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
     iterationsRequested: options.iterations,
     concurrency: options.concurrency,
     status: "skipped",
@@ -674,7 +719,7 @@ function failedSizeResult(definition, sizeMiBValue, options, operation, error) {
     chunkSizeBytes:
       definition.chunking.algorithm === "fixed-size" ? options.chunkSizeBytes : null,
     sizeMiB: sizeMiBValue,
-    fileSizeBytes: sizeMiBValue * 1024 * 1024,
+    fileSizeBytes: options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
     iterationsRequested: options.iterations,
     concurrency: options.concurrency,
     status: "failed",
@@ -761,7 +806,10 @@ async function runProvider(definition, options, context) {
     for (const sizeMiBValue of options.sizes) {
       try {
         // Payload allocation and hashing happen before the first timed write.
-        const payload = makePayload(sizeMiBValue * 1024 * 1024, options.payloadSeed)
+        const payload = makePayload(
+          options.payloadBytes ?? sizeMiBValue * 1024 * 1024,
+          options.payloadSeed,
+        )
         const result = await runSize(
           definition,
           opened.filesystem,
@@ -967,12 +1015,17 @@ export async function runBenchmark(options, environment = process.env) {
     mode: options.mode,
     config: {
       sizesMiB: options.sizes,
-      payloadSizesBytes: options.sizes.map((size) => size * 1024 * 1024),
+      payloadSizesBytes: options.sizes.map(
+        (size) => options.payloadBytes ?? size * 1024 * 1024,
+      ),
       iterations: options.iterations,
       concurrency: options.concurrency,
       timeoutMs: options.timeoutMs,
       cleanupTimeoutMs: options.cleanupTimeoutMs,
       chunkSizeBytes: options.chunkSizeBytes,
+      payloadBytes: options.payloadBytes ?? null,
+      minIops: options.minIops ?? null,
+      iopsDefinition: "successful write+read+delete lifecycle operations divided by measured lifecycle wall time",
       payloadSeed: options.payloadSeed,
       setupExcludedFromTimings: true,
       payloadVerificationExcludedFromReadTimings: true,

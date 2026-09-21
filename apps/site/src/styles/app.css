@@ -534,7 +534,7 @@ h3 { letter-spacing: -0.045em; line-height: 1.08; }
 .brand-option-palette-kicker { margin-bottom: 0; color: var(--blue-strong); font: 700 0.68rem/1.2 "SFMono-Regular", Consolas, monospace; letter-spacing: 0.1em; text-transform: uppercase; }
 .brand-option-swatch-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 12px 0 14px; }
 .brand-option-swatch-block { min-width: 0; }
-.brand-option-swatch-chip { height: 48px; border: 1px solid rgb(20 36 59 / 0.12); }
+.brand-option-swatch-chip { display: block; width: 100%; height: 48px; border: 1px solid rgb(20 36 59 / 0.12); }
 .brand-option-swatch-meta { display: grid; gap: 3px; margin-top: 7px; }
 .brand-option-swatch-meta span { color: var(--muted); font: 0.58rem/1.1 "SFMono-Regular", Consolas, monospace; text-transform: uppercase; letter-spacing: 0.05em; }
 .brand-option-swatch-meta code { overflow-wrap: anywhere; color: var(--ink); font-size: 0.65rem; }

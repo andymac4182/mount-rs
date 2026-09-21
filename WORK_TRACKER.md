@@ -1715,7 +1715,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
 | P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |
 | P7 — integration observability and error contract | Open | 10% | Redacted retry/fencing/recovery telemetry and handoff to W30/customer operations |
-| P8 — 1,000 IOPS per-drive CI workload | Open | 5% | Repeatable workload with latency, errors, resources, soak and provider-specific results |
+| P8 — 1,000 IOPS per-drive CI workload | CI gate implemented; hosted result pending | 10% | Existing benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000; Ozone composition CI is wired for 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live evidence is blocked by missing PGlite/N-API prerequisites. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
 | P10 — security, privacy, tenancy and audit | Open | 15% | Threat model, provenance, isolation, encryption expectations and security CI evidence |
 | P11 — end-to-end client/platform matrix | Open | 20% | Rust/Node/CLI/HTTP/native advertised surfaces through Ozone; cross-workstream runners required |

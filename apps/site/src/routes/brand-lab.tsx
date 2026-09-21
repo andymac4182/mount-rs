@@ -170,7 +170,15 @@ function BrandLabPage() {
                   <div className="brand-option-swatch-grid">
                     {option.colors.map((color, index) => (
                       <div className="brand-option-swatch-block" key={`${optionId}-${color}`}>
-                        <div className="brand-option-swatch-chip" style={{ backgroundColor: color }} />
+                        <svg
+                          className="brand-option-swatch-chip"
+                          viewBox="0 0 100 48"
+                          preserveAspectRatio="none"
+                          role="img"
+                          aria-label={`${paletteRoles[index]} ${color}`}
+                        >
+                          <rect width="100" height="48" fill={color} />
+                        </svg>
                         <div className="brand-option-swatch-meta">
                           <span>{paletteRoles[index]}</span>
                           <code>{color}</code>

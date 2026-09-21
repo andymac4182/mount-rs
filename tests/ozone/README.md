@@ -106,6 +106,16 @@ tests are invoked with `--ignored` only by this wrapper; a normal
 coverage. If Docker, PGlite, or either provider is unavailable, the lane is a
 blocked/non-passing attempt rather than a fabricated pass.
 
+The same composition lane can run the CI-only 1,000-IOPS qualification after
+the Node addon and PGlite service are available. Set `MOUNT_RS_OZONE_IOPS=1`;
+the wrapper invokes the public storage benchmark over the split PGlite/R2 path
+with a 4 KiB payload, 400 lifecycle iterations and concurrency 64, and fails
+below `MOUNT_RS_OZONE_IOPS_MIN` (default `1000`). Set
+`MOUNT_RS_OZONE_IOPS_OUTPUT` to retain the machine-readable JSON outside the
+disposable harness directory. One lifecycle is write + full read/verify +
+delete, so this is a controlled integration baseline rather than a customer
+physical-drive capacity guarantee.
+
 ### TiDB and FoundationDB compositions
 
 The existing real-service TiDB and FoundationDB harnesses can now keep the

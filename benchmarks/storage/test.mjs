@@ -140,11 +140,15 @@ async function testCli() {
     output: undefined,
     payloadSeed: "mount-rs-storage-benchmark",
     networkContext: "not-provided",
+    payloadBytes: undefined,
+    minIops: undefined,
   })
   assert.deepEqual(parseArgs(["--smoke", "--providers", "mount-rs-memory,mountx-memory"]).providers, [
     "mount-rs-memory",
     "mountx-memory",
   ])
+  assert.equal(parseArgs(["--payload-bytes", "4096", "--min-iops", "1000"]).payloadBytes, 4096)
+  assert.equal(parseArgs(["--payload-bytes", "4096", "--min-iops", "1000"]).minIops, 1000)
   assert.throws(() => parseArgs(["--iterations", "0"]), /positive integer/)
   assert.throws(() => parseArgs(["--unknown"]), /unknown argument/)
 }
