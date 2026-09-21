@@ -19,7 +19,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | Attached-stream contract | Local PASS | Node `attach(stream, options)`, ownership, duplicate attach, direct session calls, non-socket duplex, backpressure, write failure, and server-close tests |
 | Native-listener stream boundary | Explicit supported-scope decision | Native Tokio-accepted connections expose `stream: undefined`; callers requiring a Node `Duplex` use `server.attach` |
 | Linux native 9P | Hosted lifecycle PASS; current packet rerun pending | CI run `35616832528`, job `106389895603`, at `e168315c246061926a36e795f7332831cb1ab62f` passed `modprobe 9p`, `modprobe 9pnet_fd`, and both privileged ignored native mount/read/write/unmount lifecycle tests; the shutdown/reaping packet and the new bounded concurrent file-I/O harness still need fresh revision-matched execution |
-| Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; native fault/crash evidence open | Focused Rust/N-API lifecycle and fault tests now cover broadcast shutdown, accept-loop close races, bounded task reaping, transport faults, and session destruction that wakes and drains `Tflush` waiters; the ignored native harness covers eight concurrent mounted file write/read/rename/read workers followed by bounded unmount, while hosted/native reset, half-close, and crash evidence remains |
+| Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; native fault/crash evidence open | Focused Rust/N-API lifecycle and fault tests now cover broadcast shutdown, accept-loop close races, bounded task reaping, transport faults, and session destruction that wakes and drains `Tflush` waiters; ignored native harnesses cover eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, and bounded-unmount cleanup, while hosted/native reset, half-close, and process-crash evidence remains |
 
 ## Current queue
 
@@ -28,8 +28,9 @@ upstream stream/attach contract or hosted native mount behavior.
   test, and the bounded concurrent file-I/O/unmount test.
 - Qualify cross-process mount I/O, cancellation/close, restart, reset,
   half-close, concurrency, and crash behavior on the supported Linux runtime;
-  the local `Tflush` teardown regression does not close these native gates, and
-  the prior hosted lifecycle result does not close them either.
+  the local `Tflush` teardown regression and the new server-close harness do
+  not close these remaining native gates, and the prior hosted lifecycle result
+  does not close them either.
 - Keep unsupported platform/client results explicit and separate from passes.
 
 ## Evidence ledger
@@ -40,6 +41,7 @@ upstream stream/attach contract or hosted native mount behavior.
 | 2026-09-22 | Hosted Linux native lifecycle and shutdown/reaping packet | Prior revision-matched run `35616832528` / `native-9p` job `106389895603` passed kernel-module probing plus privileged native mount/read/write/unmount; the new packet adds broadcast shutdown, active-connection close-race coverage, task-failure reporting and completed-task reaping, with `transport_lifecycle` 5/5, `transport_errors` 8/8, strict 9P Clippy and formatting passing locally | A fresh hosted run for the new packet is required; native reset/half-close/concurrency/crash evidence and broader W01 acceptance remain open |
 | 2026-09-22 | Native concurrent mounted I/O harness | Added an ignored Linux-native test that launches eight bounded blocking workers for independent mounted write/read/rename/read round trips, then performs bounded unmount and refuses recursive cleanup after a failed lifecycle; the focused 9P target and strict 9P Clippy pass locally | Hosted execution on a revision containing this harness is required; native reset/half-close/crash evidence and broader W01 acceptance remain open |
 | 2026-09-22 | Session teardown and `Tflush` cancellation | Session destruction now marks and wakes every in-flight request, drains the in-flight map, and releases a waiting `Tflush` with the existing destroyed-session error boundary; the regression test passes in the focused 9P target and strict Clippy | Native cancellation/close, reset, crash, and current hosted execution remain open |
+| 2026-09-22 | Native server-close lifecycle harness | Added an ignored Linux-native test that performs mounted file I/O, closes the server side, waits for the kernel connection to close, and performs bounded unmount; failed paths refuse recursive mountpoint cleanup, and the focused target plus strict Clippy pass locally | Hosted execution is required; process-crash, reset/half-close, and broader W01 acceptance remain open |
 
 ## Completion rule
 
