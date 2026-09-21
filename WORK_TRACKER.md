@@ -538,7 +538,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; hosted Linux Node/CLI/native-FUSE qualification is green at `35620006731`/`aa3dae3`; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1391,6 +1391,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
   `RUSTFS_INTEGRATION_PASS`. This is a stronger bounded hosted qualification
   signal, not production-duration, capacity, failover, or release acceptance.
+  The corrected follow-up
+  [35620006731](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731)
+  (job
+  [106402140768](https://github.com/andymacclenaghan/mount-rs/actions/runs/35620006731/job/106402140768))
+  tested revision `aa3dae3` on `ubuntu-24.04` and completed green in 11m05s.
+  Its retained qualification artifact reported `qualification-pass` and
+  emitted `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  `FOUNDATIONDB_SOAK_PASS rounds=5`,
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9593
+  p95_us=48162 p99_us=48162 total_ms=171 throughput_ops_per_sec=87.35`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. This closes the hosted Linux/native-FUSE
+  qualification checkpoint for that revision; production identity/ACL/TLS,
+  backup/recovery, capacity, observability, macOS and release-owner gates
+  remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1443,10 +1459,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
-  - [ ] **Hosted and platform evidence:** obtain green hosted
-    FoundationDB/RustFS, Node, CLI/native Linux and macOS/Linux build/native
-    acceptance runs. Record the actual runner, cluster/image, revision and
-  result; failed, skipped, cancelled or unavailable evidence remains open.
+  - [ ] **Hosted and platform evidence:** the hosted FoundationDB/RustFS,
+    Node, CLI/native Linux checkpoint is green for revision `aa3dae3` in run
+    `35620006731` on `ubuntu-24.04`, with the retained
+    `qualification-pass` artifact. Complete the advertised macOS/Linux
+    build/native matrix and any remaining clean-install/package evidence;
+    record the actual runner, cluster/image, revision and result. Failed,
+    skipped, cancelled or unavailable evidence remains open.
 
   W07.7 remains open until every nested gate has concrete production-like
   evidence. No demo, local qualification, queued CI run or installation-only
