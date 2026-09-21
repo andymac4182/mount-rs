@@ -9,3 +9,6 @@ license = "Apache-2.0"
 [dependencies]
 mount-rs-core = { path = "../.." }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+
+[dev-dependencies]
+mount-rs-host = { path = "../../integrations/mount-rs-host" }

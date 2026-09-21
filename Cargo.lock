@@ -1449,6 +1449,7 @@ name = "mount-rs-nfs"
 version = "0.1.0"
 dependencies = [
  "mount-rs-core",
+ "mount-rs-host",
  "tokio",
 ]
 

@@ -41,7 +41,10 @@ semantics.
   macOS covered native NFSv3, CLI persistence/cleanup, and SQLite hosting;
   Ubuntu covered the privileged NFSv3/NFSv4.1 lane and SQLite hosting.
 - Qualify cross-process crash, concurrency, and durability behavior; bounded
-  cancellation/close now has a local transport lifecycle gate.
+  cancellation/close now has a local transport lifecycle gate, and the
+  host-backed NFSv3 data path now has a forced-process-restart gate. NFSv4
+  lease/replay/file-handle recovery and power-loss durability remain outside
+  the supported local claim.
 
 ## Evidence ledger
 
@@ -65,6 +68,7 @@ semantics.
 | 2026-09-22 | N-API session destroy parity | `NfsSession.destroy()` now tears down both shared v3/v4 sessions and `Nfs4Session.destroy()` tears down v4 state; generated declarations, direct runtime assertions, and TypeScript assignments pass alongside the release addon, live N-API server integration, pinned codec differential, and strict affected Clippy | Remaining upstream `driver`/`options`/direct-v3 member differences, native Linux v4.1, a completed hosted lifecycle run, and cross-process crash/concurrency/durability remain external gates |
 | 2026-09-22 | N-API session/member parity and supported scope | Unified, direct v3, and direct v4 N-API views now expose the server-owned read-only driver wrapper, effective scalar options, configured ID-map presence, write verifier, shared v3 routing, and shared handle/counter/destroy state; `./nfs` exports `Nfs3Session`. Release declarations, TypeScript assignments, live runtime identity/verifier/options assertions, the NFS codec differential, the refreshed pinned oracle conformance (266 passed, 18 explicit capability/root skips, 0 mismatches), full locked NFS targets, and strict affected Clippy pass. The low-level mutable v4 state table and callback function values remain intentionally unexposed; live wire/callback/lease tests cover their supported behavior. Hosted CI runs `35656252661`, `35657100915`, and `35657445618` for the published parity/evidence commits were cancelled before any native-NFS job ran and are not acceptance evidence. | A completed hosted native lifecycle run and cross-process crash/concurrency/durability remain external gates; the 18 pinned-oracle capability/root skips remain explicit boundaries |
 | 2026-09-22 | hosted native NFS platform qualification | Run `35658285441` completed `native-nfs (macos-latest)` (`106528418544`) and `native-nfs (ubuntu-latest)` (`106528418983`) successfully. The macOS job passed native NFSv3, CLI persistence/cleanup, and SQLite-over-NFS; the Ubuntu job passed privileged native NFSv3/NFSv4.1 and SQLite-over-NFS, with macOS-only CLI checks skipped on Ubuntu. | The named NFS jobs are accepted platform evidence, but the overall workflow remains non-green because unrelated jobs failed; full upstream state/member scope, cross-process crash/concurrency/durability, and production acceptance remain open |
+| 2026-09-22 | cross-process NFSv3 backend recovery | A child NFS server wrote `crash-recovered.txt` with `FILE_SYNC`, was force-terminated, and a replacement child server using the same `HostFs` root successfully performed MOUNT, LOOKUP, and READ; the replacement also verified the persisted host file directly. The focused process target passed 1/1 and the complete locked NFS target passed. | This qualifies host-backed NFSv3 data recovery across a process crash, not power-loss durability or NFSv4 lease/replay/file-handle recovery; cross-process concurrency and those NFSv4 durability claims remain open |
 
 ## Exact commands and gate boundaries
 
@@ -90,6 +94,7 @@ semantics.
 - `./scripts/cargo-shared clippy -p mount-rs-nfs -p mount-rs-napi --all-targets --locked -- -D warnings` — PASS.
 - `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture` — PASS: macOS native NFSv3 loopback mount, filesystem round trips, unmount, and bounded cleanup; 1 passed, 0 failed, 0.11s on the exact pushed tip.
 - `./scripts/cargo-shared test -p mount-rs-nfs --test transport_lifecycle --locked` — PASS: 2/2 bounded real-TCP cancellation tests covering connection-level and server-level close over a blocked backend request.
+- `./scripts/cargo-shared test -p mount-rs-nfs --test process_restart --locked -- --exact nfs_v3_host_backend_survives_process_crash_and_restart --nocapture` — PASS: a forced child-process termination followed by replacement-server MOUNT/LOOKUP/READ recovered the `FILE_SYNC` payload from the same `HostFs` root; 1 passed.
 - Hosted run [`35658285441`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441) — PASS for both named NFS jobs: [`macOS job 106528418544`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441/job/106528418544) passed native NFSv3, CLI persistence/cleanup, and SQLite-over-NFS; [`Ubuntu job 106528418983`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441/job/106528418983) passed the privileged native NFSv3/NFSv4.1 lane and SQLite-over-NFS. The overall workflow remains non-green because unrelated jobs failed, so this is job-scoped NFS evidence rather than a whole-workflow release pass.
 
 ## Completion rule
