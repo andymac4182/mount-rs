@@ -162,10 +162,9 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Latest public source `b27dd2bb` was freshly reverified locally after the
-concurrent FUSE teardown and session-lifecycle fixes: the full locked
-workspace test suite exited 0 and strict workspace Clippy with `-D warnings`
-exited 0.
+Final public source `0ab9bf41` was freshly reverified locally after the
+concurrent NFS/WebDAV/provider updates: the full locked workspace test suite
+exited 0 and strict workspace Clippy with `-D warnings` exited 0.
 Provider/native tests that require TiDB, RustFS, PGlite, R2, FUSE or NFS
 remained explicit opt-in skips, so this is source-health evidence only and
 does not close any production gate.
