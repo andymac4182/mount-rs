@@ -685,7 +685,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35632935680`/`0bb628b` after the `35632139449` N-API build blocker was corrected; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35634895382`/`0e0454da`; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1685,6 +1685,26 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
+  The latest non-cancelling hosted run
+  [35634895382](https://github.com/andymacclenaghan/mount-rs/actions/runs/35634895382)
+  (job
+  [106449795704](https://github.com/andymacclenaghan/mount-rs/actions/runs/35634895382/job/106449795704))
+  tested current-main revision `0e0454da` on `ubuntu-24.04` and completed
+  green in 10m10s. Its retained artifact
+  `foundationdb-production-qualification-35634895382-1` reported
+  `qualification-pass`, `FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse`,
+  five soak rounds, `FOUNDATIONDB_LATENCY_PASS workload=composition
+  operations=15 p50_us=9462 p95_us=398345 p99_us=398345 total_ms=803
+  throughput_ops_per_sec=18.68`, `FOUNDATIONDB_TEST_PASS topology=durable
+  ... platform=linux/amd64 service_restart=pass soak_rounds=5`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`. The schema-2 provenance
+  summary records source revision
+  `0e0454da7973c08a56c8634435909da037d21fe7`, run `35634895382`, attempt `1`
+  and runner `GitHub Actions 1000020805`; the artifact SHA-256 is
+  `c542e9538bc29708fa187ecf78281075060f981a3b06b4d30e686c79a6a33bf7`.
+  The p95/p99 outlier is retained as qualification telemetry, not production
+  capacity evidence; production identity/ACL/TLS, backup/recovery, capacity,
+  observability, macOS and release-owner gates remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1725,11 +1745,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35632935680` recorded
-    `operations=15 p50_us=9577 p95_us=41547 p99_us=41547 total_ms=168
-    throughput_ops_per_sec=89.02` at revision `0bb628b`. This is bounded
-    qualification evidence and does not convert the five-round result into
-    production capacity evidence.
+    latency and throughput; latest hosted run `35634895382` recorded
+    `operations=15 p50_us=9462 p95_us=398345 p99_us=398345 total_ms=803
+    throughput_ops_per_sec=18.68` at revision `0e0454da`. The p95/p99 outlier
+    is retained as qualification telemetry; this remains bounded qualification
+    evidence and does not convert the five-round result into production
+    capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
@@ -1740,8 +1761,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `0bb628b` in run
-    `35632935680` on `ubuntu-24.04`, with the retained schema-2
+    Node, CLI/native Linux checkpoint is green for revision `0e0454da` in run
+    `35634895382` on `ubuntu-24.04`, with the retained schema-2
     `qualification-pass` artifact and provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
@@ -2965,8 +2986,18 @@ listing a source does not mean it has been reviewed or its code can be reused.
   missing GitHub OIDC provider, and missing immutable-subject role trust; it
   made no changes. A current-source rerun at pushed source
   `cf18d93d7fdd1656d853f208db81b8b133265fe5` returned the same blocked set and
-  made no changes. The
-  workflow now has a secret-safe preflight validator that blocks
+  made no changes.
+- [x] A current read-only rerun at pushed source
+  `ce7b365a45f718009f557035d2549fd0faf2c8a8` through the authenticated
+  `myroot` profile on 2026-09-22 returned the same fail-closed blocker set:
+  `environment_missing_protection_rule`,
+  `environment_missing_protected_branch_policy`,
+  `environment_missing_non_self_review_required_reviewer`, the four missing
+  protected environment inputs/secret, `missing_github_oidc_provider`, and
+  `role_missing_immutable_github_subject_trust`. It made no GitHub or AWS
+  changes; hosted OIDC evidence remains blocked until the deployment owner
+  configures and approves those controls.
+  The workflow now has a secret-safe preflight validator that blocks
   before AWS authentication when those inputs are absent or malformed. The
   validator's secret-free seven-case regression matrix covers valid, missing,
   account-mismatch, endpoint, unsafe-prefix, static-credential, and profile-
