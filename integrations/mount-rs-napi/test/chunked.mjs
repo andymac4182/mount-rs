@@ -53,6 +53,8 @@ try {
     const root = await defaults.stat("/")
     assert.equal(root.uid, process.getuid?.() ?? 0, "default chunked uid")
     assert.equal(root.gid, process.getgid?.() ?? 0, "default chunked gid")
+    await assertCode(() => defaults.reconcileBlocks(1_000), "ENOTSUP")
+    await assertCode(() => defaults.reconcileBlocks(0), "ERR_OUT_OF_RANGE")
   } finally {
     await defaults.shutdown()
   }

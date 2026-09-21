@@ -17,10 +17,11 @@
 
 use async_trait::async_trait;
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
+    WriterLease,
 };
 use mount_rs_core::{ErrorCode, FsError, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
@@ -985,5 +986,16 @@ where
                 self.inner.delete(id)
             })
             .await
+    }
+
+    async fn reconcile(
+        &self,
+        live: &BTreeSet<BlockId>,
+        grace: Duration,
+    ) -> Result<BlockReconcileReport> {
+        // Reconciliation is an explicit operator action rather than a normal
+        // data-plane operation, so fault plans do not silently change its
+        // safety boundary. The wrapped provider still retains its capability.
+        self.inner.reconcile(live, grace).await
     }
 }

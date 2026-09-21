@@ -372,6 +372,20 @@ pub struct LoadedMetadata {
     pub namespace: Option<Namespace>,
 }
 
+/// Result of an explicit block-store reconciliation pass.
+///
+/// Reconciliation is deliberately separate from filesystem shutdown. A
+/// coordinator must hold the provider lease, derive all authoritative roots,
+/// and supply a grace period long enough to protect blocks from an in-flight
+/// or ambiguous publication in another process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BlockReconcileReport {
+    pub scanned: u64,
+    pub protected: u64,
+    pub recent: u64,
+    pub deleted: u64,
+}
+
 /// A provider-enforced, volume-wide single-writer lease. Provider transactions
 /// must validate the fence AND expiry, including during renewal/publication.
 /// Acquiring after expiry increments the persisted fence; stale owners must
@@ -417,6 +431,21 @@ pub trait BlockStore: Send + Sync {
     /// Only the coordinator may reclaim blocks proven unreachable from every
     /// live/persisted layout and in-flight write. This is not implicit on close.
     async fn delete(&self, id: &BlockId) -> Result<()>;
+
+    /// Reconcile provider-owned immutable blocks against authoritative live
+    /// roots. Providers that cannot enumerate their scoped objects must fail
+    /// closed with `ENOTSUP`; callers must not infer cleanup from a successful
+    /// filesystem shutdown. The grace period protects newly uploaded blocks
+    /// whose metadata publication outcome is still ambiguous.
+    async fn reconcile(
+        &self,
+        _live: &BTreeSet<BlockId>,
+        _grace: Duration,
+    ) -> Result<BlockReconcileReport> {
+        Err(FsError::new(ErrorCode::Enotsup)
+            .with_syscall("reconcile blocks")
+            .with_message("block provider does not expose scoped reconciliation"))
+    }
 }
 
 #[cfg(test)]

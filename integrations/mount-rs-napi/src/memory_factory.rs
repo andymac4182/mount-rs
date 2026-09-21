@@ -76,5 +76,6 @@ pub fn create_memory_driver(
             root_mode,
         }))),
         shutdown: None,
+        reconcile: None,
     })
 }

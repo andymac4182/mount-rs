@@ -45,6 +45,13 @@ export declare class Filesystem {
    * before relying on shutdown to permit removal of backing files.
    */
   shutdown(): Promise<void>
+  /**
+   * Reconcile aged, unreferenced blocks for a chunked provider. The grace
+   * period is in milliseconds and must be positive. Providers without a
+   * scoped object enumerator return ENOTSUP; no cleanup is inferred from
+   * shutdown or from an unavailable provider capability.
+   */
+  reconcileBlocks(graceMs: number): Promise<JsBlockReconcileReport>
   stat(path: string): Promise<JsStats>
   lstat(path: string): Promise<JsStats>
   statfs(path: string): Promise<JsStatsFs>
@@ -818,6 +825,13 @@ export interface JsAutoProbe {
   '9p': JsTransportProbe
   nfs: JsTransportProbe
   reason?: string
+}
+
+export interface JsBlockReconcileReport {
+  scanned: number
+  protected: number
+  recent: number
+  deleted: number
 }
 
 export interface JsCapabilities {

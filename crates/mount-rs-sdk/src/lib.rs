@@ -12,7 +12,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
+    WriterLease,
 };
 use mount_rs_core::{FsError, MemoryFs, backend_error};
 #[cfg(all(
@@ -477,6 +478,27 @@ impl BlockStore for ErasedBlockStore {
         }
         #[cfg(not(feature = "observability"))]
         self.inner.delete(id).await
+    }
+
+    async fn reconcile(
+        &self,
+        live: &std::collections::BTreeSet<BlockId>,
+        grace: Duration,
+    ) -> Result<BlockReconcileReport> {
+        #[cfg(feature = "observability")]
+        {
+            return self
+                .telemetry
+                .observe_fs(
+                    "provider.blocks",
+                    "reconcile",
+                    None,
+                    self.inner.reconcile(live, grace),
+                )
+                .await;
+        }
+        #[cfg(not(feature = "observability"))]
+        self.inner.reconcile(live, grace).await
     }
 }
 

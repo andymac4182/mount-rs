@@ -8,6 +8,7 @@ pub mod p9_codec;
 pub mod servers;
 pub mod utilities;
 
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -20,7 +21,8 @@ use mount_rs_auto::{
 };
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
+    WriterLease,
 };
 use mount_rs_core::{
     Capabilities, DirEntry, ErrorCode, FileHandle as CoreFileHandle, FsDriver, FsError, MemoryFs,
@@ -579,6 +581,25 @@ impl JsStatsFs {
     #[napi(getter)]
     pub fn files_free(&self) -> f64 {
         self.inner.files_free as f64
+    }
+}
+
+#[napi(object)]
+pub struct JsBlockReconcileReport {
+    pub scanned: f64,
+    pub protected: f64,
+    pub recent: f64,
+    pub deleted: f64,
+}
+
+impl From<BlockReconcileReport> for JsBlockReconcileReport {
+    fn from(value: BlockReconcileReport) -> Self {
+        Self {
+            scanned: value.scanned as f64,
+            protected: value.protected as f64,
+            recent: value.recent as f64,
+            deleted: value.deleted as f64,
+        }
     }
 }
 
@@ -1317,6 +1338,19 @@ impl BlockStore for DynBlockStore {
     {
         self.0.delete(id)
     }
+
+    fn reconcile<'a, 'b, 'async_trait>(
+        &'a self,
+        live: &'b BTreeSet<BlockId>,
+        grace: Duration,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<BlockReconcileReport>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.reconcile(live, grace)
+    }
 }
 
 /// An owned forwarding driver for the native transport facade. The N-API
@@ -1733,6 +1767,13 @@ fn validate_ttl(value: Option<f64>) -> Result<Duration, Error> {
         || !(0.0..=MAX_SAFE_INTEGER).contains(&value)
     {
         return Err(range_error("ttlMs", "> 0 and <= 9007199254740991", value));
+    }
+    Ok(Duration::from_millis(value as u64))
+}
+
+fn validate_reconcile_grace(value: f64) -> Result<Duration, Error> {
+    if !value.is_finite() || value.fract() != 0.0 || value <= 0.0 || value > MAX_SAFE_INTEGER {
+        return Err(range_error("graceMs", "> 0 and <= 9007199254740991", value));
     }
     Ok(Duration::from_millis(value as u64))
 }
@@ -2258,6 +2299,8 @@ impl FileHandle {
 /// A Node.js-facing wrapper around any core driver.
 type ShutdownFuture = Pin<Box<dyn Future<Output = CoreResult<()>> + Send>>;
 type ShutdownCallback = dyn Fn() -> ShutdownFuture + Send + Sync;
+type ReconcileFuture = Pin<Box<dyn Future<Output = CoreResult<BlockReconcileReport>> + Send>>;
+type ReconcileCallback = dyn Fn(Duration) -> ReconcileFuture + Send + Sync;
 
 struct ShutdownAttemptState {
     result: Option<CoreResult<()>>,
@@ -2528,16 +2571,22 @@ async fn run_shutdown(
 pub struct Filesystem {
     driver: Arc<dyn FsDriver>,
     shutdown: Option<Arc<ShutdownCallback>>,
+    reconcile: Option<Arc<ReconcileCallback>>,
 }
 
 #[napi]
 impl Filesystem {
-    fn from_driver(driver: Arc<dyn FsDriver>, shutdown: Option<Arc<ShutdownCallback>>) -> Self {
+    fn from_driver(
+        driver: Arc<dyn FsDriver>,
+        shutdown: Option<Arc<ShutdownCallback>>,
+        reconcile: Option<Arc<ReconcileCallback>>,
+    ) -> Self {
         let slot = Arc::new(DriverSlot::new(instrument_driver(driver)));
         let controller = ShutdownController::new(Arc::clone(&slot), shutdown);
         Self {
             driver: slot,
             shutdown: Some(ShutdownController::callback(controller)),
+            reconcile,
         }
     }
 
@@ -2547,14 +2596,14 @@ impl Filesystem {
 
     #[napi(factory)]
     pub fn memory() -> Self {
-        Self::from_driver(Arc::new(MemoryFs::empty()), None)
+        Self::from_driver(Arc::new(MemoryFs::empty()), None, None)
     }
 
     #[napi(factory)]
     pub async fn sqlite(path: String) -> napi::Result<Self> {
         open_sqlite(path)
             .await
-            .map(|filesystem| Self::from_driver(Arc::new(filesystem), None))
+            .map(|filesystem| Self::from_driver(Arc::new(filesystem), None, None))
             .map_err(to_js_error)
     }
 
@@ -2568,7 +2617,11 @@ impl Filesystem {
             let store = shutdown_store.clone();
             Box::pin(async move { store.close().await })
         });
-        Ok(Self::from_driver(Arc::new(filesystem), Some(shutdown)))
+        Ok(Self::from_driver(
+            Arc::new(filesystem),
+            Some(shutdown),
+            None,
+        ))
     }
 
     #[napi(factory)]
@@ -2584,7 +2637,7 @@ impl Filesystem {
         };
         open_r2(config)
             .await
-            .map(|filesystem| Self::from_driver(Arc::new(filesystem), None))
+            .map(|filesystem| Self::from_driver(Arc::new(filesystem), None, None))
             .map_err(to_js_error)
     }
 
@@ -2614,6 +2667,23 @@ impl Filesystem {
             shutdown().await.map_err(to_js_error)?;
         }
         Ok(())
+    }
+
+    /// Reconcile aged, unreferenced blocks for a chunked provider. The grace
+    /// period is in milliseconds and must be positive. Providers without a
+    /// scoped object enumerator return ENOTSUP; no cleanup is inferred from
+    /// shutdown or from an unavailable provider capability.
+    #[napi(js_name = "reconcileBlocks")]
+    pub async fn reconcile_blocks(&self, grace_ms: f64) -> napi::Result<JsBlockReconcileReport> {
+        let grace = validate_reconcile_grace(grace_ms)?;
+        let callback = self.reconcile.as_ref().ok_or_else(|| {
+            to_js_error(
+                FsError::new(ErrorCode::Enotsup)
+                    .with_syscall("reconcile blocks")
+                    .with_message("filesystem does not expose chunked block reconciliation"),
+            )
+        })?;
+        callback(grace).await.map(Into::into).map_err(to_js_error)
     }
 
     #[napi]
@@ -3070,9 +3140,15 @@ pub async fn create_chunked_driver(options: JsChunkedOptions) -> napi::Result<Fi
         let resources = shutdown_resources.clone();
         Box::pin(async move { shutdown_chunked_filesystem(filesystem, resources).await })
     });
+    let reconcile_filesystem = filesystem.clone();
+    let reconcile: Arc<ReconcileCallback> = Arc::new(move |grace| {
+        let filesystem = reconcile_filesystem.clone();
+        Box::pin(async move { filesystem.reconcile_blocks(grace).await })
+    });
     Ok(Filesystem::from_driver(
         Arc::new(filesystem),
         Some(shutdown),
+        Some(reconcile),
     ))
 }
 
@@ -3086,6 +3162,7 @@ pub fn create_node_fs_driver(root: String, options: Option<JsNodeFsOptions>) -> 
         .unwrap_or(false);
     Filesystem::from_driver(
         Arc::new(HostFs::with_options(root, HostFsOptions { read_only })),
+        None,
         None,
     )
 }

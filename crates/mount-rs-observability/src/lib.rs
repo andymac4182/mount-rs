@@ -13,9 +13,11 @@ use async_trait::async_trait;
 use mount_rs_core::driver::{FileHandle, FsDriver};
 use mount_rs_core::error::Result;
 use mount_rs_core::storage::{
-    BlockId, BlockStore, LoadedMetadata, MetadataStore, Namespace, WriterLease,
+    BlockId, BlockReconcileReport, BlockStore, LoadedMetadata, MetadataStore, Namespace,
+    WriterLease,
 };
 use mount_rs_core::types::{Capabilities, DirEntry, MkdirOptions, Stats, StatsFs};
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
@@ -1032,6 +1034,21 @@ where
     async fn delete(&self, id: &BlockId) -> Result<()> {
         self.telemetry
             .observe_fs("provider.blocks", "delete", None, self.inner.delete(id))
+            .await
+    }
+
+    async fn reconcile(
+        &self,
+        live: &BTreeSet<BlockId>,
+        grace: Duration,
+    ) -> Result<BlockReconcileReport> {
+        self.telemetry
+            .observe_fs(
+                "provider.blocks",
+                "reconcile",
+                None,
+                self.inner.reconcile(live, grace),
+            )
             .await
     }
 }

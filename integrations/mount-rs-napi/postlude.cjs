@@ -128,6 +128,7 @@ module.exports = function install(binding) {
     "truncate",
     "mknod",
     "shutdown",
+    "reconcileBlocks",
   ]) {
     wrapAsync(Filesystem.prototype, name)
   }

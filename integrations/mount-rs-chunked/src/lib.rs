@@ -13,14 +13,14 @@ use mount_rs_core::error::{ErrorCode, FsError, Result};
 use mount_rs_core::handle::OpenFlags;
 use mount_rs_core::path::{is_path_inside, normalize_path, split_path};
 use mount_rs_core::storage::{
-    BlockExtent, BlockStore, FileLayout, InodeId, MetadataStore, NAMESPACE_FORMAT_VERSION,
-    Namespace, NodeData, NodeMetadata, WriterLease,
+    BlockExtent, BlockReconcileReport, BlockStore, FileLayout, InodeId, MetadataStore,
+    NAMESPACE_FORMAT_VERSION, Namespace, NodeData, NodeMetadata, WriterLease,
 };
 use mount_rs_core::types::{
     Capabilities, DirEntry, FileType, MkdirOptions, S_IFDIR, S_IFMT, S_IFREG, Stats, StatsFs,
     now_ms,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -287,6 +287,28 @@ where
 
     pub fn block_store(&self) -> Arc<B> {
         Arc::clone(&self.inner.blocks)
+    }
+
+    /// Reconcile aged, unreferenced immutable blocks in this provider scope.
+    ///
+    /// The writer lease and operation gate exclude concurrent publications in
+    /// this filesystem. The grace period additionally protects blocks from a
+    /// crashed or ambiguous publication in another process. Open unlinked
+    /// files remain roots until their final handle closes.
+    pub async fn reconcile_blocks(&self, grace: Duration) -> Result<BlockReconcileReport> {
+        let _gate = self.inner.gate.lock().await;
+        self.ensure_operation_lease().await?;
+        let (namespace, _) = self.snapshot()?;
+        let live = {
+            let state = self.lock_state()?;
+            let mut live = BTreeSet::new();
+            collect_block_roots(&namespace, &mut live);
+            for node in state.orphans.values() {
+                collect_block_roots_from_node(node, &mut live);
+            }
+            live
+        };
+        self.inner.blocks.reconcile(&live, grace).await
     }
 
     pub fn failed(&self) -> bool {
@@ -1802,6 +1824,25 @@ fn base_stats(
     }
 }
 
+fn collect_block_roots(
+    namespace: &Namespace,
+    live: &mut BTreeSet<mount_rs_core::storage::BlockId>,
+) {
+    for node in namespace.nodes.values() {
+        collect_block_roots_from_node(node, live);
+    }
+}
+
+fn collect_block_roots_from_node(
+    node: &NodeMetadata,
+    live: &mut BTreeSet<mount_rs_core::storage::BlockId>,
+) {
+    let NodeData::File(layout) = &node.data else {
+        return;
+    };
+    live.extend(layout.extents.iter().map(|extent| extent.block.clone()));
+}
+
 fn set_file_size(stats: &mut Stats, size: u64) {
     stats.size = size;
     stats.blocks = size.div_ceil(512);
@@ -2381,6 +2422,7 @@ mod tests {
         fail_put: Arc<AtomicBool>,
         fail_flush: Arc<AtomicBool>,
         gets: Arc<AtomicUsize>,
+        reconciled: Arc<Mutex<Option<BTreeSet<mount_rs_core::storage::BlockId>>>>,
     }
 
     impl FaultBlockStore {
@@ -2390,6 +2432,7 @@ mod tests {
                 fail_put: Arc::new(AtomicBool::new(false)),
                 fail_flush: Arc::new(AtomicBool::new(false)),
                 gets: Arc::new(AtomicUsize::new(0)),
+                reconciled: Arc::new(Mutex::new(None)),
             }
         }
     }
@@ -2483,6 +2526,19 @@ mod tests {
         async fn delete(&self, id: &mount_rs_core::storage::BlockId) -> Result<()> {
             self.inner.delete(id).await
         }
+
+        async fn reconcile(
+            &self,
+            live: &BTreeSet<mount_rs_core::storage::BlockId>,
+            _grace: Duration,
+        ) -> Result<mount_rs_core::storage::BlockReconcileReport> {
+            *self.reconciled.lock().unwrap() = Some(live.clone());
+            Ok(mount_rs_core::storage::BlockReconcileReport {
+                scanned: live.len() as u64,
+                protected: live.len() as u64,
+                ..Default::default()
+            })
+        }
     }
 
     fn options(owner: &str) -> ChunkedOptions {
@@ -2570,6 +2626,30 @@ mod tests {
 
         blocks.fail_put.store(false, Ordering::SeqCst);
         assert_eq!(block_on(file.write(b"data", Some(0))).unwrap(), 4);
+        block_on(file.close()).unwrap();
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn reconciliation_protects_committed_and_open_unlinked_block_roots() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = FaultBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata,
+            blocks.clone(),
+            options("reconcile-roots"),
+        ))
+        .unwrap();
+        let file = block_on(filesystem.open("/file", "w+", 0o600)).unwrap();
+        block_on(file.write(b"data", Some(0))).unwrap();
+        block_on(filesystem.unlink("/file")).unwrap();
+
+        let report = block_on(filesystem.reconcile_blocks(Duration::from_secs(60))).unwrap();
+        assert_eq!(report.scanned, 1);
+        assert_eq!(report.protected, 1);
+        let roots = blocks.reconciled.lock().unwrap().clone().unwrap();
+        assert_eq!(roots.len(), 1);
+
         block_on(file.close()).unwrap();
         block_on(filesystem.shutdown()).unwrap();
     }

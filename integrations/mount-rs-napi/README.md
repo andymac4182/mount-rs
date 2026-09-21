@@ -96,6 +96,24 @@ lane publishes a shared authority sample first and selects `shared-provider`
 with the published `authorityPrefix`; local invocations default to the
 explicit persisted single-authority/test mode.
 
+## Explicit immutable-block reconciliation
+
+Chunked N-API filesystems that have an enumerable block provider expose
+`filesystem.reconcileBlocks(graceMs)`. The call is an explicit operator or
+maintenance action: it renews the filesystem writer lease, derives live block
+roots from the committed namespace and open-unlinked handles, and asks the
+provider to delete only valid, aged, unreferenced objects in its configured
+prefix. The returned `{ scanned, protected, recent, deleted }` report is
+bounded to that provider scope.
+
+`graceMs` must be a positive integer. The grace period is a safety boundary for
+in-flight or ambiguous metadata publication; it is not a retention policy and
+reconciliation is never run implicitly by `shutdown()`. Providers without a
+scoped object enumerator return `ENOTSUP` and must be reconciled by their own
+provider-native process if they support that operation. Customers must schedule
+the action with the Ozone/operator control plane, retain enough history to meet
+their recovery policy, and monitor the report and provider space pressure.
+
 ## Optional observability
 
 The native crate has an opt-in `observability` feature that decorates every

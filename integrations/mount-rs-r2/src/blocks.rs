@@ -4,12 +4,13 @@
 //! manifest. Each successful \`put\` is one provider-confirmed object upload;
 //! metadata providers remain responsible for publishing references to it.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use mount_rs_core::storage::{BlockId, BlockStore};
+use mount_rs_core::storage::{BlockId, BlockReconcileReport, BlockStore};
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use object_store::path::Path as ObjectPath;
 use object_store::{ObjectStore, PutMode, PutOptions, PutPayload};
@@ -122,6 +123,71 @@ impl BlockStore for R2BlockStore {
         let path = self.object_path(id)?;
         self.store.head(&path).await.map_err(map_not_found)?;
         self.store.delete(&path).await.map_err(map_not_found)
+    }
+
+    /// Reconcile only objects in this block-store prefix. Objects newer than
+    /// the supplied grace period are retained because they may belong to an
+    /// in-flight or ambiguous publication whose metadata result has not been
+    /// reconciled.
+    async fn reconcile(
+        &self,
+        live: &BTreeSet<BlockId>,
+        grace: std::time::Duration,
+    ) -> Result<BlockReconcileReport> {
+        if grace.is_zero() {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_syscall("reconcile blocks")
+                .with_message("reconciliation grace period must be positive"));
+        }
+        let listing = self
+            .store
+            .list_with_delimiter(Some(&self.prefix))
+            .await
+            .map_err(|error| {
+                backend_error(format!("list R2 blocks for reconciliation: {error}"))
+            })?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let cutoff_ms = now_ms.saturating_sub(grace.as_millis());
+        let prefix = format!("{}/", self.prefix);
+        let mut report = BlockReconcileReport::default();
+
+        for object in listing.objects {
+            let Some(relative) = object.location.as_ref().strip_prefix(&prefix) else {
+                continue;
+            };
+            if relative.is_empty() || relative.contains('/') {
+                continue;
+            }
+            let id = BlockId(relative.to_owned());
+            if validate_block_id(&id).is_err() {
+                continue;
+            }
+            report.scanned = report.scanned.saturating_add(1);
+            if live.contains(&id) {
+                report.protected = report.protected.saturating_add(1);
+                continue;
+            }
+            let is_recent = u128::try_from(object.last_modified.timestamp_millis())
+                .is_ok_and(|timestamp_ms| timestamp_ms >= cutoff_ms);
+            if is_recent {
+                report.recent = report.recent.saturating_add(1);
+                continue;
+            }
+            match self.store.delete(&object.location).await {
+                Ok(()) | Err(object_store::Error::NotFound { .. }) => {
+                    report.deleted = report.deleted.saturating_add(1);
+                }
+                Err(error) => {
+                    return Err(backend_error(format!(
+                        "delete unreferenced R2 block during reconciliation: {error}"
+                    )));
+                }
+            }
+        }
+        Ok(report)
     }
 }
 
@@ -290,5 +356,37 @@ mod tests {
         assert!(first.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
         assert!(second.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
         assert!(first.delete(&id).await.unwrap_err().is(ErrorCode::Enoent));
+    }
+
+    #[tokio::test]
+    async fn reconciliation_protects_live_and_recent_blocks_then_deletes_old_blocks() {
+        let (first, _, _) = stores().await;
+        let id = first.put(b"reconcile me").await.unwrap();
+        let live = BTreeSet::from([id.clone()]);
+
+        let protected = first
+            .reconcile(&live, std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(protected.scanned, 1);
+        assert_eq!(protected.protected, 1);
+        assert_eq!(protected.recent, 0);
+        assert_eq!(protected.deleted, 0);
+
+        let recent = first
+            .reconcile(&BTreeSet::new(), std::time::Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(recent.recent, 1);
+        assert_eq!(recent.deleted, 0);
+        assert_eq!(first.get(&id).await.unwrap(), b"reconcile me");
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let deleted = first
+            .reconcile(&BTreeSet::new(), std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert_eq!(deleted.deleted, 1);
+        assert!(first.get(&id).await.unwrap_err().is(ErrorCode::Enoent));
     }
 }
