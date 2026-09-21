@@ -259,6 +259,17 @@ async function exerciseNfs() {
     port: 0,
     maxRecord: 256,
     maxHandles: 2,
+    nfs4: {
+      leaseSeconds: 7,
+      maxSessions: 1,
+      maxForeSlots: 1,
+      maxOperations: 2,
+      maxRequestSize: 4096,
+      maxCachedResponseSize: 32,
+      maxOpensPerFile: 1,
+      maxLocksPerFile: 1,
+      requireReclaimComplete: true,
+    },
     onTransportError(error, peer) {
       reports.push({ error, peer });
       throw new Error("NFS hook callback deliberately threw");

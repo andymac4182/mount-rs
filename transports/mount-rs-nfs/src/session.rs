@@ -30,12 +30,58 @@ use crate::xdr::{XdrError, XdrReader, XdrWriter};
 pub const DEFAULT_RTMAX: usize = 1024 * 1024;
 pub const DEFAULT_WTMAX: usize = 1024 * 1024;
 pub const DEFAULT_DTPREF: usize = 32 * 1024;
+pub const DEFAULT_NFS4_LEASE_SECONDS: u32 = 90;
+pub const DEFAULT_NFS4_MAX_SESSIONS: usize = 4;
+pub const DEFAULT_NFS4_MAX_FORE_SLOTS: usize = 64;
+pub const DEFAULT_NFS4_MAX_OPERATIONS: usize = 64;
+pub const DEFAULT_NFS4_MAX_REQUEST_SIZE: usize = 1024 * 1024;
+pub const DEFAULT_NFS4_MAX_CACHED_RESPONSE_SIZE: usize = 64 * 1024;
+pub const DEFAULT_NFS4_MAX_OPENS_PER_FILE: usize = 256;
+pub const DEFAULT_NFS4_MAX_LOCKS_PER_FILE: usize = 1024;
 pub const MAX_OFFSET: u64 = 9_007_199_254_740_991;
 pub const NAME_MAX: usize = 255;
 pub const DEFAULT_EXCLUSIVE_CREATES: usize = 256;
 pub const EXCLUSIVE_CREATE_WINDOW: Duration = Duration::from_secs(120);
 const S_ISGID: u32 = 0o2000;
 const S_IXGRP: u32 = 0o0010;
+
+#[derive(Debug, Clone)]
+pub struct Nfs4StateOptions {
+    /// Lease length reported by FATTR4_LEASE_TIME.
+    pub lease_seconds: u32,
+    /// Maximum number of sessions one client may create.
+    pub max_sessions: usize,
+    /// Fore-channel slot ceiling advertised by CREATE_SESSION.
+    pub max_fore_slots: usize,
+    /// COMPOUND operation ceiling advertised and enforced per session.
+    pub max_operations: usize,
+    /// Fore-channel request/response size ceiling advertised by CREATE_SESSION.
+    pub max_request_size: usize,
+    /// Maximum cached replay response size.
+    pub max_cached_response_size: usize,
+    /// Maximum number of open states a file may carry across clients.
+    pub max_opens_per_file: usize,
+    /// Maximum number of granted lock ranges a file may carry.
+    pub max_locks_per_file: usize,
+    /// Require RECLAIM_COMPLETE before granting a new byte-range lock.
+    pub require_reclaim_complete: bool,
+}
+
+impl Default for Nfs4StateOptions {
+    fn default() -> Self {
+        Self {
+            lease_seconds: DEFAULT_NFS4_LEASE_SECONDS,
+            max_sessions: DEFAULT_NFS4_MAX_SESSIONS,
+            max_fore_slots: DEFAULT_NFS4_MAX_FORE_SLOTS,
+            max_operations: DEFAULT_NFS4_MAX_OPERATIONS,
+            max_request_size: DEFAULT_NFS4_MAX_REQUEST_SIZE,
+            max_cached_response_size: DEFAULT_NFS4_MAX_CACHED_RESPONSE_SIZE,
+            max_opens_per_file: DEFAULT_NFS4_MAX_OPENS_PER_FILE,
+            max_locks_per_file: DEFAULT_NFS4_MAX_LOCKS_PER_FILE,
+            require_reclaim_complete: true,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NfsSessionOptions {
@@ -48,6 +94,8 @@ pub struct NfsSessionOptions {
     pub dtpref: usize,
     pub snapshot_cache: usize,
     pub claim_ownership: bool,
+    /// NFSv4.1 state and channel limits. These are ignored by the v3 session.
+    pub nfs4: Nfs4StateOptions,
 }
 
 impl Default for NfsSessionOptions {
@@ -61,6 +109,7 @@ impl Default for NfsSessionOptions {
             dtpref: DEFAULT_DTPREF,
             snapshot_cache: 64,
             claim_ownership: true,
+            nfs4: Nfs4StateOptions::default(),
         }
     }
 }

@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use mount_rs_core::MemoryFs;
 use mount_rs_nfs::v4::{
-    CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, NFS4ERR_BADSESSION, NFS4ERR_SHARE_DENIED,
-    UNSTABLE4,
+    CLAIM_FH, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME, NFS4ERR_BADSESSION,
+    NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, UNSTABLE4,
 };
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions, RecordAssembler, XdrReader, XdrWriter,
@@ -216,9 +216,13 @@ fn exchange_args() -> Vec<u8> {
 }
 
 fn create_session_args(clientid: u64) -> Vec<u8> {
+    create_session_args_with_sequence(clientid, 1)
+}
+
+fn create_session_args_with_sequence(clientid: u64, sequence: u32) -> Vec<u8> {
     op(OP_CREATE_SESSION, |writer| {
         writer.u64(clientid);
-        writer.u32(1);
+        writer.u32(sequence);
         // Linux requests a callback channel during the normal v4.1 mount
         // handshake. The server must decline it in csr_flags, not reject the
         // otherwise valid CREATE_SESSION operation.
@@ -229,6 +233,19 @@ fn create_session_args(clientid: u64) -> Vec<u8> {
         writer.u32(1);
         writer.u32(0);
     })
+}
+
+fn parse_channel_attrs(reader: &mut XdrReader<'_>, label: &str) -> [u32; 6] {
+    let values = [
+        reader.u32(&format!("{label} headerpad")).unwrap(),
+        reader.u32(&format!("{label} max request")).unwrap(),
+        reader.u32(&format!("{label} max response")).unwrap(),
+        reader.u32(&format!("{label} max cached")).unwrap(),
+        reader.u32(&format!("{label} max operations")).unwrap(),
+        reader.u32(&format!("{label} max requests")).unwrap(),
+    ];
+    assert_eq!(reader.u32(&format!("{label} rdma count")).unwrap(), 0);
+    values
 }
 
 fn empty_attrs(writer: &mut XdrWriter) {
@@ -1021,6 +1038,148 @@ fn nfs_v4_session_state_is_process_local_after_server_restart() {
         .expect("spawn v4 restart boundary test thread")
         .join()
         .expect("v4 restart boundary test thread panicked");
+}
+
+#[test]
+fn nfs_v4_state_limits_are_advertised_and_enforced() {
+    std::thread::Builder::new()
+        .name("nfs-v4-state-limits-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 state-limit test runtime")
+                .block_on(async {
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.lease_seconds = 7;
+                    options.session.nfs4.max_sessions = 1;
+                    options.session.nfs4.max_fore_slots = 1;
+                    options.session.nfs4.max_operations = 3;
+                    options.session.nfs4.max_request_size = 4096;
+                    options.session.nfs4.max_cached_response_size = 32;
+                    let server = NfsServer::new(MemoryFs::empty(), options);
+                    let address = server.listen().await.expect("listen rootless NFS server");
+                    let mut stream = TcpStream::connect(address)
+                        .await
+                        .expect("connect NFS server");
+
+                    let clientid = parse_exchange(
+                        rpc(&mut stream, 401, compound("exchange", &[exchange_args()])).await,
+                    );
+                    let mut response = rpc(
+                        &mut stream,
+                        402,
+                        compound("create-session", &[create_session_args(clientid)]),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 1);
+                    parse_result_header(&mut response, OP_CREATE_SESSION);
+                    let session: [u8; 16] = response
+                        .fixed_opaque(16, "limited session id")
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                    assert_eq!(response.u32("limited session sequence").unwrap(), 1);
+                    assert_eq!(response.u32("limited session flags").unwrap(), 0);
+                    let fore = parse_channel_attrs(&mut response, "limited fore");
+                    let back = parse_channel_attrs(&mut response, "limited back");
+                    assert_eq!(fore, [0, 4096, 4096, 32, 3, 1]);
+                    assert_eq!(back[1..4], [4096, 4096, 32]);
+                    response.end("limited create session response").unwrap();
+
+                    let mut response = rpc(
+                        &mut stream,
+                        403,
+                        compound(
+                            "second-session",
+                            &[create_session_args_with_sequence(clientid, 2)],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 1),
+                        NFS4ERR_RESOURCE,
+                        "maxSessions rejects a second session for one client"
+                    );
+                    assert_eq!(
+                        parse_result_status(&mut response, OP_CREATE_SESSION),
+                        NFS4ERR_RESOURCE
+                    );
+                    response.end("second session response").unwrap();
+
+                    let client = Client {
+                        session,
+                        clientid,
+                        sequence: 1,
+                        slot: 0,
+                    };
+                    let mut response = rpc(
+                        &mut stream,
+                        404,
+                        compound(
+                            "lease",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| {
+                                    writer.u32(1);
+                                    writer.u32(1 << FATTR4_LEASE_TIME);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "lease");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    parse_result_header(&mut response, OP_GETATTR);
+                    assert_eq!(
+                        response
+                            .array(16, "lease attribute mask", |reader| reader.u32("mask word"))
+                            .unwrap(),
+                        vec![1 << FATTR4_LEASE_TIME]
+                    );
+                    let lease = response.var_opaque(16, "lease attribute value").unwrap();
+                    assert_eq!(
+                        u32::from_be_bytes(lease.try_into().unwrap()),
+                        7,
+                        "leaseSeconds is visible through FATTR4_LEASE_TIME"
+                    );
+                    response.end("lease response").unwrap();
+
+                    let mut client = client;
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        405,
+                        compound(
+                            "too-many-ops",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETFH, |_| {}),
+                                op(OP_PUTROOTFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut response, 0),
+                        NFS4ERR_TOO_MANY_OPS,
+                        "maxOperations rejects an oversized stateful COMPOUND"
+                    );
+                    response.end("too many ops response").unwrap();
+
+                    stream.shutdown().await.expect("close state-limit client");
+                    server.close().await.expect("close state-limit server");
+                });
+        })
+        .expect("spawn v4 state-limit test thread")
+        .join()
+        .expect("v4 state-limit test thread panicked");
 }
 
 #[test]

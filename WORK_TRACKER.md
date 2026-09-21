@@ -53,7 +53,12 @@ The opt-in macOS native NFSv3
 loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
 remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
 stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-backend durability, crash injection, and durable-restart qualification.
+backend durability, crash injection, and durable-restart qualification. The
+new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
+session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
+open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
+options; the wire suite passes 5/5. Upstream ID-map, deterministic clock/seed,
+and session `onError` parity remain explicit gaps.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -241,6 +246,14 @@ covers the bounded close. Local all-target FUSE tests, strict Clippy,
 formatting, and Linux-target test type-check pass, while hosted close races,
 concurrent request behavior, crash/restart, callback-event, lock and
 durability evidence remain external; W01 stays NO-GO.
+The bounded concurrency packet now permits up to 16 positional `FUSE_READ`
+workers with a single serialized reply writer. Stateful operations and writes
+still use the serialized session boundary, and stop aborts plus drains read
+workers; a Linux-gated barrier-driver harness proves two reads overlap. Local
+all-target FUSE tests, strict Clippy, formatting, and Linux-target test
+type-check pass, while hosted `/dev/fuse`, native mutation/write concurrency,
+close/crash/restart, callback-event, lock and durability evidence remain
+external; W01 stays NO-GO.
 The native transport follow-up adds owned `FuseTransportError` kinds,
 `FuseMountHooks`, `mount_with_hooks`, exactly-once terminal reporting,
 callback-panic isolation, and a mount-free Unix-stream protocol-failure
@@ -713,13 +726,16 @@ transport-hook plumbing. The Rust WebDAV target passed 13/13 tests; the
 isolated locked N-API check, release addon, generated declarations, and direct
 N-API stream probe passed three-chunk PUT, multi-chunk GET, early iterator
 return, and deliberate body failure. The oracle differential is explicitly
-skipped without `MOUNTX_SOURCE`, the sandbox blocks the live N-API loopback
-bind with `Operation not permitted`, and complete member parity, provider,
-hosted, native, network-client concurrency, and restart/durability gates
-remain open. The host-enabled WebDAV session packet also completes eight
-parallel unique-file PUTs and GETs through one direct session with exact
-byte-for-byte readback; that is same-process same-driver evidence only. W01
-and production status remain **NO-GO**.
+skipped without `MOUNTX_SOURCE`; with the pinned source at
+`/private/tmp/mountx-source-w01-20260921` (oracle
+`85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`), the pure WebDAV barrel/protocol
+differential and source-backed host-enabled server phase pass. The sandbox
+blocks the live N-API loopback bind with `Operation not permitted`, and full
+session/member parity, provider, hosted, native, network-client concurrency,
+and restart/durability gates remain open. The host-enabled WebDAV session
+packet also completes eight parallel unique-file PUTs and GETs through one
+direct session with exact byte-for-byte readback; that is same-process
+same-driver evidence only. W01 and production status remain **NO-GO**.
 
 Evidence landed without closing the remaining W01 acceptance gates:
 
@@ -2406,6 +2422,17 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `mount-rs-tests/aws-s3/20260921T124037Z-88398-91d73f60bde3b905c3af2cc78b38b224`.
   This is current test-account evidence, not production resource or hosted
   deployment acceptance.
+- [x] The pushed W25 revision `56ef9ab` passed a fresh scoped live packet on
+  2026-09-22 under the dedicated role: sibling-prefix denial, public SDK/CLI
+  self-test, composed AWS S3 filesystem, process reopen, independent PGlite
+  metadata, writer fencing, PGlite backup/restore and fresh-server reopen,
+  and exact owned-prefix cleanup. It emitted `AWS_S3_TEST_PASS` for
+  `mount-rs-tests/aws-s3/20260921T165854Z-84404-217dc2bf24fb46f9e3b96e88ba4fd4a4`
+  and `AWS_S3_PGLITE_TEST_PASS` for its child prefix. The standalone
+  `tests/aws/Cargo.lock` was refreshed for the current `mount-rs-fuse`
+  `futures-util` dependency so the harness now passes its `--locked` gate.
+  This remains qualification-account and local-metadata evidence, not
+  production deployment acceptance.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -2564,7 +2591,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   without AWS credentials. The CloudFormation bucket-name constraint and the
   read-only resource audit now reject consecutive dots and invalid length or
   edge characters consistently with the hosted preflight.
-- [x] A fresh read-only resource audit at current source `32b0609` on
+- [x] A fresh read-only resource audit at pushed source `56ef9ab` on
   2026-09-22 again passed the selected `myroot` qualification bucket's
   account/region binding, all four public-access blocks,
   `BucketOwnerEnforced` ownership, AES256 encryption, `None` versioning,
@@ -2636,9 +2663,19 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `35622312798` at `4242c24`, and `35620404949` at `0010246` stopped at the same preflight boundary, as did
   `35619552809` at `a84fa3e`. The provenance-hash expansion now binds the
   policy, preflight, resource/OIDC audit, CloudFormation contract, acceptance,
-  PGlite harness, and AWS test manifest inputs in this artifact; this improves
+  PGlite harness, AWS test manifest, and standalone AWS test lockfile inputs
+  in this artifact; the workflow also validates the standalone AWS manifest
+  with `cargo metadata --locked` before any AWS authentication. This improves
   evidence integrity but does not create AWS authentication or deployment
   evidence. A fresh
+  hosted rerun `35629600687` at pushed head `62383df` passed the new root and
+  standalone AWS manifest provenance capture, including the standalone
+  `tests/aws/Cargo.lock` hash, plus the seven-case validator, bucket-policy,
+  CloudFormation, and environment-approval contract suites. It then stopped
+  safely at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; AWS credentials,
+  identity, and acceptance were skipped. Its non-expired artifact is
+  `aws-s3-qualification-35629600687-1` (7,649 bytes). This is a successful
+  safety refusal and provenance-contract result, not hosted AWS acceptance.
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
   audit boundary `2f13354`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
@@ -2658,7 +2695,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
   mutating either system; additional or broad GitHub federation trust
   statements fail closed. Its credential-free three-case environment fixture
   test is wired into the hosted preflight. The
-  fresh read-only audit at current source `32b0609` on 2026-09-22 returned
+  fresh read-only audit at pushed source `56ef9ab` on 2026-09-22 returned
   `AWS_S3_OIDC_AUDIT_BLOCKED` for the missing environment protection rules,
   non-self-approvable reviewer, protected-environment inputs and secret,
   missing GitHub OIDC provider, and missing immutable-subject role trust; it

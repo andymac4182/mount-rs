@@ -355,6 +355,19 @@ fn verifier(value: Option<Buffer>) -> Result<Option<[u8; 8]>, Error> {
 }
 
 #[napi(object)]
+pub struct Nfs4StateKnobs {
+    pub lease_seconds: Option<f64>,
+    pub max_sessions: Option<f64>,
+    pub max_fore_slots: Option<f64>,
+    pub max_operations: Option<f64>,
+    pub max_request_size: Option<f64>,
+    pub max_cached_response_size: Option<f64>,
+    pub max_opens_per_file: Option<f64>,
+    pub max_locks_per_file: Option<f64>,
+    pub require_reclaim_complete: Option<bool>,
+}
+
+#[napi(object)]
 pub struct NfsServerOptions {
     pub port: Option<f64>,
     pub host: Option<String>,
@@ -370,6 +383,7 @@ pub struct NfsServerOptions {
     pub dtpref: Option<f64>,
     pub snapshot_cache: Option<f64>,
     pub claim_ownership: Option<bool>,
+    pub nfs4: Option<Nfs4StateKnobs>,
     #[napi(ts_type = "(error: unknown, peer: string | undefined) => void")]
     pub on_transport_error: Option<JsTransportErrorCallback>,
 }
@@ -399,6 +413,7 @@ fn nfs_options(
         dtpref: None,
         snapshot_cache: None,
         claim_ownership: None,
+        nfs4: None,
         on_transport_error: None,
     });
     let on_transport_error = options.on_transport_error;
@@ -427,6 +442,50 @@ fn nfs_options(
         output.session.snapshot_cache,
     )?;
     output.session.claim_ownership = options.claim_ownership.unwrap_or(true);
+    if let Some(nfs4) = options.nfs4 {
+        output.session.nfs4.lease_seconds = u32_number(
+            "nfs4.leaseSeconds",
+            nfs4.lease_seconds,
+            output.session.nfs4.lease_seconds,
+        )?;
+        output.session.nfs4.max_sessions = positive_number(
+            "nfs4.maxSessions",
+            nfs4.max_sessions,
+            output.session.nfs4.max_sessions,
+        )?;
+        output.session.nfs4.max_fore_slots = positive_number(
+            "nfs4.maxForeSlots",
+            nfs4.max_fore_slots,
+            output.session.nfs4.max_fore_slots,
+        )?;
+        output.session.nfs4.max_operations = positive_number(
+            "nfs4.maxOperations",
+            nfs4.max_operations,
+            output.session.nfs4.max_operations,
+        )?;
+        output.session.nfs4.max_request_size = positive_number(
+            "nfs4.maxRequestSize",
+            nfs4.max_request_size,
+            output.session.nfs4.max_request_size,
+        )?;
+        output.session.nfs4.max_cached_response_size = number(
+            "nfs4.maxCachedResponseSize",
+            nfs4.max_cached_response_size,
+            output.session.nfs4.max_cached_response_size,
+        )?;
+        output.session.nfs4.max_opens_per_file = positive_number(
+            "nfs4.maxOpensPerFile",
+            nfs4.max_opens_per_file,
+            output.session.nfs4.max_opens_per_file,
+        )?;
+        output.session.nfs4.max_locks_per_file = positive_number(
+            "nfs4.maxLocksPerFile",
+            nfs4.max_locks_per_file,
+            output.session.nfs4.max_locks_per_file,
+        )?;
+        output.session.nfs4.require_reclaim_complete =
+            nfs4.require_reclaim_complete.unwrap_or(true);
+    }
     Ok((host, port, output, on_transport_error))
 }
 
