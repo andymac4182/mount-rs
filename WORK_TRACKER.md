@@ -1268,6 +1268,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   with `components=288` and `W08_RELEASE_SBOM_PASS`. The SBOM is unsigned and
   the manifest remains `sbom=pending`; signing/attestation, target-platform
   parity, canary, rollback and approval remain W08-P07/P09 gates.
+- [x] W08.15 **All-release-asset checksum coverage:** both
+  `.github/workflows/cli-release.yml` and
+  `.github/workflows/w08-release-policy.yml` now generate `SHA256SUMS` only
+  after the tarball, `release-manifest.json` and `release-sbom.json` exist,
+  then verify all three entries. Hosted run `35615714935`, source `5116ded`,
+  `w08-release-policy` job `106386240669` passed the real Ubuntu path with
+  `mount-rs-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`,
+  `release-manifest.json: OK` and `release-sbom.json: OK`. This closes the
+  repository asset-integrity slice only; tag publication, downloaded-release
+  inspection, signing/attestation, target-platform parity, canary, rollback
+  and approval remain W08-P09 gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1370,9 +1381,10 @@ reproducible in a production-like environment.
   `f432441`; W08.14 generates/verifies a real 288-component CycloneDX SBOM in
   job `106381893114` from run `35614345209`, source `9c9d0e4`. These slices do
   not create cryptographic signing/attestation evidence or run a real tag
-  release, canary, rollback or approval. *(Release implementation + hosted;
-  registry, signing/attestation, deployment controller and approvers are
-  external.)*
+  release, and W08.15's hosted three-asset checksum pass does not close the
+  downloaded-release, canary, rollback or approval gates. *(Release
+  implementation + hosted; registry, signing/attestation, deployment
+  controller and approvers are external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
