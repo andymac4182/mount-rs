@@ -28,9 +28,11 @@ function HomePage() {
             </h1>
             <p className="hero-lede">
               When your product needs paths, handles, directories, and sync
-              semantics, mount-rs gives it a stable Rust and Node contract
-              while namespace metadata, immutable blocks, and edge transports
-              stay explicit—and replaceable.
+              semantics, mount-rs gives you a stable Rust and Node contract for
+              direct access—or a real mounted filesystem through FUSE, NFS, 9P,
+              or FSKit. HTTP and WebDAV provide network edges when a mount is
+              not the right fit, while namespace metadata and immutable blocks
+              stay explicit and replaceable.
             </p>
             <div className="button-row">
               <a className="button button-warm" href="#storage-model">See the storage model</a>
@@ -49,7 +51,7 @@ function HomePage() {
             <div className="business-diagram-node business-diagram-core">
               <span className="diagram-index">02</span>
               <strong>mount-rs contract</strong>
-              <small>Rust core · Node bindings · mount-free</small>
+              <small>Rust core · Node bindings · mountable edges</small>
             </div>
             <div className="business-diagram-arrow" aria-hidden="true">↓</div>
             <div className="business-diagram-split">
@@ -85,12 +87,12 @@ function HomePage() {
           <div className="section-heading solution-heading">
             <p className="eyebrow eyebrow-light">The mount-rs answer</p>
             <h2>One observable file contract. Three decisions you can change independently.</h2>
-            <p>mount-rs keeps the core small and makes the boundary visible: choose how your process talks to files, where namespace metadata lives, and where immutable blocks are stored.</p>
+            <p>mount-rs keeps the core small and makes the boundary visible: use the API directly, create a real mount for a host, or put HTTP/WebDAV at the edge. Choose where namespace metadata lives and where immutable blocks are stored independently.</p>
           </div>
           <div className="solution-grid">
             <article className="solution-card"><span className="solution-card-number">01</span><h3>Contract</h3><p>Use paths, handles, stats, directory operations, and explicit sync behavior from Rust or Node.</p><Link to="/docs/rust">Explore the core API <span aria-hidden="true">→</span></Link></article>
             <article className="solution-card"><span className="solution-card-number">02</span><h3>Storage planes</h3><p>Compose a metadata provider with an immutable block provider, then flush blocks before publishing references.</p><Link to="/docs/providers">Compare providers <span aria-hidden="true">→</span></Link></article>
-            <article className="solution-card"><span className="solution-card-number">03</span><h3>Edge</h3><p>Add a mount or transport only where the environment needs one. The application contract stays the same.</p><Link to="/docs/transports">Choose a transport <span aria-hidden="true">→</span></Link></article>
+            <article className="solution-card"><span className="solution-card-number">03</span><h3>Mounts and transports</h3><p>Create a real filesystem mount with FUSE, NFS, 9P, or FSKit where the platform integration is available; use HTTP or WebDAV when the edge is networked.</p><Link to="/docs/transports">Choose the edge <span aria-hidden="true">→</span></Link></article>
           </div>
         </div>
       </section>
@@ -180,12 +182,12 @@ block_01:
       <section className="page-frame use-section" id="use-mount-rs">
         <div className="section-heading split-heading">
           <div><p className="eyebrow">How to use it</p><h2>Start local. Keep the boundary when the deployment changes.</h2></div>
-          <p>Begin with a direct loopback contract, choose the storage planes your workload needs, and add a transport only at the edge. The same sequence works while the evidence grows.</p>
+          <p>Begin with a direct loopback contract, choose the storage planes your workload needs, then either create a real mount for the host or expose a network transport. The application contract stays the same while the edge changes.</p>
         </div>
         <div className="step-grid">
           <article className="step-card"><span className="step-number">01</span><h3>Define the file contract</h3><p>Give your application file operations without requiring a kernel mount.</p></article>
           <article className="step-card"><span className="step-number">02</span><h3>Select the planes</h3><p>Keep namespace and immutable bytes explicit so each provider has one job.</p></article>
-          <article className="step-card"><span className="step-number">03</span><h3>Add the edge you need</h3><p>Expose FUSE, NFS, HTTP, WebDAV, 9P, or a direct binding when the environment calls for it.</p></article>
+          <article className="step-card"><span className="step-number">03</span><h3>Mount or transport it</h3><p>Create a real mount through FUSE, NFS, 9P, or FSKit when the host needs a filesystem; choose HTTP or WebDAV for a network edge.</p></article>
         </div>
         <div className="use-code-grid">
           <CodeBlock label="Rust / direct contract">{`let fs = Loopback::new(MemoryFs::new(MemoryOptions::default()));
@@ -198,7 +200,7 @@ let bytes = fs.read_file("/hello").await?;`}</CodeBlock>
 });
 await fs.writeFile('/hello', Buffer.from('hello'));`}</CodeBlock>
         </div>
-        <div className="use-links"><Link className="button button-primary" to="/docs/rust">Start with Rust</Link><Link className="button button-secondary" to="/docs/node">Use Node</Link><Link className="text-link" to="/downloads">Download the CLI preview <span aria-hidden="true">↗</span></Link></div>
+        <div className="use-links"><Link className="button button-primary" to="/docs/cli">Start with the CLI</Link><Link className="button button-secondary" to="/docs/rust">Embed with Rust</Link><Link className="button button-secondary" to="/docs/node">Use Node</Link><Link className="button button-secondary" to="/docs/transports">Mounts and transports</Link><Link className="text-link" to="/downloads">Download the CLI preview <span aria-hidden="true">↗</span></Link></div>
       </section>
 
       <section className="page-frame fit-section" id="fit">
@@ -235,12 +237,13 @@ await fs.writeFile('/hello', Buffer.from('hello'));`}</CodeBlock>
             <a href="https://github.com/andymac4182/mount-rs/blob/main/ARCHITECTURE.md">Review the storage roles <span aria-hidden="true">↗</span></a>
           </article>
           <article className="fit-card">
-            <span className="fit-card-label">Use a native mount when</span>
-            <h3>The host owns the privileged lifecycle.</h3>
+            <span className="fit-card-label">Use a real mount when</span>
+            <h3>Existing tools expect a mounted path.</h3>
             <p>
-              A native mount can be the right boundary when platform support,
-              permissions, daemon lifecycle, and qualification are already
-              part of the environment you control.
+              FUSE, NFS, 9P, and FSKit put the filesystem surface back into a
+              host when users or existing software expect a mounted path.
+              Platform permissions, daemon lifecycle, and qualification remain
+              part of that choice.
             </p>
             <Link to="/docs/transports">Compare transports <span aria-hidden="true">→</span></Link>
           </article>

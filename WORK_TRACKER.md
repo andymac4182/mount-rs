@@ -937,9 +937,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   shared-provider/read-only configuration. The authority publisher now also
   exposes an explicit bounded-forward-jump API that fails closed before an
   unsafe wall-clock sample is written; unit coverage and the real-cluster
-  authority/composition paths use that guard. Deployment-level authority
-  credentials, clock monitoring/cadence and hosted evidence for the new guard
-  remain pending, so this item is not yet marked complete.
+  authority/composition paths use that guard. Hosted run
+  [35606741719](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719)
+  at revision `4aadbb1` passed the guarded authority/composition, restart and
+  consumer paths on `ubuntu-24.04`; deployment-level authority credentials,
+  clock monitoring/cadence and failover evidence remain pending, so this item
+  is not yet marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -1041,6 +1044,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   missing the `futures-util` dependency declared by `mount-rs-r2`. It is not
   runtime acceptance evidence; the lockfile correction is being published
   before the guarded-authority run is retried.
+  The retry
+  [35606741719](https://github.com/andymacclenaghan/mount-rs/actions/runs/35606741719)
+  at revision `4aadbb1` completed green in 10m55s. It emitted
+  `FOUNDATIONDB_RUSTFS_NETWORK_READY`, `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE
+  status=403`, `FOUNDATIONDB_LATENCY_PASS workload=composition operations=11
+  p50_us=11702 p95_us=26193 p99_us=26193 total_ms=120
+  throughput_ops_per_sec=91.24`, `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`,
+  `FOUNDATIONDB_SOAK_PASS rounds=1`, `FOUNDATIONDB_NAPI_PASS`,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=1`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. This is terminal hosted Linux qualification and
+  bounded workload/clock-guard evidence only; production identity/ACL/TLS,
+  backup/recovery, capacity, observability, macOS and release-owner gates
+  remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. The earlier target-gated packet did not
@@ -1081,8 +1099,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; hosted run `35601357569` recorded the marker at
-    revision `622d0d1`. This is bounded qualification evidence and does not
+    latency and throughput; hosted run `35606741719` recorded the marker at
+    revision `4aadbb1`. This is bounded qualification evidence and does not
     convert the one-round result into production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
@@ -1167,6 +1185,32 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   passed in run `35592902494`, `tidb-tls-compile` job `106311076905` at source
   `4326c54`; this is implementation evidence only. P01/P02/P07 remain open
   for real topology, IAM, certificates and provider/security sign-off.
+- [x] W08.7 **Production operator runbook and timed-drill matrix:** commit
+  `ea01338` added `docs/W08-operations-runbook.md` with deployment admission,
+  incident response, backup/restore, rollback, observability handoff and D01–D09
+  drill templates. The artifact is complete; execution, owners and on-call
+  acknowledgement remain P03–P08 gates.
+- [x] W08.8 **Bounded TiDB/RustFS load and soak harness:**
+  `tests/provider_matrix/tidb-rustfs-soak.mjs` and the hosted 64-operation
+  seed/reopen slice are implemented and retained in run `35595664981`,
+  `tidb-rustfs` job `106319766691`. This is bounded qualification, not a
+  production capacity/SLO result; P06 remains open.
+- [x] W08.9 **HTTP health/readiness contract:** `/healthz` and `/readyz` are
+  implemented and documented with local and terminal hosted all-features
+  contract evidence in `http-observability` job `106340034907`; collector,
+  provider-aware checks, SLOs, paging and alert execution remain P05 gates.
+- [x] W08.10 **Health response hardening:** `2f7919a` adds
+  `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` with local
+  regression coverage and hosted terminal evidence in run `35601990956`; this
+  remains HTTP contract evidence only.
+- [x] W08.11 **Release identity/provenance policy:**
+  `scripts/verify-w08-release-manifest.mjs` validates W08 source/repository,
+  artifact SHA-256/size, `SHA256SUMS`, GitHub Actions workflow/run provenance and
+  explicit signature/SBOM/canary states. Local pending/strict-accepted/invalid
+  fixtures passed their intended paths, and hosted run `35606873984`, source
+  `fecec0e`, `w08-release-policy` job `106356402785` was terminal success. This
+  is a synthetic credential-free policy gate; real artifact signing, SBOM,
+  canary, rollback and approval remain W08-P09 external gates.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -1259,9 +1303,12 @@ reproducible in a production-like environment.
   incident tooling are open.)*
 - [ ] **W08-P09 (10%) — release/canary/go-no-go:** produce immutable signed
   artifacts and SBOM, verify target-platform packages, run a staged canary with
-  live SLO telemetry, rehearse rollback and record explicit approval. *(Release
-  implementation + hosted; registry, signing, deployment controller and
-  approvers are external.)*
+  live SLO telemetry, rehearse rollback and record explicit approval. The
+  credential-free W08.11 policy verifier and hosted job `106356402785` now
+  reject placeholder source identity and require explicit verified signature,
+  SBOM and passed-canary states in strict mode; they do not create or verify a
+  real release. *(Release implementation + hosted; registry, signing, SBOM
+  tooling, deployment controller and approvers are external.)*
 
 ## W09 — napi-rs, Node API and packaging
 
@@ -1787,7 +1834,21 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
-  The current SQLite composition is single-host reopen evidence only.
+  The current SQLite composition is single-host reopen evidence only. Partial
+  pairing evidence now exists: on 2026-09-21, the scoped AWS role passed the
+  AWS CLI/block/restart gates and the new
+  `live_aws_s3_blocks_with_independent_pglite_metadata` row passed with an
+  isolated real PGlite socket server, a fresh metadata connection, a fresh
+  signed AWS client, filesystem reopen, and exact parent-prefix cleanup at
+  `mount-rs-tests/aws-s3/20260921T133321Z-23452-0493c0f8fe5454cbfd42f48dfd58f728/pglite`.
+  The expanded opt-in run at `mount-rs-tests/aws-s3/20260921T134403Z-54972-b8831d9b39f99263ce764ba298b05302`
+  also passed `live_aws_s3_pglite_prepare_for_restart` with independent-writer
+  fencing and `live_aws_s3_pglite_reopen_after_restore` after restoring a
+  temporary on-disk PGlite data directory into a fresh server process.
+  This is local metadata backup/restore and restart evidence only.
+  This does not close W25.6: production metadata ownership, multi-writer
+  fencing, backup/restore, schema migration, failure recovery, and DR evidence
+  remain open.
 - [ ] W25.7 Add deployment observability and operations: S3 latency/error and
   retry metrics, conditional-conflict and orphan/cleanup signals, credential
   expiry detection, capacity/cost alerts, SLOs, incident runbooks, and
@@ -1795,10 +1856,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `S3Session::stats()` snapshot for latency, buffered bytes, operation counts,
   and authentication/conditional/throttling/client/server error classes; the
   public SDK's optional observability path records provider block latency,
-  errors, and bytes. This is an instrumentation surface only. Exporter wiring,
-  retry visibility, credential-expiry detection, cost/retention alerts,
-  SLO thresholds, orphan/cleanup signals, and an exercised incident runbook
-  remain deployment gates.
+  errors, bytes, and bounded reconciliation scanned/protected/recent/deleted
+  counts through local snapshots, tracing, and OTLP counters. The new
+  [`docs/aws-s3-operations-runbook.md`](docs/aws-s3-operations-runbook.md)
+  maps those signals to alerts, identity/expiry checks, retention/cost review,
+  failure drills, and canary/rollback evidence. These are implementation and
+  runbook surfaces only. Exporter wiring, object-store retry measurement,
+  credential-expiry detection, cost/retention alerts, approved SLO thresholds,
+  and exercised staging procedures remain deployment gates.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy

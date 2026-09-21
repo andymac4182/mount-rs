@@ -70,7 +70,10 @@ jobs:
           RUSTFS_COMBO_TIMEOUT_SECONDS: '900'
           RUSTFS_COMBO_COMMAND: ./scripts/test-foundationdb.sh
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
-          MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS: '1'
+          # Five isolated real-provider rounds give the dedicated production
+          # qualification lane a bounded soak signal without presenting it as
+          # a production-duration or capacity result.
+          MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS: '5'
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
           MOUNT_RS_FOUNDATIONDB_NATIVE_CLI: '1'
         run: |

@@ -128,9 +128,8 @@ function DownloadsPage() {
         <div className="source-note">
           <span className="source-note-mark" aria-hidden="true">↗</span>
           <p>
-            Browse <a href={cliRelease.releasesUrl} {...externalProps()}>all GitHub Releases</a> for
-            future preview artifacts. For the implementation and current
-            acceptance boundaries, return to the <Link to="/docs">technical docs</Link>.
+            Read the <Link to="/docs/cli">CLI guide</Link> for executable
+            workflows, then browse <a href={cliRelease.releasesUrl} {...externalProps()}>all GitHub Releases</a> for future preview artifacts. For the implementation and current acceptance boundaries, return to the <Link to="/docs">technical docs</Link>.
           </p>
         </div>
       </article>

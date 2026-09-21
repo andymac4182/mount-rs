@@ -19,10 +19,11 @@ function DocsOverview() {
       <div className="callout callout-blue">
         <strong>Start with the smallest working boundary</strong>
         <p>
-          Begin with the direct contract in Rust or Node. Then choose the
-          metadata and immutable block roles, add the edge your environment
-          needs, and read the acceptance requirements before making a
-          production claim.
+          Start with the CLI when you want to run mount-rs as an executable.
+          Choose Rust or Node when you are embedding the contract. Then choose
+          the metadata and immutable block roles, create a real FUSE, NFS, 9P,
+          or FSKit mount—or choose HTTP/WebDAV at the edge—and read the
+          acceptance requirements before making a production claim.
         </p>
       </div>
 
@@ -41,7 +42,7 @@ function DocsOverview() {
         <Link className="decision-card" to="/docs/transports">
           <span className="decision-card-number">03</span>
           <h3>Choose the edge</h3>
-          <p>Reach the process through a binding, transport, or native mount.</p>
+          <p>Use Rust/Node directly, create a FUSE/NFS/9P/FSKit mount, or add HTTP/WebDAV at the edge.</p>
         </Link>
         <a className="decision-card" href="https://github.com/andymac4182/mount-rs/blob/main/REQUIREMENTS.md">
           <span className="decision-card-number">04</span>
@@ -82,7 +83,7 @@ function DocsOverview() {
         </div>
       </div>
 
-      <h2>What the docs do—and do not—promise</h2>
+      <h2>Choose your starting point</h2>
       <p>
         The project is prerelease. Examples point to real exported types and
         repository paths, but a working example is not proof that every
@@ -91,26 +92,32 @@ function DocsOverview() {
         release-ready.
       </p>
       <div className="doc-card-grid">
+        <Link className="doc-card" to="/docs/cli">
+          <span className="eyebrow">01 / CLI</span>
+          <h3>Run the executable path</h3>
+          <p>Probe a host, self-test providers, serve HTTP, or create a native mount where the transport is available.</p>
+          <span className="card-arrow" aria-hidden="true">→</span>
+        </Link>
         <Link className="doc-card" to="/docs/rust">
-          <span className="eyebrow">01 / Rust</span>
+          <span className="eyebrow">02 / Rust</span>
           <h3>Core and split-store APIs</h3>
           <p>Loopback access, handles, fixed-size chunking, and provider composition.</p>
           <span className="card-arrow" aria-hidden="true">→</span>
         </Link>
         <Link className="doc-card" to="/docs/node">
-          <span className="eyebrow">02 / Node</span>
+          <span className="eyebrow">03 / Node</span>
           <h3>napi-rs factories</h3>
           <p>The current <code>createChunkedDriver</code> shape and lifecycle expectations.</p>
           <span className="card-arrow" aria-hidden="true">→</span>
         </Link>
         <Link className="doc-card" to="/docs/providers">
-          <span className="eyebrow">03 / Providers</span>
+          <span className="eyebrow">04 / Providers</span>
           <h3>Storage roles and maturity</h3>
           <p>See where metadata lives, how bytes are laid out, and what the evidence actually covers.</p>
           <span className="card-arrow" aria-hidden="true">→</span>
         </Link>
         <Link className="doc-card" to="/docs/transports">
-          <span className="eyebrow">04 / Transports</span>
+          <span className="eyebrow">05 / Transports</span>
           <h3>Mount-free and native edges</h3>
           <p>Choose FUSE, NFS, 9P, FSKit, HTTP, or WebDAV with platform limits in view.</p>
           <span className="card-arrow" aria-hidden="true">→</span>

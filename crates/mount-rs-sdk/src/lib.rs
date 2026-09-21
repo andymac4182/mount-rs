@@ -487,7 +487,7 @@ impl BlockStore for ErasedBlockStore {
     ) -> Result<BlockReconcileReport> {
         #[cfg(feature = "observability")]
         {
-            return self
+            let report = self
                 .telemetry
                 .observe_fs(
                     "provider.blocks",
@@ -495,7 +495,9 @@ impl BlockStore for ErasedBlockStore {
                     None,
                     self.inner.reconcile(live, grace),
                 )
-                .await;
+                .await?;
+            self.telemetry.record_reconcile(&report);
+            return Ok(report);
         }
         #[cfg(not(feature = "observability"))]
         self.inner.reconcile(live, grace).await

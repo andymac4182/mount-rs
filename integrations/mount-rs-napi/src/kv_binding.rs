@@ -695,6 +695,6 @@ pub fn create_unstorage_driver(
     Ok(super::Filesystem {
         driver: super::instrument_driver(Arc::new(filesystem)),
         shutdown: Some(shutdown),
-        reconcile: None,
+        reconcile: Mutex::new(None),
     })
 }

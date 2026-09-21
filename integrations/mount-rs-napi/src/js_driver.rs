@@ -2315,7 +2315,7 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
             capabilities,
         })),
         shutdown: Some(shutdown),
-        reconcile: None,
+        reconcile: Mutex::new(None),
     })
 }
 
