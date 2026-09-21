@@ -181,6 +181,16 @@ are live provider evidence, not static validation. TiDB and FoundationDB
 have dedicated hosted composition jobs: `ozone-tidb` runs the durable
 three-PD/three-TiKV TiDB topology against the real Ozone gateway, while the
 FoundationDB lane selects its durable three-node topology in the
-`foundationdb-rustfs` job. A green job is still revision-specific and does not
+`ozone-foundationdb` job. A green job is still revision-specific and does not
 claim production authentication, TLS, power-loss durability, or native-mount
+support.
+
+The same Node composition gate now runs the shipped HTTP server/client path
+through `scripts/test-cli-remote-ozone.sh`. On Unix it writes binary data to
+both PGlite/R2 and SQLite/R2 drives, verifies full and ranged reads, rejects a
+cross-drive token, gracefully shuts down, reopens, and verifies persisted data
+again. The test uses a unique child of `OZONE_TEST_PREFIX` and the runner lists,
+deletes, and re-lists only that prefix before returning. This is end-to-end
+Ozone integration evidence for the HTTP surface; the loopback HTTP fixture does
+not prove customer TLS, identity rotation, availability or native mount
 support.
