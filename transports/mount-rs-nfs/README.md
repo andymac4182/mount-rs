@@ -30,7 +30,9 @@ in-flight bound. Two independent v4.1 sessions also complete concurrent
 distinct-file OPEN/WRITE/READ round trips. This is rootless in-process
 userspace concurrency evidence. A restart-boundary test reuses the backend
 with a replacement server and confirms that the old v4 session is rejected
-with `NFS4ERR_BADSESSION`.
+with `NFS4ERR_BADSESSION`; both halves of the eight-byte write verifier
+contribute to its session identity, avoiding the observed rapid-replacement
+alias.
 
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
@@ -39,9 +41,10 @@ The replacement also rejects the pre-crash file handle with `NFS3ERR_STALE`,
 making the boundary explicit: backend data is recoverable, while handles remain
 process-local. A companion NFSv4.1 child-process case establishes a session,
 force-terminates the child, and verifies that a replacement rejects the old
-session with `NFS4ERR_BADSESSION`. These are process-crash classification
-checks; they do not claim power-loss durability or persistent NFSv4 lease,
-replay, or file-handle state.
+session with `NFS4ERR_BADSESSION` and the old root handle with
+`NFS4ERR_STALE`. These are process-crash classification checks; they do not
+claim power-loss durability or persistent NFSv4 lease, replay, or file-handle
+state.
 
 The shared file-handle table accepts `max_handles` through
 `NfsSessionOptions`/`NfsServerOptions` (and `maxHandles` through the N-API

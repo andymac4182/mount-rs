@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 08:56 AEST (2026-09-21 22:56 UTC)
+Last updated: 2026-09-22 09:13 AEST (2026-09-21 23:13 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -23,7 +23,7 @@ N-API packaging defect was also fixed in `postbuild.mjs` and pushed as
 `P9AttachOptions` declaration referenced by `P9Server.attach()`.
 
 The latest complete local qualification spans exact pushed revision
-`a0c73c54`:
+`b65d4e31`:
 format, the full locked Rust workspace, strict Clippy, optimized N-API build,
 the complete pinned-oracle Node/N-API suite, and the real PGlite matrix were
 exercised. The packet includes the 9P property-shaped server clients and
@@ -34,7 +34,7 @@ forced cancellation, W04 lease-TTL validation, and WebDAV SQLite reopen. It
 passed real PGlite reconnect/versioning/VFS/lifecycle/split-store/FUSE checks,
 Rust SDK `6 pass / 3 skip / 0 fail`, Node SDK `5/3/0`, CLI `12/2`, upstream
 `1200 passed / 82 skipped`, and all 40 five-seed/eight-backend traces at 621
-operations. The full packet therefore qualifies `a0c73c54`. It includes the
+operations. The full packet therefore qualifies `b65d4e31`. It includes the
 WebDAV timed-out-drain and concurrent-client coverage, NFS owner/lease
 callback bridge and session-member views, bounded connection-shutdown
 cancellation repair, chunked atime coalescing, FoundationDB lease-policy
@@ -51,9 +51,9 @@ checks, Ozone provider matrix work, the production-readiness documentation,
 the latest FoundationDB fail-closed changes, the N-API declaration fix, the
 chunked immutable-write overlap repair, the FUSE syncfs codec, W04 explicit
 lease-TTL/configuration code, and the WebDAV SQLite reopen path. The full
-packet revision `a0c73c54` is locally qualified and includes the 9P
+packet revision `b65d4e31` is locally qualified and includes the 9P
 property-shaped server client surface plus the newer NFS/S3/chunked/N-API/WebDAV
-changes. Concurrent shared work has since advanced origin/main to `d391f9b7`,
+changes. Concurrent shared work has since advanced origin/main to `9b2dabd7`,
 which adds bounded chunked mutation-queue cancellation, 9P mount-created
 server-policy mapping, Ozone lockfile refresh, and cross-process NFS backend
 recovery coverage, and the latest FUSE forced-teardown/read-worker/native-
@@ -101,6 +101,22 @@ R2 `35665105299` pending, Native 9P `35665105178` queued, W08 policy
 `35665105293` pending, fault `35665105186` queued, W08 targets
 `35665105417` pending, CI `35665105286` pending, and W04 policy
 `35665105441` pending. None is terminal release evidence.
+Current-boundary update captured at 09:13 AEST: exact pushed `b65d4e31` passed
+the complete local release packet: format, full locked Rust workspace,
+strict Clippy, optimized N-API build, the complete pinned-oracle Node/N-API
+suite, and the full real-PGlite matrix. The packet reports Rust SDK `6/3/0`,
+Node SDK `5/3/0`, CLI `12/2`, upstream `1200 passed / 82 skipped`, and 40
+five-seed/eight-backend traces at 621 operations. The exact packet also
+passed the 64-way WebDAV probes, NFS process-crash/restart tests, injected
+PGlite cleanup failure gate, and artifact aggregation. `origin/main` has
+since advanced to `9b2dabd7` with bounded FUSE handoff changes, chunked
+concurrent-create batching, 9P mount-source parity, WebDAV NodeFs crash
+recovery and session-parity metadata, and related documentation; those are
+the next unqualified successor surfaces. Current Actions for `9b2dabd7` are
+R2 `35666473009` queued, Native 9P `35666472979` pending, W08 policy
+`35666472973` pending, fault `35666473104` queued, W08 targets
+`35666473078` pending, CI `35666472961` pending, and W04 policy
+`35666473004` pending. No current-head hosted gate is terminal.
 The latest completed R2 safety refusal `35628414156` failed closed at
 `count=139 limit=20`, and the latest documented AWS gate failed closed at
 `missing_bucket`; current provider, native, package-publication, and
@@ -147,6 +163,7 @@ gates therefore remain actionable work in this session.
 | W05.14 Qualify the pushed current tip after FUSE/9P/WebDAV/NFS/R2 changes | Local release qualification + hosted evidence | Full packet green on `eaf59894`; current `ccd3f671` successor remains open | 100% local packet / 0% current-tip hosted closure | Exact pushed `eaf59894` passed format, full locked Rust workspace, strict Clippy, optimized N-API, complete Node SDK/CLI suite, real PGlite reconnect/versioning/VFS/lifecycle/split-store/FUSE checks, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40 five-seed/eight-backend traces at 621 operations; injected cleanup failure remained fail-closed. Current `ccd3f671` adds direct 9P mount-signal teardown, wider WebDAV session concurrency, Ozone content-addressing coverage, and a FoundationDB qualification lock refresh, and is not locally requalified or hosted-accepted. | Re-run the complete packet on `ccd3f671` if it remains the selected release SHA; retain one terminal hosted CI/fault/W04/W08/provider/package/native result on that same SHA. | 1–3 h local requalification; hosted/provider wait separate | The current R2 lane is cap-blocked/nonterminal; AWS security inputs, platform runners, native mount privileges, signing, and package registries remain external gates. |
 | W05.15 Requalify the next pushed release tip after 9P/WebDAV/Ozone/HTTP gates | Local release qualification + hosted evidence | Full packet green on `a0c73c54`; current `e7888067` successor remains open | 100% local packet / 0% current-tip hosted closure | Exact pushed `a0c73c54` passed format, full locked Rust workspace including 7-case NFS v4 concurrent-client coverage, strict Clippy, optimized N-API, complete Node SDK/CLI suite including direct WebDAV session concurrency, real PGlite reconnect/versioning/VFS/lifecycle/split-store/FUSE checks, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40 five-seed/eight-backend traces at 621 operations; injected cleanup failure remained fail-closed. Current `e7888067` adds hosted 9P native-lifecycle coverage, WebDAV session-member tests, Ozone cleanup deduplication, and fragmented HTTP early-rejection coverage and is not locally requalified or hosted-accepted. | Re-run the complete packet on `e7888067` if it remains the selected release SHA; retain one terminal hosted CI/fault/W04/W08/provider/package/native result on that same SHA. | 1–3 h local requalification; hosted/provider wait separate | The R2 lane is cap-blocked/nonterminal; AWS security inputs, platform runners, native mount privileges, signing, and package registries remain external gates. |
 | W05.16 Requalify the latest shared tip after NFS process-crash fencing and widened WebDAV probes | Local changed-surface qualification + hosted/native evidence | Focused current-tip gates green; full packet and hosted closure open | 65% | Exact current `d391f9b7` passed direct WebDAV session concurrency with 64 concurrent PUT/GET pairs and network WebDAV concurrency/auth/streaming/error-callback coverage with 64 concurrent HTTP PUT/GET pairs. The same exact tip passed the NFS package: 38 Rust tests, process-crash/restart tests, rootless wire, transport concurrency/errors/lifecycle, v4 commit barrier, and seven v4 wire tests; strict package Clippy passed with `-D warnings`. The local N-API direct-9P probe reported the documented skip because macOS lacks the opted-in Linux/kernel 9P mount boundary. | Run the full format/locked Rust/strict Clippy/optimized N-API/complete Node/PGlite packet on the selected final SHA; retain terminal CI, fault, W04, W08, Native 9P, package, AWS, and provider results on that same SHA. Do not admit live R2 before the UTC-month reset and security-approved token rotation. | 1–3 h local full requalification; hosted/provider wait separate | Native kernel 9P, Linux FUSE, Windows, FSKit/signing, AWS security inputs, package registries, hosted concurrency, and the R2 monthly cap remain external gates. |
+| W05.17 Complete the full current-tip Rust/Node/SDK/CLI/PGlite packet | Local release qualification + hosted evidence | Full local packet green on `b65d4e31`; current `9b2dabd7` successor open | 100% local packet / 0% current-tip hosted closure | Exact pushed `b65d4e31` passed format, full locked Rust workspace, strict Clippy, optimized N-API, complete pinned-oracle Node/N-API suite, and real PGlite lifecycle/reconnect/versioning/VFS/split-store/FUSE checks. Rust SDK was `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40 five-seed/eight-backend traces passed at 621 operations; WebDAV direct/network concurrency, NFS process-crash/restart, cleanup fail-closed, and artifact aggregation also passed. Current `9b2dabd7` adds FUSE handoff, chunked batching, 9P source parity, WebDAV NodeFs crash recovery, and session-parity metadata changes and has not been requalified or hosted-accepted. | Re-run the complete packet on `9b2dabd7` or the selected final SHA; retain terminal CI, fault, W04/W08, Native 9P, package, AWS, and provider evidence on that same SHA. After the UTC-month reset and security-approved token rotation, run exactly one bounded live-R2 requalification. | 1–3 h local successor qualification; hosted/provider wait separate | R2 monthly cap, AWS security/OIDC inputs, hosted concurrency, Linux/kernel 9P and FUSE, Windows, FSKit/signing, registries, and package publication remain external gates. |
 
 ### W05.12 current-boundary reconciliation
 
@@ -175,6 +192,14 @@ focused-green as recorded in W05.16; the latest complete full packet remains
 Native 9P `35665105178` queued, W08 policy `35665105293` pending, fault
 `35665105186` queued, W08 targets `35665105417` pending, CI `35665105286`
 pending, and W04 policy `35665105441` pending.
+
+Follow-up boundary at 09:13 AEST: exact pushed `b65d4e31` is the latest
+complete local Rust/Node/SDK/CLI/PGlite qualification. `origin/main`
+`9b2dabd7` is a newer successor carrying FUSE handoff, chunked batching, 9P
+source parity, WebDAV NodeFs crash recovery, and session-parity metadata;
+those changes are not included in the `b65d4e31` full packet. Current hosted
+Actions on `9b2dabd7` remain queued or pending, and no current-head hosted,
+provider, native, package-publication, or final-audit acceptance is claimed.
 
 ## Production-readiness dependency register
 
@@ -258,11 +283,11 @@ necessary provider gate, not a substitute for these release criteria.
    fail-closed R2 cap and AWS security preflight have blocked new provider
    evidence.
 2. Select one final release SHA and let the required CI, fault, W07, AWS, and
-   package workflows reach terminal results on it. Pushed `a0c73c54` is the
+   package workflows reach terminal results on it. Pushed `b65d4e31` is the
    latest complete local Rust/Node/PGlite/CLI packet, while current
-   origin/main `d391f9b7` is a newer WebDAV/NFS successor with focused
-   changed-surface evidence only. No hosted result currently qualifies the
-   final SHA. Requalify
+   origin/main `9b2dabd7` is a newer FUSE/chunked/9P/WebDAV successor with no
+   full qualification yet. No hosted result currently qualifies the final
+   SHA. Requalify
    any later code tip before promoting a hosted result. Record every failed,
    cancelled, skipped, or externally blocked job rather than treating a
    partial matrix as green.
@@ -392,6 +417,7 @@ shown separately from active engineering time.
 
 | 2026-09-22 08:41–08:50 | Requalified exact pushed `a0c73c54` across format, full locked Rust, strict Clippy, optimized N-API, complete Node SDK/CLI, and full PGlite/oracle matrix; refreshed shared main and Actions | Local production qualification / hosted evidence | The exact `a0c73c54` packet passed with Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces. Current `e7888067` adds 9P hosted lifecycle, WebDAV session-member, Ozone cleanup, and HTTP early-rejection changes; current hosted workflows are queued/pending and R2 `35664438822` failed closed at the cap before live admission. |
 | 2026-09-22 08:50–08:57 | Fast-forwarded to `d391f9b7`, reran exact-tip NFS tests/strict Clippy, ran widened WebDAV direct-session and network concurrency probes, and refreshed Actions | Local changed-surface qualification / hosted evidence | NFS package tests (38 plus process-crash/restart, rootless, transport, and v4 suites) and strict Clippy passed; WebDAV direct-session and network probes passed 64 concurrent PUT/GET pairs with streaming/auth/error coverage. Local direct 9P correctly skipped at the macOS/kernel boundary. Current Actions are queued/pending across R2, Native 9P, W04, W08, fault, and CI; full current-tip packet and hosted release evidence remain open. |
+| 2026-09-22 08:57–09:13 | Completed the pushed `b65d4e31` full local packet: format, locked Rust workspace, strict Clippy, optimized N-API, complete oracle-enabled Node/N-API suite, real PGlite lifecycle/matrix, upstream suite, and trace parity; refreshed shared main and Actions | Local production qualification / hosted evidence | Full packet passed: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces; 64-way WebDAV, NFS process-crash/restart, cleanup fail-closed, and artifact aggregation passed. Oracle dependencies were installed frozen without lifecycle scripts after the first environment-only `unstorage` module gate. Origin advanced to `9b2dabd7`; its hosted R2/Native 9P/CI/W04/W08/fault runs are queued or pending and do not qualify the current successor. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program: **about 24–25 h total active work so far**. The
