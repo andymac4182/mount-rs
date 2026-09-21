@@ -1,11 +1,12 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 06:33 AEST**
+Status snapshot: **2026-09-22 06:37 AEST**
 Repository: `andymac4182/mount-rs`  
-Publication snapshot: W08.34 implementation commit `59149b95` and its
-hosted-boundary documentation commit `25ff75c1` were reconciled with
-concurrent mainline work and are included in current public ref
-`73b0936d2bcb1619e3ff928b083dbc5f544f63ea` (verified at **06:28 AEST**).
+Publication snapshot: W08.34 implementation commit `59149b95`, hosted-boundary
+documentation commit `25ff75c1` and hosted-success documentation commit
+`aec7fbdd` were reconciled with concurrent mainline work and are included in
+public ref `b649ed5140a69fdbd938c1ef91fb315c8150a726` (verified at **06:37
+AEST**).
 The W08.33 implementation and evidence-boundary commits `16ae685d` and
 `969339b8` remain in the same public ancestry.
 The W08.32 hosted-policy evidence documentation remains in the same public
@@ -443,7 +444,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 05:53–current | Added `--require-go` to the fail-closed rollout-ledger verifier, added production-admission negative/complete-GO coverage and wired a required admission job before the protected candidate build matrix; `node --check`, the seven-case suite, YAML parsing and `git diff --check` passed. | ~0.35 engineer-day | ~0 min hosted candidate admission by design; local qualification completed | W08.33 is an implementation safety control. The current production decision remains NO-GO; no candidate tag or production gate is claimed. |
 | 2026-09-22 05:53–06:11 AEST | Followed the post-push W08.33 policy state: push run `35648755697` for source `86a87ed0` and manual-dispatch run `35648898876` (resolved source `987c593b`) both cancelled before job creation; no hosted admission result was promoted to evidence. Committed the correction as `969339b8`, reconciled concurrent mainline changes twice, and published the result in public ref `38a995f5`. | ~0.1 engineer-day | ~1 min hosted queue/cancellation observation plus ~4 min fetch/merge/push reconciliation | W08.33 remains locally qualified only. The cancellation boundary is external hosted scheduling state; the production decision remains NO-GO and no candidate tag or production gate is claimed. |
 | 2026-09-22 06:13–06:28 AEST | Added the machine-readable NO-GO production-evidence packet, fail-closed validator/test and workflow admission wiring; local packet/rollout policy, ten-case evidence suite, seven-case rollout suite, YAML parsing and diff hygiene passed. Followed successful run `35650533691` and classified it as pre-W08.34, then classified current-tip run `35650626028` as cancelled with `jobs=[]`. Committed the boundary as `25ff75c1`, reconciled concurrent mainline changes twice, and published the pointer-synchronized result at `73b0936d`. | ~0.5 engineer-day | ~2m2s hosted run observation plus queue/cancellation boundary and ~5 min fetch/merge/push reconciliation; local qualification completed | W08.34 is implementation/static qualification only. No hosted packet-validator evidence is claimed; all P01–P09 remain open and the rollout decision remains NO-GO until actual production-like evidence and approval are supplied. |
-| 2026-09-22 06:28–06:33 AEST | Followed current-tip hosted run `35651363875` at source `14f8c344`, job `106504528377`, to terminal success; the W08 policy and existing release-identity/provenance steps passed. | ~0.05 engineer-day | ~2m41s hosted job runtime plus queue/terminal observation | W08.34 hosted implementation/static qualification passed. The packet remains NO-GO with zero production evidence records; P01–P09 and production approval remain open. |
+| 2026-09-22 06:28–06:37 AEST | Followed current-tip hosted run `35651363875` at source `14f8c344`, job `106504528377`, to terminal success; the W08 policy and existing release-identity/provenance steps passed. Committed the hosted-success update as `aec7fbdd`, reconciled concurrent mainline changes three times, and published it in public ref `b649ed51`. | ~0.05 engineer-day | ~2m41s hosted job runtime plus queue/terminal observation and ~8 min fetch/merge/push reconciliation | W08.34 hosted implementation/static qualification passed. The packet remains NO-GO with zero production evidence records; P01–P09 and production approval remain open. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
