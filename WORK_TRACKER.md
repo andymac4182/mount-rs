@@ -715,7 +715,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest hosted Linux Node/CLI/native-FUSE qualification is green at `35636591071`/`97b63aed` after the FUSE abort/shutdown fix; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; latest exact-current-main Linux Node/CLI/native-FUSE qualification is green at `35638932960`/`3817efc9` after the FUSE sync-barrier and blocked-read changes; the prior `35632139449` N-API build blocker was corrected and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1761,7 +1761,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   The p95/p99 outlier is retained as qualification telemetry, not production
   capacity evidence; production identity/ACL/TLS, backup/recovery, capacity,
   observability, macOS and release-owner gates remain open.
-  The latest post-FUSE-abort-fix hosted run
+  The previous post-FUSE-abort-fix hosted run
   [35636591071](https://github.com/andymac4182/mount-rs/actions/runs/35636591071)
   (job
   [106455406713](https://github.com/andymac4182/mount-rs/actions/runs/35636591071/job/106455406713))
@@ -1778,6 +1778,26 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `97b63aed2236696a8d397054b3c04c824e89c229`, run `35636591071`, attempt `1`
   and runner `GitHub Actions 1000020918`; the artifact SHA-256 is
   `123c2c5ece757fda141342d2b8e415e34269fff4246f5c3a8c147902415c137d`.
+  This is terminal hosted Linux qualification for the tested revision only;
+  production identity/ACL/TLS, backup/recovery, capacity, observability,
+  macOS and release-owner gates remain open.
+  The latest exact-current-main hosted run
+  [35638932960](https://github.com/andymac4182/mount-rs/actions/runs/35638932960)
+  (job
+  [106463213777](https://github.com/andymac4182/mount-rs/actions/runs/35638932960/job/106463213777))
+  tested current-main revision `3817efc9` on `ubuntu-24.04` and completed
+  green in 11m33s after the FUSE sync-barrier and blocked-read changes. Its
+  retained artifact `foundationdb-production-qualification-35638932960-1`
+  reported `qualification-pass`, `FOUNDATIONDB_CLI_PASS
+  mode=foundationdb-rustfs-fuse`, five soak rounds,
+  `FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=9751
+  p95_us=28824 p99_us=28824 total_ms=151 throughput_ops_per_sec=99.31`,
+  `FOUNDATIONDB_TEST_PASS topology=durable ... platform=linux/amd64
+  service_restart=pass soak_rounds=5`, `RUSTFS_COMBO_PASS` and
+  `RUSTFS_INTEGRATION_PASS`. The schema-2 provenance summary records source
+  revision `3817efc9999cc9d77e2c597873193d56206adb08`, run `35638932960`,
+  attempt `1` and runner `GitHub Actions 1000021113`; the artifact SHA-256 is
+  `c474b5ef9275ef88daf73e7fe90e36bd25eba8d149ac6849edfc672217ef4bd0`.
   This is terminal hosted Linux qualification for the tested revision only;
   production identity/ACL/TLS, backup/recovery, capacity, observability,
   macOS and release-owner gates remain open.
@@ -1821,9 +1841,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35636591071` recorded
-    `operations=15 p50_us=9640 p95_us=27896 p99_us=27896 total_ms=157
-    throughput_ops_per_sec=95.52` at revision `97b63aed`. This remains bounded
+    latency and throughput; latest hosted run `35638932960` recorded
+    `operations=15 p50_us=9751 p95_us=28824 p99_us=28824 total_ms=151
+    throughput_ops_per_sec=99.31` at revision `3817efc9`. This remains bounded
     qualification evidence and does not convert the five-round result into
     production capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -1836,8 +1856,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     keyspace and configuration, rehearse rollback/authority recovery and
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
-    Node, CLI/native Linux checkpoint is green for revision `97b63aed` in run
-    `35636591071` on `ubuntu-24.04`, with the retained schema-2
+    Node, CLI/native Linux checkpoint is green for revision `3817efc9` in run
+    `35638932960` on `ubuntu-24.04`, with the retained schema-2
     `qualification-pass` artifact and provenance digest. Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
