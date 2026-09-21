@@ -3,6 +3,7 @@ name: CI
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   # Ordinary pushes stay cheap, while an explicitly dispatched release
