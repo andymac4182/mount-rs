@@ -1154,7 +1154,9 @@ pub struct JsChunkedStoreOptions {
     pub uri: Option<String>,
     pub key: Option<String>,
     pub durable: Option<bool>,
+    /// FoundationDB only: persisted-single-authority or shared-provider.
     pub lease_authority: Option<String>,
+    /// FoundationDB shared-provider only: the authority record key prefix.
     pub authority_prefix: Option<String>,
     pub endpoint: Option<String>,
     pub bucket: Option<String>,
