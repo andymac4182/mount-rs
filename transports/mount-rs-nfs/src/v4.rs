@@ -3480,17 +3480,6 @@ impl Nfs4Session {
         };
 
         let mut state = self.state.lock().expect("NFSv4 state lock");
-        if target_key.is_none() {
-            let granted_ranges = state
-                .locks
-                .values()
-                .filter(|lock| lock.file_id == entry.fileid)
-                .map(|lock| lock.ranges.len())
-                .sum::<usize>();
-            if granted_ranges >= self.options.nfs4.max_locks_per_file.max(1) {
-                return V4OpResult::new(OP_LOCK, NFS4ERR_RESOURCE);
-            }
-        }
         let denied = state.locks.values().find_map(|held| {
             if held.file_id != entry.fileid || (held.clientid == clientid && held.owner == owner) {
                 return None;
@@ -3506,6 +3495,15 @@ impl Nfs4Session {
                 NFS4ERR_DENIED,
                 lock_denied_body(&range, held_clientid, &held_owner),
             );
+        }
+        let granted_ranges = state
+            .locks
+            .values()
+            .filter(|lock| lock.file_id == entry.fileid)
+            .map(|lock| lock.ranges.len())
+            .sum::<usize>();
+        if granted_ranges >= self.options.nfs4.max_locks_per_file.max(1) {
+            return V4OpResult::new(OP_LOCK, NFS4ERR_RESOURCE);
         }
 
         // A granted range replaces the requesting lock owner's overlapping
