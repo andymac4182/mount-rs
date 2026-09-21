@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 09:27 AEST**
+Status snapshot: **2026-09-22 09:31 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -11,8 +11,10 @@ with concurrent mainline work and pushed in public merge tip `a40f5b8d`.
 The exact fully tested Rust source is `7f964ca3`, which passed a fresh full
 locked workspace test and strict Clippy run after the concurrent NFS/9P/
 WebDAV/HTTP/provider, Ozone, FUSE, chunked, 9P parity, bounded teardown and
-NFS restart-fencing updates. The current public tip `a6a86e40` is a
-documentation-only merge after that tested source; the earlier public
+NFS restart-fencing updates. The current public tip `715beb9f` adds only
+N-API/JavaScript 9P constants and parity-test support after that tested Rust
+source; its changed JavaScript files are syntax-clean, while full local N-API
+runtime remains blocked by absent optional binding artifacts. The earlier public
 `9b2dabd7` added only a WebDAV N-API parity test file whose syntax is clean,
 while its local runtime is blocked by absent optional N-API binding artifacts.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
@@ -436,7 +438,7 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 09:23 AEST
+### Latest evidence refresh — 2026-09-22 09:31 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
@@ -444,6 +446,7 @@ the evidence counted here.
 | Public mainline `9b2dabd7` WebDAV N-API parity-test refresh | PARTIAL — syntax passes; local native-artifact runtime boundary | `node --check integrations/mount-rs-napi/test/webdav-session-parity.mjs` exited 0. Running the test exited 1 before the parity body because the checkout has no optional native N-API binding (`Cannot find native binding`, including the platform package/module alternatives). This is the same local artifact boundary already recorded for the Node consumer; hosted W08.4 Node/N-API acceptance remains the functional evidence. No production gate is closed. | Build or install the platform N-API artifact before claiming a local runtime pass; retain hosted/native evidence separately and do not promote this local artifact failure to a W08 production failure. |
 | Live GitHub production-boundary audit, 2026-09-22 08:49 AEST | BLOCKED — P09 repository/API/environment execution boundary | Read-only `gh api` checks returned HTTP 404 for the repository, `w08-production` environment and environment-secret surface. `gh release list` could not resolve the repository and `gh run list --workflow w08-production-release.yml` returned HTTP 404, so neither is promoted to current release evidence; the last successful API observation at 08:38 showed only `v0.1.0-cli-preview`. `git ls-remote` found no `v*-cli-production-candidate*` tag, while fetched `origin/main` contains `.github/workflows/w08-production-release.yml`. This is external GitHub/API and release-configuration evidence, not production acceptance. | Restore/authorize the repository API surface, configure the protected environment and reviewers/secrets, create an approved immutable candidate tag, run the terminal workflow, then inspect registry assets and execute canary/rollback/approval. |
 | Live GitHub production-boundary audit, 2026-09-22 09:25 AEST | BLOCKED — P09 repository/API/environment execution boundary | Read-only `gh api` checks again returned HTTP 404 for the repository, `w08-production` environment and environment-secret surface. `gh release list` could not resolve the repository and `gh run list --workflow w08-production-release.yml` returned HTTP 404; the last successful release observation remains 08:38 AEST with only `v0.1.0-cli-preview`. `git ls-remote` found no `v*-cli-production-candidate*` tag, while public `origin/main` contains `.github/workflows/w08-production-release.yml`. This is unchanged external GitHub/API and release-configuration evidence, not production acceptance. | Restore/authorize the repository API surface, configure the protected environment and reviewers/secrets, create an approved immutable candidate tag, run the terminal workflow, then inspect registry assets and execute canary/rollback/approval. |
+| Public current tip `715beb9f` 9P N-API constants/parity support | PARTIAL — JavaScript syntax/static checks pass; local N-API runtime not available | `node --check` passed for `p9.cjs`, `postlude-p9-codec.cjs`, `test/p9-constants.mjs`, `test/webdav-network-concurrency.mjs` and `test/webdav-session-concurrency.mjs`; all four W08 policy/evidence suites also passed. No full local N-API runtime claim is made because the checkout lacks optional native binding artifacts, as recorded above. Hosted W08.4 Node/N-API evidence remains authoritative. | Build or install the platform N-API artifact before claiming local runtime parity; keep this static/native-artifact boundary separate from production P01–P09. |
 
 ## Session time log
 
@@ -538,6 +541,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 09:10–09:15 AEST | Fast-forwarded to public tip `9b2dabd7`, reran all W08 policy/evidence suites, syntax-checked the new WebDAV N-API parity test, and attempted its local runtime. | ~0.05 engineer-day | ~6s policy/syntax/runtime check and mainline synchronization | Syntax passed; runtime stopped before execution because the optional local N-API binding is absent. Hosted W08.4 evidence remains valid; no production-gate state changed. |
 | 2026-09-22 09:15–09:23 AEST | Merged the published NFS restart-fencing and WebDAV parity updates through `656a8dab`, reran all four W08 policy/evidence suites, then ran the full locked workspace test and strict workspace Clippy on exact merge `7f964ca32110468d1d3eaa59a4067afd2ba651fb`; both exited 0. Merged the subsequent documentation-only public tip `b8d6a25b` as `d8d2b8dc`. | ~0.2 engineer-day | ~30s policy checks plus ~1m10s Cargo test/Clippy execution and mainline reconciliation | `7f964ca3` is the exact tested source and `d8d2b8dc` is source-equivalent; provider/native opt-in rows and all nine production gates remain open. |
 | 2026-09-22 09:23–09:27 AEST | Merged the public 9P parity documentation through `2667bc72`, reran the four W08 policy/evidence suites, pushed the reconciled W08 chunk at `a6a86e40370d5ac0723becc062fe811cb7d917b7`, and refreshed the read-only production boundary at 09:25 AEST. | ~0.1 engineer-day | ~30s policy checks, ~4 min remote merge/push, ~13s GitHub audit | Public refs matched `a6a86e40` after push; the production repository/environment API remains 404, no candidate tag is present, and all nine production gates remain open. |
+| 2026-09-22 09:27–09:31 AEST | Merged the published 9P constants/N-API support through `61b904c3`, reran all four W08 policy/evidence suites and JavaScript syntax checks for the changed files. | ~0.05 engineer-day | ~30s policy/syntax checks and mainline reconciliation | Current public N-API support is syntax-clean; full local runtime remains blocked by missing optional binding artifacts. The Rust source-health result at `7f964ca3` remains valid; no production-gate state changed. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
