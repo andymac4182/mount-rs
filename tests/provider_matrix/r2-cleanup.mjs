@@ -24,7 +24,8 @@ function xmlDecode(value) {
 }
 
 function validatePrefix(prefix) {
-  if (!prefix.startsWith("mount-rs-provider-matrix/") || prefix.includes("..")) {
+  const ownedRoots = ["mount-rs-provider-matrix/", "mount-rs-ozone/"];
+  if (!ownedRoots.some((root) => prefix.startsWith(root)) || prefix.includes("..")) {
     throw new Error(`R2 cleanup prefix is outside the test-owned scope: ${prefix}`);
   }
 }
@@ -133,12 +134,12 @@ export async function listR2Prefix(config, prefix) {
     });
     const body = await response.text();
     if (response.status !== 200) {
-      throw new Error(`RustFS prefix listing failed: HTTP ${response.status} ${body}`);
+      throw new Error(`S3-compatible prefix listing failed: HTTP ${response.status} ${body}`);
     }
     for (const match of body.matchAll(/<Key>([^<]*)<\/Key>/g)) {
       const key = xmlDecode(match[1]);
       if (!key.startsWith(`${prefix}/`)) {
-        throw new Error(`RustFS listing escaped the owned prefix: ${key}`);
+        throw new Error(`S3-compatible listing escaped the owned prefix: ${key}`);
       }
       keys.add(key);
     }
@@ -155,7 +156,7 @@ export async function cleanupR2Prefix(config, prefix, protectedKeys = new Set())
     const response = await signedRequest(config, "DELETE", key);
     const body = await response.text();
     if (![200, 204, 404].includes(response.status)) {
-      throw new Error(`RustFS object cleanup failed for ${key}: HTTP ${response.status} ${body}`);
+      throw new Error(`S3-compatible object cleanup failed for ${key}: HTTP ${response.status} ${body}`);
     }
   }
   const remaining = await listR2Prefix(config, prefix);

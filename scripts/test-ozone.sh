@@ -545,6 +545,21 @@ bounded_cli_ignored_cargo_test() {
   return "$test_status"
 }
 
+bounded_cli_remote_http_test() {
+  if bounded_process_command_for_timeout "$ozone_test_timeout" "ozone-cli-http-remote" \
+    sh "$repo_dir/scripts/test-cli-remote-ozone.sh"; then
+    return 0
+  else
+    test_status=$?
+  fi
+  if [ "$test_status" -eq 124 ] || [ "$test_status" -eq 125 ]; then
+    echo "Apache Ozone remote HTTP CLI test exceeded its bounded timeout" >&2
+  else
+    echo "Apache Ozone remote HTTP CLI test failed with status $test_status" >&2
+  fi
+  return "$test_status"
+}
+
 bounded_node_test() {
   test_name=$1
   test_script=$2
@@ -639,6 +654,8 @@ if [ "${MOUNT_RS_OZONE_COMPOSITIONS:-0}" = "1" ]; then
     bounded_cli_ignored_cargo_test "actual_binary_runs_live_ozone_split_provider_self_test"
     bounded_node_test "provider-matrix" "$repo_dir/tests/provider_matrix/node-sdk.mjs"
     bounded_node_test "cli" "$repo_dir/tests/ozone/node-cli.mjs"
+    export MOUNT_RS_CLI_REMOTE_PREFIX="$OZONE_TEST_PREFIX/cli-http"
+    bounded_cli_remote_http_test
   fi
 fi
 

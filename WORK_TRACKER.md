@@ -978,6 +978,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   published on main as `39a20b6`. This is local loopback/non-secure
   qualification evidence only: hosted acceptance, production identity/TLS,
   power-loss/backup recovery, capacity and operational gates remain open.
+  Hosted run `35591729423` at revision `1ea183e` reached the durable
+  FoundationDB configuration, transaction readiness, image match and cluster
+  readiness markers, then failed before the composition client could start:
+  `curl: (7) Failed to connect to host.docker.internal port 32768` and
+  `FoundationDB client container could not reach the composed block endpoint`.
+  The workflow was later superseded, so it is not hosted PASS evidence. This
+  exposed the Linux loopback-publish portability gap fixed in `6d2a5d4`, which
+  now attaches the owned RustFS container to the FoundationDB client network;
+  a terminal hosted rerun of that fix remains required.
+  The follow-up local arm64 durable run `foundationdb-network-cleanup` tested
+  the fix before commit `65b521c` (published as `6d2a5d4`) and exited 0 with
+  `FOUNDATIONDB_RUSTFS_NETWORK_READY`,
+  `FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403`,
+  `FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/arm64 service_restart=pass soak_rounds=0`,
+  `RUSTFS_COMBO_PASS` and `RUSTFS_INTEGRATION_PASS`; owned network disconnect
+  and cleanup also completed. This remains local qualification evidence only.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
@@ -1665,9 +1681,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   deployment evidence remain open. The adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
-  same bounded cross-driver staging and atomic publication path. Remaining
-  list/staging-retention and repository-coverage findings from the sealed
-  review remain open. Do not place AWS secrets in the repository or CI logs.
+  same bounded cross-driver staging and atomic publication path. ListObjectsV2
+  now uses bounded continuation-aware traversal with prefix pruning. Remaining
+  staging-retention and repository-coverage findings from the sealed review
+  remain open. Do not place AWS secrets in the repository or CI logs.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
@@ -1751,8 +1768,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   PGlite-to-S3 partial/truncate/reopen), Node CLI self-test/reopen, matching
   Rust CLI self-test/reopen and owned cleanup; the summary was `pass=7
   skip=1 fail=0`. The CI job now builds the NAPI addon and installs PGlite;
-  hosted results remain revision-specific. Ozone remains loopback-only,
-  non-secure and not production replicated-durability acceptance.
+  hosted results remain revision-specific. The same Ozone composition now
+  exercises the shipped HTTP server/client binary, range reads, cross-drive
+  authorization, graceful reopen and scoped object cleanup. Ozone remains
+  loopback-only, non-secure and not production replicated-durability
+  acceptance.
 
 ### W26 production-rollout readiness (post-demo; currently NO-GO)
 
@@ -1777,7 +1797,7 @@ qualification packet alone. W26 has CI only and no staging environment.
 | P8 — 1,000 IOPS per-drive CI workload | CI gate implemented; hosted result pending | 10% | Existing benchmark measures successful write+read+delete lifecycle IOPS and fails below 1,000; Ozone composition CI is wired for 4 KiB payloads, 400 iterations, concurrency 64 and artifact retention. Local live evidence is blocked by missing PGlite/N-API prerequisites. |
 | P9 — compatibility handoff | External release/deployment dependency | 0% W26 migration evidence | W26 supplies compatibility notes; release stream owns promotion/rollback |
 | P10 — security, privacy, tenancy and audit | Open | 15% | Threat model, provenance, isolation, encryption expectations and security CI evidence |
-| P11 — end-to-end client/platform matrix | Open | 20% | Rust/Node/CLI/HTTP/native advertised surfaces through Ozone; cross-workstream runners required |
+| P11 — end-to-end client/platform matrix | HTTP path added to Ozone CI; full matrix open | 25% | Rust/Node/CLI and the shipped HTTP server/client path now run through the Ozone composition gate with scoped cleanup; native mounts, every advertised platform, and terminal hosted evidence remain open |
 | P12 — release handoff | External release stream | 0% W26 release evidence | Reproducible CI inputs and evidence markers only; no W26 canary claim |
 | P13 — incident/failover handoff | External customer/Ozone operations | 0% W26 rehearsal evidence | CI fault cases plus customer operator scenarios for 99.99%/5-minute RTO |
 | P14 — final W26 integration-readiness review | Not started | 0% | One-revision all-provider/performance/security/end-to-end audit and explicit handoff decision |

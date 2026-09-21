@@ -65,6 +65,10 @@ impl FsDriver for FlakyReadOpenDriver {
     async fn unlink(&self, path: &str) -> mount_rs_core::Result<()> {
         self.inner.unlink(path).await
     }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> mount_rs_core::Result<()> {
+        self.inner.rename(old_path, new_path).await
+    }
 }
 
 #[tokio::test]

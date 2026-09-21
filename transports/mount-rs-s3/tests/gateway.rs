@@ -521,6 +521,29 @@ async fn session_round_trip_lists_ranges_and_conditionals() {
     assert!(page_text.contains("<KeyCount>1</KeyCount>"));
     assert!(page_text.contains("<IsTruncated>true</IsTruncated>"));
     assert!(!page_text.contains(".mountx-multipart"));
+    let token = xml_field(page_text.as_bytes(), "NextContinuationToken");
+    assert!(!token.is_empty());
+    let next_page = session
+        .handle(request(
+            "GET",
+            &format!("/mountx?list-type=2&delimiter=%2F&max-keys=1&continuation-token={token}"),
+            [],
+            &[],
+        ))
+        .await;
+    assert_eq!(next_page.status, 200);
+    let next_page_text = String::from_utf8(next_page.body).expect("listing is XML");
+    assert!(next_page_text.contains("<KeyCount>1</KeyCount>"));
+    assert!(next_page_text.contains("<IsTruncated>true</IsTruncated>"));
+    assert!(next_page_text.contains("<CommonPrefixes><Prefix>a/</Prefix>"));
+
+    let empty_page = session
+        .handle(request("GET", "/mountx?list-type=2&max-keys=0", [], &[]))
+        .await;
+    assert_eq!(empty_page.status, 200);
+    let empty_page_text = String::from_utf8(empty_page.body).expect("listing is XML");
+    assert!(empty_page_text.contains("<KeyCount>0</KeyCount>"));
+    assert!(empty_page_text.contains("<IsTruncated>false</IsTruncated>"));
 
     let missing_range = session
         .handle(request(
