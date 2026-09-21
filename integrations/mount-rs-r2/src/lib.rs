@@ -12,6 +12,7 @@ pub use blocks::R2BlockStore;
 
 use std::fmt;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use mount_rs_core::{FsError, Result, backend_error};
@@ -19,7 +20,17 @@ use mount_rs_persist::{LoadedSnapshot, PersistedFs, StateStore, snapshot_conflic
 use object_store::aws::{AmazonS3Builder, AmazonS3ConfigKey, S3ConditionalPut};
 use object_store::client::ClientConfigKey;
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
+use object_store::{ObjectStore, PutMode, PutOptions, PutPayload, RetryConfig, UpdateVersion};
+
+/// Maximum number of internal object-store retry attempts for the AWS S3
+/// provider. The public SDK configuration intentionally does not expose a
+/// deployment-specific retry knob yet; this conservative bound prevents an
+/// expired short-lived credential from being hidden behind an unbounded wait.
+pub const AWS_S3_MAX_RETRIES: usize = 5;
+/// Maximum elapsed retry time for one AWS S3 request. This remains below the
+/// five-minute temporary-credential safety boundary documented by
+/// `object_store`.
+pub const AWS_S3_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub struct R2Config {
@@ -50,12 +61,22 @@ impl AwsS3Config {
         Ok(())
     }
 
+    /// Return the bounded retry policy used for AWS S3 requests.
+    pub fn retry_config(&self) -> RetryConfig {
+        RetryConfig {
+            max_retries: AWS_S3_MAX_RETRIES,
+            retry_timeout: AWS_S3_RETRY_TIMEOUT,
+            ..RetryConfig::default()
+        }
+    }
+
     pub fn build_store(&self) -> Result<Arc<dyn ObjectStore>> {
         self.validate()?;
         let builder = AmazonS3Builder::from_env()
             .with_bucket_name(&self.bucket)
             .with_region(&self.region)
             .with_virtual_hosted_style_request(true)
+            .with_retry(self.retry_config())
             .with_conditional_put(S3ConditionalPut::ETagMatch);
         validate_aws_builder(&builder)?;
         Ok(Arc::new(builder.build().map_err(backend_error)?))
@@ -655,6 +676,18 @@ mod tests {
             };
             assert!(config.validate().is_err(), "accepted {bucket}/{region}");
         }
+    }
+
+    #[test]
+    fn aws_s3_retry_policy_is_explicit_and_credential_safe() {
+        let config = AwsS3Config {
+            bucket: "mount-rs-production".to_owned(),
+            region: "ap-southeast-2".to_owned(),
+        };
+        let retry = config.retry_config();
+        assert_eq!(retry.max_retries, AWS_S3_MAX_RETRIES);
+        assert_eq!(retry.retry_timeout, AWS_S3_RETRY_TIMEOUT);
+        assert!(retry.retry_timeout < Duration::from_secs(5 * 60));
     }
 
     #[test]
