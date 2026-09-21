@@ -1190,8 +1190,13 @@ reproducible in a production-like environment.
   for an empty registry); the default `mount-rs-http` suite passed 8 unit and
   10 integration tests, and its all-features observability/OTLP suite passed 8
   unit and 13 integration tests; strict Clippy passed in both configurations.
+  Responses also carry `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`, with local regression assertions passing
+  on reconciled source `2159976`.
   Hosted CI run `35599817215`, source `b26819e`, job `106333141914` also
-  reached terminal success for that all-features gate. This is
+  reached terminal success for the pre-hardening all-features gate. The
+  header-hardening hosted requalification is still open because successive
+  current-main candidates were cancelled before the job ran. This is
   process/configuration and local/hosted exporter-path evidence only:
   provider-aware readiness, collector, SLO, paging, redaction and end-to-end
   alert evidence remain open. *(Implementation + hosted/provider; collector
@@ -1729,6 +1734,12 @@ listing a source does not mean it has been reviewed or its code can be reused.
   passing run includes the 14-test S3 gateway suite, 13 AWS-provider unit
   tests, both signed HTTP interop tests, and the public SDK/CLI tests; the
   workspace's explicitly ignored native/service rows remain separate gates.
+- [x] Final current-head qualification rerun on 2026-09-21 at local
+  `b720696` passed `cargo fmt --all -- --check`, the full locked offline
+  workspace test gate, and strict workspace Clippy with `-D warnings`. This
+  confirms the current source and workflow head before rollout review; the
+  explicitly ignored native/service rows and all production deployment gates
+  remain separate and are not claimed by this local result.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -1767,8 +1778,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `bb69ddae-798a-4387-bb87-f3e7acd496cb`, which reports zero reportable
   findings in the 22 directly reviewed W25 surfaces, with partial repository
   coverage (596 files, 22 closed review rows). Hosted OIDC trust, the protected
-  versioning-status input, and the deployment evidence remain open. The latest
-  hosted run `35598843178` stopped before AWS authentication with
+  versioning-status input, and the deployment evidence remain open. Latest
+  hosted run `35601403560` at head `2159976` stopped before AWS authentication with
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; this is a successful safety
   refusal, not acceptance evidence. The existing test
   role trust policy allows only the selected SSO administrator role and does

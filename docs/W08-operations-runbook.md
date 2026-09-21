@@ -51,8 +51,10 @@ The preflight record must also include:
 - for the HTTP transport, `GET`/`HEAD /healthz` returning `200` with
   `{"status":"ok"}` and `/readyz` returning `200` with the configured drive
   count; an empty registry must return `503` with `{"status":"not_ready"}`;
-  these are listener/process and local configuration checks only, not remote
-  TiDB, RustFS, TLS, collector or pager health;
+  both responses must include `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`; these are listener/process and local
+  configuration checks only, not remote TiDB, RustFS, TLS, collector or pager
+  health;
 - successful TiDB identity/version and readiness checks from the selected
   topology;
 - an HTTPS block-store health/read/write check using the runtime identity and
