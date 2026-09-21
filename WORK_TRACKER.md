@@ -1976,14 +1976,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   successful safety refusal, not acceptance evidence. The preceding hosted run
   `35608516727` at `8e271cd` stopped at the same preflight boundary. A fresh
   Standard scan `c6992ddb-3762-4638-b37e-f1399bd77e42` targets `8e271cd`, not
-  current head `3fca802`; it therefore cannot be used as current-head release
+  current head `a2fda11`; it therefore cannot be used as current-head release
   evidence, regardless of its result. The completed scan found one medium
   `StoreConfig` debug-credential disclosure in its 10 reviewed W25 surfaces
   and partial 606-file inventory; the issue is remediated on current pushed
   head `3fca802` by a redacting SDK `Debug` implementation and regression test,
-  but the scan itself predates that fix and remains stale for current-head
-  security acceptance. The existing test
-  role trust policy allows only the selected SSO administrator role and does
+  and the later `1d63319` IaC prefix hardening is also outside the scan; the
+  scan itself remains stale for current-head security acceptance. The existing
+  test role trust policy allows only the selected SSO administrator role and does
   not trust GitHub's OIDC provider, so an approved IAM trust-policy change and
   protected environment configuration are required before rerunning hosted
   evidence. The read-only
