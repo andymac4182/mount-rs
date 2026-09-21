@@ -13,6 +13,7 @@
  */
 
 import http from "node:http";
+import net from "node:net";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -207,21 +208,46 @@ async function writeUntilEarlyResponse(request) {
 
   return await new Promise((resolve, reject) => {
     let settled = false;
-    const client = http.request(target, {
-      method: "PUT",
-      headers: {
-        ...request.headers,
-        // The server is allowed to stop consuming this deliberately invalid
-        // body as soon as the first bad signature is decoded.
-        connection: "close",
-      },
-    });
+    let timeout;
+    let cleanupScheduled = false;
+    let socket;
+    let responseBuffer = Buffer.alloc(0);
+    let responseLength;
+    let responseChunked = false;
+    let responseChunkLength;
+    let responseBodyBytes = 0;
+    const responseBodyParts = [];
+    const crlf = Buffer.from("\r\n");
+
+    const requestHeaders = { ...request.headers, connection: "close" };
+    if (!Object.keys(requestHeaders).some((name) => name.toLowerCase() === "host")) {
+      requestHeaders.host = target.host;
+    }
+    const requestHead = Buffer.from(
+      [
+        `PUT ${target.pathname}${target.search} HTTP/1.1`,
+        ...Object.entries(requestHeaders).map(([name, value]) => `${name}: ${value}`),
+        "",
+        "",
+      ].join("\r\n"),
+    );
+
+    const cleanup = () => {
+      if (cleanupScheduled) return;
+      cleanupScheduled = true;
+      clearTimeout(timeout);
+      // A peer-close error can be reported on the next turn after the socket
+      // close event, so keep the narrowly scoped guard installed for one
+      // more turn before restoring the process default.
+      setImmediate(() => process.off("uncaughtException", handleUncaughtException));
+    };
 
     const fail = (error) => {
       if (settled) return;
       settled = true;
       state.stopped = true;
-      client.destroy();
+      cleanup();
+      socket?.destroy();
       reject(error);
     };
 
@@ -236,10 +262,11 @@ async function writeUntilEarlyResponse(request) {
         return;
       }
       settled = true;
+      cleanup();
       resolve(state);
     };
 
-    const handleRequestError = (error) => {
+    const handleUncaughtException = (error) => {
       if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
         state.requestError = error;
         return;
@@ -247,14 +274,182 @@ async function writeUntilEarlyResponse(request) {
       fail(error);
     };
 
-    client.on("error", handleRequestError);
-    // On macOS, a peer that closes after the early response can surface the
-    // expected EPIPE on the underlying socket instead of the ClientRequest.
-    // Keep the same bounded handling on both event sources so the negative
-    // path remains strict for unexpected transport errors.
-    client.on("socket", (socket) => socket.on("error", handleRequestError));
+    const handleSocketError = (error) => {
+      if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
+        state.requestError = error;
+        return;
+      }
+      fail(error);
+    };
 
-    client.once("close", () => {
+    // Node 24 can surface an EPIPE from a queued socket write as an
+    // uncaughtException instead of emitting it on the socket. This test
+    // intentionally races a peer response with fragmented writes, so handle
+    // only the expected shutdown family after the response has started.
+    process.on("uncaughtException", handleUncaughtException);
+
+    const appendResponseBody = (chunk) => {
+      if (chunk.byteLength === 0) return;
+      responseBodyParts.push(Buffer.from(chunk));
+      responseBodyBytes += chunk.byteLength;
+    };
+
+    const completeResponse = () => {
+      if (state.responseEnded) return;
+      state.responseEnded = true;
+      state.responseBody = Buffer.concat(responseBodyParts).toString("utf8");
+      socket?.destroy();
+      finish();
+    };
+
+    const consumeChunkedResponse = () => {
+      while (!state.responseEnded) {
+        if (responseChunkLength === undefined) {
+          const lineEnd = responseBuffer.indexOf(crlf);
+          if (lineEnd < 0) return;
+          const sizeLine = responseBuffer.subarray(0, lineEnd).toString("ascii");
+          const size = Number.parseInt(sizeLine.split(";", 1)[0], 16);
+          if (!Number.isFinite(size) || size < 0) {
+            fail(new Error(`invalid chunked HTTP response size: ${sizeLine}`));
+            return;
+          }
+          responseBuffer = responseBuffer.subarray(lineEnd + crlf.byteLength);
+          if (size === 0) {
+            if (responseBuffer.subarray(0, crlf.byteLength).equals(crlf)) {
+              responseBuffer = responseBuffer.subarray(crlf.byteLength);
+              completeResponse();
+              return;
+            }
+            const trailersEnd = responseBuffer.indexOf(Buffer.from("\r\n\r\n"));
+            if (trailersEnd < 0) return;
+            responseBuffer = responseBuffer.subarray(trailersEnd + 4);
+            completeResponse();
+            return;
+          }
+          responseChunkLength = size;
+        }
+
+        const size = Math.min(responseChunkLength, responseBuffer.byteLength);
+        if (size > 0) {
+          appendResponseBody(responseBuffer.subarray(0, size));
+          responseBuffer = responseBuffer.subarray(size);
+          responseChunkLength -= size;
+        }
+        if (responseChunkLength > 0) return;
+        if (responseBuffer.byteLength < crlf.byteLength) return;
+        if (!responseBuffer.subarray(0, crlf.byteLength).equals(crlf)) {
+          fail(new Error("chunked HTTP response is missing its chunk terminator"));
+          return;
+        }
+        responseBuffer = responseBuffer.subarray(crlf.byteLength);
+        responseChunkLength = undefined;
+      }
+    };
+
+    const consumeResponse = () => {
+      if (!state.responseStarted) {
+        const headerEnd = responseBuffer.indexOf(Buffer.from("\r\n\r\n"));
+        if (headerEnd < 0) return;
+        const headerLines = responseBuffer.subarray(0, headerEnd).toString("latin1").split("\r\n");
+        const statusMatch = headerLines.shift()?.match(/^HTTP\/\d\.\d\s+(\d{3})(?:\s|$)/);
+        if (!statusMatch) {
+          fail(new Error("malformed early-rejection HTTP response status"));
+          return;
+        }
+        const responseHeaders = new Map();
+        for (const line of headerLines) {
+          const separator = line.indexOf(":");
+          if (separator < 0) {
+            fail(new Error(`malformed early-rejection HTTP response header: ${line}`));
+            return;
+          }
+          responseHeaders.set(
+            line.slice(0, separator).trim().toLowerCase(),
+            line.slice(separator + 1).trim(),
+          );
+        }
+        const transferEncoding = responseHeaders.get("transfer-encoding") ?? "";
+        responseChunked = /(?:^|,)\s*chunked\s*(?:,|$)/i.test(transferEncoding);
+        if (!responseChunked && responseHeaders.has("content-length")) {
+          responseLength = Number.parseInt(responseHeaders.get("content-length"), 10);
+          if (!Number.isSafeInteger(responseLength) || responseLength < 0) {
+            fail(
+              new Error(
+                `invalid early-rejection HTTP content length: ${responseHeaders.get("content-length")}`,
+              ),
+            );
+            return;
+          }
+        }
+        state.responseStarted = true;
+        state.stopped = true;
+        state.responseStatus = Number(statusMatch[1]);
+        responseBuffer = responseBuffer.subarray(headerEnd + 4);
+      }
+
+      if (responseChunked) {
+        consumeChunkedResponse();
+        return;
+      }
+      if (responseLength === undefined) {
+        appendResponseBody(responseBuffer);
+        responseBuffer = Buffer.alloc(0);
+        return;
+      }
+      const size = Math.min(responseLength - responseBodyBytes, responseBuffer.byteLength);
+      if (size > 0) {
+        appendResponseBody(responseBuffer.subarray(0, size));
+        responseBuffer = responseBuffer.subarray(size);
+      }
+      if (responseBodyBytes === responseLength) completeResponse();
+    };
+
+    const writeChunk = (chunk) =>
+      new Promise((resolve, reject) => {
+        if (!socket || socket.destroyed) {
+          reject(Object.assign(new Error("HTTP request socket was destroyed"), { code: "ERR_STREAM_DESTROYED" }));
+          return;
+        }
+        let finished = false;
+        const settle = (error) => {
+          if (finished) return;
+          finished = true;
+          socket.off("error", onError);
+          if (error) reject(error);
+          else resolve();
+        };
+        const onError = (error) => settle(error);
+        socket.once("error", onError);
+        try {
+          socket.write(chunk, (error) => settle(error));
+        } catch (error) {
+          settle(error);
+        }
+      });
+
+    socket = net.createConnection({
+      host: target.hostname,
+      port: Number(target.port) || 80,
+    });
+    socket.on("error", handleSocketError);
+    socket.on("data", (chunk) => {
+      responseBuffer = Buffer.concat([responseBuffer, chunk]);
+      consumeResponse();
+    });
+    socket.once("end", () => {
+      if (!state.responseStarted) {
+        fail(new Error("HTTP request socket closed before the early rejection response"));
+        return;
+      }
+      if (state.responseEnded) return;
+      if (responseChunked || responseLength !== undefined) {
+        fail(new Error("early rejection response closed before its complete body"));
+        return;
+      }
+      consumeResponse();
+      completeResponse();
+    });
+    socket.once("close", () => {
       state.requestClosed = true;
       if (!state.responseStarted) {
         fail(new Error("HTTP request closed before the early rejection response"));
@@ -263,47 +458,47 @@ async function writeUntilEarlyResponse(request) {
       finish();
     });
 
-    client.on("response", (response) => {
-      state.responseStarted = true;
-      state.stopped = true;
-      state.responseStatus = response.statusCode;
-      response.setEncoding("utf8");
-      response.on("data", (chunk) => {
-        state.responseBody += chunk;
-      });
-      response.once("error", fail);
-      response.once("aborted", () => fail(new Error("early rejection response was aborted")));
-      response.once("close", () => {
-        if (!state.responseEnded) fail(new Error("early rejection response closed before end"));
-      });
-      response.once("end", () => {
-        state.responseEnded = true;
-        client.destroy();
-        finish();
-      });
-    });
-
     const write = async () => {
       let offset = 0;
       let pull = 0;
-      while (offset < request.body.byteLength && !state.stopped) {
-        await sleep(2);
-        if (state.stopped) break;
-        const size = chunkSizes[pull % chunkSizes.length];
-        const end = Math.min(request.body.byteLength, offset + size);
-        client.write(request.body.subarray(offset, end));
-        offset = end;
-        state.sent = offset;
-        pull += 1;
-        while (client.writableNeedDrain && !state.stopped) await sleep(1);
+      try {
+        await writeChunk(requestHead);
+        while (offset < request.body.byteLength && !state.stopped) {
+          await sleep(2);
+          if (state.stopped) break;
+          const size = chunkSizes[pull % chunkSizes.length];
+          const end = Math.min(request.body.byteLength, offset + size);
+          try {
+            await writeChunk(request.body.subarray(offset, end));
+          } catch (error) {
+            if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
+              state.requestError = error;
+              break;
+            }
+            throw error;
+          }
+          offset = end;
+          state.sent = offset;
+          pull += 1;
+        }
+        if (!state.stopped) socket.end();
+      } catch (error) {
+        if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
+          state.requestError = error;
+          return;
+        }
+        fail(error);
       }
-      if (!state.stopped) client.end();
     };
 
-    client.setTimeout(HTTP_TIMEOUT_MS, () =>
+    socket.setTimeout(HTTP_TIMEOUT_MS, () =>
       fail(new Error(`timed out waiting for early rejection after ${HTTP_TIMEOUT_MS}ms`)),
     );
-    write().catch(fail);
+    timeout = setTimeout(
+      () => fail(new Error(`timed out waiting for early rejection after ${HTTP_TIMEOUT_MS}ms`)),
+      HTTP_TIMEOUT_MS,
+    );
+    socket.once("connect", () => void write());
   });
 }
 

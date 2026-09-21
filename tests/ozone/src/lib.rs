@@ -254,7 +254,12 @@ async fn real_ozone_block_contract() {
         )
         .unwrap();
 
-        for id in concurrent_ids.into_iter().chain([first_id, second_id]) {
+        let mut cleanup_ids = concurrent_ids;
+        cleanup_ids.push(first_id);
+        if second_id != *cleanup_ids.last().expect("first block ID is retained") {
+            cleanup_ids.push(second_id);
+        }
+        for id in cleanup_ids {
             blocks.delete(&id).await.unwrap();
         }
         object_store.delete(&conditional_path).await.unwrap();
