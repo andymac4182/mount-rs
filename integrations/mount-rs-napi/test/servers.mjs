@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import {
   Filesystem,
   NfsConnection,
+  Nfs3Session,
   Nfs4Session,
   NfsSession,
   S3Session,
@@ -367,7 +368,22 @@ async function exerciseNfs() {
     assert.ok(server.port > 0);
     assert.equal(server.connections, 0);
     assert.ok(server.session instanceof NfsSession);
+    assert.ok(server.session.v3 instanceof Nfs3Session);
     assert.ok(server.session.v4 instanceof Nfs4Session);
+    assert.ok(server.session.driver instanceof Filesystem);
+    assert.ok(server.session.v3.driver instanceof Filesystem);
+    assert.ok(server.session.v4.driver instanceof Filesystem);
+    assert.equal(server.session.options.maxHandles, 2);
+    assert.equal(server.session.options.nfs4.leaseSeconds, 7);
+    assert.equal(server.session.options.nfs4.idmapConfigured, true);
+    assert.deepEqual(
+      [...server.session.writeVerifier],
+      [...server.session.v3.writeVerifier],
+    );
+    assert.deepEqual(
+      [...server.session.writeVerifier],
+      [...server.session.v4.writeVerifier],
+    );
     assert.deepEqual(server.session.mounts, []);
     assert.equal(server.session.destroyed, false);
     assert.deepEqual(server.session.stats, {
@@ -384,15 +400,21 @@ async function exerciseNfs() {
     assert.equal(directReply.readUInt32BE(20), 0);
     assert.equal(server.session.stats.requests, 1);
 
+    const directV3Reply = await server.session.v3.handleCall(nfsNullCall(41));
+    assert.ok(Buffer.isBuffer(directV3Reply));
+    assert.equal(directV3Reply.readUInt32BE(0), 41);
+    assert.equal(directV3Reply.readUInt32BE(20), 0);
+    assert.equal(server.session.stats.requests, 2);
+
     const directV4Reply = await server.session.handleCall(nfsV4NullCall(44));
     assert.ok(Buffer.isBuffer(directV4Reply));
     assert.equal(directV4Reply.readUInt32BE(0), 44);
     assert.equal(directV4Reply.readUInt32BE(4), 1);
     assert.equal(directV4Reply.readUInt32BE(20), 0);
     assert.equal(server.session.v4.destroyed, false);
-    assert.equal(server.session.stats.requests, 2);
+    assert.equal(server.session.stats.requests, 3);
     assert.equal(server.session.stats.procedures["NFS4:NULL"], 1);
-    assert.equal(server.session.v4.stats.requests, 2);
+    assert.equal(server.session.v4.stats.requests, 3);
     assert.equal(await server.session.v4.sweepExpired(), 0);
     assert.ok(clockCalls.length > 0, "NFSv4 uses the injected JavaScript clock");
 
@@ -571,6 +593,7 @@ async function exerciseNfs() {
     assert.match(nfsConnection.peer, /^127\.0\.0\.1:\d+$/);
     assert.equal(nfsConnection.isClosed, false);
     assert.ok(nfsConnection.session instanceof NfsSession);
+    assert.ok(nfsConnection.session.v3 instanceof Nfs3Session);
     assert.ok(nfsConnection.session.v4 instanceof Nfs4Session);
     assert.ok(nfsConnection.closed instanceof Promise);
     assert.strictEqual(nfsConnection.closed, nfsConnection.closed);

@@ -372,6 +372,36 @@ export declare class NativeP9Writer {
   writeRgetlock(value: NativeP9Rgetlock): void
 }
 
+/**
+ * Read-only N-API view of the NFSv3/MOUNT session routed by an [`NfsServer`].
+ * It shares the transport's handle table, counters, driver, and destruction
+ * state with the unified session view.
+ */
+export declare class Nfs3Session {
+  /**
+   * Handle one unframed NFSv3 or MOUNTv3 RPC record. Malformed records
+   * return `null`; decoded calls return one encoded RPC reply.
+   */
+  handleCall(bytes: Buffer): Promise<Buffer | null>
+  /**
+   * Read-only N-API wrapper for the session-owned filesystem driver. The
+   * server retains the authoritative driver lifetime.
+   */
+  get driver(): Filesystem
+  get options(): NfsSessionOptionsView
+  get writeVerifier(): Buffer
+  get stats(): NfsSessionStats
+  get mounts(): Array<Array<string>>
+  /**
+   * Stable read-only snapshots of the shared v3/v4 file-handle table.
+   * Handles are BigInts because the transport identity is u64.
+   */
+  get handles(): Array<NfsHandleEntry>
+  get destroyed(): boolean
+  /** Destroy the NFSv3/MOUNT session and release its process-local state. */
+  destroy(): Promise<void>
+}
+
 /** Read-only N-API view of the NFSv4.1 session routed by an [`NfsServer`]. */
 export declare class Nfs4Session {
   /**
@@ -379,6 +409,18 @@ export declare class Nfs4Session {
    * decoded calls return one encoded RPC reply.
    */
   handleCall(bytes: Buffer): Promise<Buffer | null>
+  /**
+   * Read-only N-API wrapper for the session-owned filesystem driver. The
+   * server retains the authoritative driver lifetime.
+   */
+  get driver(): Filesystem
+  /**
+   * Effective scalar policy. Callback values are retained by the server
+   * hook boundary and are intentionally not returned as new JS functions.
+   */
+  get options(): NfsSessionOptionsView
+  /** The NFSv4.1 write verifier carried by WRITE and COMMIT replies. */
+  get writeVerifier(): Buffer
   /** Sweep expired NFSv4 client leases and release their process-local state. */
   sweepExpired(): Promise<number>
   get stats(): NfsSessionStats
@@ -423,10 +465,27 @@ export declare class NfsSession {
    */
   handleCall(bytes: Buffer): Promise<Buffer | null>
   /**
+   * The NFSv3/MOUNT session routed by this server. Its state is read-only
+   * at the N-API boundary and shares the server-owned driver lifetime.
+   */
+  get v3(): Nfs3Session
+  /**
    * The NFSv4.1 session routed by this server. Its state is read-only at the
    * N-API boundary and shares the server-owned driver lifetime.
    */
   get v4(): Nfs4Session
+  /**
+   * Read-only N-API wrapper for the session-owned filesystem driver. The
+   * server retains the authoritative driver lifetime.
+   */
+  get driver(): Filesystem
+  /**
+   * Effective scalar policy. Callback values are retained by the server
+   * hook boundary and are intentionally not returned as new JS functions.
+   */
+  get options(): NfsSessionOptionsView
+  /** The write verifier shared by NFSv3 and NFSv4 replies for this server. */
+  get writeVerifier(): Buffer
   get stats(): NfsSessionStats
   get mounts(): Array<Array<string>>
   /**
@@ -2177,6 +2236,25 @@ export interface Nfs4StateKnobs {
   requireReclaimComplete?: boolean
 }
 
+/**
+ * Effective scalar NFSv4 policy exposed by a server-owned session view.
+ * Callback functions are retained by the server hook boundary and therefore
+ * are represented only by the fact that an ID map was configured.
+ */
+export interface Nfs4StateOptionsView {
+  leaseSeconds: number
+  seed: number
+  maxSessions: number
+  maxForeSlots: number
+  maxOperations: number
+  maxRequestSize: number
+  maxCachedResponseSize: number
+  maxOpensPerFile: number
+  maxLocksPerFile: number
+  requireReclaimComplete: boolean
+  idmapConfigured: boolean
+}
+
 export declare function nfsAuthNull(): NfsOpaqueAuth
 
 export declare function nfsAuthSys(uid?: number | undefined | null, gid?: number | undefined | null, machineName?: string | undefined | null): NfsOpaqueAuth
@@ -2335,6 +2413,23 @@ export interface NfsServerOptions {
   nfs4?: Nfs4StateKnobs
   onTransportError?: (error: unknown, peer: string | undefined) => void
   onError?: (error: unknown, call: NfsRpcCall | undefined) => void
+}
+
+/**
+ * Effective scalar policy exposed by a server-owned NFS session view.
+ * `onError`, ID-map callbacks, and the injected clock are intentionally not
+ * reflected as callable values because their lifetimes belong to the server.
+ */
+export interface NfsSessionOptionsView {
+  useDriverIno: boolean
+  verifier?: Uint8Array | null
+  maxHandles?: number
+  rtmax: number
+  wtmax: number
+  dtpref: number
+  snapshotCache: number
+  claimOwnership: boolean
+  nfs4: Nfs4StateOptionsView
 }
 
 export interface NfsSessionStats {

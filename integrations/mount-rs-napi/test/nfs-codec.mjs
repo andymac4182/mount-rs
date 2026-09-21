@@ -11,6 +11,7 @@ assert.deepEqual(Object.keys(root), rootKeys, "NFS facade must not mutate root e
 assert.equal(native.createNfsServer, root.createNfsServer)
 assert.equal(native.NfsServer, root.NfsServer)
 assert.equal(native.NfsSession, root.NfsSession)
+assert.equal(native.Nfs3Session, root.Nfs3Session)
 assert.equal(native.Nfs4Session, root.Nfs4Session)
 assert.equal(native.NfsConnection, root.NfsConnection)
 

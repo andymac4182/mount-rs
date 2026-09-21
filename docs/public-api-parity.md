@@ -270,14 +270,18 @@ Current focused behavior:
   controls are explicitly unsupported in this packet, and hosted N-API native
   mount lifecycle evidence remains unverified.
 - NFS now exposes a shared `session` view with v3/v4-aware direct `handleCall`
-  routing, direct `destroy()` on both the unified and v4 views, a read-only `v4`
-  session view, synchronized v3/v4 request/reply/error/drop/procedure stats,
-  mount records, destroyed-state readback, the server's active `connections`
-  count, and live `clients()` objects with stable id/peer/session views plus
-  `close()`/`waitClosed()` lifecycle. Both N-API session views expose
-  deterministic BigInt-backed snapshots of the Rust server's shared v3/v4
-  handle table; remaining upstream member differences and the complete
-  stateful/crash/durability surface remain open. S3 now
+  routing, direct v3/v4/unified `destroy()` operations, read-only v3 and v4
+  session views, server-owned driver wrappers, effective scalar options,
+  write-verifier readback, synchronized v3/v4 request/reply/error/drop/procedure
+  stats, mount records, destroyed-state readback, the server's active
+  `connections` count, and live `clients()` objects with stable id/peer/session
+  views plus `close()`/`waitClosed()` lifecycle. All three N-API session views
+  expose deterministic BigInt-backed snapshots of the Rust server's shared
+  v3/v4 handle table. The low-level mutable v4 state table and callback
+  function values are intentionally outside the N-API inspection surface;
+  wire operations, effective knobs, lease sweeping, and live callback tests
+  qualify the supported behavior. Cross-process crash/durability and native
+  acceptance remain open. S3 now
   exposes `S3Server.session`, bucket names, session-owned bucket wrappers,
   safe effective options, debug-gated assertions, buffered `handleRequest`,
   streaming `handleRequestStream`, async session metrics, live `connections`,
