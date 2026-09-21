@@ -81,14 +81,22 @@ shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
-NFSv3 calls under bounded in-flight dispatch. A restart-boundary test also
-proves that a replacement server rejects the old v4 session with
-`NFS4ERR_BADSESSION`, classifying session/lease/replay state as process-local.
-The opt-in macOS native NFSv3
-loopback mount gate passed 1/1 in 0.11s on the exact pushed tip. Production
-remains NO-GO pending the privileged Linux v4.1 lane, the full v3/v4
-stateful/member surface, hosted/native lifecycle evidence, automatic reconnect
-backend durability, crash injection, and durable-restart qualification. The
+NFSv3 calls under bounded in-flight dispatch. The forced-crash boundary tests
+now reject a pre-crash NFSv3 file handle with `NFS3ERR_STALE`, a pre-crash v4
+session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
+`NFS4ERR_STALE`; the v4 session identity folds both write-verifier halves to
+avoid the observed replacement alias. Two independent v4 sessions also
+complete concurrent distinct-file OPEN/WRITE/READ round trips. Multiple server
+processes sharing one backend remain explicitly outside the supported scope.
+The pinned current-tip NFS conformance refresh passed 266 tests with 18
+explicit capability/root skips and zero mismatches. The opt-in macOS native
+NFSv3 loopback mount gate passed 1/1 in 0.11s, and hosted run
+`35658285441` passed the named macOS and Ubuntu native-NFS jobs; the overall
+workflow was not green because unrelated jobs failed. Production remains
+NO-GO pending complete v3/v4 stateful/member parity, a green hosted release
+qualification, automatic reconnect/backend durability, crash injection,
+durable-restart qualification, and native-client concurrency beyond the
+bounded in-process scope. The
 new bounded NFSv4 channel/state packet exposes `leaseSeconds`, per-client
 session/fore-slot/COMPOUND ceilings, request/replay-cache ceilings, per-file
 open/lock limits, and `requireReclaimComplete` through Rust and nested N-API
@@ -103,9 +111,9 @@ safe N-API bridges, with a live v4.1 owner/clock sequence. Rust
 `NfsSessionHooks` and N-API `NfsServerOptions.onError` now report decoded
 request failures with panic isolation; the malformed-v4 callback test,
 complete NFS target, release addon/typecheck, live N-API harness, and strict
-affected Clippy pass. Native Linux/hosted lifecycle and crash/durability gates
-remain open.
-Deterministic seeded identities are covered.
+affected Clippy pass. Named native-NFS hosted jobs are accepted platform
+evidence, but complete hosted qualification and crash/durability gates remain
+open. Deterministic seeded identities are covered.
 
 Current local acceptance: on 2026-09-20, `scripts/test-all.sh` exited 0 at
 `73c33e0` with the pinned mountx checkout and live, bucket-scoped Cloudflare R2
@@ -1677,6 +1685,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Node matrix, artifact/package provenance, deployment persistence and
   backup/rollback, provider scope/performance, observability, runbook,
   ownership, and release approval gates.
+
+- Current W04 recovery chunks: WebDAV session parity now pins native/oracle
+  directory and file mtimes before exact PROPFIND XML comparison; the focused
+  parity test passed 30 repetitions, `node --check`, formatting, and
+  `git diff --check`. Ozone cleanup now deduplicates the repeated block ID;
+  the local `mount-rs-r2` suite passed 18/18 and the standalone Ozone workspace
+  compiled with `--locked`. These changes were published as `9b2dabd7` and
+  `23c0ba7e` respectively. The first full run `35664315098` remained queued
+  after its macOS runner failed to materialize and was canceled after its
+  pre-fix WebDAV `PROPFIND`, Ozone cleanup `block object` ENOENT, and
+  pre-`bc292709` Ubuntu FUSE failures were diagnosed. Recovery run
+  `35666527609` is active from `9b2dabd7`, before the Ozone fix; Windows and
+  ARM Node have started while Linux/macOS/provider jobs remain queued at the
+  ledger snapshot. No queued, partial, or pre-fix result is promoted to W04
+  or production acceptance; production remains **NO-GO**.
 
 ## W05 — Cloudflare R2
 
