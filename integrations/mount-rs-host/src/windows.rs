@@ -13,8 +13,15 @@ use mount_rs_core::{OpenFlags, Stats, StatsFs};
 type Handle = *mut c_void;
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+const GENERIC_READ: u32 = 0x8000_0000;
+const GENERIC_WRITE: u32 = 0x4000_0000;
+const CREATE_NEW: u32 = 1;
+const OPEN_EXISTING: u32 = 3;
 const SYMBOLIC_LINK_FLAG_DIRECTORY: u32 = 0x1;
 const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: u32 = 0x2;
+const SYMLINK_FLAG_RELATIVE: u32 = 0x1;
+const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 const FILE_ATTRIBUTE_ARCHIVE: u32 = 0x20;
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
@@ -124,7 +131,20 @@ unsafe extern "system" {
         existing_path: *const u16,
         security: *const c_void,
     ) -> i32;
+    fn CreateDirectoryW(path: *const u16, security: *const c_void) -> i32;
     fn CreateSymbolicLinkW(link: *const u16, target: *const u16, flags: u32) -> i32;
+    fn DeleteFileW(path: *const u16) -> i32;
+    fn RemoveDirectoryW(path: *const u16) -> i32;
+    fn DeviceIoControl(
+        device: Handle,
+        control_code: u32,
+        input: *const c_void,
+        input_size: u32,
+        output: *mut c_void,
+        output_size: u32,
+        bytes_returned: *mut u32,
+        overlapped: *mut c_void,
+    ) -> i32;
     fn GetFileInformationByHandle(handle: Handle, info: *mut HandleInfo) -> i32;
     fn GetFileInformationByHandleEx(
         handle: Handle,
@@ -226,10 +246,158 @@ fn wide_link_target(target: &str) -> io::Result<Vec<u16>> {
     Ok(wide)
 }
 
+fn reparse_link_target(target: &str) -> io::Result<Vec<u16>> {
+    let mut target = wide_link_target(target)?;
+    target.pop();
+
+    // The substitute name in a Windows symlink reparse buffer is an NT path
+    // for absolute targets, while relative targets must remain relative so
+    // rename/move semantics match CreateSymbolicLinkW and Node.
+    let is_drive_absolute =
+        target.len() >= 3 && target[1] == u16::from(b':') && target[2] == u16::from(b'\\');
+    let is_unc = target.starts_with(&[u16::from(b'\\'), u16::from(b'\\')]);
+    let is_extended = target.starts_with(&[92, 92, 63, 92]);
+    if is_extended {
+        target = [92, 63, 63, 92]
+            .into_iter()
+            .chain(target[4..].iter().copied())
+            .collect();
+    } else if is_drive_absolute {
+        target = [92, 63, 63, 92]
+            .into_iter()
+            .chain(target.iter().copied())
+            .collect();
+    } else if is_unc {
+        target = [92, 63, 63, 92, 85, 78, 67, 92]
+            .into_iter()
+            .chain(target[2..].iter().copied())
+            .collect();
+    }
+    Ok(target)
+}
+
+fn write_u16(buffer: &mut [u8], offset: usize, value: u16) {
+    buffer[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(buffer: &mut [u8], offset: usize, value: u32) {
+    buffer[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn remove_created_symlink_entry(path: &[u16], directory: bool) {
+    // SAFETY: `path` is a live NUL-terminated UTF-16 path and the cleanup
+    // operation is best effort after the creation handle has been closed.
+    unsafe {
+        if directory {
+            let _ = RemoveDirectoryW(path.as_ptr());
+        } else {
+            let _ = DeleteFileW(path.as_ptr());
+        }
+    }
+}
+
+fn create_long_symlink(path: &Path, target: &str, directory: bool) -> io::Result<()> {
+    let link = wide_host_path(path)?;
+    let target = reparse_link_target(target)?;
+    let target_bytes = target
+        .len()
+        .checked_mul(2)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let target_bytes =
+        u16::try_from(target_bytes).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let data_length = 12_u32
+        .checked_add(u32::from(target_bytes) * 2)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let data_length =
+        u16::try_from(data_length).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let total_length = 8_usize
+        .checked_add(data_length as usize)
+        .ok_or_else(|| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let mut reparse = vec![0_u8; total_length];
+    write_u32(&mut reparse, 0, IO_REPARSE_TAG_SYMLINK);
+    write_u16(&mut reparse, 4, data_length);
+    write_u16(&mut reparse, 8, target_bytes);
+    write_u16(&mut reparse, 10, target_bytes);
+    write_u16(&mut reparse, 12, 0);
+    write_u16(&mut reparse, 14, target_bytes);
+    write_u32(
+        &mut reparse,
+        16,
+        if target.starts_with(&[92, 63, 63, 92]) {
+            0
+        } else {
+            SYMLINK_FLAG_RELATIVE
+        },
+    );
+    for (index, unit) in target.iter().chain(target.iter()).enumerate() {
+        reparse[20 + index * 2..22 + index * 2].copy_from_slice(&unit.to_le_bytes());
+    }
+
+    let mut created_directory = false;
+    if directory {
+        // SAFETY: `link` is a live NUL-terminated UTF-16 path. The null
+        // security descriptor requests the default directory security.
+        if unsafe { CreateDirectoryW(link.as_ptr(), std::ptr::null()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        created_directory = true;
+    }
+
+    let disposition = if directory { OPEN_EXISTING } else { CREATE_NEW };
+    let attributes = if directory {
+        BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+    } else {
+        FILE_ATTRIBUTE_NORMAL | OPEN_REPARSE_POINT
+    };
+    // SAFETY: the path and arguments remain valid for the synchronous call;
+    // successful creation transfers ownership of the returned handle.
+    let handle = unsafe {
+        CreateFileW(
+            link.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE,
+            7,
+            std::ptr::null(),
+            disposition,
+            attributes,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == -1_isize as Handle {
+        let error = io::Error::last_os_error();
+        if created_directory {
+            remove_created_symlink_entry(&link, true);
+        }
+        return Err(error);
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    let mut bytes_returned = 0_u32;
+    // SAFETY: `file` owns the handle, `reparse` is a correctly sized buffered
+    // FSCTL_SET_REPARSE_POINT input, and no output buffer is requested.
+    if unsafe {
+        DeviceIoControl(
+            file.as_raw_handle(),
+            FSCTL_SET_REPARSE_POINT,
+            reparse.as_ptr().cast(),
+            reparse.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        let error = io::Error::last_os_error();
+        drop(file);
+        remove_created_symlink_entry(&link, directory);
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<()> {
     let link = wide_symbolic_link_path(path)?;
     let extended_link = wide_host_path(path)?;
-    let target = wide_link_target(target)?;
+    let target_wide = wide_link_target(target)?;
     let type_flag = if directory {
         SYMBOLIC_LINK_FLAG_DIRECTORY
     } else {
@@ -243,7 +411,7 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
     loop {
         // SAFETY: both buffers are NUL-terminated UTF-16 and remain alive for
         // the synchronous CreateSymbolicLinkW call.
-        if unsafe { CreateSymbolicLinkW(link_path.as_ptr(), target.as_ptr(), flags) } != 0 {
+        if unsafe { CreateSymbolicLinkW(link_path.as_ptr(), target_wide.as_ptr(), flags) } != 0 {
             return Ok(());
         }
         let error = io::Error::last_os_error();
@@ -262,6 +430,9 @@ pub(super) fn symlink(target: &str, path: &Path, directory: bool) -> io::Result<
             // process and filesystem have opted into long paths.
             link_path = &extended_link;
             continue;
+        }
+        if std::ptr::eq(link_path, &extended_link) && error.raw_os_error() == Some(2) {
+            return create_long_symlink(path, target, directory);
         }
         return Err(error);
     }

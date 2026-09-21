@@ -1,8 +1,10 @@
 //! The HTTP boundary for the S3 session.
 //!
-//! The unauthenticated mode is deliberately loopback-only. A configured
-//! credential pair enables SigV4 verification before dispatch and permits an
-//! operator-selected non-loopback bind.
+//! The listener is deliberately loopback-only because this crate does not
+//! provide TLS or replay protection. A configured credential pair enables
+//! SigV4 verification before dispatch, but it never authorizes a remote bind;
+//! put a reviewed TLS/mTLS proxy in front of the loopback listener when remote
+//! access is required.
 
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -49,6 +51,8 @@ impl Default for S3ServerOptions {
 pub enum S3BindError {
     #[error("unauthenticated S3 gateway must bind a loopback address; refused {host}")]
     UnauthenticatedNonLoopback { host: IpAddr },
+    #[error("S3 gateway has no TLS boundary and must bind a loopback address; refused {host}")]
+    NonLoopbackUnsupported { host: IpAddr },
     #[error("failed to bind S3 gateway: {0}")]
     Bind(#[source] std::io::Error),
     #[error("S3 server task failed: {0}")]
@@ -67,8 +71,12 @@ impl S3Server {
         session: Arc<S3Session>,
         options: S3ServerOptions,
     ) -> Result<Self, S3BindError> {
-        if session.options.credentials.is_none() && !options.host.is_loopback() {
-            return Err(S3BindError::UnauthenticatedNonLoopback { host: options.host });
+        if !options.host.is_loopback() {
+            return Err(if session.options.credentials.is_none() {
+                S3BindError::UnauthenticatedNonLoopback { host: options.host }
+            } else {
+                S3BindError::NonLoopbackUnsupported { host: options.host }
+            });
         }
         let listener = TcpListener::bind(SocketAddr::new(options.host, options.port))
             .await

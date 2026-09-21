@@ -970,6 +970,31 @@ async fn unauthenticated_server_refuses_non_loopback_bind() {
     ));
 }
 
+#[tokio::test]
+async fn credentialed_server_refuses_non_loopback_without_tls() {
+    let session = Arc::new(S3Session::new_with_options(
+        MemoryFs::empty(),
+        S3SessionOptions {
+            credentials: Some(Credentials::new("AKIAMOUNTX7REMOTE", "test-secret-key")),
+            region: Some("us-east-1".to_owned()),
+            ..S3SessionOptions::default()
+        },
+    ));
+    let result = S3Server::start(
+        session,
+        S3ServerOptions {
+            host: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: 0,
+        },
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(S3BindError::NonLoopbackUnsupported { host })
+            if host == IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    ));
+}
+
 #[derive(Clone)]
 struct ProbeSignals {
     first_write: Arc<Notify>,

@@ -4,9 +4,10 @@
 path-style S3-compatible HTTP gateway. It is a transport gateway, not a native
 filesystem mount: the rootless tests exercise HTTP and S3 semantics only.
 
-The unauthenticated server binds loopback addresses only. Configure SigV4
-credentials before binding a non-loopback address. The crate supports the
-core object operations, ListObjectsV2, ranges and HTTP conditionals, copy,
+The server always binds loopback addresses only. SigV4 credentials authenticate
+requests but do not provide TLS or authorize a non-loopback bind; put a
+reviewed TLS/mTLS proxy in front of the loopback listener for remote access.
+The crate supports the core object operations, ListObjectsV2, ranges and HTTP conditionals, copy,
 DeleteObjects, and multipart create/upload/list/complete/abort using the
 driver's reserved `.mountx-multipart` staging tree.
 
