@@ -246,6 +246,13 @@ Current focused behavior:
   `Duplex`; the supported Node stream-injection boundary is `attach`.
   The public `peer` type retains the native listener's `null` absence while
   allowing the attached-stream contract's `undefined` absence.
+- The N-API object boundary keeps serializable lifecycle views: native
+  `P9Server.address()`/`path` use string-or-null representations, and effective
+  `onError`/`onAssertion` hooks are omitted from `server.options` and
+  `session.options` rather than pretending that live JavaScript functions can
+  be round-tripped through the native getter. The focused metadata regression
+  checks those snapshots plus the attached stream/peer state; the hosted direct
+  mount test checks the native stream/peer representation.
 - The N-API P9 session now exposes the scalar session policy through
   `session.options` and the attach identity through `userFor(fid)`; the server
   exposes its effective scalar policy through `server.options`. These members

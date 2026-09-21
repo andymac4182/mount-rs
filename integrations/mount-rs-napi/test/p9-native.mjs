@@ -47,6 +47,8 @@ try {
   assert.equal(mounted.trans, "unix")
   assert.ok(mounted.server)
   assert.ok(mounted.connection)
+  assert.equal(mounted.connection.stream, undefined)
+  assert.equal(mounted.connection.peer, null)
   assert.equal(typeof mounted.waitClosed, "function")
   assert.equal((await live9pMounts()).length, 1)
 

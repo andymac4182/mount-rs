@@ -6,6 +6,8 @@ import p9 from "../p9.cjs";
 
 const { Filesystem, createP9Server } = root;
 const { P9LockTable, encodeMessage } = p9;
+const onError = () => {};
+const onAssertion = () => {};
 
 function waitUntil(predicate, label) {
   const deadline = Date.now() + 5_000;
@@ -37,15 +39,26 @@ const server = createP9Server(Filesystem.memory(), {
   readOnly: true,
   msize: 32 * 1024,
   locks: sharedLocks,
+  onError,
+  onAssertion,
 });
 const connection = server.attach(stream, { own: false, peer: "metadata-test" });
 
 try {
+  assert.equal(server.address(), null);
+  assert.equal(server.path, null);
+  assert.equal(server.options.onError, undefined);
+  assert.equal(server.options.onAssertion, undefined);
   assert.equal(server.options.maxInFlight, 3);
   assert.equal(server.options.readOnly, true);
   assert.equal(server.options.msize, 32 * 1024);
+  assert.equal(connection.stream, stream);
+  assert.equal(connection.peer, "metadata-test");
+  assert.equal(connection.isClosed, false);
   assert.equal(connection.session.options.msize, 32 * 1024);
   assert.equal(connection.session.options.readOnly, true);
+  assert.equal(connection.session.options.onError, undefined);
+  assert.equal(connection.session.options.onAssertion, undefined);
   assert.ok(server.options.locks);
   assert.ok(connection.session.options.locks);
   const sharedClient = sharedLocks.client();
