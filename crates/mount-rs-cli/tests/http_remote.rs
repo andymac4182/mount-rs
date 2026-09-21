@@ -22,6 +22,7 @@ struct HttpResponse {
 struct HttpChild {
     child: Child,
     stdout: Receiver<String>,
+    #[cfg_attr(not(unix), allow(dead_code))]
     stderr: Receiver<String>,
     readers: Vec<JoinHandle<()>>,
     root: PathBuf,
@@ -136,6 +137,7 @@ impl HttpChild {
     }
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
 fn redact_remote_diagnostic(line: &str) -> String {
     let mut redacted = mount_rs_cli::config::redact_diagnostic(line);
     for name in [

@@ -2005,10 +2005,12 @@ fn transport_probe(probe: TransportProbe) -> JsTransportProbe {
 }
 
 fn auto_probe(probe: mount_rs_auto::AutoProbe) -> JsAutoProbe {
-    // Rust names the Darwin target `macos`, while Node's public platform
-    // contract (and the upstream TypeScript facade) uses `darwin`.
+    // Rust names Darwin and Windows targets `macos` and `windows`, while
+    // Node's public platform contract (and the upstream TypeScript facade)
+    // uses `darwin` and `win32`.
     let platform = match probe.platform.as_str() {
         "macos" => "darwin".to_owned(),
+        "windows" => "win32".to_owned(),
         platform => platform.to_owned(),
     };
     JsAutoProbe {
@@ -3350,6 +3352,8 @@ mod tests {
         let probe = auto_probe(mount_rs_auto::probe_transports_for("macos"));
         assert_eq!(probe.platform, "darwin");
         assert_eq!(probe.preference, vec!["nfs", "fuse", "9p"]);
+        let windows = auto_probe(mount_rs_auto::probe_transports_for("windows"));
+        assert_eq!(windows.platform, "win32");
 
         assert_eq!(parse_auto_transport(None).unwrap(), AutoTransport::Auto);
         assert_eq!(
