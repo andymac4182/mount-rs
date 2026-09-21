@@ -378,15 +378,15 @@ differential, listener, provider/native, restart, and hosted gates remain open.
 The Rust listener lifecycle itself is locally qualified by concurrent
 `listen()` serialization, an immediate `listen()`/`close()` shutdown-wakeup
 regression, and a bounded-drain regression: a stalled partial request keeps a
-timed-out server in a draining state, repeated `close()` calls continue to
-report the timeout, and `listen()` is rejected until the peer exits. The
+timed-out server in a terminal closing state, aborts the tracked connection
+task, and rejects `listen()` until a successful retry close completes. The
 focused host-enabled WebDAV target passes 18/18 with strict warning-denied
 Clippy and formatting. The N-API WebDAV wrapper also serializes its
 closed-state check with the transport lifecycle; a rebuilt 40-iteration
 real-loopback race test passes. The opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
-host-enabled WebDAV network/fault/restart matrix; N-API forced connection
-cancellation, network/hosted concurrency and hosted lifecycle remain open.
+host-enabled WebDAV network/fault/restart matrix; hosted network concurrency
+and hosted lifecycle remain open.
 The shared postbuild server facade keeps close idempotent while in flight but
 clears a rejected close promise so a timed-out N-API WebDAV close can be
 retried after the peer drains.

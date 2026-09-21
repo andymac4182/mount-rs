@@ -182,28 +182,29 @@ async fn close_timeout_keeps_the_server_in_a_draining_state() {
         first_close,
         WebdavServerError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
     ));
-    assert_eq!(server.connections(), 1);
-
     let listen_while_draining = server
         .listen()
         .await
         .expect_err("relisten must not race the timed-out drain");
-    assert!(listen_while_draining.to_string().contains("draining"));
+    assert!(
+        listen_while_draining.to_string().contains("closing")
+            || listen_while_draining.to_string().contains("draining")
+    );
 
-    let second_close = server
+    timeout(Duration::from_secs(1), async {
+        while server.connections() != 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("timed-out close must force-cancel the stalled connection");
+
+    server
         .close()
         .await
-        .expect_err("a second close must not report false success");
-    assert!(matches!(
-        second_close,
-        WebdavServerError::Io(error) if error.kind() == std::io::ErrorKind::TimedOut
-    ));
+        .expect("a retry after forced cancellation must complete");
 
     drop(stream);
-    timeout(Duration::from_secs(1), server.close())
-        .await
-        .expect("close after the stalled peer exited")
-        .expect("close after the stalled peer exited");
     assert_eq!(server.connections(), 0);
 }
 
