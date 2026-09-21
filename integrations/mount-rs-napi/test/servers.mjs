@@ -50,6 +50,10 @@ async function runPhase(label, task) {
   }
 }
 
+function markPhase(label) {
+  activePhase = { label, startedAt: Date.now() };
+}
+
 async function within(promise, label) {
   let timer;
   try {
@@ -854,17 +858,20 @@ async function exerciseS3() {
   let idleSocket;
   let faultSocket;
   try {
+    markPhase("S3 listener setup");
     assert.equal(server.port, 0);
     listening = (await listenLifecycle(server, "S3")).listening;
     assert.ok(server.port > 0);
     assert.equal(server.connections, 0);
     assert.equal(server.url.endsWith("/"), false);
     assert.deepEqual(server.buckets, ["notes", "photos"]);
+    markPhase("S3 idle connection setup");
     idleSocket = (await connectLoopback(server.port)).socket;
     await waitUntil(() => server.connections >= 1, "S3 accepted connection count");
     await closeSocket(idleSocket, "S3 idle connection close");
     idleSocket = undefined;
     await waitUntil(() => server.connections === 0, "S3 disconnected connection count");
+    markPhase("S3 session inspection");
     assert.ok(server.session instanceof S3Session);
     assert.deepEqual(server.session.bucketNames, ["notes", "photos"]);
     assert.deepEqual(Object.keys(server.session.buckets).sort(), ["notes", "photos"]);
@@ -893,6 +900,7 @@ async function exerciseS3() {
     assert.deepEqual(server.session.assertions, []);
 
     const object = Buffer.from("S3 over the real loopback HTTP listener");
+    markPhase("S3 buffered PUT");
     const put = await fetchBody(
       `${server.url}/photos/servers-s3.txt`,
       { method: "PUT", body: object },
@@ -900,6 +908,7 @@ async function exerciseS3() {
     );
     assert.ok(put.response.status >= 200 && put.response.status < 300);
 
+    markPhase("S3 buffered GET");
     const get = await fetchBody(
       `${server.url}/photos/servers-s3.txt`,
       { method: "GET" },
@@ -908,6 +917,7 @@ async function exerciseS3() {
     assert.equal(get.response.status, 200);
     assert.deepEqual(get.body, object);
 
+    markPhase("S3 bucket isolation");
     const isolated = await fetchBody(
       `${server.url}/notes/servers-s3.txt`,
       { method: "GET" },
@@ -926,6 +936,7 @@ async function exerciseS3() {
         yield streamedObject.subarray(start, start + 100 * 1024);
       }
     }
+    markPhase("S3 streamed PUT");
     const streamedPut = await within(
       server.session.handleRequestStream(
         {
@@ -946,9 +957,11 @@ async function exerciseS3() {
       streamedObject,
     );
 
+    markPhase("S3 multipart initiation");
     const initiated = await bufferedS3(server.session, "POST", "/photos/restarted-s3.bin?uploads");
     assert.equal(initiated.status, 200);
     const uploadId = xmlField(initiated.body, "UploadId");
+    markPhase("S3 multipart part upload");
     const part = await bufferedS3(
       server.session,
       "PUT",
@@ -961,8 +974,10 @@ async function exerciseS3() {
 
     // Rebuild the server facade over the same native Filesystem. Multipart
     // state is represented by the driver tree, not a session-local registry.
+    markPhase("S3 replacement server setup");
     const replacement = createS3Server({ buckets: { photos } }, { debug: true });
     try {
+      markPhase("S3 multipart listing after replacement");
       const listed = await bufferedS3(
         replacement.session,
         "GET",
@@ -970,6 +985,7 @@ async function exerciseS3() {
       );
       assert.equal(listed.status, 200);
       assert.match(Buffer.from(listed.body).toString(), /<PartNumber>1<\/PartNumber>/);
+      markPhase("S3 multipart completion after replacement");
       const completed = await bufferedS3(
         replacement.session,
         "POST",
@@ -979,6 +995,7 @@ async function exerciseS3() {
         ),
       );
       assert.equal(completed.status, 200);
+      markPhase("S3 object read after replacement");
       const restartedObject = await bufferedS3(
         replacement.session,
         "GET",
@@ -995,6 +1012,7 @@ async function exerciseS3() {
         controller.close();
       },
     });
+    markPhase("S3 streamed GET");
     const streamedGet = await within(
       server.session.handleRequestStream(
         { method: "GET", target: "/photos/streamed-s3.txt", headers: [] },
@@ -1009,6 +1027,7 @@ async function exerciseS3() {
     assert.ok(streamedChunks.length >= 3);
     assert.deepEqual(Buffer.concat(streamedChunks), streamedObject);
 
+    markPhase("S3 streamed cancellation setup");
     const cancelledGet = await within(
       server.session.handleRequestStream(
         { method: "GET", target: "/photos/streamed-s3.txt", headers: [] },
@@ -1027,6 +1046,7 @@ async function exerciseS3() {
       yield Buffer.from("partial");
       throw new Error("deliberate S3 request stream failure");
     }
+    markPhase("S3 streamed request failure");
     const failedStream = await within(
       server.session.handleRequestStream(
         {
@@ -1040,6 +1060,7 @@ async function exerciseS3() {
     );
     assert.equal(failedStream.status, 400);
 
+    markPhase("S3 streamed stats");
     const streamedStats = await server.session.stats();
     assert.equal(streamedStats.requests, beforeStreamStats.requests + 6);
     assert.equal(streamedStats.replies, beforeStreamStats.replies + 6);
@@ -1056,8 +1077,10 @@ async function exerciseS3() {
     assert.deepEqual(server.session.assertions, []);
     assert.deepEqual(reports, []);
 
+    markPhase("S3 peer-fault fixture write");
     await photos.writeFile("/peer-fault-s3.txt", Buffer.alloc(4 * 1024 * 1024, 0x1b));
     const faultReplyCount = streamedStats.replies;
+    markPhase("S3 peer-fault connection");
     faultSocket = (await connectLoopback(server.port)).socket;
     await writeSocket(
       faultSocket,
@@ -1066,6 +1089,7 @@ async function exerciseS3() {
       ),
       "S3 JavaScript peer-fault request",
     );
+    markPhase("S3 peer-fault response readiness");
     await within(
       (async () => {
         while ((await server.session.stats()).replies <= faultReplyCount) {
@@ -1074,12 +1098,15 @@ async function exerciseS3() {
       })(),
       "S3 JavaScript peer-fault response readiness",
     );
+    markPhase("S3 peer-fault reset");
     faultSocket.destroy(new Error("deliberate S3 peer reset"));
+    markPhase("S3 peer-fault callback");
     const faultReport = await waitForTransportError(reports, "S3 JavaScript peer fault");
     assert.ok(faultReport.error instanceof Error);
     assert.match(faultReport.peer, /^127\.0\.0\.1:\d+$/);
     assert.equal(reports.length, 1);
     faultSocket = undefined;
+    markPhase("S3 peer-fault connection cleanup");
     await waitUntil(() => server.connections === 0, "S3 peer-fault connection cleanup");
   } finally {
     if (idleSocket) {
@@ -1088,10 +1115,12 @@ async function exerciseS3() {
       );
     }
     if (faultSocket) {
+      markPhase("S3 cleanup fault socket");
       await runPhase("S3 cleanup: fault socket close", () =>
         closeSocket(faultSocket, "S3 fault socket close"),
       );
     }
+    markPhase("S3 cleanup server lifecycle");
     await runPhase("S3 cleanup: server lifecycle", () =>
       closeLifecycle(server, "S3", listening),
     );
