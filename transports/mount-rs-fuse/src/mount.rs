@@ -870,6 +870,35 @@ async fn write_reply_until_stop(
 }
 
 #[cfg(target_os = "linux")]
+async fn write_terminal_reply(
+    device: Arc<FuseDevice>,
+    writer: Arc<tokio::sync::Mutex<()>>,
+    reply: Vec<u8>,
+) -> Result<(), FuseTransportError> {
+    let _guard = writer.lock().await;
+    device
+        .write_frame(&reply)
+        .await
+        .map_err(|error| FuseTransportError::from_io(FuseTransportErrorKind::Write, &error))
+}
+
+#[cfg(target_os = "linux")]
+async fn prepared_read_reply(prepared: PreparedRead, state: Arc<MountState>) -> Vec<u8> {
+    let unique = prepared.unique();
+    let stopped = state.stop_notify.notified();
+    tokio::pin!(stopped);
+    stopped.as_mut().enable();
+    if state.stop.load(Ordering::Acquire) {
+        crate::error_reply(unique, ErrorCode::Eio).to_vec()
+    } else {
+        tokio::select! {
+            _ = &mut stopped => crate::error_reply(unique, ErrorCode::Eio).to_vec(),
+            reply = prepared.reply() => reply,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn read_task_join_error(error: tokio::task::JoinError) -> FuseTransportError {
     FuseTransportError::from_message(
         FuseTransportErrorKind::Task,
@@ -908,11 +937,8 @@ fn spawn_prepared_read(
     let state = Arc::clone(state);
     let abort = read_tasks.spawn(async move {
         let _permit = permit;
-        let reply = prepared.reply().await;
-        (
-            unique,
-            write_reply_until_stop(device, writer, state, reply).await,
-        )
+        let reply = prepared_read_reply(prepared, Arc::clone(&state)).await;
+        (unique, write_terminal_reply(device, writer, reply).await)
     });
     in_flight.insert(unique, abort);
 }
@@ -1036,9 +1062,6 @@ async fn run_session_loop(
             // bounded terminal drain below prevents an uncooperative backend
             // future from keeping the device open forever, while
             // run_session() performs the final session-owned cleanup.
-            for abort in in_flight.drain().map(|(_, abort)| abort) {
-                abort.abort();
-            }
             pending_reads.clear();
             state.request_stop();
             break;
@@ -1135,7 +1158,10 @@ async fn run_session_loop(
         }
     }
     pending_reads.clear();
-    read_tasks.abort_all();
+    // Wake positional-read workers before joining them. Each worker turns the
+    // stop signal into an EIO reply, which releases a kernel read that would
+    // otherwise keep FUSE_DESTROY and the native unmount helper blocked.
+    state.request_stop();
     match tokio::time::timeout(
         READ_TASK_DRAIN_TIMEOUT,
         drain_read_tasks(&mut read_tasks, &mut in_flight),
@@ -1148,6 +1174,7 @@ async fn run_session_loop(
         Ok(None) => {}
         Err(_) => {
             failure.get_or_insert_with(read_worker_drain_timeout_error);
+            read_tasks.abort_all();
             // Dropping the JoinSet releases any worker that did not honor
             // cancellation within the bound. The native device must be
             // released even when a backend future is not cancellation
@@ -3033,6 +3060,11 @@ mod tests {
         peer.write_all(&test_frame(crate::constants::FUSE_DESTROY, 5, 0, &[]))
             .await
             .expect("send destroy");
+        let read_reply = tokio::time::timeout(Duration::from_secs(1), read_test_reply(&mut peer))
+            .await
+            .expect("destroy should terminate the blocked read");
+        assert_eq!(i32::from_le_bytes(read_reply[4..8].try_into().unwrap()), -5);
+        assert_eq!(u64::from_le_bytes(read_reply[8..16].try_into().unwrap()), 4);
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("FUSE_DESTROY should close the session")
