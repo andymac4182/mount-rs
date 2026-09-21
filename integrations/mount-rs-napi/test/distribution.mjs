@@ -48,9 +48,14 @@ assert.deepEqual(packageJson.exports, {
   "./nfs": { types: "./types/nfs-codec.d.ts", require: "./nfs.cjs", default: "./nfs.cjs" },
   "./9p": { types: "./types/p9-codec.d.ts", require: "./p9.cjs", default: "./p9.cjs" },
   "./fuse": { types: "./types/fuse-codec.d.ts", require: "./fuse.cjs", default: "./fuse.cjs" },
-  ...Object.fromEntries(["./drivers/node-fs", "./drivers/unstorage", "./auto", "./s3", "./webdav"].map((path) => [path, {
+  ...Object.fromEntries(["./drivers/node-fs", "./drivers/unstorage", "./auto", "./s3"].map((path) => [path, {
     types: "./index.d.ts", require: "./index.js", default: "./index.js",
   }])),
+  "./webdav": {
+    types: "./types/webdav.d.ts",
+    require: "./webdav.cjs",
+    default: "./webdav.cjs",
+  },
 });
 assert.deepEqual(packageJson.napi.targets, [
   "aarch64-apple-darwin",
@@ -74,7 +79,7 @@ const files = new Set(report.files.map(({ path }) => path));
 for (const required of ["LICENSE", "THIRD_PARTY_NOTICES.md", "index.js", "index.d.ts", "package.json", "postlude.cjs", "postlude-utilities.cjs", "postlude-servers.cjs", "postlude-harness.cjs", "types/harness.d.ts", "types/memory.d.ts"]) {
   assert.equal(files.has(required), true, `package is missing ${required}`);
 }
-for (const required of ["nfs.cjs", "p9.cjs", "fuse.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "postlude-fuse-codec.cjs", "types/nfs-codec.d.ts", "types/p9-codec.d.ts", "types/fuse-codec.d.ts"]) {
+for (const required of ["nfs.cjs", "p9.cjs", "fuse.cjs", "webdav.cjs", "postlude-nfs-codec.cjs", "postlude-p9-codec.cjs", "postlude-fuse-codec.cjs", "types/nfs-codec.d.ts", "types/p9-codec.d.ts", "types/fuse-codec.d.ts", "types/webdav.d.ts"]) {
   assert.equal(files.has(required), true, `package is missing ${required}`);
 }
 assert.equal(
