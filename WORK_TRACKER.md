@@ -501,7 +501,7 @@ complete.
 | W22 | Distributed caching | Deferred for discussion | User / Main |
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
-| W25 | Actual AWS S3 integration | Complete for the myroot private bucket, scoped role, live Rust gate, and owned-prefix cleanup | Main |
+| W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
 | W26 | Apache Ozone S3 backend | W26 qualification complete; customer-deployed Ozone integration track is open and currently NO-GO pending CI qualification for all feasible providers, 1,000 IOPS per drive, 99.99%/5-minute objective boundaries, security and end-to-end client coverage | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
@@ -772,25 +772,23 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Terminate-frame cleanup path plus an I/O-turn barrier. The readiness slot test
   passed 10/10 and bounded close/reopen passed 5/5; the full PGlite and root
   gates then passed without the prior `Eio` reconnect failure.
-- [ ] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
-  The latest published-revision run [35587575994](https://github.com/andymac4182/mount-rs/actions/runs/35587575994)
-  is running on `bdfcb11`: Linux Node job
-  [106294483397](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483397),
+- [x] W04.2 Confirm hosted macOS/Linux reruns close the previous reconnect failure.
+  Isolated qualification run [35588994864](https://github.com/andymac4182/mount-rs/actions/runs/35588994864)
+  on `andymac4182/c/w04-production-gate` contains the published W04 fix
+  `bdfcb11`. Linux Node job
+  [106298858958](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298858958),
   macOS-latest Node job
-  [106294483486](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483486),
+  [106298859119](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859119),
   and macOS-15-intel Node job
-  [106294483435](https://github.com/andymac4182/mount-rs/actions/runs/35587575994/job/106294483435)
-  have started. The historical run [35560240894](https://github.com/andymac4182/mount-rs/actions/runs/35560240894)
-  is not closure evidence: macOS-latest passed its PGlite step, but
-  macOS-15-intel failed earlier in `test-http-early-rejection.mjs` with
-  `EPIPE`; the published `bdfcb11` fixture-shutdown fix is being requalified.
-  Close W04.2 only after all three fresh Node jobs complete successfully and
-  their exact `Verify PGlite integration and restart recovery` logs pass;
-  queued, skipped, cancelled, partial, or pre-fix evidence does not count.
-  Production rollout remains separately tracked in
-  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and is NO-GO
-  until its artifact, persistence/rollback, provider, and operational gates
-  also close.
+  [106298859135](https://github.com/andymac4182/mount-rs/actions/runs/35588994864/job/106298859135)
+  completed successfully. Direct logs and job metadata confirm the exact
+  `Verify PGlite integration and restart recovery` step passed on all three
+  platforms, as did fragmented HTTP early rejection; the prior Intel EPIPE
+  failure did not recur. W04.2 is closed on this evidence. Production rollout
+  remains separately tracked in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
+  NO-GO until artifact/package, persistence/rollback, provider, and
+  operational gates also close.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
@@ -969,6 +967,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   owned FoundationDB service restart, a separate post-restart authority
   republish, and fresh-client RustFS reopen; hosted result remains pending until
   CI runs. No emulated acceptance.
+  The local arm64 durable qualification run on 2026-09-21 used the
+  `foundationdb-soak-durable` composition name, three pinned FoundationDB
+  7.4.7 server containers with `double`/SSD configuration, one bounded soak
+  round, a replicated-node restart, authority republish and a fresh-client
+  reopen. It emitted `FOUNDATIONDB_RUSTFS_CHUNKED_PASS`,
+  `FOUNDATIONDB_SOAK_PASS rounds=1`,
+  `FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
+  `FOUNDATIONDB_TEST_PASS topology=durable`; the tested tree was `3b64a98`,
+  published on main as `39a20b6`. This is local loopback/non-secure
+  qualification evidence only: hosted acceptance, production identity/TLS,
+  power-loss/backup recovery, capacity and operational gates remain open.
 - [x] W07.6a The bounded mixed-provider packet also verifies exact owned-prefix
   cleanup: every tracked block is absent after cleanup while sibling and parent
   sentinel objects remain untouched. This does not close the W07.6 service-
@@ -1579,6 +1588,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `sdk-self-test --reopen` against a separate owned prefix, proving the
   configuration-driven consumer path. AWS S3 evidence does not replace
   Cloudflare R2 or RustFS acceptance.
+- [x] The 2026-09-21 rerun after hardening the qualification boundary passed
+  the read-only resource audit with expected caller account `922978963556`
+  and bucket-region verification, then passed the CLI, composed SDK, and
+  fresh-process reopen gates under owned prefix
+  `mount-rs-tests/aws-s3/20260921T110709Z-26488-cb5ea2ff3d0d69de816b63db34ef1806`.
+  Direct AWS tests now construct the public `AwsS3Config` path rather than a
+  parallel raw client, and version-aware cleanup completed with
+  `AWS_S3_TEST_PASS`.
 - [x] W25.4 Expose and qualify the first-class AWS S3 provider through the
   public Rust SDK and versioned Rust CLI configuration. `kind: "aws-s3"`
   accepts only bucket, region, prefix, and durable fields, resolves signed
@@ -1618,7 +1635,9 @@ listing a source does not mean it has been reviewed or its code can be reused.
   for all four public-access blocks, BucketOwnerEnforced ownership, AES256
   default encryption, seven-day `mount-rs-tests/` expiry, and one-day
   incomplete-multipart abort; the W25 bucket and role are test resources, so
-  production resource review remains open.
+  production resource review remains open. The audit now fails closed on
+  inherited endpoint/service-profile overrides, requires an expected caller
+  account, and verifies the bucket location before reporting controls.
 - [ ] W25.6 Qualify the production metadata pairing. Select a remote durable
   metadata provider and pass multi-writer/fencing, restart, backup/restore,
   schema-migration, and failure-recovery tests with actual AWS S3 blocks.
@@ -1630,7 +1649,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
 - [ ] W25.8 Add hosted release evidence: locked build/artifact provenance,
   approved OIDC or equivalent short-lived role credentials, security scan,
   load/soak/fault/restore drills, staged canary, rollback, and post-deploy
-  smoke. Do not place AWS secrets in the repository or CI logs.
+  smoke. The workflow action references are now pinned to verified full SHAs,
+  but hosted OIDC trust, the protected versioning-status input, and the
+  deployment evidence remain open. Do not place AWS secrets in the repository
+  or CI logs.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
@@ -1677,6 +1699,11 @@ listing a source does not mean it has been reviewed or its code can be reused.
   real multi-node restart evidence, but remains loopback/non-secure test
   deployment evidence rather than production auth, TLS or power-loss proof;
   hosted CI remains revision-specific and pending.
+- A dedicated hosted `ozone-foundationdb` CI job is now wired for the durable
+  three-node FoundationDB metadata path over the live Ozone gateway. It must
+  reach a terminal pass with the durable restart and cleanup markers before
+  the all-feasible-provider production gate can close; no queued, canceled or
+  diagnostic result is promoted to evidence.
 - Historical hosted W26 validation run `35581168122` on `63dbdbd` passed the actual
   Linux-amd64 Ozone gateway (`ozone`, job `106274147767`) and the mixed
   SQLite/PGlite Ozone composition (`ozone-compositions`, job
@@ -1726,8 +1753,8 @@ qualification packet alone. W26 has CI only and no staging environment.
 | --- | --- | ---: | --- |
 | P0 — scope, support matrix, SLO/RPO/RTO, ownership | Scope captured; CI baseline open | 60% | Convert customer-deployment decisions into provider/platform assertions and approved non-goals |
 | P1 — customer Ozone topology contract | External dependency | 0% W26 deployment evidence | Customer supplies secure Ozone deployment; W26 documents required topology but does not deploy it |
-| P2 — all-feasible-provider Ozone CI matrix | Open | 20% | Each provider needs its own terminal Ozone CI packet; provider images/versions and CI capacity required |
-| P3 — authentication, TLS, secrets and redaction | Open | 20% | Secure endpoint/auth, secret references, least privilege, redaction and negative CI tests |
+| P2 — all-feasible-provider Ozone CI matrix | Ozone CI matrix wired; terminal evidence pending | 30% | SQLite/PGlite and durable TiDB lanes are retained; `ozone-foundationdb` now provides the dedicated durable FoundationDB lane, which still needs a terminal retained result |
+| P3 — authentication, TLS, secrets and redaction | Static endpoint gate improved; secure integration open | 30% | Static R2/Ozone config parsing rejects malformed or credential-bearing endpoints before client construction; secure endpoint/auth, least privilege, rotation and full negative-path evidence remain open |
 | P4 — durability/storage failure contract | Partial qualification | 10% | CI client recovery/error evidence plus customer Ozone replication/storage requirements |
 | P5 — fencing, ambiguous commit and failover recovery | Partial qualification | 30% | Concurrent/retry/failover evidence across feasible Ozone/provider CI lanes |
 | P6 — backup, restore and DR | External Ozone/customer dependency | 0% W26 DR evidence | Document five-minute RPO/RTO prerequisites; no competing W26 backup system |

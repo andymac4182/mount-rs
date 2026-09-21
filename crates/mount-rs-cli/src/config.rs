@@ -629,8 +629,10 @@ fn parse_provider(
                 ],
                 path,
             )?;
+            let endpoint = required_nonempty_string(object, "endpoint", path)?;
+            validate_r2_endpoint(&endpoint, &format!("{path}.endpoint"))?;
             StorageProvider::R2 {
-                endpoint: required_nonempty_string(object, "endpoint", path)?,
+                endpoint,
                 bucket: required_nonempty_string(object, "bucket", path)?,
                 prefix: required_nonempty_string(object, "prefix", path)?,
                 access_key_id: required_env_reference(
@@ -971,6 +973,33 @@ fn required_nonempty_string(
         ));
     }
     Ok(value.to_owned())
+}
+
+fn validate_r2_endpoint(endpoint: &str, path: &str) -> Result<(), ConfigError> {
+    let Some((scheme, remainder)) = endpoint.split_once("://") else {
+        return Err(ConfigError::at(
+            path,
+            "must use an http:// or https:// endpoint",
+        ));
+    };
+    let authority = remainder.split('/').next().unwrap_or_default();
+    if !matches!(scheme, "http" | "https")
+        || endpoint.chars().any(|character| {
+            character == '\0'
+                || character.is_ascii_whitespace()
+                || character == '?'
+                || character == '#'
+        })
+        || authority.is_empty()
+        || authority.contains('@')
+        || remainder.starts_with('@')
+    {
+        return Err(ConfigError::at(
+            path,
+            "must be an absolute HTTP(S) endpoint without credentials, query, or fragment",
+        ));
+    }
+    Ok(())
 }
 
 fn optional_nonempty_string(
@@ -1425,6 +1454,40 @@ mod tests {
         assert_eq!(connection.name, "PGLITE_URL");
         assert_eq!(access_key_id.name, "R2_ACCESS_KEY_ID");
         assert_eq!(secret_access_key.name, "R2_SECRET_ACCESS_KEY");
+    }
+
+    #[test]
+    fn r2_endpoint_validation_rejects_unsafe_url_shapes() {
+        for endpoint in [
+            "ftp://account.example",
+            "https://user:password@account.example",
+            "https://account.example?signature=secret",
+            "https://account.example#fragment",
+            "https:///missing-authority",
+        ] {
+            let config = format!(
+                r#"{{
+                    "version": 1,
+                    "driver": {{
+                        "kind": "splitstore",
+                        "storage": {{
+                            "metadata": {{"kind": "memory"}},
+                            "blocks": {{
+                                "kind": "r2",
+                                "endpoint": "{endpoint}",
+                                "bucket": "mount-rs-tests",
+                                "prefix": "blocks",
+                                "access_key_id": {{"env": "R2_ACCESS_KEY_ID"}},
+                                "secret_access_key": {{"env": "R2_SECRET_ACCESS_KEY"}}
+                            }}
+                        }}
+                    }}
+                }}"#
+            );
+            let error = parse_config_str(&config, Path::new("/tmp/config")).unwrap_err();
+            assert!(error.message().contains("endpoint"), "{endpoint}: {error}");
+            assert!(!error.message().contains("password"), "{endpoint}: {error}");
+        }
     }
 
     #[test]

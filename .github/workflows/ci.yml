@@ -27,6 +27,7 @@ jobs:
         run: |
           cargo test --locked -p mount-rs-cli --test cli \
             actual_binary_validates_the_loopback_ozone_provider_config_without_credentials_or_network
+          cargo test --locked -p mount-rs-cli r2_endpoint_validation_rejects_unsafe_url_shapes
           node examples/node-cli/index.mjs \
             --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
       - name: Verify real Apache Ozone block contract and restart recovery
@@ -95,6 +96,28 @@ jobs:
           MOUNT_RS_OZONE_TIDB_COMPOSITION: '1'
           MOUNT_RS_TIDB_TOPOLOGY: durable
           MOUNT_RS_TIDB_VERSION: v8.5.7
+          MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
+        run: sh scripts/test-ozone.sh
+
+  ozone-foundationdb:
+    # W26 requires a provider-specific Ozone packet for every feasible
+    # metadata provider. Keep FoundationDB separate because its harness owns
+    # a multi-container cluster and a disposable native-client image.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify durable FoundationDB metadata over Apache Ozone chunks
+        env:
+          MOUNT_RS_OZONE_FOUNDATIONDB_COMPOSITION: '1'
+          MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
           MOUNT_RS_OZONE_COMPOSITION_TIMEOUT_SECONDS: '2400'
         run: sh scripts/test-ozone.sh
 

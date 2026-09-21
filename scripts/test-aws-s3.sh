@@ -101,6 +101,7 @@ cleanup() {
   cleanup_done=1
 
   if [ "$cleanup_required" -eq 1 ]; then
+    versioning_status=$test_versioning_status
     owner_metadata=$(AWS_EC2_METADATA_DISABLED=true aws s3api head-object \
       --bucket "${AWS_S3_TEST_BUCKET}" \
       --key "$owner_key" \
@@ -118,6 +119,73 @@ cleanup() {
         echo "AWS_S3_CLEANUP_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix" >&2
         cleanup_status=1
       fi
+
+      case "$versioning_status" in
+        Enabled|Suspended)
+          version_entries=$(AWS_EC2_METADATA_DISABLED=true aws s3api list-object-versions \
+            --bucket "${AWS_S3_TEST_BUCKET}" \
+            --prefix "$prefix/" \
+            --region "$region" \
+            --query 'Versions[].[Key,VersionId]' \
+            --output text 2>/dev/null) || {
+              echo "AWS_S3_CLEANUP_VERSIONS_LIST_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix" >&2
+              cleanup_status=1
+              version_entries=unknown
+            }
+          case "$version_entries" in
+            ''|None|unknown) ;;
+            *)
+              while IFS="$(printf '\t')" read -r object_key version_id; do
+                [ -n "$object_key" ] || continue
+                if [ -z "$version_id" ] || ! AWS_EC2_METADATA_DISABLED=true aws s3api delete-object \
+                  --bucket "${AWS_S3_TEST_BUCKET}" \
+                  --key "$object_key" \
+                  --version-id "$version_id" \
+                  --region "$region" >/dev/null 2>&1; then
+                  echo "AWS_S3_CLEANUP_VERSION_DELETE_FAILED bucket=${AWS_S3_TEST_BUCKET} key=$object_key" >&2
+                  cleanup_status=1
+                fi
+              done <<EOF
+$version_entries
+EOF
+              ;;
+          esac
+
+          marker_entries=$(AWS_EC2_METADATA_DISABLED=true aws s3api list-object-versions \
+            --bucket "${AWS_S3_TEST_BUCKET}" \
+            --prefix "$prefix/" \
+            --region "$region" \
+            --query 'DeleteMarkers[].[Key,VersionId]' \
+            --output text 2>/dev/null) || {
+              echo "AWS_S3_CLEANUP_DELETE_MARKERS_LIST_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix" >&2
+              cleanup_status=1
+              marker_entries=unknown
+            }
+          case "$marker_entries" in
+            ''|None|unknown) ;;
+            *)
+              while IFS="$(printf '\t')" read -r object_key version_id; do
+                [ -n "$object_key" ] || continue
+                if [ -z "$version_id" ] || ! AWS_EC2_METADATA_DISABLED=true aws s3api delete-object \
+                  --bucket "${AWS_S3_TEST_BUCKET}" \
+                  --key "$object_key" \
+                  --version-id "$version_id" \
+                  --region "$region" >/dev/null 2>&1; then
+                  echo "AWS_S3_CLEANUP_DELETE_MARKER_DELETE_FAILED bucket=${AWS_S3_TEST_BUCKET} key=$object_key" >&2
+                  cleanup_status=1
+                fi
+              done <<EOF
+$marker_entries
+EOF
+              ;;
+          esac
+          ;;
+        None|'') ;;
+        *)
+          echo "AWS_S3_CLEANUP_VERSIONING_STATUS_UNKNOWN bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix status=$versioning_status" >&2
+          cleanup_status=1
+          ;;
+      esac
     else
       echo "AWS_S3_CLEANUP_OWNERSHIP_MISMATCH bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix" >&2
       cleanup_status=1
@@ -141,6 +209,26 @@ cleanup() {
         cleanup_status=1
         ;;
     esac
+
+    if [ "$versioning_status" = "Enabled" ] || [ "$versioning_status" = "Suspended" ]; then
+      remaining_versions=$(AWS_EC2_METADATA_DISABLED=true aws s3api list-object-versions \
+        --bucket "${AWS_S3_TEST_BUCKET}" \
+        --prefix "$prefix/" \
+        --region "$region" \
+        --query 'length(Versions || `[]`) + length(DeleteMarkers || `[]`)' \
+        --output text 2>/dev/null) || {
+          echo "AWS_S3_CLEANUP_VERSION_VERIFY_FAILED bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix" >&2
+          cleanup_status=1
+          remaining_versions=unknown
+        }
+      case "$remaining_versions" in
+        0) ;;
+        *)
+          echo "AWS_S3_CLEANUP_VERSIONED_INCOMPLETE bucket=${AWS_S3_TEST_BUCKET} prefix=$prefix count=$remaining_versions" >&2
+          cleanup_status=1
+          ;;
+      esac
+    fi
   fi
 
   rm -f \
@@ -210,6 +298,30 @@ if [ -z "${AWS_ACCESS_KEY_ID:-}" ] || [ -z "${AWS_SECRET_ACCESS_KEY:-}" ]; then
   done <"$credential_file"
 fi
 rm -f "$credential_file"
+
+# Version history is a bucket-level control and is intentionally read before
+# switching to the prefix-scoped runtime role. Hosted callers that separate
+# audit and cleanup identities may provide the value from their approved
+# read-only resource audit instead; never silently assume that a missing value
+# means the bucket is non-versioned.
+test_versioning_status=${AWS_S3_TEST_VERSIONING_STATUS:-}
+if [ -z "$test_versioning_status" ]; then
+  if ! test_versioning_status=$(AWS_EC2_METADATA_DISABLED=true aws s3api get-bucket-versioning \
+    --bucket "${AWS_S3_TEST_BUCKET}" \
+    --region "$region" \
+    --query Status \
+    --output text 2>/dev/null); then
+    echo "AWS_S3_TEST_BLOCKED reason=versioning_status_unavailable" >&2
+    exit 3
+  fi
+fi
+case "$test_versioning_status" in
+  None|Enabled|Suspended) ;;
+  *)
+    echo "AWS_S3_TEST_BLOCKED reason=versioning_status_invalid" >&2
+    exit 3
+    ;;
+esac
 
 # Optionally replace the profile/environment identity with short-lived
 # credentials from a dedicated least-privilege role. The role ARN is supplied
@@ -306,7 +418,7 @@ echo "AWS_S3_TEST_START bucket=${AWS_S3_TEST_BUCKET} region=$region prefix=$pref
 
 # Exercise the real Rust CLI consumer against the same first-class AWS S3
 # provider and the same scoped credentials before the lower-level acceptance
-# processes run. The config contains no credentials; AmazonS3Builder resolves
+# processes run. The config contains no credentials; AwsS3Config resolves
 # the exported short-lived workload credentials from the environment.
 printf '{\n  "version": 1,\n  "driver": {\n    "kind": "splitstore",\n    "storage": {\n      "metadata": {"kind": "sqlite", "path": "%s"},\n      "blocks": {"kind": "aws-s3", "bucket": "%s", "region": "%s", "prefix": "%s/cli", "durable": true},\n      "chunk_size_bytes": 4096,\n      "owner": "aws-s3-cli"\n    }\n  }\n}\n' \
   "$metadata_file" \
@@ -324,7 +436,7 @@ CARGO_NET_OFFLINE=true ./scripts/cargo-shared run \
   --reopen
 echo "AWS_S3_CLI_PASS prefix=$prefix"
 
-cargo test \
+./scripts/cargo-shared test \
   --manifest-path "$repo_dir/tests/aws/Cargo.toml" \
   --locked \
   --lib \
@@ -332,7 +444,7 @@ cargo test \
   -- \
   --exact --ignored --nocapture
 
-cargo test \
+./scripts/cargo-shared test \
   --manifest-path "$repo_dir/tests/aws/Cargo.toml" \
   --locked \
   --lib \

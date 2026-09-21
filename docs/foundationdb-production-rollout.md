@@ -20,6 +20,18 @@ status. This ledger is the source of truth for the separate production track.
 Do not check a production gate from demo behavior, a queued/skipped/cancelled
 CI job, installation-only evidence, or a local qualification report.
 
+## Latest qualification evidence
+
+| Run | Result | Boundary |
+| --- | --- | --- |
+| `foundationdb-soak-durable`, 2026-09-21, arm64, tested tree `3b64a98` (published as `39a20b6`) | **PASS** — three pinned FoundationDB 7.4.7 servers with `double`/SSD configuration; one bounded composition soak round; replicated-node restart; authority republish; fresh-client RustFS reopen; owned cleanup | Disposable loopback/non-secure Docker qualification only. It does not prove production identity/ACL/TLS, power-loss or backup recovery, capacity/cost, multi-day soak, hosted CI, native platform support or operator readiness. |
+
+The run is retained as qualification evidence for the restart/fencing and
+harness gates, not as production acceptance. Its markers were
+`FOUNDATIONDB_RUSTFS_CHUNKED_PASS`, `FOUNDATIONDB_SOAK_PASS rounds=1`,
+`FOUNDATIONDB_RUSTFS_SERVICE_RESTART_PASS` and
+`FOUNDATIONDB_TEST_PASS topology=durable`.
+
 ## Production gate ledger
 
 | Gate | Status | Required exit evidence |
@@ -29,10 +41,10 @@ CI job, installation-only evidence, or a local qualification report.
 | P2 — metadata and block-provider matrix | Qualification only | Explicit production provider choices and supported combinations; secure staging runs for FoundationDB metadata, RustFS/AWS-compatible blocks, Node, Rust CLI and native clients |
 | P3 — authority identity, ACLs, TLS and secret lifecycle | Not started | One write-capable authority identity per prefix; read-only consumer identities; actual tenant/credential/ACL negative test proving consumers cannot publish or overwrite; secret injection/rotation, TLS policy and redacted logs |
 | P4 — replicated durability and storage failure protection | Not started | Backup/replication and sync policy review; node, disk, process and power-loss boundaries; integrity checks for metadata, fences, authority samples and immutable blocks; recovery evidence on the intended storage class |
-| P5 — fencing, ambiguous commit and failover recovery | Partial qualification | Secure multi-node tests covering stale writers, lease expiry/renewal, maybe-committed reconciliation, network delay/partition, authority loss, reviewed failover and no split-brain publication |
+| P5 — fencing, ambiguous commit and failover recovery | Partial qualification; local durable restart evidence added | Secure multi-node tests covering stale writers, lease expiry/renewal, maybe-committed reconciliation, network delay/partition, authority loss, reviewed failover and no split-brain publication |
 | P6 — backup, restore and disaster recovery | Not started | Consistent metadata/authority/block backup definition, encrypted retention, clean-environment restore, hash/revision verification, measured RPO/RTO and provider/region-loss procedure |
 | P7 — observability, alerts and runbooks | Not started | Metrics and alerts for cluster health, authority publication age/errors, lease-fence/ESTALE, transaction retry/maybe-committed EIO, block errors, latency, capacity and cleanup/space pressure; tested on-call runbook |
-| P8 — load, capacity, soak and cost envelope | Harness support added; evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup; production-shaped workload, concurrency, duration, p50/p95/p99 latency, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
+| P8 — load, capacity, soak and cost envelope | Harness + one-round local qualification; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and one durable round passed; production-shaped workload, concurrency, duration, p50/p95/p99 latency, retry/error budget, resource growth, safe capacity and scaling triggers are still required |
 | P9 — upgrade, rollback and compatibility | Not started | Forward/backward keyspace and configuration compatibility, rolling provider/client upgrade, failed-upgrade rollback, retained-data downgrade boundary, lockfile/image/artifact provenance |
 | P10 — security, privacy, tenancy and audit | Not started | Threat-model review, prefix/tenant isolation, data classification, encryption, audit retention, dependency/image review, abuse/rate limits, closed findings or approved exceptions |
 | P11 — native client, mount and platform support | Not started | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
