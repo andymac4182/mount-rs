@@ -1678,6 +1678,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   backup/rollback, provider scope/performance, observability, runbook,
   ownership, and release approval gates.
 
+- Current W04 recovery chunks: WebDAV session parity now pins native/oracle
+  directory and file mtimes before exact PROPFIND XML comparison; the focused
+  parity test passed 30 repetitions, `node --check`, formatting, and
+  `git diff --check`. Ozone cleanup now deduplicates the repeated block ID;
+  the local `mount-rs-r2` suite passed 18/18 and the standalone Ozone workspace
+  compiled with `--locked`. These changes were published as `9b2dabd7` and
+  `23c0ba7e` respectively. The first full run `35664315098` remained queued
+  after its macOS runner failed to materialize and was canceled after its
+  pre-fix WebDAV `PROPFIND`, Ozone cleanup `block object` ENOENT, and
+  pre-`bc292709` Ubuntu FUSE failures were diagnosed. Recovery run
+  `35666527609` is active from `9b2dabd7`, before the Ozone fix; Windows and
+  ARM Node have started while Linux/macOS/provider jobs remain queued at the
+  ledger snapshot. No queued, partial, or pre-fix result is promoted to W04
+  or production acceptance; production remains **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
