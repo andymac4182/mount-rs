@@ -52,16 +52,16 @@ account, versioning, and role inputs were blank. This is a current safety
 refusal rather than an implementation failure or AWS acceptance result.
 
 The latest tested integrated repository boundary
-`eed34234b7706f490dcfe91d8316bc20fc1fe1e1` passed formatting, the full locked
-offline workspace/all-target test gate, and strict workspace Clippy with
-`-D warnings` on an explicitly isolated Cargo target after the S3 observability
-code was pushed to `origin/main`, with the required local loopback permission.
-The gate includes the streamed request/response byte accounting tests in the
-17-case S3 gateway suite. The isolated target was used because concurrent
-worktrees share the normal Cargo target and can expose cross-worktree artifact
-races; this gate therefore binds to the checked-out source rather than another
-thread's compiled metadata. Ignored native/service rows remain explicit
-prerequisites and are not treated as production acceptance.
+`984e070b1568e50c7e30962a7064049a7c95f846` passed formatting, the full locked
+offline workspace/all-target test gate with the required local loopback
+permission, and strict workspace Clippy with `-D warnings` on the explicitly
+isolated Cargo target `/private/tmp/mount-rs-w25-current-shared-gate`. The gate
+included the 18-case S3 gateway suite and the current W01/S3 source. The
+isolated target was used because concurrent worktrees share the normal Cargo
+target and can expose cross-worktree artifact races; this gate therefore binds
+to the checked-out source rather than another thread's compiled metadata.
+Ignored native/service rows remain explicit prerequisites and are not treated
+as production acceptance.
 
 ## Deployment contract
 

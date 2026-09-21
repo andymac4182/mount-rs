@@ -2840,6 +2840,14 @@ listing a source does not mean it has been reviewed or its code can be reused.
   streamed request/response byte accounting tests in the 17-case S3 gateway
   suite. Explicitly ignored native/service rows remain separate prerequisites
   and are not promoted to production evidence.
+- [x] The current shared source
+  `984e070b1568e50c7e30962a7064049a7c95f846` passed on 2026-09-22:
+  `cargo fmt --all -- --check`, the full locked offline workspace/all-target
+  test gate with the required local loopback permission, and strict workspace
+  Clippy with `-D warnings` on the isolated Cargo target
+  `/private/tmp/mount-rs-w25-current-shared-gate`. The gate included the 18-case
+  S3 gateway suite and the current W01/S3 source. Ignored native/service rows
+  remain explicit prerequisites and are not promoted to production evidence.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
