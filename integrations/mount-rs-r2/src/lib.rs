@@ -242,7 +242,7 @@ fn is_local_http_authority(authority: &str) -> bool {
     };
     matches!(
         host,
-        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal"
+        "127.0.0.1" | "localhost" | "::1" | "host.docker.internal" | "mount-rs-rustfs"
     )
 }
 
@@ -607,6 +607,7 @@ mod tests {
             "http://127.0.0.1:9000",
             "http://localhost:9000",
             "http://host.docker.internal:9000",
+            "http://mount-rs-rustfs:9000",
         ] {
             let config = R2Config {
                 endpoint: endpoint.to_owned(),

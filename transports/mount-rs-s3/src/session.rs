@@ -1770,8 +1770,14 @@ async fn staging_usage_bytes(driver: &Arc<dyn FsDriver>) -> S3Result<u64> {
 }
 
 async fn reap_staging(driver: &Arc<dyn FsDriver>, ttl_ms: i64) -> S3Result<()> {
+    // Drivers without timestamp support cannot distinguish an active upload
+    // from an expired one. Keep the quota and explicit DeleteObjects cleanup
+    // guarantees, but never reap by guessing from an unavailable mtime.
+    if !driver.capabilities().times {
+        return Ok(());
+    }
     let now = now_ms();
-    let expired = |mtime_ms: i64| now.saturating_sub(mtime_ms) >= ttl_ms;
+    let expired = |mtime_ms: i64| mtime_ms > 0 && now.saturating_sub(mtime_ms) >= ttl_ms;
     let multipart_root = format!("/{MULTIPART_PREFIX}");
     let entries = match driver.readdir(&multipart_root).await {
         Ok(entries) => entries,

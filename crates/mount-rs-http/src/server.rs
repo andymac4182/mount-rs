@@ -768,6 +768,7 @@ impl RequestError {
 
 #[derive(Debug)]
 enum Route {
+    Health { readiness: bool },
     Discovery,
     File { drive: String, path: String },
     Entries { drive: String, path: String },
@@ -788,6 +789,13 @@ struct ErrorDetail {
 #[derive(Serialize)]
 struct DriveSummary<'a> {
     id: &'a str,
+}
+
+#[derive(Serialize)]
+struct HealthPayload<'a> {
+    status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drives: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -943,15 +951,21 @@ async fn handle_request_uninstrumented(
         Err(error) => return error_response(error),
     };
 
-    if matches!(route, Route::Discovery) {
-        return handle_discovery(&parts.method, &parts.headers, &state.registry);
+    match &route {
+        Route::Health { readiness } => {
+            return handle_health(&parts.method, &state.registry, *readiness);
+        }
+        Route::Discovery => {
+            return handle_discovery(&parts.method, &parts.headers, &state.registry);
+        }
+        Route::File { .. } | Route::Entries { .. } | Route::Operation { .. } => {}
     }
 
     let drive_id = match &route {
         Route::File { drive, .. }
         | Route::Entries { drive, .. }
         | Route::Operation { drive, .. } => drive,
-        Route::Discovery => unreachable!(),
+        Route::Discovery | Route::Health { .. } => unreachable!(),
     };
     let Some(drive) = state.registry.get(drive_id).cloned() else {
         return error_response(RequestError::not_found());
@@ -981,7 +995,7 @@ async fn handle_request_uninstrumented(
         Route::Operation { operation, .. } => {
             handle_operation(parts.method, body, drive, operation, state.config.clone()).await
         }
-        Route::Discovery => unreachable!(),
+        Route::Discovery | Route::Health { .. } => unreachable!(),
     };
     result.unwrap_or_else(error_response)
 }
@@ -1008,6 +1022,29 @@ fn handle_discovery(
     }
     let body = serde_json::to_vec(&drives).unwrap_or_else(|_| b"[]".to_vec());
     json_response(StatusCode::OK, Bytes::from(body), method == Method::HEAD)
+}
+
+fn handle_health(method: &Method, registry: &DriveRegistry, readiness: bool) -> Response<HttpBody> {
+    if method != Method::GET && method != Method::HEAD {
+        return error_response(RequestError::method_not_allowed("GET, HEAD"));
+    }
+
+    let is_ready = !readiness || !registry.is_empty();
+    let status = if is_ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+    let payload = HealthPayload {
+        status: if readiness {
+            if is_ready { "ready" } else { "not_ready" }
+        } else {
+            "ok"
+        },
+        drives: readiness.then_some(registry.len()),
+    };
+    let bytes = serde_json::to_vec(&payload).unwrap_or_else(|_| b"{\"status\":\"error\"}".to_vec());
+    json_response(status, Bytes::from(bytes), method == Method::HEAD)
 }
 
 async fn handle_file(
@@ -1418,6 +1455,8 @@ async fn read_limited_body(
 fn parse_route(raw_path: &str) -> Result<Route, RequestError> {
     let segments = decode_uri_segments(raw_path)?;
     match segments.as_slice() {
+        [health] if health == "healthz" => Ok(Route::Health { readiness: false }),
+        [ready] if ready == "readyz" => Ok(Route::Health { readiness: true }),
         [version, drives] if version == "v1" && drives == "drives" => Ok(Route::Discovery),
         [version, drives, drive, kind, rest @ ..]
             if version == "v1" && drives == "drives" && kind == "fs" =>

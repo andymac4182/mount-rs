@@ -7,6 +7,14 @@ second filesystem implementation.
 
 ## Routes
 
+Unauthenticated `GET`/`HEAD /healthz` reports that the listener is alive.
+Unauthenticated `GET`/`HEAD /readyz` reports `ready` and the configured drive
+count when at least one drive is registered, and returns `503` with
+`not_ready` for an empty registry. These are process/configuration probes only;
+they do not claim that a remote provider, object store, TLS endpoint, or
+external dependency is healthy. Use the provider-specific checks and
+application-owned telemetry for those gates.
+
 All routes are versioned under `/v1`:
 
 - `GET /v1/drives` requires a bearer token and lists only the drive IDs whose
