@@ -440,6 +440,12 @@ session, pinned codec oracle, and inode oracle all passed. The ignored native
 harnesses were not executable on this macOS host, so hosted `/dev/fuse`,
 callback delivery, panic/cleanup, close/crash/restart, mutation/write
 concurrency, locks, durability, and FSKit remain external; W01 stays NO-GO.
+The subsequent hosted CI run `35645669363` / native-FUSE job `106485735709`
+passed the Linux FUSE prerequisite probe but was cancelled during the actual
+rootless kernel file-operation step, so it supplies no native acceptance
+evidence. The exact branch tip still requires a non-canceling manual hosted
+qualification before any Linux mount, callback, lifecycle, concurrency, lock,
+crash/restart, or durability result can be promoted; W01 remains NO-GO.
 
 Parallel W01 sidecars completed on 2026-09-21 and were published to `main`:
 
