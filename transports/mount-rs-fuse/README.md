@@ -78,8 +78,12 @@ negotiate or receive them.
 `FORGET` and `BATCH_FORGET` remain bookkeeping paths, while
 `NOTIFY_REPLY` is ignored without a reply.
 
+Plain `RENAME2` requests (`flags = 0`) use the same rename implementation.
+Flagged exchange/whiteout variants are rejected with `ENOSYS` without mutating
+the namespace because the core driver does not expose those semantics.
+
 The native session still returns `ENOSYS` for the other codec-covered
 operations, including `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
 `GETLK`, `SETLK`, `SETLKW`, `INTERRUPT`, `BMAP`, `POLL`,
-`FALLOCATE`, `LSEEK`, and `RENAME2`. Native device/mount behavior and the
+`FALLOCATE`, `LSEEK`, and `COPY_FILE_RANGE`. Native device/mount behavior and the
 N-API `./fuse` boundary are outside this scoped slice.

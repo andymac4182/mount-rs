@@ -663,18 +663,20 @@ async fn advanced_operations_fail_closed_and_remain_explicitly_unsupported() {
         .unwrap();
     assert_eq!(errno(&malformed), -22);
 
-    let mut rename2_with_flags = vec![0; 16];
-    rename2_with_flags[..8].copy_from_slice(&1u64.to_le_bytes());
-    rename2_with_flags[8..12].copy_from_slice(&1u32.to_le_bytes());
-    rename2_with_flags.extend(b"old\0new\0");
-    let unsupported = session
-        .handle(&frame(FUSE_RENAME2, 1, &rename2_with_flags))
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(errno(&unsupported), -38);
-    assert!(fs.lstat("/old").await.is_ok());
-    assert!(fs.lstat("/new").await.is_err());
+    for flags in [1u32, 2, 4] {
+        let mut rename2_with_flags = vec![0; 16];
+        rename2_with_flags[..8].copy_from_slice(&1u64.to_le_bytes());
+        rename2_with_flags[8..12].copy_from_slice(&flags.to_le_bytes());
+        rename2_with_flags.extend(b"old\0new\0");
+        let unsupported = session
+            .handle(&frame(FUSE_RENAME2, 1, &rename2_with_flags))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(errno(&unsupported), -38, "rename2 flags {flags}");
+        assert!(fs.lstat("/old").await.is_ok());
+        assert!(fs.lstat("/new").await.is_err());
+    }
 
     let mut rename2 = vec![0; 16];
     rename2[..8].copy_from_slice(&1u64.to_le_bytes());
