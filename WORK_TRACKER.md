@@ -1660,9 +1660,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   deployment evidence remain open. The adjacent S3 gateway now refuses
   non-loopback binds without a TLS boundary and now stages streaming PUT and
   multipart publication behind bounded atomic rename. CopyObject now uses the
-  same bounded cross-driver staging and atomic publication path. Remaining
-  list/staging-retention and repository-coverage findings from the sealed
-  review remain open. Do not place AWS secrets in the repository or CI logs.
+  same bounded cross-driver staging and atomic publication path. ListObjectsV2
+  now uses bounded continuation-aware traversal with prefix pruning. Remaining
+  staging-retention and repository-coverage findings from the sealed review
+  remain open. Do not place AWS secrets in the repository or CI logs.
 - [ ] W25.9 Production sign-off: record the exact released commit/image,
   reviewed configuration, live smoke result, rollback owner, and evidence for
   every W25.5-W25.8 gate before calling the AWS workstream production-ready.
