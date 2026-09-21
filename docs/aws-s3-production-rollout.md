@@ -103,7 +103,9 @@ deletion are reserved for the maintenance role. A bucket policy denies
 insecure transport.
 
 The template was syntax-validated with the read-only AWS CloudFormation API on
-2026-09-21; no stack or change set was created. Validation does not approve
+2026-09-21 and revalidated after tightening `OwnedPrefix` to reject empty and
+dot components on 2026-09-22; no stack or change set was created. Validation
+does not approve
 the production parameters, role trust policies, metadata topology, backup
 plan, or deployment promotion. Those remain W25.5-W25.9 gates.
 

@@ -1893,7 +1893,10 @@ listing a source does not mean it has been reviewed or its code can be reused.
   lifecycle and multipart cleanup, transport denial, prefix-scoped runtime
   access, and separately governed maintenance access. AWS CloudFormation
   syntax validation passed on 2026-09-21 without creating a stack or change
-  set. The audit still fails closed on inherited endpoint/service-profile
+  set; after the `OwnedPrefix` regex was tightened to reject empty and dot
+  components, the revised template also passed the read-only validation API
+  on 2026-09-22 without creating a stack or change set. The audit still fails
+  closed on inherited endpoint/service-profile
   overrides, requires an expected caller account, and verifies bucket
   location before reporting controls; approved production parameters, role
   trust, change-set review, and live production audit remain open.
