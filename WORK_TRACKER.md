@@ -1061,6 +1061,12 @@ assert `partial` remains after the deliberate failure. This is an accepted
 oracle-compatible protocol scope decision, not atomic publication or
 power-loss/live-provider durability evidence; those gates remain open.
 
+For the published 256-request packet `efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6`,
+the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
+release policy `35669389968` were pending; Fault injection `35669390039` and
+W04 production policy `35669390028` were queued, and no Live Cloudflare R2
+run was listed. No hosted WebDAV PASS is claimable from this tip.
+
 Evidence landed without closing the remaining W01 acceptance gates:
 
 - [x] `0de1832` plus `6ba3d62` now provide a mount-free core parity harness:
