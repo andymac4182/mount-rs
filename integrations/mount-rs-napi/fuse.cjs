@@ -13,6 +13,11 @@ if (!binding || typeof binding.decodeInHeader !== "function") {
 
 module.exports = binding
 
+// The session is a mount-free Rust dispatcher. Native Linux device and mount
+// lifecycle remain owned by the Rust transport; exposing this class here keeps
+// the FUSE subpath usable for deterministic protocol/session qualification.
+module.exports.FuseSession = binding.FuseSession
+
 // Spell public names directly so Node's CommonJS-to-ESM named-export bridge
 // can discover the codec barrel without executing a loop.
 module.exports.ProtocolError = binding.ProtocolError
@@ -236,6 +241,7 @@ module.exports.FUSE_KERNEL_VERSION = binding.FUSE_KERNEL_VERSION
 module.exports.FUSE_KERNEL_MINOR_VERSION = binding.FUSE_KERNEL_MINOR_VERSION
 module.exports.FUSE_ROOT_ID = binding.FUSE_ROOT_ID
 module.exports.FUSE_LOOKUP = binding.FUSE_LOOKUP
+module.exports.FUSE_FORGET = binding.FUSE_FORGET
 module.exports.FUSE_GETATTR = binding.FUSE_GETATTR
 module.exports.FUSE_SETATTR = binding.FUSE_SETATTR
 module.exports.FUSE_GETATTR_FH = binding.FUSE_GETATTR_FH
@@ -299,6 +305,7 @@ module.exports.FATTR_SIZE = binding.FATTR_SIZE
 module.exports.FATTR_ATIME = binding.FATTR_ATIME
 module.exports.FATTR_MTIME = binding.FATTR_MTIME
 module.exports.FUSE_INIT = binding.FUSE_INIT
+module.exports.FUSE_DESTROY = binding.FUSE_DESTROY
 module.exports.FUSE_OPEN = binding.FUSE_OPEN
 module.exports.FUSE_CREATE = binding.FUSE_CREATE
 module.exports.FUSE_OPENDIR = binding.FUSE_OPENDIR
