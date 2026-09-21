@@ -26,6 +26,8 @@ use std::time::Instant;
 
 #[cfg(target_os = "linux")]
 use futures_util::FutureExt;
+#[cfg(target_os = "linux")]
+use mount_rs_core::ErrorCode;
 use mount_rs_core::{FsDriver, FsError};
 #[cfg(target_os = "linux")]
 use mount_rs_core::{S_IFDIR, S_IFMT};
@@ -35,6 +37,8 @@ use tokio::sync::Notify;
 use crate::device::DEFAULT_MAX_FRAME;
 #[cfg(target_os = "linux")]
 use crate::device::FuseDevice;
+#[cfg(target_os = "linux")]
+use crate::session::PreparedRead;
 #[cfg(target_os = "linux")]
 use crate::session::{FuseSession, FuseSessionOptions};
 
@@ -809,6 +813,9 @@ async fn run_session(mut session: FuseSession, device: FuseDevice, state: Arc<Mo
 const MAX_PARALLEL_READS: usize = 16;
 
 #[cfg(target_os = "linux")]
+const MAX_PENDING_READS: usize = 16;
+
+#[cfg(target_os = "linux")]
 const READ_TASK_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[cfg(target_os = "linux")]
@@ -863,6 +870,31 @@ fn read_worker_drain_timeout_error() -> FuseTransportError {
 }
 
 #[cfg(target_os = "linux")]
+fn spawn_prepared_read(
+    read_tasks: &mut tokio::task::JoinSet<ReadTaskResult>,
+    in_flight: &mut std::collections::HashMap<u64, tokio::task::AbortHandle>,
+    prepared: PreparedRead,
+    permit: tokio::sync::OwnedSemaphorePermit,
+    device: &Arc<FuseDevice>,
+    writer: &Arc<tokio::sync::Mutex<()>>,
+    state: &Arc<MountState>,
+) {
+    let unique = prepared.unique();
+    let device = Arc::clone(device);
+    let writer = Arc::clone(writer);
+    let state = Arc::clone(state);
+    let abort = read_tasks.spawn(async move {
+        let _permit = permit;
+        let reply = prepared.reply().await;
+        (
+            unique,
+            write_reply_until_stop(device, writer, state, reply).await,
+        )
+    });
+    in_flight.insert(unique, abort);
+}
+
+#[cfg(target_os = "linux")]
 async fn drain_read_tasks(
     read_tasks: &mut tokio::task::JoinSet<ReadTaskResult>,
     in_flight: &mut std::collections::HashMap<u64, tokio::task::AbortHandle>,
@@ -898,7 +930,29 @@ async fn run_session_loop(
     let mut read_tasks = tokio::task::JoinSet::<ReadTaskResult>::new();
     let mut in_flight: std::collections::HashMap<u64, tokio::task::AbortHandle> =
         std::collections::HashMap::new();
+    let mut pending_reads = std::collections::VecDeque::<PreparedRead>::new();
     loop {
+        if state.stop.load(Ordering::Acquire) {
+            break;
+        }
+        while let Some(prepared) = pending_reads.pop_front() {
+            let permit = match Arc::clone(&permits).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    pending_reads.push_front(prepared);
+                    break;
+                }
+            };
+            spawn_prepared_read(
+                &mut read_tasks,
+                &mut in_flight,
+                prepared,
+                permit,
+                &device,
+                &writer,
+                &state,
+            );
+        }
         if state.stop.load(Ordering::Acquire) {
             break;
         }
@@ -961,31 +1015,38 @@ async fn run_session_loop(
             for abort in in_flight.drain().map(|(_, abort)| abort) {
                 abort.abort();
             }
+            pending_reads.clear();
             state.request_stop();
             break;
         }
         match session.prepare_read(&frame) {
             Ok(Some(prepared)) => {
-                let unique = prepared.unique();
-                let permit = tokio::select! {
-                    _ = state.stop_notify.notified() => break,
-                    result = Arc::clone(&permits).acquire_owned() => match result {
-                        Ok(permit) => permit,
-                        Err(_) => break,
-                    },
-                };
-                let device = Arc::clone(&device);
-                let writer = Arc::clone(&writer);
-                let state = Arc::clone(&state);
-                let abort = read_tasks.spawn(async move {
-                    let _permit = permit;
-                    let reply = prepared.reply().await;
-                    (
-                        unique,
-                        write_reply_until_stop(device, writer, state, reply).await,
+                if let Ok(permit) = Arc::clone(&permits).try_acquire_owned() {
+                    spawn_prepared_read(
+                        &mut read_tasks,
+                        &mut in_flight,
+                        prepared,
+                        permit,
+                        &device,
+                        &writer,
+                        &state,
+                    );
+                } else if pending_reads.len() < MAX_PENDING_READS {
+                    pending_reads.push_back(prepared);
+                } else {
+                    let reply = crate::error_reply(prepared.unique(), ErrorCode::Eagain).to_vec();
+                    if let Err(error) = write_reply_until_stop(
+                        Arc::clone(&device),
+                        Arc::clone(&writer),
+                        Arc::clone(&state),
+                        reply,
                     )
-                });
-                in_flight.insert(unique, abort);
+                    .await
+                    {
+                        failure = Some(error);
+                        break;
+                    }
+                }
                 continue;
             }
             Ok(None) => {
@@ -993,6 +1054,8 @@ async fn run_session_loop(
                     Ok(Some(target)) => {
                         if let Some(abort) = in_flight.remove(&target) {
                             abort.abort();
+                        } else {
+                            pending_reads.retain(|prepared| prepared.unique() != target);
                         }
                     }
                     Ok(None) => {}
@@ -1058,6 +1121,7 @@ async fn run_session_loop(
             state.ready_notify.notify_waiters();
         }
     }
+    pending_reads.clear();
     read_tasks.abort_all();
     if failure.is_none() {
         match tokio::time::timeout(
@@ -2327,6 +2391,116 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn destroy_remains_readable_when_read_concurrency_is_saturated() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use std::sync::atomic::AtomicUsize;
+        use tokio::net::UnixDatagram;
+
+        let inner = Arc::new(mount_rs_core::MemoryFs::empty());
+        let file = inner.open("/file", "w", 0o644).await.expect("create file");
+        file.write(b"data", Some(0)).await.expect("seed file");
+        file.close().await.expect("close seed file");
+        let active = Arc::new(AtomicUsize::new(0));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let driver = Arc::new(ReadBarrierDriver {
+            inner,
+            active: Arc::clone(&active),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            barrier: Arc::new(tokio::sync::Barrier::new(MAX_PARALLEL_READS + 1)),
+            entered: Arc::clone(&entered),
+        });
+
+        let (device_socket, mut peer) = UnixDatagram::pair().expect("datagram pair");
+        let standard = device_socket.into_std().expect("standard Unix datagram");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("datagram descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-saturated-read-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(driver),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.send(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init");
+        let _ = read_test_datagram(&mut peer).await;
+        peer.send(&test_frame(1, 2, 1, b"file\0"))
+            .await
+            .expect("send lookup");
+        let lookup = read_test_datagram(&mut peer).await;
+        let nodeid = u64::from_le_bytes(lookup[16..24].try_into().unwrap());
+        peer.send(&test_frame(14, 3, nodeid, &[0; 8]))
+            .await
+            .expect("send open");
+        let open = read_test_datagram(&mut peer).await;
+        let handle = u64::from_le_bytes(open[16..24].try_into().unwrap());
+
+        for (index, unique) in (4_u64..).take(MAX_PARALLEL_READS).enumerate() {
+            peer.send(&test_frame(15, unique, nodeid, &read_body(handle)))
+                .await
+                .expect("send saturated read");
+            let expected = index + 1;
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while active.load(Ordering::SeqCst) < expected {
+                    entered.notified().await;
+                }
+            })
+            .await
+            .expect("saturated read should enter its worker");
+        }
+
+        // The next read exhausts the bounded pending queue's first slot. The
+        // terminal DESTROY must still be read from the device while all
+        // sixteen active workers remain blocked.
+        peer.send(&test_frame(
+            15,
+            4 + MAX_PARALLEL_READS as u64,
+            nodeid,
+            &read_body(handle),
+        ))
+        .await
+        .expect("send pending read");
+        peer.send(&test_frame(crate::constants::FUSE_DESTROY, 100, 0, &[]))
+            .await
+            .expect("send destroy");
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("destroy must remain serviceable at the read limit")
+            .expect("saturated session task should finish");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(
+            observed
+                .lock()
+                .expect("callback observation lock")
+                .is_empty()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn stop_cancels_an_inflight_request_and_closes_without_transport_error() {
         use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
@@ -2519,6 +2693,15 @@ mod tests {
         peer.read_exact(&mut reply[crate::OUT_HEADER_SIZE..])
             .await
             .expect("read FUSE reply body");
+        reply
+    }
+
+    #[cfg(target_os = "linux")]
+    async fn read_test_datagram(peer: &mut tokio::net::UnixDatagram) -> Vec<u8> {
+        let mut reply = vec![0; DEFAULT_MAX_FRAME];
+        let length = peer.recv(&mut reply).await.expect("read FUSE datagram");
+        reply.truncate(length);
+        assert!(reply.len() >= crate::OUT_HEADER_SIZE);
         reply
     }
 
