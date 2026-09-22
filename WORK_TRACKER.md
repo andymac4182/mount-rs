@@ -58,7 +58,10 @@ the 20:41 AEST poll the four provider jobs were still queued; a 20:47 AEST
 queue inventory showed nine complete `ci.yml` workflows queued since 10:01
 UTC. This is a CI-capacity blocker, not provider evidence. The manual run
 remains the authoritative non-canceling exact-head gate despite newer
-unrelated push runs.
+unrelated push runs. A later manual descendant run `35716722852` has head
+`32b85965deef60c84d90f5fb353f45fb6001a303`, locally verified to include
+`fba61979`, and is also queued. Automatic descendant run `35717708439` is
+rejected because its four provider jobs were canceled by push concurrency.
 
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
