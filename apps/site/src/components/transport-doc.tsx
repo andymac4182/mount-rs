@@ -226,6 +226,12 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         release. This is a session-boundary behavior, not native mount proof.
         <code>FALLOCATE</code>, <code>LSEEK</code>, and
         <code>COPY_FILE_RANGE</code> remain unsupported boundaries.
+        The Lima source packet at commit <code>467da6a7</code> now also passes
+        the repository's in-process PGlite native-FUSE scope: mounted PGlite
+        connection reopen and PGlite-backed SQLite compositions pass without
+        external credentials. This closes the local PGlite qualification gap,
+        but hosted exact-tip native-FUSE acceptance and the wider W01 release
+        and provider gates remain open.
         The latest terminal CI packet <code>35698854392</code> at source
         <code>116e9ed4</code> canceled its native-FUSE job before a hosted
         <code>/dev/fuse</code> result; the current exact-tip run
@@ -244,6 +250,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Latest hosted FUSE diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666436803' },
       { label: 'Latest hosted FUSE status packet', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
       { label: 'Current exact-tip FUSE qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35700938192' },
+      { label: 'Lima in-process PGlite qualification', href: 'https://github.com/andymac4182/mount-rs/commit/467da6a7' },
     ],
   },
   nfs: {
