@@ -14,6 +14,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
+use mount_rs_nfs::constants::{
+    CREATE_UNCHECKED, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3, NFS3_OK,
+    NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
+};
+use mount_rs_nfs::protocol::{
+    Create3args, DirOpArgs, Sattr3, read_create_res, read_getattr_res, read_lookup_res,
+    read_mount_res, write_create_args,
+};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
     NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_REP_TOO_BIG_TO_CACHE,
@@ -21,6 +29,7 @@ use mount_rs_nfs::v4::{
     NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE,
     OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
 };
+use mount_rs_nfs::xdr::encode_xdr;
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, OpaqueAuth,
     RecordAssembler, XdrReader, XdrWriter, auth_sys, decode_reply, encode_call, frame_record,
@@ -194,7 +203,19 @@ async fn rpc_with_credential(
     args: Vec<u8>,
     credential: Option<&OpaqueAuth>,
 ) -> XdrReader<'static> {
-    let call = encode_call(xid, NFS4_PROGRAM, NFS_V4, 1, credential, None, &args);
+    rpc_call(stream, xid, NFS4_PROGRAM, NFS_V4, 1, args, credential).await
+}
+
+async fn rpc_call(
+    stream: &mut TcpStream,
+    xid: u32,
+    program: u32,
+    version: u32,
+    procedure: u32,
+    args: Vec<u8>,
+    credential: Option<&OpaqueAuth>,
+) -> XdrReader<'static> {
+    let call = encode_call(xid, program, version, procedure, credential, None, &args);
     stream
         .write_all(&frame_record(&call).expect("frame RPC call"))
         .await
@@ -620,6 +641,205 @@ async fn concurrent_file_round_trip(
     let data = response.var_opaque(128, "concurrent read data").unwrap();
     response.end("concurrent read response").unwrap();
     data
+}
+
+#[test]
+fn nfs_v3_and_v4_share_wire_handle_lifetime() {
+    std::thread::Builder::new()
+        .name("nfs-cross-version-handle-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let address = server.listen().await.unwrap();
+                    let mut v3_stream = TcpStream::connect(address).await.unwrap();
+                    let mut mount = rpc_call(
+                        &mut v3_stream,
+                        100,
+                        MOUNT_PROGRAM,
+                        MOUNT_V3,
+                        MOUNTPROC3_MNT,
+                        encode_xdr(|writer| writer.string("/")),
+                        None,
+                    )
+                    .await;
+                    let mount_result = read_mount_res(&mut mount).unwrap();
+                    mount.end("v3 MOUNT response").unwrap();
+                    assert_eq!(mount_result.status, NFS3_OK);
+                    let v3_root = mount_result.fh.unwrap();
+
+                    let create = Create3args {
+                        where_: DirOpArgs {
+                            dir: v3_root.clone(),
+                            name: "cross-version.txt".to_owned(),
+                        },
+                        mode: CREATE_UNCHECKED,
+                        attributes: Some(Sattr3 {
+                            mode: Some(0o644),
+                            ..Sattr3::default()
+                        }),
+                        verf: None,
+                    };
+                    let mut created = rpc_call(
+                        &mut v3_stream,
+                        101,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_CREATE,
+                        encode_xdr(|writer| write_create_args(writer, &create)),
+                        None,
+                    )
+                    .await;
+                    let create_result = read_create_res(&mut created).unwrap();
+                    created.end("v3 CREATE response").unwrap();
+                    assert_eq!(create_result.status, NFS3_OK);
+                    let v3_file = create_result.obj.unwrap();
+
+                    let (mut v4_stream, mut client) =
+                        connect_v4_client(address, 200, b"cross-version-owner").await;
+                    let mut handles = rpc(
+                        &mut v4_stream,
+                        203,
+                        compound(
+                            "shared-handles",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETFH, |_| {}),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&v3_root)),
+                                op(OP_GETFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("cross-version.txt")),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    client.sequence += 1;
+                    parse_compound_header(&mut handles, 7);
+                    consume_sequence_result(&mut handles, "cross-version");
+                    parse_result_header(&mut handles, OP_PUTROOTFH);
+                    parse_result_header(&mut handles, OP_GETFH);
+                    let v4_root = handles.var_opaque(128, "v4 root handle").unwrap();
+                    assert_eq!(v4_root, v3_root);
+                    parse_result_header(&mut handles, OP_PUTFH);
+                    parse_result_header(&mut handles, OP_GETFH);
+                    assert_eq!(handles.var_opaque(128, "v3 root via v4").unwrap(), v3_root);
+                    parse_result_header(&mut handles, OP_LOOKUP);
+                    parse_result_header(&mut handles, OP_GETFH);
+                    assert_eq!(handles.var_opaque(128, "v3 file via v4").unwrap(), v3_file);
+                    handles.end("shared handles response").unwrap();
+
+                    let mut removed = rpc(
+                        &mut v4_stream,
+                        204,
+                        compound(
+                            "cross-version-remove",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&v3_root)),
+                                op(OP_REMOVE, |writer| writer.string("cross-version.txt")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut removed, 3);
+                    consume_sequence_result(&mut removed, "cross-version remove");
+                    parse_result_header(&mut removed, OP_PUTFH);
+                    parse_result_header(&mut removed, OP_REMOVE);
+                    let _ = removed.bool("remove atomic").unwrap();
+                    let _ = removed.u64("remove before").unwrap();
+                    let _ = removed.u64("remove after").unwrap();
+                    removed.end("cross-version remove response").unwrap();
+                    client.sequence += 1;
+
+                    let mut old_handle = rpc_call(
+                        &mut v3_stream,
+                        102,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_GETATTR,
+                        encode_xdr(|writer| writer.var_opaque(&v3_file)),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(
+                        read_getattr_res(&mut old_handle).unwrap().status,
+                        NFS3ERR_STALE
+                    );
+                    old_handle.end("stale v3 handle response").unwrap();
+
+                    let open = op(OP_OPEN, |writer| {
+                        writer.u32(0);
+                        writer.u32(OPEN4_SHARE_ACCESS_BOTH);
+                        writer.u32(0);
+                        writer.u64(client.clientid);
+                        writer.var_opaque(b"cross-version-open-owner");
+                        writer.u32(OPEN4_CREATE);
+                        writer.u32(UNCHECKED4);
+                        empty_attrs(writer);
+                        writer.u32(CLAIM_NULL);
+                        writer.string("v4-created.txt");
+                    });
+                    let mut opened = rpc(
+                        &mut v4_stream,
+                        205,
+                        compound(
+                            "v4-create-v3-lookup",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                open,
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut opened, 4);
+                    consume_sequence_result(&mut opened, "v4 create");
+                    parse_result_header(&mut opened, OP_PUTROOTFH);
+                    parse_result_header(&mut opened, OP_OPEN);
+                    let _ = opened.fixed_opaque(16, "v4 open stateid").unwrap();
+                    let _ = opened.bool("v4 open atomic").unwrap();
+                    let _ = opened.u64("v4 open before").unwrap();
+                    let _ = opened.u64("v4 open after").unwrap();
+                    let _ = opened.u32("v4 open flags").unwrap();
+                    let _ = opened
+                        .array(16, "v4 open attrset", |reader| reader.u32("attr word"))
+                        .unwrap();
+                    assert_eq!(opened.u32("v4 open delegation").unwrap(), 0);
+                    parse_result_header(&mut opened, OP_GETFH);
+                    let v4_file = opened.var_opaque(128, "v4-created handle").unwrap();
+                    opened.end("v4 create response").unwrap();
+
+                    let mut looked_up = rpc_call(
+                        &mut v3_stream,
+                        103,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&v3_root);
+                            writer.string("v4-created.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    let lookup_result = read_lookup_res(&mut looked_up).unwrap();
+                    looked_up.end("v3 LOOKUP response").unwrap();
+                    assert_eq!(lookup_result.status, NFS3_OK);
+                    assert_eq!(lookup_result.object.unwrap(), v4_file);
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

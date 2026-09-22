@@ -2378,6 +2378,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and diff checks pass locally. `AUTH_SYS` remains client-asserted identity;
   native-client ordering, crash/power-loss durability, exact-tip hosted
   acceptance, and W01-NFS production readiness remain open.
+- [x] W01-NFS now has bidirectional real-TCP shared-handle lifetime evidence:
+  v3 MOUNT/CREATE handles match v4.1 PUTFH/LOOKUP/GETFH; v4.1 REMOVE makes
+  the old v3 handle stale; and v4.1 OPEN/CREATE matches v3 LOOKUP. The full
+  locked NFS target passes 42 unit and all applicable integrations including
+  21 v4 wire; pinned upstream parity passes 266 with 18 explicit skips, and
+  strict NFS Clippy plus formatting/diff checks pass. The opt-in native macOS
+  NFSv3 round trip passed on refreshed base `4376c07d`. Cross-process handle
+  persistence, native-client ordering, crash/power-loss durability, exact-tip
+  hosted acceptance, and W01-NFS production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
