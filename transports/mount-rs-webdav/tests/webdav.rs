@@ -672,6 +672,10 @@ async fn failed_streaming_put_preserves_the_written_prefix_by_contract() {
         )
         .await;
     assert_eq!(response.status, 500);
+    assert_eq!(
+        response.headers.get("connection"),
+        Some(&"close".to_owned())
+    );
 
     let handle = filesystem
         .open("/streamed-failure.txt", "r", 0)
@@ -681,6 +685,49 @@ async fn failed_streaming_put_preserves_the_written_prefix_by_contract() {
     assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
     assert_eq!(&bytes, b"partial");
     handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn unread_body_faults_report_once_and_close_the_connection() {
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let session = WebdavSession::new_with_hooks(
+        Arc::new(MemoryFs::empty()),
+        WebdavSessionOptions::default(),
+        WebdavSessionHooks {
+            on_error: Some(Arc::new(move |error, head| {
+                callback_reports
+                    .lock()
+                    .expect("WebDAV body-drain hook lock")
+                    .push((error.to_string(), head));
+            })),
+        },
+    );
+    let response = session
+        .handle_request_stream(
+            WebdavRequestHead {
+                method: "OPTIONS".to_owned(),
+                target: "*".to_owned(),
+                headers: Default::default(),
+            },
+            FailingRequestBody::new(),
+        )
+        .await;
+
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers.get("connection"),
+        Some(&"close".to_owned())
+    );
+    let reports = reports.lock().expect("WebDAV body-drain reports lock");
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].1.method, "OPTIONS");
+    assert_eq!(reports[0].1.target, "*");
+    assert!(
+        reports[0]
+            .0
+            .contains("deliberate WebDAV request stream failure")
+    );
 }
 
 #[tokio::test]
