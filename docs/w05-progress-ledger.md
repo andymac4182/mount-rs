@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 15:15 AEST (2026-09-22 05:15 UTC)
+Last updated: 2026-09-22 15:26 AEST (2026-09-22 05:26 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,21 +10,22 @@ hosted or native gate.
 ## Overall position
 
 Current moving boundary: fetched `origin/main` is now
-`7cc9c8c5f53b08b3b9255e831dc272e7209aca8a` (`7cc9c8c5`), a documentation
-successor over the exact locally qualified
-`01f844c1145278765438e7b367cd560e811476a6` (`01f844c`). The exact `01f844c`
-packet passed formatting, `git diff --check`, the full locked Rust workspace
-including the HTTP/Windows parity successor, strict workspace Clippy,
-optimized N-API build/postbuild, the complete elevated Node SDK/CLI
-integration suite, and the real PGlite/provider/CLI/oracle matrix: Rust SDK
-`6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40
-five-seed/eight-backend traces at 621 operations. The current `7cc9c8c5`
-delta is documentation-only over that tested implementation, and its hosted
-workflows are not terminal: W04 `35689926763` and W08 policy `35689926768`
-are queued, CI `35689926753` and W08 targets `35689926756` are pending,
-fault injection `35689926749` is queued, and no R2 run was admitted because
-the monthly cap remains closed. Native mounts, live external
-providers, package/provenance, scope, and the final audit remain open.
+`9e1879553a5db47932eb286dd1db3a772419ca25` (`9e187955`), a W05
+ledger/documentation successor over the runtime fix `4f9120a2e61a260ea14af0953bcc3f7dc5cafe3e`
+(`4f9120a2`). The current tip was requalified locally: the streamed-response
+framing regression passed `1/1`, the full locked Rust workspace passed, strict
+workspace Clippy passed, formatting and `git diff --check` passed, the
+optimized N-API build passed, the complete Node SDK/CLI suite passed, and the
+real PGlite/provider/CLI/oracle matrix passed. The packet reports Rust SDK
+`6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, all 40
+five-seed/eight-backend traces at 621 operations, and 33/33 S3 gateway tests.
+R2/TiDB/RustFS credentials or services and privileged native mounts remain
+explicit skips. Same-SHA hosted Actions were all cancelled before terminal
+acceptance: CI `35690379471`, fault injection `35690379495`, W04
+`35690379497`, W08 targets `35690379501`, and W08 policy `35690379506`;
+no current R2 run was admitted because the monthly cap remains closed.
+Native mounts, live external providers, package/provenance, scope, and the
+final audit remain open. Production remains **NO-GO**.
 Production remains **NO-GO**.
 
 **W05 functional completion: 100%; production-readiness completion: 60%
@@ -40,9 +41,9 @@ N-API packaging defect was also fixed in `postbuild.mjs` and pushed as
 `90df85b`: clean release generation now preserves the public
 `P9AttachOptions` declaration referenced by `P9Server.attach()`.
 
-Earlier current-main qualification captured at 10:46 AEST was exact
+Historical current-main qualification captured at 10:46 AEST was exact
 `db431f4ccfff45c329fcc12f20f4e04f332a77c3` (`db431f4c`). This revision is
-the latest fetched and pushed `origin/main`. It contains the same generated
+an earlier fetched and pushed `origin/main` boundary. It contains the same generated
 N-API P9 absence-shape fix as `730a3de4`; clean release generation now keeps
 the public `undefined` contract for P9 lock/session optional values. On that
 exact SHA, formatting, the full locked Rust workspace with permitted
@@ -255,6 +256,35 @@ gates therefore remain actionable work in this session.
 | W05.32 Requalify the exact d43/S3-observability successor and reconcile the current shared head | Local release qualification + hosted evidence | Complete exact local runtime packet on `175615c7`; current docs-only `9563d2db` head and production closure remain open | 100% local code packet / 0% hosted-provider-native-package closure | Exact pushed `175615c7265a49b4d07ed16c57e63e9ae771df26` passed `cargo fmt --all -- --check`, `git diff --check`, the full locked Rust workspace, strict workspace Clippy (`-D warnings`), optimized N-API build, complete Node SDK/CLI integration suite, and `scripts/test-pglite.sh`. It reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200 passed / 82 skipped`, and all 40 five-seed/eight-backend traces at 621 operations; the real PGlite lifecycle, backup/restore/rollback, split-store/VFS/FUSE, cleanup-failure, WebDAV, S3, 9P, NFS, differential, distribution, and artifact checks passed. Fetched/pushed `origin/main` `9563d2db` adds only documentation over this tested runtime and therefore does not require a new runtime packet, but it has no hosted release acceptance yet. Exact-SHA hosted W04 `35684095331`, fault injection `35684095300`, and W08 release policy `35684095289` succeeded; CI `35684095286` and W08 release targets `35684095309` were still in progress at capture. | Let the current head settle, then retain terminal same-SHA CI, W08 targets/policy, fault, W04/W07, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and W20.6 evidence on the selected release revision. Do not admit live R2 while the monthly cap is closed; rotate the short-lived token through the approved security path after reset. | 3–5 h exact local packet completed; 2–8 h remaining hosted/provider/platform closure | R2 cap/reset and token rotation, AWS protected inputs/OIDC trust, hosted concurrency, privileged native platforms, signing, registries, provider services, product scope, and final-audit ownership remain external. No credential value was read, stored, printed, or placed in Keychain. |
 | W05.33 Requalify the exact pushed S3 error-hook head and preserve cancelled hosted evidence | Local release qualification + hosted evidence | Complete exact local packet on `b3cfbcb4`; current `1179d9e3` 9P/WebDAV successor requires fresh qualification | 100% local code packet / 0% current-tip closure | Exact pushed `b3cfbcb419a2a24bd89750358c96701f98ba3130` passed the focused `delete_objects_reports_per_key_driver_errors_to_error_hook` regression, format, diff check, full locked Rust workspace (including 30 S3 gateway tests), strict Clippy, optimized N-API build, complete Node SDK/CLI suite, and real PGlite/oracle matrix. It reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200 passed / 82 skipped`, and all 40×621 traces. Same-SHA W04 `35684755110` succeeded; W08 targets `35684755036`, CI `35684755170`, W08 policy `35684755009`, and fault injection `35684755061` were cancelled, so no hosted full-release acceptance is claimed. | Requalify current `1179d9e3` or select a final SHA; retain terminal same-SHA CI, fault, W04/W07/W08, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence. Keep live R2 closed until the UTC-month reset and security-approved short-lived-token rotation. | 2–4 h exact local packet completed; 2–8 h remaining hosted/provider/platform closure | Concurrent shared-main pushes and hosted cancellation remain external; R2 cap/reset, AWS protected inputs/OIDC, native privileges/signing, provider services, registries, product scope, and final-audit ownership remain open. No credential value was read, stored, printed, or placed in Keychain. |
 | W05.34 Requalify the exact 9P/WebDAV current head and preserve mixed hosted evidence | Local release qualification + hosted evidence | Complete exact local packet on `8d7e9f3d`; current `4f6e1048` WebDAV successor requires fresh qualification | 100% local code packet / 0% current-tip closure | Exact pushed `8d7e9f3d577daa22735d1e31079c0971c2e7eddd` passed format/diff checks, full locked Rust workspace, strict Clippy, optimized N-API build, complete Node SDK/CLI suite with 9P teardown/backpressure and WebDAV structural phases, and real PGlite/oracle matrix. It reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200 passed / 82 skipped`, and all 40×621 traces. Same-SHA W04 `35685285569`, fault injection `35685285680`, W08 policy `35685285584`, and W08 targets `35685285524` succeeded; CI `35685285624` was cancelled, so no hosted full-release acceptance is claimed. | Requalify current `4f6e1048` or select a final SHA; retain terminal same-SHA CI, fault, W04/W07/W08, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence. Keep live R2 closed until the UTC-month reset and security-approved short-lived-token rotation. | 2–4 h exact local packet completed; 2–8 h remaining hosted/provider/platform closure | Concurrent shared-main pushes and hosted cancellation remain external; R2 cap/reset, AWS protected inputs/OIDC, native privileges/signing, provider services, registries, product scope, and final-audit ownership remain open. No credential value was read, stored, printed, or placed in Keychain. |
+
+| W05.35 Requalify the exact pushed current tip after the streamed S3 response-framing fix | Local release qualification + hosted evidence | Full local packet green; hosted/provider/native/package closure open | 100% local / 0% current-tip hosted closure | Exact pushed `9e1879553a5db47932eb286dd1db3a772419ca25` is documentation-only over runtime fix `4f9120a2e61a260ea14af0953bcc3f7dc5cafe3e`. The focused `http_server_aborts_short_streamed_response_without_reusing_connection` regression passed `1/1`, the full locked Rust workspace passed, strict workspace Clippy passed, format and diff checks passed, optimized N-API build passed, and the complete Node SDK/CLI plus real PGlite/provider/CLI/oracle packet passed. Results: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, 40×621 traces, and 33/33 S3 gateway tests. Same-SHA CI `35690379471`, fault `35690379495`, W04 `35690379497`, W08 targets `35690379501`, and W08 policy `35690379506` were cancelled; no current R2 run was admitted. | Select one final release SHA after shared-main movement; obtain terminal same-SHA CI, fault, W04/W07/W08, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence. After the UTC-month reset and security-approved R2 token rotation, run exactly one bounded live-R2 packet. | 0 h additional implementation; 1–3 h evidence reconciliation plus hosted/provider/platform wait | R2 monthly cap/token rotation, AWS security/OIDC provisioning, hosted concurrency, privileged native platforms, signing, registries, provider services, scope decisions, and final-audit ownership remain external. |
+
+### W05.35 current-tip evidence (2026-09-22 15:26 AEST)
+
+The current pushed tip is locally qualified but is not a production release
+candidate yet. On `9e187955`, the permitted host runs passed
+`./scripts/cargo-shared fmt --all -- --check`, `git diff --check`,
+`./scripts/cargo-shared test --workspace --all-targets --locked`, strict
+workspace Clippy, the focused S3 framing regression, the optimized
+`pnpm --dir integrations/mount-rs-napi build`, the complete Node/N-API suite,
+and `scripts/test-pglite.sh`. The current S3 gateway has 33 passing tests,
+including the short streamed-response connection-abort case. The Node suite
+passed its SDK, CLI, N-API, WebDAV, S3 restart/barrel, FUSE/9P/NFS, differential,
+distribution, and artifact phases; PGlite passed lifecycle, reconnect,
+versioning, VFS, split-store, backup/restore/rollback, FUSE, SDK, Node, CLI,
+upstream, and trace phases. The explicit skips are R2 credentials, TiDB/RustFS
+services, FoundationDB opt-in, and privileged native mounts; they are not
+failures, but they remain production gates when those capabilities are in the
+advertised support matrix.
+
+The five same-SHA hosted workflows were cancelled before terminal acceptance,
+and no R2 run was admitted under the fail-closed monthly cap. This is current
+hosted evidence, not a release pass. Remaining production actions are to
+select a settled final SHA, obtain terminal hosted CI/fault/W04/W07/W08 and
+package/provenance evidence, provision AWS inputs and immutable OIDC trust
+through security, rotate the R2 token after the UTC-month reset, close the
+advertised-provider and native-platform gates, resolve production scope, and
+run W20.6 for the written GO/NO-GO decision.
 
 ### W05.12 current-boundary reconciliation
 
@@ -814,10 +844,11 @@ shown separately from active engineering time.
 | 2026-09-22 13:59–14:08 | Requalified exact pushed `8d7e9f3d` after the 9P EOF/backpressure and teardown changes, refreshed same-SHA hosted Actions, fetched the next WebDAV successor, and prepared the next ledger checkpoint | Local production qualification / hosted evidence / release engineering | Exact `8d7e9f3d` passed format/diff, full locked Rust workspace, strict Clippy, optimized N-API, complete Node SDK/CLI suite, real PGlite, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces. W04, fault, W08 policy, and W08 targets succeeded; CI was cancelled. `origin/main` advanced to `4f6e1048` with recursive WebDAV mutation, duplicate-header, listener-restart, and N-API changes, so current-tip qualification remains open and production is NO-GO. |
 | 2026-09-22 14:08–14:58 | Requalified exact pushed `338026ae` after the 9P remote-admission successor, handled sandbox loopback/spawn boundaries with permitted host runs, ran the full Rust/Clippy/N-API/Node/PGlite packet, fetched/rebased concurrent main, queried exact-SHA hosted state, and prepared this ledger/tracker checkpoint | Local production qualification / hosted evidence / release engineering | Exact `338026ae` passed format/diff, full locked Rust workspace, strict Clippy, optimized N-API build/postbuild, complete elevated Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix. Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces passed. Current `origin/main` is docs-only `44cd558a`; W04 succeeded, fault/W08 policy are in progress, CI/W08 targets are cancelled, and no R2 run was admitted at the cap. Production remains NO-GO; security/native/provider/package/scope/final-audit gates remain open. |
 | 2026-09-22 14:58–15:15 | Rebased over the S3, SQLite, HTTP/Windows, and shared documentation successors; requalified exact `01f844c` with the full Rust/Clippy/N-API/Node/PGlite packet, pushed the W05 ledger/tracker as `7cc9c8c5`, and refreshed exact-SHA hosted state | Local production qualification / hosted evidence / release engineering | Exact `01f844c` passed format/diff, full locked Rust workspace, strict Clippy, optimized N-API build/postbuild, complete elevated Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix. Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces passed. Pushed ledger tip `7cc9c8c5` has W04/W08 queued, CI/W08 targets pending, fault queued, and no R2 admission at the cap. Production remains NO-GO; security/native/provider/package/scope/final-audit gates remain open. |
+| 2026-09-22 15:15–15:26 | Rebased and pushed the W05 ledger onto concurrent `origin/main` through `9e187955`, verified the integrated S3 framing regression, reran the full Rust/Clippy/N-API/Node/PGlite packet, refreshed current-SHA Actions, and prepared the next production checkpoint | Local production qualification / hosted evidence / release engineering | Runtime `4f9120a2` and pushed tip `9e187955` passed the focused S3 regression, format/diff, full locked Rust workspace, strict Clippy, optimized N-API build, complete Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix. Counts are Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, 40×621 traces, and 33/33 S3 gateway tests. Same-SHA CI `35690379471`, fault `35690379495`, W04 `35690379497`, W08 targets `35690379501`, and W08 policy `35690379506` cancelled before terminal acceptance; no R2 run was admitted. Production remains NO-GO. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program plus the current qualification checkpoints: **about
-48–58 h total active work so far**. The
+49–59 h total active work so far**. The
 production-readiness register currently represents **about 60–140 h** of
 provisional active engineering and review across the mapped rows, excluding
 hosted queues, provider provisioning, signing, and other external wait time.
