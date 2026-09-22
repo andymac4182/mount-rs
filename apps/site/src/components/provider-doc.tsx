@@ -382,11 +382,11 @@ SQL`,
         <code>onAssertion</code> controls with callback keepalive/release;
         its callback-observability, package, Rust, and strict-Clippy checks
         passed. These remain local controls, not live-provider acceptance. The
-        latest AWS admission <code>35679010203</code> stopped at
-        <code>missing_bucket</code> and the latest R2 admission
-        <code>35680542993</code> stopped at <code>count=285 limit=20</code>, so
-        neither produced a live
-        service PASS.
+        latest AWS admission <code>35686512809</code> stopped at
+        <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code>. The latest R2
+        admission <code>35687955189</code> stopped at
+        <code>count=309 limit=20</code> and skipped its live integration job,
+        so neither produced a live service PASS.
       </>
     ),
     inspectLabel: 'List, head, range-read, and delete an owned prefix',
@@ -482,7 +482,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
-      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35680542993' },
+      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955189' },
       { label: 'S3 session-hook change', href: 'https://github.com/andymac4182/mount-rs/commit/d43f5ea4' },
     ],
   },
@@ -1068,18 +1068,19 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         <code>process.abort()</code> multipart restart check is
         native-filesystem evidence only; neither result changes the live AWS
         or power-loss acceptance boundary. The latest admission
-        <code>35679010203</code> at published source <code>9e98f14</code>
+        <code>35686512809</code> at published source <code>5e910e80</code>
         reached the same protected-config validator and stopped at
-        <code>missing_bucket</code> before AWS authentication. No live AWS
-        service PASS is claimable until the protected bucket, region, account,
-        versioning, and OIDC role inputs are provisioned.
+        <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code> before AWS
+        authentication. No live AWS service PASS is claimable until the
+        protected bucket, region, account, versioning, and OIDC role inputs are
+        provisioned.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35679010203' },
+      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35686512809' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
@@ -1093,7 +1094,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, while the publication-barrier optimization is locally qualified and the latest hosted rerun remains pending against the unchanged 1,000-IOPS gate. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the latest terminal hosted packet is diagnostic against the unchanged 1,000-IOPS gate, while a fresh exact-tip rerun remains queued. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -1245,6 +1246,15 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         aggregate job <code>106606577835</code> failed closed on missing
         <code>OZONE_IOPS_PASS</code> markers. No acceptance or production
         claim is made from this run.
+        The newer terminal packet <code>35686340751</code> selected exact SHA
+        <code>1e64bc25</code>: base Ozone passed, SQLite/R2 measured
+        <code>997.06</code> IOPS, PGlite/R2 <code>592.43</code>, and TiDB/R2
+        <code>277.59</code>; FoundationDB produced no benchmark after its
+        locked-preflight failure, and aggregate job
+        <code>106616062969</code> failed closed. A fresh manual dispatch
+        <code>35688061634</code> selected the newer exact SHA
+        <code>06fc7061</code> and remains queued/in progress with no aggregate
+        result, so it is not acceptance evidence.
       </>
     ),
     sources: [
@@ -1256,7 +1266,8 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Historical hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
       { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
-      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683158821' },
+      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35686340751' },
+      { label: 'Current hosted Ozone dispatch', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35688061634' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

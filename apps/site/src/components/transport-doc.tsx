@@ -473,6 +473,16 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         native tests. The corrected member-boundary packet at exact SHA
         <code>81cc6596</code> and run <code>35670279904</code> confirms native
         <code>stream: undefined</code> and the transport-source peer string.
+        The later wire-framing packet at exact SHA
+        <code>c42030c1</code> passed hosted run <code>35687955065</code>, covering
+        a deterministic 256 KiB payload split across negotiated 8 KiB frames,
+        oversized-frame rejection, and continued service for a second session.
+        The subsequent backpressure teardown packet at exact SHA
+        <code>1179d9e3</code> passed hosted run <code>35685073733</code>, covering
+        bounded pending replies while observing orderly EOF, TCP reset, and
+        paused-peer half-close cleanup. These remain scoped native/API and
+        transport qualifications; process-crash, arbitrary kernel-reset,
+        broader parity, and production acceptance remain open.
         The platform-probe packet at run <code>35672845113</code> also passes
         synthetic Linux/Darwin override checks. The same pinned packet checks all 124
         constants and 274 runtime <code>./9p</code> barrel exports. The
@@ -529,7 +539,9 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'W01 9P progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_9P_PROGRESS.md' },
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
-      { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
+      { label: 'Latest hosted Native 9P lifecycle', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35685073733' },
+      { label: 'Hosted 9P wire-framing qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955065' },
+      { label: 'Hosted 9P Unix-listener qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },
       { label: 'Latest hosted 9P stats qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673543701' },
       { label: 'Latest hosted 9P fid qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35674581481' },
@@ -881,6 +893,11 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         materialized. No newer hosted WebDAV result is claimable, so
         <code>35678488755</code> remains the latest terminal native result and
         the current maturity remains Preview.
+        The subsequent exact-tip audit run <code>35687955166</code> was
+        cancelled with no jobs, while its protected R2 companion
+        <code>35687955189</code> stopped at the usage admission guard
+        (<code>count=309 limit=20</code>) and skipped live integration. No
+        hosted WebDAV or live-provider PASS is promoted from that audit.
       </>
     ),
     sources: [
@@ -896,6 +913,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'WebDAV Basic-auth hardening', href: 'https://github.com/andymac4182/mount-rs/commit/8e23ca0' },
       { label: 'WebDAV bounded enumeration and copy failures', href: 'https://github.com/andymac4182/mount-rs/commit/8e08ac4' },
       { label: 'Latest hosted WebDAV queue audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35681127696' },
+      { label: 'Latest hosted WebDAV/provider audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955189' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
