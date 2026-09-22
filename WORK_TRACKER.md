@@ -949,9 +949,12 @@ provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
 host-enabled provider-backed network matrix also passes 64 concurrent NodeFs
 and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
-The current-tip Rust WebDAV target passes 19/19 with the shared Cargo wrapper,
-and warning-denied WebDAV Clippy passes; this does not close external hosted,
-provider-lifecycle, or durability gates.
+The current-tip Rust WebDAV target passes 20/20 with the shared Cargo wrapper,
+and warning-denied WebDAV Clippy passes; the target now includes a durable
+driver barrier regression covering successful PUT, MKCOL, PROPPATCH, COPY,
+MOVE, DELETE, resource creation by LOCK, and injected barrier failure/retry.
+This is transport-level barrier evidence and does not close external hosted,
+provider-lifecycle, power-loss, or durable-lock gates.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
@@ -1099,6 +1102,15 @@ prefix. The Rust focused regression and host-enabled N-API WebDAV phase both
 assert `partial` remains after the deliberate failure. This is an accepted
 oracle-compatible protocol scope decision, not atomic publication or
 power-loss/live-provider durability evidence; those gates remain open.
+
+WebDAV now awaits `FsDriver::syncfs()` before acknowledging successful
+filesystem mutations whenever `Capabilities::durable_writes` is advertised;
+barrier errors return request failures, while volatile drivers remain no-op.
+Lock-table state remains process-local and is not presented as durable lock
+state. The focused 20-test Rust target exercises this contract across the
+mutation methods and an injected failure/retry path; provider-specific
+power-loss ordering, live remote-provider behavior, hosted lifecycle, and
+durable-lock acceptance remain open.
 
 For the published 256-request packet `efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6`,
 the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
