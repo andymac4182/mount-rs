@@ -5111,6 +5111,13 @@ reproducible in a production-like environment.
   passed; this is bounded local graceful-close evidence only, so live providers,
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open and W01-S3 stays **NO-GO**.
+- [x] Re-qualified the current release N-API S3 runtime on published mainline
+  `76eb2914`: the fresh release addon build, callback observability, 64-way/CAS
+  concurrency, session differential, exact 155/258/153 barrel scope, process
+  restart, generated typecheck, distribution, and isolated S3 server phase all
+  passed. This refreshes local Rust/N-API evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
