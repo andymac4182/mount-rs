@@ -3342,13 +3342,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source base `e8c6043827e6cd0232a28f94b8fc665e25985f76` was freshly reverified
-  after concurrent N-API, S3-test, FUSE, WebDAV, lockfile, NFS, 9P and provider
+  Source base `eeb628da9deed5ad0b9670756b406556a659f9b8` was freshly reverified
+  after concurrent FUSE, N-API, S3-test, WebDAV, lockfile, NFS, 9P and provider
   updates with the full locked workspace test suite (exit 0) and strict
   workspace Clippy with `-D warnings` (exit 0). The four W08 rollout/evidence
   policy commands also passed with 36 functional items, 9 open production
   gates, 7 rollout tests and 11 evidence tests; the packet remains NO-GO with
-  zero evidence records. A subsequent documentation-only merge is
+  zero evidence records. A subsequent unrelated documentation-only merge is
   source-equivalent to this tested tree. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close

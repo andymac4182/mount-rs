@@ -162,16 +162,17 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Source base `e8c6043827e6cd0232a28f94b8fc665e25985f76` was freshly reverified
-locally after concurrent N-API, S3-test, FUSE, WebDAV, lockfile, NFS, 9P and
+Source base `eeb628da9deed5ad0b9670756b406556a659f9b8` was freshly reverified
+locally after concurrent FUSE, N-API, S3-test, WebDAV, lockfile, NFS, 9P and
 provider updates: the full locked workspace test suite exited 0 and strict
 workspace Clippy with `-D warnings` exited 0. The four W08 rollout/evidence
 policy commands also passed with 36 functional items, 9 open production gates,
 7 rollout tests and 11 evidence tests; the packet remains NO-GO with zero
-evidence records. A subsequent documentation-only merge is source-equivalent
-to this tested tree. This is source-health and tracking-control evidence only
-and does not close any production gate. Provider/native rows requiring TiDB,
-RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips.
+evidence records. A subsequent unrelated documentation-only merge is
+source-equivalent to this tested tree. This is source-health and
+tracking-control evidence only and does not close any production gate.
+Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained
+explicit opt-in skips.
 
 The latest read-only production-boundary audit at **2026-09-22 10:38 AEST**
 returned HTTP 404 from both W08 workflow-list queries, the `w08-production`
