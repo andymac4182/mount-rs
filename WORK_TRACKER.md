@@ -919,6 +919,19 @@ coverage and zero reportable findings. This remains unpublished
 implementation evidence until pushed and requalified on an exact hosted
 revision; production remains **NO-GO**.
 
+Current W26 TiDB isolation follow-up (2026-09-22): the TiDB private pool now
+sets and verifies both pessimistic transaction mode and `REPEATABLE-READ`
+session isolation once for each newly created connection. Per-transaction
+isolation negotiation is removed while the transaction guard, rollback on
+cancellation/early return, fail-closed mode/isolation validation,
+parameterized SQL and ambiguous-commit semantics remain intact. The focused
+TiDB package has 7 passing unit tests; full locked workspace tests, strict
+workspace Clippy, formatting and diff checks pass locally. Security diff scan
+`5975446d-8bb7-457e-92d3-74c5c6ccf671` completed with full changed-file
+coverage and zero reportable findings. This is unpublished implementation
+evidence until pushed and requalified on the exact published revision;
+production remains **NO-GO**.
+
 ## Decisions and external prerequisites
 
 - After the app restart, the nine prior worker handles were missing. Their

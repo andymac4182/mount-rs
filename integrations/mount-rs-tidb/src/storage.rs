@@ -5,7 +5,7 @@ use mount_rs_core::storage::{
 use mount_rs_core::{ErrorCode, FsError, Result, backend_error};
 use mysql_async::prelude::Queryable;
 use mysql_async::{
-    Conn, Error as MysqlError, IsolationLevel, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
+    Conn, Error as MysqlError, Opts, OptsBuilder, Params, Pool, Transaction, TxOpts,
 };
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -267,15 +267,23 @@ async fn configure_pessimistic_session(
     let mode: Option<String> = connection
         .query_first("SELECT @@SESSION.tidb_txn_mode")
         .await?;
-    require_pessimistic_mode(mode.as_deref()).map_err(|error| MysqlError::Other(Box::new(error)))
+    require_pessimistic_mode(mode.as_deref())
+        .map_err(|error| MysqlError::Other(Box::new(error)))?;
+    connection
+        .query_drop("SET SESSION transaction_isolation='REPEATABLE-READ'")
+        .await?;
+    let isolation: Option<String> = connection
+        .query_first("SELECT @@SESSION.transaction_isolation")
+        .await?;
+    require_repeatable_read_isolation(isolation.as_deref())
+        .map_err(|error| MysqlError::Other(Box::new(error)))
 }
 
 async fn begin_pessimistic(connection: &mut Conn) -> Result<Transaction<'_>> {
     // Sessions are configured and verified once when the pool creates them.
     // Keep the driver's transaction guard so cancellation and early-return
     // paths are rolled back before a pooled connection is reused.
-    let mut options = TxOpts::default();
-    options.with_isolation_level(IsolationLevel::RepeatableRead);
+    let options = TxOpts::default();
     connection
         .start_transaction(options)
         .await
@@ -288,6 +296,19 @@ fn require_pessimistic_mode(mode: Option<&str>) -> Result<()> {
     } else {
         Err(backend_error(
             "TiDB session must use pessimistic transactions",
+        ))
+    }
+}
+
+fn require_repeatable_read_isolation(isolation: Option<&str>) -> Result<()> {
+    if isolation.is_some_and(|value| {
+        value.eq_ignore_ascii_case("repeatable-read")
+            || value.eq_ignore_ascii_case("repeatable read")
+    }) {
+        Ok(())
+    } else {
+        Err(backend_error(
+            "TiDB session must use repeatable-read isolation",
         ))
     }
 }
@@ -934,6 +955,15 @@ mod tests {
         assert!(require_pessimistic_mode(Some("PESSIMISTIC")).is_ok());
         for mode in [None, Some(""), Some("optimistic"), Some("unknown")] {
             assert!(require_pessimistic_mode(mode).is_err());
+        }
+    }
+
+    #[test]
+    fn effective_transaction_isolation_must_be_repeatable_read() {
+        assert!(require_repeatable_read_isolation(Some("REPEATABLE-READ")).is_ok());
+        assert!(require_repeatable_read_isolation(Some("repeatable read")).is_ok());
+        for isolation in [None, Some(""), Some("READ-COMMITTED"), Some("SERIALIZABLE")] {
+            assert!(require_repeatable_read_isolation(isolation).is_err());
         }
     }
 
