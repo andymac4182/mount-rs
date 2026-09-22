@@ -185,6 +185,12 @@ without re-executing the operation. A same-slot retry that reaches the server
 while the original is blocked now gets prompt `NFS4ERR_DELAY` before the
 per-RPC lease-sweep lock; a premature next sequence is rejected with
 `NFS4ERR_SEQ_MISORDERED`. Once the original completes, its reply is cached.
+For a completed cached reply, a retry whose decoded `AUTH_SYS` credentials
+identify a different effective user receives `NFS4ERR_SEQ_FALSE_RETRY` instead
+of the other user's cached body. A same-user retry can still receive that
+original body even when its operation arguments differ; neither retry
+re-executes the mutation. `AUTH_SYS` is not cryptographic authentication, and
+uncached or restart-spanning replay remains outside this guarantee.
 The exclusive lease-sweep lock is now taken only when a client has expired;
 otherwise independent slots of the same live session can overlap on separate
 TCP connections. A controlled rootless test proves this for two `GETATTR`

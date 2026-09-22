@@ -105,6 +105,7 @@ pub const NFS4ERR_SEQUENCE_POS: u32 = 10_064;
 pub const NFS4ERR_RETRY_UNCACHED_REP: u32 = 10_068;
 pub const NFS4ERR_TOO_MANY_OPS: u32 = 10_070;
 pub const NFS4ERR_OP_NOT_IN_SESSION: u32 = 10_071;
+pub const NFS4ERR_SEQ_FALSE_RETRY: u32 = 10_076;
 pub const NFS4ERR_NOT_ONLY_OP: u32 = 10_081;
 pub const NFS4ERR_CONN_NOT_BOUND_TO_SESSION: u32 = 10_055;
 pub const NFS4ERR_CLIENTID_BUSY: u32 = 10_074;
@@ -639,6 +640,7 @@ struct ClientState {
 struct CachedReply {
     sequence: u32,
     body: Vec<u8>,
+    credentials: RpcCredentials,
 }
 
 #[derive(Debug, Clone)]
@@ -2197,18 +2199,29 @@ impl Nfs4Session {
                         .clone(),
                     in_flight,
                 )
-            } else if let Some(body) = state
+            } else if let Some(cached) = state
                 .sessions
                 .get(sessionid)
                 .and_then(|session| session.cached[slot_index].as_ref())
                 .filter(|cached| cached.sequence == *sequence)
-                .map(|cached| cached.body.clone())
+                .cloned()
             {
+                // AUTH_SYS stamps/machine names may change on retransmission;
+                // compare the decoded effective credentials, not raw bytes.
+                if cached.credentials != *credentials {
+                    v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_FALSE_RETRY, 1, false);
+                    drop(state);
+                    return Ok(self.compound_error_body(
+                        NFS4ERR_SEQ_FALSE_RETRY,
+                        &tag,
+                        &[V4OpResult::new(OP_SEQUENCE, NFS4ERR_SEQ_FALSE_RETRY)],
+                    ));
+                }
                 if let Some(client) = state.clients.get_mut(&clientid) {
                     client.renewed = self.now();
                 }
-                v4_trace_body_reply(peer, xid, &body, true);
-                return Ok(body);
+                v4_trace_body_reply(peer, xid, &cached.body, true);
+                return Ok(cached.body);
             } else {
                 v4_trace_compound_reply(peer, xid, NFS4ERR_SEQ_MISORDERED, 0, false);
                 drop(state);
@@ -2272,6 +2285,7 @@ impl Nfs4Session {
                     session.cached[slot_index] = Some(CachedReply {
                         sequence: *sequence,
                         body: body.clone(),
+                        credentials: credentials.clone(),
                     });
                 }
             }

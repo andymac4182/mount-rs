@@ -17,12 +17,12 @@ use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
     NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE,
-    NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL,
-    OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
+    NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS,
+    NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
 };
 use mount_rs_nfs::{
-    NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler,
-    XdrReader, XdrWriter, decode_reply, encode_call, frame_record,
+    NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, OpaqueAuth,
+    RecordAssembler, XdrReader, XdrWriter, auth_sys, decode_reply, encode_call, frame_record,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -181,7 +181,16 @@ struct Client {
 }
 
 async fn rpc(stream: &mut TcpStream, xid: u32, args: Vec<u8>) -> XdrReader<'static> {
-    let call = encode_call(xid, NFS4_PROGRAM, NFS_V4, 1, None, None, &args);
+    rpc_with_credential(stream, xid, args, None).await
+}
+
+async fn rpc_with_credential(
+    stream: &mut TcpStream,
+    xid: u32,
+    args: Vec<u8>,
+    credential: Option<&OpaqueAuth>,
+) -> XdrReader<'static> {
+    let call = encode_call(xid, NFS4_PROGRAM, NFS_V4, 1, credential, None, &args);
     stream
         .write_all(&frame_record(&call).expect("frame RPC call"))
         .await
@@ -1424,8 +1433,11 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
                     let address = server.listen().await.expect("listen replay NFS server");
                     let (mut first, mut client) =
                         connect_v4_client(address, 601, b"replay-reconnect-client").await;
+                    let original_user = auth_sys(1000, 1000, "replay-client");
+                    let same_user_new_machine = auth_sys(1000, 1000, "replay-reconnected");
+                    let different_user = auth_sys(2000, 2000, "replay-client");
 
-                    let mut response = rpc(
+                    let mut response = rpc_with_credential(
                         &mut first,
                         604,
                         compound(
@@ -1436,6 +1448,7 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
                                 op(OP_REMOVE, |writer| writer.string("replay-first")),
                             ],
                         ),
+                        Some(&original_user),
                     )
                     .await;
                     let first_body = response.rest();
@@ -1465,11 +1478,37 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
                     let mut second = TcpStream::connect(address)
                         .await
                         .expect("connect replacement replay transport");
-                    // A changed target is intentional: the same slot/sequence
-                    // must replay the old body, never execute the new REMOVE.
-                    let mut replay = rpc(
+                    let mut foreign_retry = rpc_with_credential(
                         &mut second,
                         605,
+                        compound(
+                            "foreign-retry",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-second")),
+                            ],
+                        ),
+                        Some(&different_user),
+                    )
+                    .await;
+                    assert_eq!(
+                        parse_compound_status(&mut foreign_retry, 1),
+                        NFS4ERR_SEQ_FALSE_RETRY
+                    );
+                    assert_eq!(
+                        parse_result_status(&mut foreign_retry, OP_SEQUENCE),
+                        NFS4ERR_SEQ_FALSE_RETRY
+                    );
+                    foreign_retry.end("foreign replay response").unwrap();
+                    assert!(driver.stat("/replay-second").await.is_ok());
+
+                    // A changed target is intentional: the same slot/sequence
+                    // can replay the old body for the same effective user,
+                    // never executing the new REMOVE.
+                    let mut replay = rpc_with_credential(
+                        &mut second,
+                        606,
                         compound(
                             "altered-retry",
                             &[
@@ -1478,15 +1517,16 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
                                 op(OP_REMOVE, |writer| writer.string("replay-second")),
                             ],
                         ),
+                        Some(&same_user_new_machine),
                     )
                     .await;
                     assert_eq!(replay.rest(), first_body);
                     assert!(driver.stat("/replay-second").await.is_ok());
 
                     client.sequence += 1;
-                    let mut response = rpc(
+                    let mut response = rpc_with_credential(
                         &mut second,
-                        606,
+                        607,
                         compound(
                             "fresh-remove",
                             &[
@@ -1495,6 +1535,7 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
                                 op(OP_REMOVE, |writer| writer.string("replay-second")),
                             ],
                         ),
+                        Some(&original_user),
                     )
                     .await;
                     parse_compound_header(&mut response, 3);
