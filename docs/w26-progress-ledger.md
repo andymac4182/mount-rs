@@ -5,6 +5,58 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, optimistic preparation snapshot chunk
+
+This is the newest W26 implementation boundary. Source commit
+[`c1d3037ad3e179a2df01005f1b72295f08f0887b`](https://github.com/andymac4182/mount-rs/commit/c1d3037ad3e179a2df01005f1b72295f08f0887b)
+(`perf(w26): overlap whole-file preparation snapshots`) is published at
+`origin/main`. The 13-line runtime change adds a dedicated lease-renewal
+gate, serializes lease renew/validation provider mutations, and removes only
+the read-only initial `write_file_atomic` snapshot from the global mutation
+gate. The state mutex still makes the snapshot coherent; the existing
+mutation-batch revision/CAS, create rebase, conflict fallback, fenced
+publication, lifecycle lock, shutdown ordering and fail-closed paths remain
+the commit boundary. This allows concurrent whole-file operations to overlap
+preparation without allowing concurrent lease mutations.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Source implementation | **PUBLISHED / 100% for this chunk** | `c1d3037a` is at both the detached checkout and `origin/main`; `cargo fmt --all` and `git diff --check` pass. | Requalify the real Ozone/provider path on this exact source. |
+| Chunked focused test gate | **PASS** | `./scripts/cargo-shared test -p mount-rs-chunked --lib --locked`: 22 passed, 0 failed, 0 ignored, including lease-loss, shutdown, revision conflict, batch publication and preparation-window tests. | Hosted/provider execution remains separate. |
+| Full workspace locked test gate | **PASS** | `./scripts/cargo-shared test --workspace --all-targets --locked` completed with executed suites passing; explicitly opt-in native/live provider tests remain ignored where external services or host privileges are not configured. | Do not promote ignored native/provider cases as hosted acceptance. |
+| Focused/full strict Clippy | **PASS** | Focused chunked Clippy and `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` both exited successfully. | No local action; retain hosted evidence boundary. |
+| Security diff scan | **PASS — 0 findings / complete coverage** | Scan `86a4e46e-caef-4d9b-8ab7-aeba21571d80` covered the one changed source file with complete coverage and zero findings; snapshot `codex-security-snapshot/v1:sha256:aaa80da6e5eca5d80170d0a6ba50f6c3b967d02d821fbb0ceda46eb7d0821d2e`; report `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-7kSFBv/mount-rs/186b0d081086abbf91bafd80017a15bc2ad71288_20260922T120042Z_ughpz8yq/report.md`. | Customer certificate/IAM, secret rotation, tenant isolation and provider-native controls remain separate production gates. |
+| Exact-head manual W26 qualification | **PENDING — run `35724922283`** | Manual run [`35724922283`](https://github.com/andymac4182/mount-rs/actions/runs/35724922283) has exact workflow head `c1d3037ad3e179a2df01005f1b72295f08f0887b`. At 22:03 AEST, `ozone-foundationdb` (`106736188870`), `ozone-tidb` (`106736188994`), `tidb-rustfs` (`106736189003`), `ozone` (`106736189040`), `ozone-compositions` (`106736189052`), `foundationdb-rustfs` (`106736189166`) and `tidb` (`106736189217`) were queued. | Wait for terminal all-provider/base/aggregate artifacts from this exact run; queued is not acceptance. |
+| Production readiness | **NO-GO** | Local correctness/security gates are positive, but the exact source has no terminal Ozone/provider packet. The hard 1,000 IOPS/drive target, aggregate/e2e packet, Tier-1 99.99% reliability, five-minute RPO/RTO and customer-deployed Ozone security evidence remain open; Ozone/customer backup/DR and the separate release stream remain external. | Continue W26 compatibility and qualification only; do not claim customer deployment readiness. |
+
+### Work-item delta and provisional estimates
+
+The complete W26.1–W26.15/P14 table below remains authoritative for every
+work item. This chunk improves the shared optimistic preparation path but does
+not promote a hosted performance result or change provider acceptance counts.
+
+| Work item | Status / completion after this chunk | Evidence and remaining action | Provisional engineering time / external blocker |
+| --- | --- | --- | --- |
+| W26.1/W26.2 — base Ozone and immutable-block contract | **OPEN / 100% implementation; exact-head hosted evidence pending** | Lease mutations are serialized independently while read-only preparation snapshots overlap; run `35724922283` is queued on `c1d3037a`. | 0.25–0.75 d per hosted qualification/remediation cycle; CI/Ozone topology are external. |
+| W26.3a–d — SQLite, PGlite, TiDB and FoundationDB compositions | **OPEN / 100% implementation; hard-target acceptance unchanged** | No provider metric is available for `c1d3037a`; require terminal finite rows for all four feasible providers at or above 1,000 IOPS/drive. | 0.5–1.5 d per cycle; provider startup, Ozone/R2 latency and hosted runners are external. |
+| W26.4/W26.8 — end-to-end and requested-provider/no-skip qualification | **OPEN / 100% verifier; exact packet pending** | Local tests pass, but only the exact manual run can provide hosted functional/restart/cleanup/authority/lease markers and no-skip provider rows. | 0.25–0.75 d review; CI scheduling and provider services are external. |
+| W26.11/W26.14 — aggregate and end-to-end packet | **OPEN / 100% fail-closed verifier; pending** | Run `35724922283` has no terminal aggregate result; require all retained artifacts on one accepted workflow revision. | 0.5–1.5 d review; GitHub artifact service, native runners and Ozone topology are external. |
+| W26.15 — per-drive hard IOPS gate | **OPEN / 100% verifier; current acceptance remains 1/4 from prior terminal evidence** | This change is not a performance pass. Require four individual finite rows at or above 1,000 IOPS/drive; do not average, lower or skip. | 1.5–4 d per cycle plus queue; provider/Ozone performance and artifact retention are external. |
+| W26.7/W26.10/W26.13 — security, retention and customer rollout contract | **OPEN for production / source-diff gate positive** | Complete local diff scan is clean; customer TLS/IAM/rotation/tenant isolation, artifact retention and customer-run deployment evidence remain open. | 0.5–2 d review; customer/Ozone controls and deployment environment are external. |
+| P14 — final integration-readiness review | **NO-GO / 50% provisional** | The source/runtime chunk is published and locally validated, but hosted provider/performance/aggregate and customer production gates are not closed. | 1–2 d after W26.15; customer SLO/RPO/RTO, security, backup/DR and release-stream gates are external. |
+
+### Session time log — optimistic preparation snapshot chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — diagnosis/design | Reviewed the global gate, lease renewal cache, mutation runner and optimistic conflict paths; identified the initial whole-file snapshot as the remaining serialized preparation section. | ~0.5–0.75 h | 0 h | Change scope limited to read-only preparation plus a dedicated lease-mutation gate. |
+| 2026-09-22 — implementation | Added `lease_gate`, wrapped renew/validate operations, and moved the initial `write_file_atomic` snapshot outside the global mutation gate with an explicit optimistic-CAS comment. | ~0.25–0.5 h | 0 h | Provider lease mutations remain serialized; publication semantics unchanged. |
+| 2026-09-22 — local verification | Ran formatting/diff checks, focused 22-test chunked suite, focused Clippy, full locked workspace tests and full workspace strict Clippy. | ~0.75–1 h | ~0.25–0.5 h shared Cargo target wait | Local Rust gates passed; opt-in provider/native tests remain external. |
+| 2026-09-22 — security review | Completed preflight, threat model, one-file review and scan `86a4e46e-caef-4d9b-8ab7-aeba21571d80` with complete coverage and zero findings. | ~0.25–0.5 h | ~0.1–0.25 h security workbench finalization | No security candidate survived; hosted/customer controls remain separate. |
+| 2026-09-22 — source publication | Committed the runtime chunk, rebased over concurrent mainline updates through `672564b0`, pushed `c1d3037a`, and verified local `HEAD == origin/main` clean. | ~0.25–0.5 h | ~0.1–0.25 h mainline reconciliation | Other threads can build from the exact runtime tip. |
+| 2026-09-22 — hosted dispatch (22:03 AEST) | Dispatched manual run `35724922283` from `main`, verified exact head `c1d3037a` and all seven W26 jobs queued. | ~0.1 h | CI/provider capacity pending | The run is the authoritative hosted boundary for this source chunk. |
+| 2026-09-22 — next gate | Poll `35724922283` with bounded waits; retrieve exact provider artifacts after terminal completion, classify all four rows against 1,000 IOPS/drive, then update W26.15/W26.14/P14. | ~0.5–1.5 d provisional | ~0.5–2 h provisional hosted wait | Keep production **NO-GO** until the complete packet and customer gates close. |
+
 ## Current authority override — 2026-09-22, hosted queue recheck after bounded watch
 
 At 21:52 AEST, stable manual run
