@@ -750,10 +750,13 @@ impl MetadataStore for SqliteMetadataStore {
         let (fence, expires) = lease_numbers(lease)?;
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
         let mut connection = self.0.lock()?;
-        let tx = connection
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .map_err(backend_error)?;
-        let changed = tx
+        // The successful publication path is one fenced conditional UPDATE.
+        // SQLite makes a single autocommit statement atomic and durable under
+        // the configured synchronous policy, so avoid opening and committing
+        // a second explicit transaction for the common case. A zero-row
+        // result opens the Immediate transaction only for the locked
+        // stale/revision classification below.
+        let changed = connection
             .execute(
                 &format!(
                     "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
@@ -767,6 +770,9 @@ impl MetadataStore for SqliteMetadataStore {
             // The conditional update is the successful-path CAS. Only the
             // exceptional path needs a read to preserve the stale-versus-
             // revision-conflict classification of the former lease preflight.
+            let tx = connection
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .map_err(backend_error)?;
             let (valid, actual_revision): (bool, i64) = tx
                 .query_row(
                     &format!(
@@ -787,7 +793,6 @@ impl MetadataStore for SqliteMetadataStore {
             // unexplained zero-row CAS fails closed.
             return Err(stale());
         }
-        tx.commit().map_err(backend_error)?;
         Ok(next as u64)
     }
 

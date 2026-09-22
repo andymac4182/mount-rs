@@ -1094,7 +1094,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the latest terminal hosted packet is diagnostic against the unchanged 1,000-IOPS gate, while a fresh exact-tip rerun remains queued. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the latest exact-tip hosted packet is diagnostic after hard 1,000-IOPS misses, while customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -1252,9 +1252,14 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         <code>277.59</code>; FoundationDB produced no benchmark after its
         locked-preflight failure, and aggregate job
         <code>106616062969</code> failed closed. A fresh manual dispatch
-        <code>35688061634</code> selected the newer exact SHA
-        <code>06fc7061</code> and remains queued/in progress with no aggregate
-        result, so it is not acceptance evidence.
+        <code>35688061634</code> selected exact SHA <code>06fc7061</code> and is
+        now terminal but diagnostic: SQLite/R2 measured <code>940.82</code>
+        IOPS, PGlite/R2 <code>1004.33</code>, TiDB/R2 <code>332.25</code>, and
+        FoundationDB/R2 <code>399.59</code>. Each row completed 1,200/1,200
+        lifecycle operations with zero timeouts and cleanup failures, but the
+        aggregate packet failed closed because the compositions evidence lacked
+        <code>OZONE_IOPS_PASS</code>. No acceptance or production claim is made
+        from this run.
       </>
     ),
     sources: [
@@ -1266,8 +1271,8 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Historical hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
       { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
-      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35686340751' },
-      { label: 'Current hosted Ozone dispatch', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35688061634' },
+      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35688061634' },
+      { label: 'Previous hosted Ozone diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35686340751' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

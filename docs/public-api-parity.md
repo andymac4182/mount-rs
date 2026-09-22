@@ -359,8 +359,16 @@ Current focused behavior:
   IPv4 interface skip this environmental case. Exact SHA
   `87ccd68c8e2040c90037c6027eb4467b1a7bd42d` passed [Native 9P run `35688474092`](https://github.com/andymac4182/mount-rs/actions/runs/35688474092),
   N-API job `106620236951`, with Rust job `106620236776` also green. Explicit
-  `allowRemote: true` network admission and broader server-boundary parity
-  remain separate gates.
+  `allowRemote: true` network admission is covered by the following packet;
+  broader server-boundary parity remains a separate gate.
+- The native TCP listener also has interface-qualified hosted evidence for
+  `allowRemote: true`: a peer sourced from the actual external IPv4 interface
+  completes version/attach and serves `Tgetattr`, retaining its peer and
+  negotiated `msize`; hosts without an external IPv4 interface skip this
+  environmental case. Exact SHA
+  `2f0e23a4bc5ba79fef61426137da365cbcd55f42` passed [Native 9P run `35688865494`](https://github.com/andymac4182/mount-rs/actions/runs/35688865494),
+  N-API job `106621392719`, with Rust job `106621392818` also green. Broader
+  server-boundary parity remains a separate gate.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
