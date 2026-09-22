@@ -5,7 +5,7 @@
 //! Filesystem driver alive while exposing the small lifecycle surface that
 //! Node callers need.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -4796,14 +4796,21 @@ async fn webdav_response(response: TransportWebdavResponse) -> napi::Result<Webd
 }
 
 fn transport_webdav_head(head: WebdavRequestHead) -> TransportWebdavRequestHead {
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
+    for header in head.headers {
+        let name = header.name.to_ascii_lowercase();
+        if let Some(existing) = headers.get_mut(&name) {
+            let separator = if name == "if" { " " } else { "," };
+            existing.push_str(separator);
+            existing.push_str(&header.value);
+        } else {
+            headers.insert(name, header.value);
+        }
+    }
     TransportWebdavRequestHead {
         method: head.method,
         target: head.target,
-        headers: head
-            .headers
-            .into_iter()
-            .map(|header| (header.name.to_ascii_lowercase(), header.value))
-            .collect(),
+        headers,
     }
 }
 

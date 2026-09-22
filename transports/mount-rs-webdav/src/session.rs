@@ -10,7 +10,7 @@ use bytes::Bytes;
 use mount_rs_core::{ErrorCode, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
-    ALLOW_HEADER, COLLECTION_CONTENT_TYPE, DAV_COMPLIANCE, DAV_NS, MAX_PROPFIND_ENTRIES,
+    ALLOW_HEADER, COLLECTION_CONTENT_TYPE, DAV_COMPLIANCE, DAV_NS, MAX_DIRECTORY_ENTRIES,
     MS_AUTHOR_VIA, READ_CHUNK_BYTES, RESOURCE_CONTENT_TYPE, status_for_error,
 };
 use crate::locks::{
@@ -651,7 +651,11 @@ impl WebdavSession {
         path: &'a str,
     ) -> Pin<Box<dyn Future<Output = (Vec<Failure>, bool)> + Send + 'a>> {
         Box::pin(async move {
-            let entries = match self.driver.readdir(path).await {
+            let entries = match self
+                .driver
+                .readdir_bounded(path, MAX_DIRECTORY_ENTRIES)
+                .await
+            {
                 Ok(entries) => entries,
                 Err(error) if is_absent(&error) => return (Vec::new(), false),
                 Err(error) => {
@@ -906,7 +910,11 @@ impl WebdavSession {
             if !deep {
                 return (Vec::new(), true);
             }
-            let entries = match self.driver.readdir(source).await {
+            let entries = match self
+                .driver
+                .readdir_bounded(source, MAX_DIRECTORY_ENTRIES)
+                .await
+            {
                 Ok(entries) => entries,
                 Err(error) => {
                     return (
@@ -1038,7 +1046,7 @@ impl WebdavSession {
         if depth == Depth::One && stats.is_directory() {
             let children = self
                 .driver
-                .readdir_bounded(path, MAX_PROPFIND_ENTRIES)
+                .readdir_bounded(path, MAX_DIRECTORY_ENTRIES)
                 .await
                 .map_err(propfind_directory_error)?;
             for entry in children {
