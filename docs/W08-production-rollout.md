@@ -224,6 +224,12 @@ release-manifest fixture passed with `--require-release-acceptance`. These are
 repository admission controls only; they do not close P01/P02/P07/P09 or
 create provider, signing, SBOM-service, canary, rollback or approval evidence.
 
+A fresh read-only production-boundary audit at **2026-09-22 12:40 AEST** still
+returned HTTP 404 for both W08 workflow queries and the protected environment;
+the release API could not resolve the repository and no production-candidate
+tag exists. No release, canary, rollback or approval evidence was created, so
+P09 remains externally blocked.
+
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or

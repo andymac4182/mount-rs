@@ -3586,6 +3586,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   closed, and the strict accepted release-manifest fixture passed with
   `--require-release-acceptance`; these remain repository controls only and
   do not close P01/P02/P07/P09.
+  A fresh 12:40 AEST read-only audit again returned HTTP 404 for both W08
+  workflow queries and the `w08-production` environment, could not resolve the
+  release surface, and found no production-candidate tag. No release,
+  canary, rollback or approval evidence was created, so P09 remains externally
+  blocked.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

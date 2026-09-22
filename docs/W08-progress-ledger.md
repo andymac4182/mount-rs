@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 12:38 AEST**
+Status snapshot: **2026-09-22 12:41 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -31,8 +31,8 @@ qualification commit `052dc184` was reconciled and published in public merge
 tip `a921fe76`; the subsequent pointer synchronization was published in
 `ff29dad7`. The current source qualification is merged tip `32b1a229`; the
 source-equivalent ledger and reconciliation history were published in public
-ancestry through tip `ea49dc65`, with exact local/remote equality, public-ref
-and ancestry verification at **12:24 AEST**. This is the latest successful
+ancestry through tip `7cba89a5`, with exact local/remote equality, public-ref
+and ancestry verification at **12:41 AEST**. This is the latest successful
 publication check before the read-only production-boundary audit below.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
 `77114d4d`, `229a9cd5`,
@@ -481,6 +481,9 @@ the evidence counted here.
 | Live GitHub production-boundary audit, 2026-09-22 10:38 AEST | BLOCKED — P09 repository/API/environment execution boundary | Fresh read-only `gh run list` checks returned HTTP 404 for both `w08-release-policy.yml` and `w08-production-release.yml`; `gh api` for `w08-production` returned HTTP 404; `gh release list` could not resolve the repository; and `git ls-remote` found no `v*-cli-production-candidate*` tag. The fetched public mainline still contains both workflow files. The last successful release observation remains 08:38 AEST with only `v0.1.0-cli-preview`; these failed API calls are not promoted to a release claim. This is external GitHub/API and release-configuration evidence, not production acceptance. | Restore/authorize the repository/API surface, configure the protected environment and reviewers/secrets, create an approved immutable candidate tag, run the terminal workflow, then inspect registry assets and execute canary/rollback/approval. |
 | Public current tip `715beb9f` 9P N-API constants/parity support | PARTIAL — JavaScript syntax/static checks pass; local N-API runtime not available | `node --check` passed for `p9.cjs`, `postlude-p9-codec.cjs`, `test/p9-constants.mjs`, `test/webdav-network-concurrency.mjs` and `test/webdav-session-concurrency.mjs`; all four W08 policy/evidence suites also passed. No full local N-API runtime claim is made because the checkout lacks optional native binding artifacts, as recorded above. Hosted W08.4 Node/N-API evidence remains authoritative. | Build or install the platform N-API artifact before claiming local runtime parity; keep this static/native-artifact boundary separate from production P01–P09. |
 
+| Current public source-equivalent tip `7cba89a5a1b4c03e7d52a2507ad8fa1deee71d0e` | PASS — documentation-only public reconciliation | `git fetch origin`, `git rev-parse HEAD`, `git rev-parse origin/main`, `git ls-remote origin refs/heads/main` and the diff from public checkpoint `803db689` confirm the current public tip contains only W01/W04 documentation after the tested FoundationDB merge. No W08 Rust/provider/native or production result is claimed. | Preserve the tested source base `32b1a229` and the explicit production NO-GO boundary; no production gate is closed by documentation-only publication. |
+| Live GitHub production-boundary audit, 2026-09-22 12:40 AEST | BLOCKED — P09 repository/API/environment execution boundary | Fresh read-only `gh run list` returned HTTP 404 for both `w08-production-release.yml` and `w08-release-policy.yml`; `gh api repos/andymacclenaghan/mount-rs/environments/w08-production` returned HTTP 404; `gh release list` could not resolve the repository; and `git ls-remote origin 'refs/tags/v*-cli-production-candidate*'` returned no tag. No release, canary, rollback or approval evidence was created. | Restore/authorize the repository/API surface, configure the protected environment and reviewers/secrets, create an approved immutable candidate tag, run the terminal workflow, then inspect registry assets and execute canary/rollback/approval. |
+
 ## Session time log
 
 Times below are approximate engineering/wall-clock accounting for this goal;
@@ -616,6 +619,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 12:25–12:30 AEST | Rechecked local production prerequisites and credential-free admission controls: Docker daemon, live-provider environment presence, positive/negative production-config fixtures, and strict accepted release-manifest fixture. | ~0.05 engineer-day | ~2s local prerequisite/policy execution | No local Docker/provider path or credentials are available. Repository controls remain fail-closed and the accepted manifest fixture is synthetic; no P01–P09 gate closed, so production remains NO-GO with zero evidence records. |
 | 2026-09-22 12:30–12:35 AEST | Merged concurrent chunked lease-release and 9P synchronous mount-inspection source changes, reran the full locked workspace test and strict Clippy, syntax-checked changed N-API files, parsed package JSON, reran all W08 rollout/evidence suites, and merged the later WebDAV hosted-result documentation as source-equivalent. | ~0.2 engineer-day | ~1m30s test/Clippy/policy/static execution plus ~2 min fetch/merge reconciliation | The exact merged source is test-, lint- and tracking-control clean; provider/native prerequisites and production P01–P09 gates remain external. The source qualification is ready for publication and production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 12:35–12:38 AEST | Merged the current FoundationDB qualification-harness source, reran the full locked workspace test and strict Clippy, checked the new harness with `bash -n`, reran all W08 rollout/evidence suites, and ran diff checks. | ~0.15 engineer-day | ~1m30s test/Clippy/policy execution plus mainline reconciliation | The exact merged source is test-, lint- and tracking-control clean; the provider/native and production boundaries remain explicit. W08 production remains NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 12:38–12:41 AEST | Verified public checkpoint `803db689`, merged the subsequent W01/W04 documentation-only public tip `7cba89a5`, verified `refs/heads/main`, and refreshed the read-only W08 workflow/environment/release/candidate-tag audit. | ~0.08 engineer-day | ~8s public-ref/API observation plus mainline reconciliation | The tested FoundationDB-merged W08 source remains publicly integrated through a source-equivalent tip; the production API/environment/release boundary remains externally blocked. P01–P09 stay open with zero evidence records and production remains NO-GO. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
