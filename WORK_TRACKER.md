@@ -2224,6 +2224,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   lifecycle IOPS `1287.12` (passed); cleanup passed, but the job is terminal
   failure. Its W26 evidence job `106652855215` is still queued and is not
   evidence, so provider capacity and production rollout remain **NO-GO**.
+- Ubuntu Node `106641134421` has now completed successfully in the retained
+  run: fragmented early rejection, exact PGlite/restart recovery,
+  `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration, package/consumer
+  smoke, and `providersFailed: 0` all passed. macOS-latest Node `106641134336`
+  remains in progress, so the run is still partial and no new full-qualification
+  or production claim is made.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and

@@ -97,6 +97,12 @@ composition job failed closed on the failing row, and its queued W26 evidence
 job [106652855215](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106652855215)
 is not evidence. Provider capacity therefore remains an open production gate.
 
+Ubuntu Node [106641134421](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134421)
+also completed successfully with the exact early-rejection and PGlite/restart
+steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API/package/consumer smoke, and
+`providersFailed: 0`. macOS-latest Node remains in progress; this is still a
+partial qualification run and does not change the production NO-GO decision.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
