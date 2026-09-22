@@ -439,6 +439,39 @@ qualification. The latest retained terminal hosted W08 policy pass is
 credentials, production deployment, candidate tag, canary, rollback or owner
 approval exists. P01–P09 remain open and the decision remains NO-GO.
 
+The latest source-bearing shared checkpoint
+`323820683fcd3c063ab392c81eb12906ec8ab2e0` passed the full locked workspace
+test and strict Clippy with warnings denied on an isolated non-incremental
+Cargo target; changed N-API/package checks, six workflow YAML parses, all
+W07/W08 tracking/evidence suites and diff hygiene also passed. Hosted W08 run
+`35699181097`, job `106653083216`, completed successfully in 2m42s. This is
+implementation/static qualification only. Shared main then advanced with
+documentation-only updates to public tip
+`b31291c1cda67ecb1928970a766d6e17af841b56`; current run `35699754200` is
+queued and is not evidence. No provider/native or production gate is closed;
+P01–P09 remain open and the decision remains NO-GO.
+
+The latest exact source-health requalification covered shared source
+`33f52cdaaefcee268cf633d6c0852d0bc685b975` after the FUSE and TiDB-test/CI
+updates. The full locked workspace test and strict Clippy with `-D warnings`
+passed using isolated target `/private/tmp/mount-rs-w08-qual-TeImd6`; all
+runnable tests passed and provider/native rows remained explicit opt-in skips.
+Six workflow YAML files, changed N-API/package checks, W07/W08 tracking and
+evidence validators/tests, and `git diff --check` also passed. Public
+`origin/main` then advanced documentation-only to
+`3a14de2f31862cec1ecd40206c4703aacb4f5309`. Hosted W08 run `35700945120`
+has that exact head SHA and was still `in_progress` at the 17:45 AEST audit,
+so it is pending and not evidence. No provider/native or production gate is
+closed; P01–P09 remain open and the decision remains NO-GO.
+
+A fresh read-only production-boundary audit at **2026-09-22 17:43–17:45
+AEST** found no `w08-production-release.yml` runs, HTTP 404 for the protected
+`w08-production` environment, only the prerelease `v0.1.0-cli-preview`, and no
+`v*-cli-production-candidate*` tag. The separate W08 policy run above is a
+non-production implementation/static workflow and does not change this
+boundary. No production mutation, candidate publication, canary, rollback or
+approval was attempted or inferred; P01–P09 remain open.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
