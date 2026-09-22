@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, a machine-readable nine-gate production-evidence packet/validator, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, evidence-shape, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, an explicit replicated-durable P01 topology policy, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, a machine-readable nine-gate production-evidence packet/validator, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, evidence-shape, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -30,7 +30,7 @@ planning result.
 
 | Gate | Status | Required exit evidence |
 | --- | --- | --- |
-| P01 — deployment scope, topology and support matrix | Open — 25% | Approved managed/self-hosted TiDB/PD/TiKV and block-store topology, regions, HA/quorum, network/TLS policy, resource limits, supported versions, tenancy, IaC and a production-like staging smoke/restart result; the checked-in policy gate now verifies the required deployment shape only. A fresh local single-node v8.5.7 smoke attempt entered PD startup but exited 125 on `Bad response from Docker engine`; the preceding durable attempt failed closed below the 10 GiB Docker floor. Neither produced `TIDB_ACCEPTANCE` or production evidence. |
+| P01 — deployment scope, topology and support matrix | Open — 25% | Approved managed/self-hosted TiDB/PD/TiKV and block-store topology, regions, HA/quorum, network/TLS policy, resource limits, supported versions, tenancy, IaC and a production-like staging smoke/restart result; the checked-in `verify-w08-production-topology.mjs` policy now requires a replicated-durable shape with 3 PD, 3 TiKV, 2 SQL frontends, majority quorum, pinned coherent versions, private TLS networking and the durable resource floor. This is repository shape control only. A fresh local single-node v8.5.7 smoke attempt entered PD startup but exited 125 on `Bad response from Docker engine`; the preceding durable attempt failed closed below the 10 GiB Docker floor. Neither produced `TIDB_ACCEPTANCE` or production evidence. |
 | P02 — secrets, IAM, rotation and audit | Open — 20% | Secret-manager injection, least-privilege metadata/block identities, rotation and revocation without data loss, break-glass procedure, audit and redaction evidence; the policy gate rejects inline secret strings and requires external env references only |
 | P03 — backup, restore and disaster recovery | Open — 10% | Defined RPO/RTO and retention, encrypted backups/versioning, clean-environment restore, metadata/block consistency, corruption/partial-object handling and recovery sign-off |
 | P04 — upgrade, compatibility and rollback | Open — 10% | Rehearsed TiDB/RustFS/client version matrix, schema/config migration, rolling upgrade, interrupted-upgrade recovery, retained-data rollback and compatibility sign-off |
@@ -155,6 +155,21 @@ owner, cleanup, rollback and evidence-reference fields. The synthetic
 regression case fails closed, while the checked-in packet remains NO-GO with
 zero evidence records. This is evidence-shape protection only; it cannot
 authenticate a provider result or create production approval.
+
+W08.37 adds the credential-free P01 topology contract in
+`tests/tidb/production-topology-policy.json`, enforced by
+`scripts/verify-w08-production-topology.mjs` and its eight-case regression
+suite. The policy accepts only an explicitly `replicated-durable` topology:
+three PD members, three TiKV members, two SQL frontends, majority quorum,
+coherent pinned TiDB component versions, private TLS-enabled networking, the
+durable resource floor and tenant-isolation support metadata. The TiDB
+harness's `single-node-smoke-not-replicated-acceptance` result remains a
+separate smoke boundary and is deliberately rejected by this production-like
+topology policy. The checks are wired into the dedicated W08 release-policy
+workflow and protected candidate admission. This closes a repository
+implementation/control slice of P01 only; it does not prove that the selected
+staging or production topology exists, has quorum, meets capacity, or has
+provider/owner approval. P01 therefore remains open.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

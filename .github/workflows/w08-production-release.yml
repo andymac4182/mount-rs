@@ -32,6 +32,8 @@ jobs:
         run: |
           node scripts/verify-w08-rollout-ledger.mjs --require-go
           node scripts/verify-w08-production-evidence.mjs --require-go
+          node scripts/verify-w08-production-topology.mjs \
+            tests/tidb/production-topology-policy.json
 
   build:
     name: Build ${{ matrix.label }} production candidate

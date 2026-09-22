@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "environment": {
+    "class": "production-like-staging",
+    "region": "staging-au-east-1",
+    "owner": "w08-platform"
+  },
+  "topology": {
+    "class": "replicated-durable",
+    "pd_replicas": 3,
+    "tikv_replicas": 3,
+    "sql_frontends": 2,
+    "quorum": {
+      "pd_min_available": 2,
+      "tikv_min_available": 2
+    }
+  },
+  "versions": {
+    "pd": "v8.5.7",
+    "tikv": "v8.5.7",
+    "tidb": "v8.5.7"
+  },
+  "blocks": {
+    "provider": "r2",
+    "durability": "provider-managed",
+    "tls": true
+  },
+  "network": {
+    "private": true,
+    "tidb_tls": true,
+    "blocks_tls": true
+  },
+  "resources": {
+    "min_cpu": 4,
+    "min_memory_gib": 10
+  },
+  "support": {
+    "platforms": ["linux/amd64"],
+    "tenant_isolation": true
+  }
+}

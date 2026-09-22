@@ -4998,6 +4998,24 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
+- [x] W08.37 **Replicated-durable production topology policy:** added
+  `scripts/verify-w08-production-topology.mjs` and its eight-case
+  `scripts/test-w08-production-topology.mjs` control over
+  `tests/tidb/production-topology-policy.json`. The policy requires an
+  explicitly replicated-durable topology with at least three PD members,
+  three TiKV members, two SQL frontends, majority quorum, pinned coherent
+  TiDB component versions, private TLS-enabled networking, the durable
+  resource floor and tenant-isolation support metadata. A
+  `single-node-smoke` classification is rejected rather than promoted to
+  production-like evidence; the existing harness marker
+  `single-node-smoke-not-replicated-acceptance` remains a separate smoke
+  boundary. The credential-free policy and test are wired into both the
+  dedicated W08 release-policy workflow and protected production admission.
+  This is a P01 implementation/control boundary only; it does not prove a
+  deployed topology, quorum, provider durability, capacity or production
+  approval. *(Implementation/static qualification; provider and production
+  evidence remain external.)*
+
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
   bounded propfind/copy failure fix, the
