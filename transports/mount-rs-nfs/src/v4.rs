@@ -716,10 +716,39 @@ struct OpenState {
     handle_id: u64,
     file_id: u64,
     path: String,
-    handle: Arc<dyn FileHandle>,
+    // A same-owner OPEN may add access later. Keep the original descriptor
+    // for in-flight I/O and add the new mode without assuming it can be used
+    // through the first descriptor's OS open flags.
+    read_handle: Option<Arc<dyn FileHandle>>,
+    write_handle: Option<Arc<dyn FileHandle>>,
     access: u32,
     deny: u32,
     owner: Vec<u8>,
+}
+
+impl OpenState {
+    fn any_handle(&self) -> Arc<dyn FileHandle> {
+        self.read_handle
+            .as_ref()
+            .or(self.write_handle.as_ref())
+            .expect("OPEN state owns at least one backend handle")
+            .clone()
+    }
+
+    fn into_handles(self) -> Vec<Arc<dyn FileHandle>> {
+        let mut handles = Vec::with_capacity(2);
+        if let Some(handle) = self.read_handle {
+            handles.push(handle);
+        }
+        if let Some(handle) = self.write_handle
+            && !handles
+                .iter()
+                .any(|existing| Arc::ptr_eq(existing, &handle))
+        {
+            handles.push(handle);
+        }
+        handles
+    }
 }
 
 impl fmt::Debug for OpenState {
@@ -1830,16 +1859,18 @@ impl Nfs4Session {
                     .collect::<Vec<_>>();
                 for other in open_ids {
                     if let Some(open) = state.opens.remove(&other) {
-                        handles.push((open.handle_id, open.handle));
+                        handles.push((open.handle_id, open.into_handles()));
                     }
                 }
                 removed += 1;
             }
             (removed, handles)
         };
-        for (handle_id, handle) in handles {
+        for (handle_id, backend_handles) in handles {
             self.handles.unpin(handle_id);
-            let _ = handle.close().await;
+            for handle in backend_handles {
+                let _ = handle.close().await;
+            }
         }
         removed
     }
@@ -1862,15 +1893,17 @@ impl Nfs4Session {
             let open_handles = state
                 .opens
                 .drain()
-                .map(|(_, open)| (open.handle_id, open.handle))
+                .map(|(_, open)| (open.handle_id, open.into_handles()))
                 .collect::<Vec<_>>();
             state.locks.clear();
             state.exclusive_creates.clear();
             open_handles
         };
-        for (handle_id, handle) in open_handles {
+        for (handle_id, backend_handles) in open_handles {
             self.handles.unpin(handle_id);
-            let _ = handle.close().await;
+            for handle in backend_handles {
+                let _ = handle.close().await;
+            }
         }
     }
 
@@ -3146,7 +3179,7 @@ impl Nfs4Session {
             .opens
             .values()
             .find(|open| open.file_id == file_id)
-            .map(|open| open.handle.clone())
+            .map(OpenState::any_handle)
     }
 
     async fn lookup(&self, name: &str, cursor: &mut Cursor) -> V4OpResult {
@@ -4338,6 +4371,17 @@ impl Nfs4Session {
                     .opens
                     .get_mut(&key)
                     .expect("open state found while holding state lock");
+                let needs_read = flags.read && open.read_handle.is_none();
+                let needs_write = flags.write && open.write_handle.is_none();
+                if needs_read || needs_write {
+                    let backend_handle = handle.take().expect("OPEN acquired backend handle");
+                    if needs_read {
+                        open.read_handle = Some(backend_handle.clone());
+                    }
+                    if needs_write {
+                        open.write_handle = Some(backend_handle);
+                    }
+                }
                 open.access |= access;
                 open.deny |= args.share_deny;
                 open.stateid.seqid = bump_stateid_seq(open.stateid.seqid);
@@ -4364,20 +4408,21 @@ impl Nfs4Session {
                             },
                         );
                     }
-                    state.opens.insert(
-                        stateid.other,
+                    state.opens.insert(stateid.other, {
+                        let backend_handle = handle.take().expect("new open backend handle");
                         OpenState {
                             stateid: stateid.clone(),
                             clientid,
                             handle_id: entry.id,
                             file_id: entry.fileid,
                             path: path.clone(),
-                            handle: handle.take().expect("new open backend handle"),
+                            read_handle: flags.read.then(|| backend_handle.clone()),
+                            write_handle: flags.write.then_some(backend_handle),
                             access,
                             deny: args.share_deny,
                             owner: args.owner.clone(),
-                        },
-                    );
+                        }
+                    });
                     (Some(stateid), false)
                 }
             }
@@ -4434,12 +4479,17 @@ impl Nfs4Session {
             state
                 .opens
                 .remove(&stateid.other)
-                .map(|open| (open.handle_id, open.handle))
+                .map(|open| (open.handle_id, open.into_handles()))
         };
-        if let Some((handle_id, handle)) = handle {
-            let result = handle.close().await;
+        if let Some((handle_id, backend_handles)) = handle {
+            let mut error = None;
+            for handle in backend_handles {
+                if let Err(failure) = handle.close().await {
+                    error.get_or_insert(failure);
+                }
+            }
             self.handles.unpin(handle_id);
-            if let Err(error) = result {
+            if let Some(error) = error {
                 return V4OpResult::new(OP_CLOSE, error_status(&error));
             }
         }
@@ -4461,7 +4511,13 @@ impl Nfs4Session {
             Err(status) => return V4OpResult::new(OP_READ, status),
         };
         let (path, held_handle) = match open {
-            Some(open) => (open.path, Some(open.handle)),
+            Some(open) => (
+                open.path,
+                Some(
+                    open.read_handle
+                        .expect("READ-granted OPEN owns a readable handle"),
+                ),
+            ),
             None => (
                 match self.current_path(cursor) {
                     Ok(path) => path,
@@ -4525,7 +4581,13 @@ impl Nfs4Session {
             Err(status) => return V4OpResult::new(OP_WRITE, status),
         };
         let (path, held_handle) = match open {
-            Some(open) => (open.path, Some(open.handle)),
+            Some(open) => (
+                open.path,
+                Some(
+                    open.write_handle
+                        .expect("WRITE-granted OPEN owns a writable handle"),
+                ),
+            ),
             None => (
                 match self.current_path(cursor) {
                     Ok(path) => path,
