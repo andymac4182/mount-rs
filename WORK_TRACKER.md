@@ -4652,6 +4652,13 @@ reproducible in a production-like environment.
   HTTP/1.1 evidence only, so live providers, power-loss durability, broader
   workload bounds, and native/hosted acceptance remain open and W01-S3 stays
   **NO-GO**.
+- [x] The automatic provider runs for published packet `a861032f` were
+  refreshed: AWS run `35691926924` stopped at
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35691926938`
+  stopped at `R2 CI monthly run cap already exceeded: count=323` before live
+  admission. No service PASS is claimable; protected AWS configuration, the R2
+  budget reset, physical power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `4f9120a2` were
   refreshed: AWS run `35690334807` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35690334795`
