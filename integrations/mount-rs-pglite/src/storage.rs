@@ -754,44 +754,6 @@ impl MetadataStore for PgliteMetadataStore {
             .transaction()
             .await
             .map_err(postgres_error)?;
-        let state = match tx
-            .query_typed_opt(
-                &format!(
-                    "SELECT
-                         (owner IS NOT DISTINCT FROM $2 AND fence=$3 AND expires=$4
-                          AND expires>{NOW}) AS lease_valid,
-                         (revision=$5) AS revision_valid
-                     FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
-                ),
-                &[
-                    (&self.0.volume_key, Type::TEXT),
-                    (&lease.owner, Type::TEXT),
-                    (&fence, Type::INT8),
-                    (&expires, Type::INT8),
-                    (&expected, Type::INT8),
-                ],
-            )
-            .await
-        {
-            Ok(Some(row)) => (row.get::<_, bool>(0), row.get::<_, bool>(1)),
-            Ok(None) => {
-                let _ = tx.rollback().await;
-                return Err(backend_error("PGlite metadata row is missing"));
-            }
-            Err(error) => {
-                let _ = tx.rollback().await;
-                return Err(postgres_error(error));
-            }
-        };
-        if !state.0 {
-            let _ = tx.rollback().await;
-            return Err(stale());
-        }
-        if !state.1 {
-            let _ = tx.rollback().await;
-            return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"));
-        }
-
         let changed = match tx
             .execute_typed(
                 &format!(
@@ -819,13 +781,50 @@ impl MetadataStore for PgliteMetadataStore {
             }
         };
         if changed != 1 {
+            // The conditional update is the successful-path CAS. Only the
+            // exceptional path needs a locked read to preserve the exact
+            // stale-versus-revision-conflict classification that callers
+            // receive from the former preflight SELECT.
+            let state = match tx
+                .query_typed_opt(
+                    &format!(
+                        "SELECT
+                             (owner IS NOT DISTINCT FROM $2 AND fence=$3 AND expires=$4
+                              AND expires>{NOW}) AS lease_valid,
+                             (revision=$5) AS revision_valid
+                         FROM mount_rs_metadata WHERE volume_key=$1 FOR UPDATE"
+                    ),
+                    &[
+                        (&self.0.volume_key, Type::TEXT),
+                        (&lease.owner, Type::TEXT),
+                        (&fence, Type::INT8),
+                        (&expires, Type::INT8),
+                        (&expected, Type::INT8),
+                    ],
+                )
+                .await
+            {
+                Ok(Some(row)) => (row.get::<_, bool>(0), row.get::<_, bool>(1)),
+                Ok(None) => {
+                    let _ = tx.rollback().await;
+                    return Err(backend_error("PGlite metadata row is missing"));
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(postgres_error(error));
+                }
+            };
+            let error = if !state.0 {
+                stale()
+            } else if !state.1 {
+                FsError::new(ErrorCode::Eagain).with_syscall("publish metadata")
+            } else {
+                // The row was locked and the revision and lease were still
+                // valid, so an unexplained zero-row CAS is fail-closed.
+                stale()
+            };
             let _ = tx.rollback().await;
-            // The row was locked and the revision was already checked. A
-            // failed fenced update therefore means the lease expired while
-            // the transaction was completing (or the backend violated the
-            // row-lock invariant); fail closed as stale rather than allowing
-            // a caller to retry a potentially fenced publication.
-            return Err(stale());
+            return Err(error);
         }
         tx.commit().await.map_err(postgres_error)?;
         Ok(next as u64)
