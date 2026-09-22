@@ -920,6 +920,7 @@ dependencies = [
  "mount-rs-persist",
  "object_store",
  "sha2",
+ "tokio",
 ]
 
 [[package]]
