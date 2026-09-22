@@ -87,6 +87,28 @@ function DownloadsPage() {
             public binary is claimable from it; the verified preview below
             remains the only downloadable release asset.
           </p>
+          <p>
+            The latest W08 release-target run{' '}
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35730825471" {...externalProps()}>
+              35730825471
+            </a>{' '}
+            at source <code>f8508e27</code> completed successfully for
+            <code>x86_64-unknown-linux-gnu</code> and
+            <code>aarch64-apple-darwin</code>. Its verified CI artifacts are
+            <code>mount-rs-0.1.0-x86_64-unknown-linux-gnu.tar.gz</code>{' '}
+            (8,550,793 bytes; SHA-256{' '}
+            <code>d115a66cbb5afc39f6d4de5ad15b31f8034c54e1c89b53d114ef4eae142d0f4c</code>)
+            and <code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code>{' '}
+            (7,119,469 bytes; SHA-256{' '}
+            <code>5c7e9cfc09782d04ce659c5d7f6f0ea18646a210abe9422f28dd7827448299fe</code>).
+            Each CI bundle passed its <code>SHA256SUMS</code> check; the
+            manifests themselves are <code>87bf5d2ad4f02a1866f4d0f650dfaf79edcc1a2fd5900ec0649d40956b6df219</code>{' '}
+            (Linux) and <code>ad11076b16bf30807cc84122f3188ddd68448a6265ce060a818453403a0c873e</code>{' '}
+            (macOS). Attestation jobs were skipped and the manifests record
+            signature/SBOM as pending and canary as not run, so these remain
+            CI evidence rather than public GitHub Release downloads. The
+            public release below is still the only claimable download.
+          </p>
         </div>
 
         <section className="download-release-card" aria-labelledby="download-release-heading">
