@@ -1187,17 +1187,17 @@ The current ignored native WebDAV harness now performs eight concurrent
 native-client write/read pairs after the basic round trip, then closes the
 server while mounted, unmounts, relistens, remounts the same driver, and
 verifies a post-restart round trip. Its host-enabled macOS run passed 1/1 with
-the shared Cargo wrapper; the follow-up hosted run above passed the preceding
-mounted-I/O concurrency version, while hosted qualification of the new
-teardown/restart extension remains open.
+the shared Cargo wrapper, and corrected hosted run `35678488755` passed both
+native-WebDAV jobs for the same flow; the aggregate workflow remained
+nonterminal on unrelated jobs.
 The first exact-tip hosted rerun, CI `35677973511` at
 `6ccea74f0df6001e2627bf33e3c8b4ffb2d9d58b`, reached macOS native WebDAV but
 the harness treated the server-induced `not currently mounted` cleanup result
 as failure; the corrected cleanup now accepts an absent mount and still fails
 if the mount remains active. A fresh hosted rerun is required.
-The corrected manual run `35678488755` at `ed29016e82c46e23e372f0615916ed3c1608370b`
-was still aggregate-queued at the latest refresh, with neither native-WebDAV
-job started; no hosted teardown/restart result is claimable yet.
+At the pre-completion snapshot, corrected manual run `35678488755` at
+`ed29016e82c46e23e372f0615916ed3c1608370b` was aggregate-queued with neither
+native-WebDAV job started; its subsequent macOS and Ubuntu jobs both passed.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
