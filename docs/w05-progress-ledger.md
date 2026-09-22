@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 10:46 AEST (2026-09-22 00:46 UTC)
+Last updated: 2026-09-22 10:54 AEST (2026-09-22 00:54 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -38,6 +38,16 @@ CLI `12/2`, upstream `1200 passed / 82 skipped`, and all 40
 five-seed/eight-backend traces at 621 operations. Provider rows remain
 explicitly skipped when credentials are absent. This is the current local
 packet, not hosted/provider/native/package-publication acceptance.
+
+Current-tip boundary captured at 10:54 AEST: `origin/main` is now exact
+`1bdd6adfe6e984a5e7e27ddf0edfb3bbd9d24462` (`1bdd6adf`), adding the FUSE
+busy-unmount forced-teardown handoff. The focused current-tip gate passed
+formatting, all 61 non-native `mount-rs-fuse` package tests, and strict
+package Clippy; the latest complete full Rust/Node/PGlite packet remains
+`db431f4c`, and this FUSE delta has not been promoted to a new full packet.
+The hosted Native 9P dispatch observed during this moving-mainline window was
+revision-specific and remains non-terminal; no native mount acceptance is
+inferred locally on this macOS host.
 
 The latest complete local qualification spans exact pushed revision
 `9354362a`:
@@ -202,6 +212,7 @@ gates therefore remain actionable work in this session.
 | W05.18 Complete the exact successor full Rust/Node/SDK/CLI/PGlite packet | Local release qualification + hosted evidence | Full local packet green on `9354362a`; current `61b904c3` successor open | 100% local packet / 0% current-tip hosted closure | Exact pushed `9354362a` passed format, full locked Rust workspace tests, strict workspace Clippy, optimized N-API build, complete pinned-oracle Node/N-API suite, and the full PGlite/provider matrix. Rust SDK was `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40 five-seed/eight-backend traces passed at 621 operations. PGlite lifecycle, backup/restore rollback, split-store/VFS, injected cleanup-failure fail-closed, WebDAV NodeFs crash/restart, 64-way WebDAV concurrency, NFS process-crash/restart, FUSE package tests, chunked concurrent publication, and artifact aggregation also passed. `origin/main` then advanced to `61b904c3` with additional WebDAV, 9P, and NFS changes; no current-head hosted status was available because the GitHub API was unreachable during refresh. | Requalify `61b904c3` or the selected final SHA; retain terminal CI, fault, W04/W08, Native 9P, package, AWS, and provider evidence on that same SHA. After the UTC-month reset and security-approved token rotation, run exactly one bounded live-R2 requalification. | 1–3 h local successor qualification; hosted/provider wait separate | R2 monthly cap, AWS security/OIDC inputs, hosted concurrency, Linux/kernel 9P and FUSE, Windows, FSKit/signing, registries, package publication, and unavailable hosted status remain external gates. |
 | W05.19 Qualify the exact latest `origin/main` after WebDAV/9P/NFS successors | Local release qualification + hosted/provider evidence | Full current local packet green; hosted/provider/native/package closure open | 100% local packet / 0% current-tip release closure | Exact fetched `origin/main` `8ca6c2572782420ae65bd709e3e08b9670d78148` passed `cargo fmt --all -- --check`, the full locked Rust workspace with loopback permission, strict workspace Clippy (`-D warnings`), optimized `pnpm --dir integrations/mount-rs-napi build`, the complete current Node/N-API suite, and `scripts/test-pglite.sh`. The current Node suite passed WebDAV provider concurrency and in-flight crash/restart in addition to the prior W05 surfaces. The packet reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40 five-seed/eight-backend traces at 621 operations. The workflow-path helper passed both AWS/R2 workflows; the read-only AWS audit returned the exact missing security/OIDC inputs without reading any credential value. | Obtain terminal hosted CI, fault, W04/W08, AWS, Native 9P/platform, package/provenance, and provider evidence on this exact release SHA or a deliberately selected successor; after the UTC-month reset and security-approved R2 token rotation, run exactly one bounded live-R2 packet; complete PR-01 through PR-10 and record W20.6 GO/NO-GO. | 1–3 h local packet already spent; 2–8 h remaining release closure plus hosted/provider wait | R2 monthly cap and token rotation, AWS security/OIDC provisioning, hosted concurrency, Linux/FUSE/9P, Windows, FSKit/signing, registries, provider services, scope decisions, and final audit ownership remain external gates. |
 | W05.20 Requalify the exact pushed `db431f4c` after the current N-API packaging fix | Local release qualification + package/integration gate | Complete locally; hosted/provider/native/package-publication closure open | 100% local packet / 0% current-tip release closure | Exact `db431f4c` passed `cargo fmt --all -- --check`, the full locked Rust workspace with permitted loopback binds, strict workspace Clippy (`-D warnings`), optimized N-API build, complete Node/N-API suite, and the full `scripts/test-pglite.sh` matrix. The clean build regenerated P9 `getlock`, `userFor`, `msize`, and `version` as the public `undefined` shapes; typecheck passed. Node passed P9 metadata/locks, WebDAV direct/network/provider concurrency (64 direct pairs and 32 HTTP provider pairs), SQLite/NodeFs crash/restart, in-flight recovery, CLI, distribution, and artifact aggregation. The exact PGlite packet passed Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 oracle traces. | Carry this exact SHA through terminal hosted CI/fault/W04/W07/W08/AWS/provider/native/package/provenance jobs; keep live R2 admission blocked until the UTC-month reset and security-approved token rotation; close PR-01 through PR-10 and issue W20.6 GO/NO-GO. | 3–5 h active local qualification completed in this session; hosted/provider/platform wait remains separate | R2 monthly envelope, AWS protected environment/OIDC inputs, hosted concurrency, Linux/FUSE/9P privileges, Windows/FSKit/signing, provider services, registries, scope decisions, and final audit ownership remain external. |
+| W05.21 Qualify the current FUSE busy-unmount forced-teardown successor | Focused implementation + local native-package gate | Focused current-tip gate green; full release packet and hosted/native closure open | 100% focused implementation / 0% current-tip release closure | Exact `1bdd6adf` passed `cargo fmt --all -- --check`, the full `mount-rs-fuse` package `--all-targets` suite with 61 passed and 0 failed tests, and strict package Clippy (`-D warnings`). The change classifies Linux helper `EBUSY`/resource-busy unmount failures, requests stop/abort, runs the bounded forced-unmount handoff, and records a transport error if the mount remains present. Native mount tests were not run on this macOS host. | Re-run the complete Rust/Node/PGlite packet on the selected final SHA; obtain terminal revision-matched CI, fault, W04/W07/W08, Native 9P/FUSE/Windows/FSKit, package/provenance, AWS, provider, and final-audit evidence. | 0.75–1.5 h focused qualification completed; 2–8 h remaining release closure plus hosted/platform wait | Linux `/dev/fuse`, native helper behavior, Windows/FSKit/signing, hosted concurrency, AWS security/OIDC inputs, provider services, registries, R2 monthly cap, and scope decisions remain external. |
 
 ### W05.12 current-boundary reconciliation
 
@@ -263,6 +274,12 @@ fixed by `730a3de4` in the pushed ancestry. Exact PGlite evidence is
 revision-matched terminal hosted/provider/native/package/publication/final
 audit packet exists; no credential value was read or placed in Keychain.
 
+Follow-up boundary at 10:54 AEST: `origin/main` advanced to exact
+`1bdd6adf` with the FUSE busy-unmount forced-teardown successor. Its focused
+format, package test, and strict Clippy gates passed. The complete local
+release packet is still anchored at `db431f4c`; the FUSE delta is focused
+green but not yet full-packet or hosted accepted. Production remains NO-GO.
+
 ## Production-readiness dependency register
 
 This register expands W05 from a closed provider slice into the complete
@@ -271,8 +288,9 @@ not a weighted release score. Every row must either reach 100% with evidence
 or be explicitly removed from the release scope by a recorded decision before
 the final audit can issue a GO decision.
 
-Current release-candidate addendum: exact `origin/main` `db431f4c` has a
-green local implementation/SDK/CLI/PGlite packet, but it is not a production
+Current release-candidate addendum: exact `origin/main` `1bdd6adf` has a
+focused FUSE successor over the green full local implementation/SDK/CLI/PGlite
+packet at `db431f4c`, but it is not a production
 release candidate yet. PR-00 remains blocked by the UTC-month R2 admission cap
 and required short-lived-token rotation; PR-02, PR-04, PR-06, and PR-09 need
 revision-matched hosted/provider/platform evidence; PR-03 needs clean
@@ -327,6 +345,7 @@ necessary provider gate, not a substitute for these release criteria.
 
 | Surface | Result | Acceptance meaning |
 | --- | --- | --- |
+| Exact current `origin/main` `1bdd6adf` | Focused FUSE delta green; full packet and hosted/provider/native/package/scope closure open | The exact current tip passed formatting, 61 non-native `mount-rs-fuse` package tests, and strict package Clippy. The delta adds bounded forced teardown for Linux busy-unmount helper outcomes. The complete Rust/Node/PGlite packet remains evidenced at `db431f4c`; native mount behavior, hosted workflows, live providers, package publication, and final audit are not closed by this focused result. |
 | Exact current `origin/main` `db431f4c` | Full local packet green; hosted/provider/native/package/scope closure open | `cargo fmt --all -- --check`, full locked Rust workspace with permitted loopback binds, strict workspace Clippy, optimized N-API build, complete current Node/N-API suite, and `scripts/test-pglite.sh` all passed on the exact pushed SHA. Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40 five-seed/eight-backend traces at 621 operations passed. P9 optional declarations, WebDAV provider/network concurrency, crash/restart, CLI, distribution, and artifact aggregation passed. R2 credentials were absent by policy and provider rows skipped; AWS/OIDC audit remained fail-closed. This does not close hosted CI, live provider, privileged native, package publication, or final-audit gates. |
 | Exact current `origin/main` `8ca6c257` | Full local packet green; hosted/provider/native/package/scope closure open | `cargo fmt --all -- --check`, full locked Rust workspace with permitted loopback binds, strict workspace Clippy, optimized N-API build, complete current Node/N-API suite, and `scripts/test-pglite.sh` all passed. Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40 five-seed/eight-backend traces at 621 operations passed. Current WebDAV provider-concurrency and in-flight crash/restart tests passed; R2 credentials were absent by policy, and AWS/OIDC audit remained fail-closed. This does not close hosted CI, live provider, privileged native, package publication, or final-audit gates. |
 | Repository implementation | `0aa25ad7` is the latest observed origin/main ledger checkpoint, rebased onto concurrent code/docs through `0ad4928e`; the full packet covers pushed `9354362a`, and the current successor adds newer WebDAV/9P/NFS changes | The tested ancestry includes the W05 ledger ancestry, CI workflow, budget guard, hosted orchestration, shared Cargo wrapper use, provider-matrix R2 CLI coverage, lease-refresh fix, strict-Clippy TiDB fix, Windows release-gate repairs, AWS protected-input/PGlite pairing and preflight hardening, release-package declaration fixes, S3 publication/staged-upload retention/ETag fixes, W08 release-manifest checks, Ozone provider matrix, W07 FoundationDB workflow, N-API S3 drain-timeout, 9P property-shaped clients and mount helpers, FUSE lifecycle/syncfs and bounded native frames, NFS session hooks plus owner/lease callbacks, session-member views and shutdown cancellation, WebDAV lifecycle plus timed-out drain preservation/concurrent-client coverage, chunked stale-read/concurrency plus atime coalescing and bounded mutation cancellation, W04 lease-TTL configuration, generated N-API declarations, FoundationDB lease-policy validation, the standalone provider lock repair, FUSE teardown/read-worker/native-session fixes, and the newer WebDAV/9P/NFS changes. |
@@ -363,9 +382,10 @@ necessary provider gate, not a substitute for these release criteria.
    evidence.
 2. Select one final release SHA and let the required CI, fault, W07, AWS, and
    package workflows reach terminal results on it. Exact current `origin/main`
-   `db431f4c` is now the latest complete local Rust/Node/PGlite/CLI packet;
-   its local evidence is green, but no hosted result currently qualifies the
-   final SHA. Requalify any later code tip before promoting a hosted result.
+   `1bdd6adf` is the latest focused FUSE successor over the complete local
+   Rust/Node/PGlite/CLI packet at `db431f4c`; its local delta evidence is green,
+   but no hosted result currently qualifies the final SHA. Requalify the full
+   packet after any later code tip before promoting a hosted result.
    Record every failed, cancelled, skipped, or externally blocked job rather
    than treating a partial matrix as green.
    W07 `35623069365` is a terminal success on `1acc15f`, but it cannot qualify
@@ -406,6 +426,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 10:49–10:54 | Reconciled concurrent main from `db431f4c` through `bed4aacd` to `1bdd6adf`; qualified the four-part S3 multipart-ordering successor, then the FUSE busy-unmount successor | Concurrent-main release qualification | `bed4aacd` gateway format and 28/28 S3 gateway tests passed. Exact `1bdd6adf` then passed format, 61/61 non-native FUSE package tests, and strict package Clippy; current full packet remains anchored at `db431f4c` until the FUSE delta is requalified end to end. |
 | 2026-09-22 10:21–10:30 | Rebased the committed N-API P9 absence-type fix over concurrent `origin/main`; upstream already contained the equivalent implementation as `730a3de4`, so the resulting checkout resolved exactly to `db431f4c` and the push was safely a no-op | Release engineering / concurrent-main reconciliation | `HEAD == origin/main == db431f4c`; no duplicate code commit was created, and the equivalent clean-build declaration fix is present in the shared mainline. |
 | 2026-09-22 10:39–10:44 | Ran the exact pushed `db431f4c` real PGlite qualification with an isolated Cargo target and loopback permission | Local SDK/CLI/provider-matrix qualification | Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40 five-seed/eight-backend traces at 621 operations passed; live R2/TiDB/RustFS rows were explicit skips because credentials/services were absent. |
 | 2026-09-22 10:44–10:49 | Ran exact-current format, locked Rust workspace tests, strict Clippy, optimized N-API build, and complete Node/N-API suite | Local production qualification / package gate | All passed on `db431f4c`, including P9 optional declarations, WebDAV direct/network/provider concurrency, crash/restart and in-flight recovery, CLI, distribution, and artifact aggregation. Native mount and live provider rows remain explicit host/provider gates. |
