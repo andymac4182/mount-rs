@@ -89,21 +89,21 @@ function DownloadsPage() {
           </p>
           <p>
             The latest W08 release-target run{' '}
-            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35730825471" {...externalProps()}>
-              35730825471
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35742010242" {...externalProps()}>
+              35742010242
             </a>{' '}
-            at source <code>f8508e27</code> completed successfully for
+            at source <code>b10db219</code> completed successfully for
             <code>x86_64-unknown-linux-gnu</code> and
             <code>aarch64-apple-darwin</code>. Its verified CI artifacts are
             <code>mount-rs-0.1.0-x86_64-unknown-linux-gnu.tar.gz</code>{' '}
-            (8,550,793 bytes; SHA-256{' '}
-            <code>d115a66cbb5afc39f6d4de5ad15b31f8034c54e1c89b53d114ef4eae142d0f4c</code>)
+            (8,550,825 bytes; SHA-256{' '}
+            <code>497a5bfc8f9494ddb7e62cce3cc7fd908a340284650be745ce2f66f7cfdf4fbc</code>)
             and <code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code>{' '}
             (7,119,469 bytes; SHA-256{' '}
-            <code>5c7e9cfc09782d04ce659c5d7f6f0ea18646a210abe9422f28dd7827448299fe</code>).
+            <code>fd670dce71ada1e0671962a1eb25bef54704a514de75c0b8657f2fee6e9a98fe</code>).
             Each CI bundle passed its <code>SHA256SUMS</code> check; the
-            manifests themselves are <code>87bf5d2ad4f02a1866f4d0f650dfaf79edcc1a2fd5900ec0649d40956b6df219</code>{' '}
-            (Linux) and <code>ad11076b16bf30807cc84122f3188ddd68448a6265ce060a818453403a0c873e</code>{' '}
+            manifests themselves are <code>87fb4a4b6a457724fe649af3ef56373ae610ba10a774cb082cd436dea96dc31d</code>{' '}
+            (Linux) and <code>cef948cfcf9b824b4d665b2306780d6b4a41ffddb6771a99d9c94ba374e2ae1a</code>{' '}
             (macOS). Attestation jobs were skipped and the manifests record
             signature/SBOM as pending and canary as not run, so these remain
             CI evidence rather than public GitHub Release downloads. The
