@@ -31,6 +31,36 @@ accepted.
 | Observability route | Collector, dashboard, alert policy, pager, and log/trace retention | Not connected |
 | Operators | Incident commander, operator, data owner, and release approver | Not assigned |
 
+## Current candidate qualification (supporting evidence, not production approval)
+
+The current published candidate is `d870f900370fe5a7b4235ac7e63f8c3b33efce99`.
+Manual qualification run
+[35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
+completed with the required macOS-latest, macOS-15-intel, Ubuntu, and ARM Node
+early-rejection and PGlite/restart steps green. Its aggregate-native job
+[106634465987](https://github.com/andymac4182/mount-rs/actions/runs/35692153251/job/106634465987)
+passed artifact aggregation, all five native package validations, and clean
+consumer install/smoke. The run itself is terminal `failure` because provider
+capacity/W26 lanes failed, so this is not a production release record or GO
+decision.
+
+The retained native package artifacts provide current candidate provenance for
+the support matrix:
+
+| Package | Artifact | SHA-256 digest |
+| --- | --- | --- |
+| macOS arm64 | `native-macos-latest` (ID `10679168108`) | `8863a55eeb5f549c344fdd8715e6301c88ce0bbc2a8f0293f759fab48fb00df7` |
+| macOS x86_64 | `native-macos-15-intel` (ID `10678858847`) | `c875f4be5b4f3e242f0df30fcc0b4f847700ef50a8f6d31114657f6f4e43e582` |
+| Linux x86_64 | `native-ubuntu-latest` (ID `10678797966`) | `7d28416c540ad863cd33fd447f5d1f348898f901288645005cb7cffd3f64a8a3` |
+| Linux arm64 | `native-ubuntu-24.04-arm` (ID `10679631427`) | `78d33dd923d565542b31dcb87df22132d994dca021f89863dea7fc38efb37a5f` |
+| Windows x86_64 MSVC | `native-win32-x64-msvc` (ID `10679196530`) | `0980293de9302de1afc5fd4052b58313fdec6b537a8e71e5f3af8f0448ecbff2` |
+
+These digests are qualification artifacts, not a signed/tagged production
+release. Ozone/TiDB measured `342.86` IOPS, Ozone/FoundationDB `157.33`, and
+one Ozone composition `838.37` against the hard `1000` target; W26 evidence
+failed closed without `OZONE_IOPS_PASS`. The advertised provider scope must be
+chosen explicitly before rerunning or excluding those lanes.
+
 Do not promote a demo, local filesystem, ephemeral container volume, provider
 mock, credential-free policy check, or skipped hosted job into a production
 pass. If the launch is PGlite-only, explicitly record the excluded provider

@@ -9,7 +9,7 @@ on:
 # Do not cancel a terminal config result merely because another main-branch
 # push starts a newer full CI run.
 concurrency:
-  group: w04-production-policy-${{ github.ref }}
+  group: w04-production-policy-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-manual-{0}', github.run_id) || '' }}
   cancel-in-progress: false
 
 jobs:

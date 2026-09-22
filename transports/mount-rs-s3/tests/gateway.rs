@@ -2846,6 +2846,56 @@ async fn http_server_closes_abandoned_download_handle() {
 }
 
 #[tokio::test]
+async fn http_server_close_allows_inflight_response_to_finish() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x52; 2 * 1024 * 1024];
+    let handle = memory
+        .open("/inflight-download.bin", "w", 0o666)
+        .await
+        .expect("open object");
+    handle.write(&payload, Some(0)).await.expect("write object");
+    handle.close().await.expect("close object");
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory,
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/inflight-download.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write in-flight request");
+    timeout(Duration::from_secs(2), signals.second_read.notified())
+        .await
+        .expect("response entered parked read");
+
+    let mut raw = Vec::new();
+    let response = async {
+        stream.read_to_end(&mut raw).await.expect("read response");
+    };
+    let closing = server.close();
+    signals.release_read.notify_one();
+    timeout(Duration::from_secs(2), async {
+        let (close_result, ()) = tokio::join!(closing, response);
+        close_result.expect("in-flight response close");
+    })
+    .await
+    .expect("in-flight response finished before drain deadline");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body, payload);
+}
+
+#[tokio::test]
 async fn http_server_close_aborts_stalled_response_at_drain_deadline() {
     let memory = MemoryFs::empty();
     let payload = vec![0x41; 2 * 1024 * 1024];

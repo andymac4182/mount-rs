@@ -183,3 +183,41 @@ jobs:
             artifacts/foundationdb-ozone-iops.json
             docs/W07-production-evidence.json
           if-no-files-found: warn
+
+  foundationdb-macos-platform:
+    name: macOS FoundationDB native feature compile qualification
+    runs-on: macos-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+
+      - name: Compile macOS FoundationDB provider, CLI, and N-API features
+        run: |
+          set -o pipefail
+          mkdir -p artifacts
+          {
+            ./scripts/cargo-shared check --locked \
+              -p mount-rs-foundationdb \
+              --features foundationdb \
+              --test foundationdb
+            ./scripts/cargo-shared check --locked \
+              -p mount-rs-cli \
+              --features foundationdb \
+              --test native_lifecycle
+            ./scripts/cargo-shared check --locked \
+              -p mount-rs-napi \
+              --features foundationdb
+            echo 'W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb'
+          } 2>&1 | tee artifacts/w07-macos-foundationdb-compile.log
+
+      - name: Preserve macOS platform qualification evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: foundationdb-macos-platform-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/w07-macos-foundationdb-compile.log
+          if-no-files-found: warn
