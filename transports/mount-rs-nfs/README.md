@@ -195,8 +195,11 @@ Completed replies that fit the negotiated cache bound are retained even when
 mutation. For `cachethis=false` replies larger than the negotiated cache
 bound, the server instead retains a compact successful-`SEQUENCE` plus
 `NFS4ERR_RETRY_UNCACHED_REP` marker when it fits. `cachethis=true` oversized
-replies, bounds too small for the marker, and restart-spanning replay remain
-outside this guarantee.
+replies can also return a cached `NFS4ERR_REP_TOO_BIG_TO_CACHE` on a read-only
+`READDIR` tail, preserving earlier successful operations when the error
+reply fits. Other `cachethis=true` variable-size results, bounds too small
+even for the error or retry marker, and restart-spanning replay remain outside
+this guarantee.
 The exclusive lease-sweep lock is now taken only when a client has expired;
 otherwise independent slots of the same live session can overlap on separate
 TCP connections. A controlled rootless test proves this for two `GETATTR`
