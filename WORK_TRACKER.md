@@ -823,6 +823,7 @@ patch):
 | Main | W01 N-API 9P `P9User.uid` object-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/postbuild.mjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/servers.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: the direct/root N-API `P9User` facade preserves the oracle-required own `uid` property, using `undefined` when native identity has no numeric uid; generated direct declarations use `uid: number | undefined`. Local `pnpm build:debug`, session metadata, generated typecheck, syntax, and diff checks passed. Exact SHA `1c43f66ec570be35444055ab6adb0f841628fef6` passed Native 9P run `35681672318`, N-API job `106599754171` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106599753872` with all four ignored native lifecycle tests; the broad `node test/servers.mjs` script remains separately blocked by the Darwin NFS relisten sandbox `Operation not permitted` before 9P, so production remains NO-GO |
 | Main | W01 N-API 9P transport teardown under backpressure | `transports/mount-rs-9p/src/server.rs`, `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet fixes the connection task's permit-wait deadlock by retaining a bounded pending-frame queue while continuing to read for peer EOF, and reports a frame transport failure if that queue is exceeded. Real loopback N-API coverage now checks server close with an open fid, paused-peer FIN with a large queued reply burst, silent TCP reset, and orderly client EOF. Local focused Rust tests (36 passed), strict Clippy, addon rebuild, syntax/diff checks, and elevated isolated N-API execution passed. Exact SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed Native 9P run `35685073733`, N-API job `106610049913` with teardown and automatic/direct/structural mounted-I/O cleanup, and Rust job `106610049705` with the Linux probe plus all four ignored native lifecycle tests; process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P TCP connection isolation and dispatch ordering | `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds real loopback coverage for two native listener connections using distinct sessions but the same fid number, survivor service after one client closes, and a slow-open/fast-getattr burst that replies in completion order. Local syntax/diff checks and elevated isolated N-API execution passed. Exact SHA `9870d58cfbed5bcea90972c4b9caaf5db3075cef` passed Native 9P run `35685807744`, N-API job `106612633937` with the full server/attach, teardown, and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106612633771` with the Linux probe plus all four ignored native lifecycle tests; shared lock-table network behavior, remote-admission/interface qualification, remaining framing/payload/port cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
+| Main | W01 N-API 9P shared network lock table | `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds real loopback coverage for two native TCP sessions sharing one configured `P9LockTable`: the first write lock succeeds, the second receives `P9_LOCK_BLOCKED` and reads the first holder through `Tgetlock`, and closing the first connection releases the range for the second. Local `git diff --check` and elevated isolated N-API execution passed. Exact SHA `514d2c533382b927c059ccd946f3e566d2c371a9` passed Native 9P run `35686403815`, N-API job `106614048924` with the shared-lock, server/attach, teardown, and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106614048722` with the Linux probe plus all four ignored native lifecycle tests; remote-admission/interface qualification, remaining framing/payload/port cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -905,6 +906,18 @@ completed with full changed-file coverage and zero reportable findings. This
 is implementation evidence only until the chunk is pushed and the hosted W26
 matrix is rerun on its exact published revision; the 1,000-IOPS production
 gate remains **NO-GO**.
+
+Current W26 SQLite follow-up (2026-09-22): the SQLite metadata publisher now
+uses a parameterized fenced conditional CAS update on the successful path and
+performs the lease/revision read only when the update affects zero rows. It
+retains missing-row errors, stale-lease classification, revision conflicts,
+unexplained-zero-row fail-closed behavior and the existing transaction commit
+boundary. SQLite provider tests, strict provider/workspace Clippy, full locked
+workspace tests, formatting and diff checks pass locally. Security diff scan
+`ea882470-0ef4-4f7a-8d91-03c8d85d7fb7` completed with full changed-file
+coverage and zero reportable findings. This remains unpublished
+implementation evidence until pushed and requalified on an exact hosted
+revision; production remains **NO-GO**.
 
 ## Decisions and external prerequisites
 
@@ -2108,20 +2121,36 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
   required and production remains **NO-GO**.
 
-- Active current-tip qualification checkpoint: non-cancelling run
-  `35684808019` was dispatched from exact published head `4cd57723` before
-  concurrent mainline advanced to `87d5eb27`. At the 14:06 AEST snapshot,
-  Windows Node, RustFS, native WebDAV/NFS/9P, observability, Ozone base,
-  TiDB/RustFS, and TiDB had completed successfully; ARM Node `106609248954`,
-  Ubuntu Node `106609249118`, macOS-latest Node `106609248932`, Ubuntu Rust
-  `106609249086`, Ozone/TiDB `106609249034`, and Ozone compositions
-  `106609249144` had failed; macOS-15-intel Node `106609248961`, native FUSE
-  `106609249088`, FoundationDB/RustFS `106609249058`, and
-  Ozone/FoundationDB `106609249069` remained non-terminal. GitHub had not
-  exposed terminal logs while the workflow was still running, so no failure
-  cause, exact PGlite/restart PASS, or W04 acceptance is claimed. Production
-  remains **NO-GO** pending terminal diagnosis and all deployment/provider/
-  operational gates.
+- Terminal diagnosis for current-tip qualification run `35684808019`: it was
+  dispatched from exact published head `4cd57723` before later mainline WebDAV
+  changes and ended **cancelled** after native-FUSE job `106609249088` failed
+  `Exercise actual rootless kernel file operations` and its hosted `Complete
+  job` hook remained in progress. ARM `106609248954`, Ubuntu `106609249118`,
+  macOS-latest `106609248932`, and macOS-15-intel `106609248961` all failed
+  `webdav/propfind-links mismatch` before the exact PGlite/restart step, with
+  TypeScript HTTP 207 XML versus Rust HTTP 501 and an empty response. Ubuntu
+  Rust `106609249086` failed the saturated-read timing assertion `Elapsed(())`.
+  Ozone/TiDB `106609249034` measured `59.76` IOPS, Ozone/FoundationDB
+  `106609249069` measured `339.24`, and Ozone compositions `106609249144`
+  measured `837.80` and `789.33` against the hard `1000` target; W26
+  `106611498619` failed closed without `OZONE_IOPS_PASS`, and aggregate-native
+  was skipped. Windows Node `106609248992` passed package/N-API sub-gates only.
+  The native-FUSE failure log was not retrievable because hosted cleanup never
+  finalized. Current `origin/main` is `5e910e80`; this stale-tip diagnosis does
+  not promote W04 or production acceptance. Dispatch a fresh non-cancelling
+  qualification from the exact current tip and keep production **NO-GO**.
+
+- Active exact-tip qualification: non-cancelling run `35686870515` was
+  dispatched from the exact published `origin/main` head `6db7a3ca` after the
+  terminal diagnosis above. At the 2026-09-22 14:26 AEST snapshot, Node jobs
+  macOS-15-intel `106615463347`, ARM `106615463353`, and Windows
+  `106615463597` were in progress; macOS-latest `106615463377` and Ubuntu
+  `106615463386` were queued. RustFS, FoundationDB/RustFS, Ozone/TiDB,
+  Ozone/FoundationDB, Ozone compositions, and native WebDAV Ubuntu were in
+  progress; the remaining Rust, native, observability, and provider jobs were
+  queued. No queued or in-progress job is acceptance evidence. The exact
+  PGlite/restart steps, native/package/artifact gates, provider/W26 markers,
+  and production rollout gates remain open; production remains **NO-GO**.
 
 ## W05 — Cloudflare R2
 

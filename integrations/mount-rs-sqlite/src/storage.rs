@@ -753,27 +753,39 @@ impl MetadataStore for SqliteMetadataStore {
         let tx = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(backend_error)?;
-        let valid: bool = tx
-            .query_row(
-                &format!(
-                    "SELECT owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}
-            FROM mount_rs_metadata WHERE id=1"
-                ),
-                params![lease.owner, fence, expires],
-                |row| Ok(row.get::<_, Option<bool>>(0)?.unwrap_or(false)),
-            )
-            .map_err(backend_error)?;
-        if !valid {
-            return Err(stale());
-        }
         let changed = tx
             .execute(
-                "UPDATE mount_rs_metadata SET revision=?1, namespace=?2 WHERE id=1 AND revision=?3",
-                params![next, namespace, expected],
+                &format!(
+                    "UPDATE mount_rs_metadata SET revision=?1, namespace=?2
+                     WHERE id=1 AND revision=?3 AND owner=?4 AND fence=?5
+                       AND expires=?6 AND expires>{NOW}"
+                ),
+                params![next, namespace, expected, lease.owner, fence, expires],
             )
             .map_err(backend_error)?;
         if changed != 1 {
-            return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"));
+            // The conditional update is the successful-path CAS. Only the
+            // exceptional path needs a read to preserve the stale-versus-
+            // revision-conflict classification of the former lease preflight.
+            let (valid, actual_revision): (bool, i64) = tx
+                .query_row(
+                    &format!(
+                        "SELECT owner=?1 AND fence=?2 AND expires=?3 AND expires>{NOW}, revision
+                         FROM mount_rs_metadata WHERE id=1"
+                    ),
+                    params![lease.owner, fence, expires],
+                    |row| Ok((row.get::<_, Option<bool>>(0)?.unwrap_or(false), row.get(1)?)),
+                )
+                .map_err(backend_error)?;
+            if !valid {
+                return Err(stale());
+            }
+            if actual_revision != expected {
+                return Err(FsError::new(ErrorCode::Eagain).with_syscall("publish metadata"));
+            }
+            // The row was still valid and at the expected revision, so an
+            // unexplained zero-row CAS fails closed.
+            return Err(stale());
         }
         tx.commit().map_err(backend_error)?;
         Ok(next as u64)
