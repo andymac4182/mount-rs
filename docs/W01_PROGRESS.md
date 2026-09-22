@@ -327,6 +327,12 @@ N-API job `106590841909` and Rust job `106590841982` both passed their Linux
 probes and supported lifecycle gates. The native typed-reader maximums are
 recorded in the detailed W01-9P ledger; broader W01 acceptance remains NO-GO.
 
+W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
+orderly TCP reconnect: the same cached slot/sequence returns the original
+mutating `REMOVE` reply without removing a changed target, and the next
+sequence advances normally. In-flight same-slot ordering, crash-durable
+replay, native-client ordering, and exact-tip hosted acceptance remain open.
+
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
 the prefix already written at the destination. The focused Rust regression and
