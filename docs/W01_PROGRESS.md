@@ -80,6 +80,17 @@ tests. Local elevated N-API execution passed; remote admission and the
 remaining framing, payload, port, crash/reset, parity, and W01 gates remain
 open, so production remains NO-GO.
 
+The latest W01-9P listener-boundary packet was published at exact SHA
+`2a3ccfa9a77cab22d154d041627369d995ba74d5` and passed [Native 9P run
+`35687145769`](https://github.com/andymac4182/mount-rs/actions/runs/35687145769):
+N-API job `106616293297` passed the occupied-port `EADDRINUSE` case, malformed-
+frame survivor case, full server/attach, shared-lock, and teardown phases, and
+automatic/direct/structural mounted-I/O cleanup. Rust job `106616293187` passed
+the Linux probe plus all four ignored native lifecycle tests. Local elevated
+N-API execution passed; remote admission, large payload/negotiated `msize`,
+crash/reset, broader parity, and W01 gates remain open, so production remains
+NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
