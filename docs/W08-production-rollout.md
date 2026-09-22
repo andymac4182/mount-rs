@@ -544,6 +544,16 @@ Public main then added W07 provenance/control and docs-only updates through
 rollback or approval gate is closed; P01–P09 remain open and the decision
 remains NO-GO.
 
+The final combined source boundary `3fe2a02d` includes PGlite source
+`c791ab31` plus the NFS/WebDAV/S3/N-API and TiDB/N-API/9P updates. Compile-only
+locked workspace check and strict Clippy passed; the linked test remains
+blocked before execution by the unaccepted Xcode license (link exit 69), so
+`35523b9f` remains the latest full linked-test PASS. Public main then advanced
+docs-only through `214169ed`; hosted W08 run `35706621318` targets that exact
+tip and was `pending` at 18:46 AEST. This is source-health, native-host and
+hosted scheduling evidence only; no provider or production gate is closed.
+P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
