@@ -2417,6 +2417,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFSv3 round trip passed on refreshed base `4376c07d`. Cross-process handle
   persistence, native-client ordering, crash/power-loss durability, exact-tip
   hosted acceptance, and W01-NFS production readiness remain open.
+- [x] W01-NFS cross-version open-unlink state now has real-wire coverage:
+  v4.1 OPEN/WRITE followed by v3 REMOVE makes v3 LOOKUP return
+  `NFS3ERR_NOENT`, while the original v4.1 stateid still reads the exact
+  payload and then closes. Full locked NFS (42 unit and 21 v4 wire), strict
+  Clippy, pinned 266-pass/18-skip upstream parity, and opt-in native macOS
+  NFSv3 mount pass locally. This does not establish cross-process open-state
+  recovery, native-client ordering, power-loss durability, exact-tip hosted
+  acceptance, or W01-NFS production readiness.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -7631,3 +7639,4 @@ cross-drive isolation.
 | `pending` | W01-FUSE blocked-read teardown follow-up | Non-canceling CI run `35668748366` at `dda0e9c` / native-FUSE job `106560234631` passed round-trip and backend-panic callback/close but still timed out `native_unmount_interrupts_a_blocked_read` after 30.03s. The new bounded graceful-stop path closes the serving task after 250ms while `fusermount3 -u` remains pending; focused FUSE tests and strict checks are required before publishing a fresh hosted rerun. W01 remains NO-GO. |
 | `467da6a` | W01-FUSE Lima Linux qualification | Exact published commit passed the Lima Ubuntu arm64 `/dev/fuse` native Rust, automatic facade, CLI lifecycle, Node N-API/structural/SDK native FUSE, SQLite restart, and Python fault-injection gates; backend persistence/reopen was 3/4 with PGlite skipped because `PGLITE_DATABASE_URL` was unset. Local Linux runtime is green; hosted exact-tip acceptance and credentialed PGlite evidence remain open. |
 | `467da6a` | W01-FUSE Lima in-process PGlite qualification | Repository `scripts/test-pglite.sh` native-FUSE scope passed mounted PGlite connection reopen and PGlite-backed SQLite compositions using the in-process test server; no external credentials were required. Hosted exact-tip native-FUSE acceptance remains open. |
+| `35715585800` / `106706185799` | W01-FUSE hosted native-FUSE queue blocker | Manual CI run at `e175f80a3134e9ab8c02a19944ca036be09f111f` remained queued with no runner, completion time, conclusion, or step output; `origin/main` has since advanced to `e984c2321317e9d93b8db1ec98dc428662b17d34`. No hosted `/dev/fuse` result is claimable; exact-current-tip terminal native-FUSE evidence remains required and W01 stays NO-GO. |

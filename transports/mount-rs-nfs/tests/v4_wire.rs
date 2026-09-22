@@ -16,11 +16,12 @@ use std::time::{Duration, Instant};
 use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3, NFS3_OK,
-    NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
+    NFS3ERR_NOENT, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
+    NFSPROC3_REMOVE,
 };
 use mount_rs_nfs::protocol::{
     Create3args, DirOpArgs, Sattr3, read_create_res, read_getattr_res, read_lookup_res,
-    read_mount_res, write_create_args,
+    read_mount_res, read_wcc_res, write_create_args,
 };
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
@@ -800,11 +801,16 @@ fn nfs_v3_and_v4_share_wire_handle_lifetime() {
                         ),
                     )
                     .await;
+                    client.sequence += 1;
                     parse_compound_header(&mut opened, 4);
                     consume_sequence_result(&mut opened, "v4 create");
                     parse_result_header(&mut opened, OP_PUTROOTFH);
                     parse_result_header(&mut opened, OP_OPEN);
-                    let _ = opened.fixed_opaque(16, "v4 open stateid").unwrap();
+                    let v4_stateid: [u8; 16] = opened
+                        .fixed_opaque(16, "v4 open stateid")
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
                     let _ = opened.bool("v4 open atomic").unwrap();
                     let _ = opened.u64("v4 open before").unwrap();
                     let _ = opened.u64("v4 open after").unwrap();
@@ -834,6 +840,116 @@ fn nfs_v3_and_v4_share_wire_handle_lifetime() {
                     looked_up.end("v3 LOOKUP response").unwrap();
                     assert_eq!(lookup_result.status, NFS3_OK);
                     assert_eq!(lookup_result.object.unwrap(), v4_file);
+
+                    let payload = b"v4 open survives v3 unlink";
+                    let mut written = rpc(
+                        &mut v4_stream,
+                        206,
+                        compound(
+                            "write-before-v3-unlink",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&v4_file)),
+                                op(OP_WRITE, |writer| {
+                                    writer.fixed_opaque(&v4_stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(UNSTABLE4);
+                                    writer.var_opaque(payload);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    client.sequence += 1;
+                    parse_compound_header(&mut written, 3);
+                    consume_sequence_result(&mut written, "v4 write before unlink");
+                    parse_result_header(&mut written, OP_PUTFH);
+                    parse_result_header(&mut written, OP_WRITE);
+                    assert_eq!(written.u32("v4 write count").unwrap(), payload.len() as u32);
+                    let _ = written.u32("v4 write stability").unwrap();
+                    let _ = written.fixed_opaque(8, "v4 write verifier").unwrap();
+                    written.end("v4 write response").unwrap();
+
+                    let mut unlinked = rpc_call(
+                        &mut v3_stream,
+                        104,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_REMOVE,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&v3_root);
+                            writer.string("v4-created.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_wcc_res(&mut unlinked).unwrap().status, NFS3_OK);
+                    unlinked.end("v3 REMOVE response").unwrap();
+
+                    let mut missing = rpc_call(
+                        &mut v3_stream,
+                        105,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&v3_root);
+                            writer.string("v4-created.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_lookup_res(&mut missing).unwrap().status, NFS3ERR_NOENT);
+                    missing.end("v3 removed-name LOOKUP response").unwrap();
+
+                    let mut read = rpc(
+                        &mut v4_stream,
+                        207,
+                        compound(
+                            "read-after-v3-unlink",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&v4_file)),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&v4_stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(payload.len() as u32);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    client.sequence += 1;
+                    parse_compound_header(&mut read, 3);
+                    consume_sequence_result(&mut read, "v4 read after unlink");
+                    parse_result_header(&mut read, OP_PUTFH);
+                    parse_result_header(&mut read, OP_READ);
+                    assert!(read.bool("v4 read eof").unwrap());
+                    assert_eq!(read.var_opaque(128, "v4 read payload").unwrap(), payload);
+                    read.end("v4 held-open read response").unwrap();
+
+                    let mut closed = rpc(
+                        &mut v4_stream,
+                        208,
+                        compound(
+                            "close-after-v3-unlink",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&v4_file)),
+                                op(OP_CLOSE, |writer| {
+                                    writer.u32(1);
+                                    writer.fixed_opaque(&v4_stateid, 16);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut closed, 3);
+                    consume_sequence_result(&mut closed, "v4 close after unlink");
+                    parse_result_header(&mut closed, OP_PUTFH);
+                    parse_result_header(&mut closed, OP_CLOSE);
+                    let _ = closed.fixed_opaque(16, "v4 close stateid").unwrap();
+                    closed.end("v4 close response").unwrap();
                     server.close().await.unwrap();
                 });
         })
