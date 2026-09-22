@@ -128,6 +128,20 @@ an explicitly reviewed failover authority; never fall back to a worker's local
 clock or to `with_persisted_lease_oracle`. These are deployment controls, not
 claims enforced by this library's `Database` handle.
 
+`FoundationDbLeaseAuthority::stats()` and
+`FoundationDbSharedLeaseOracle::stats()` expose clone-shared, process-local
+snapshots for application-owned telemetry. The authority snapshot counts
+publication attempts, successes and failures and records the last published
+provider time plus local observation timestamps. The shared-reader snapshot
+does the same for authority reads and records the last observed provider time.
+Use these fields for publication-age, authority-error and reader-failure
+metrics, and export them through the embedding application's approved
+observability path. The timestamps are diagnostic observations only; lease
+safety still fails closed on an unavailable reader and uses the persisted
+provider-time policy rather than a local telemetry timestamp. Counters reset
+when a new authority/oracle handle is constructed and are not a substitute
+for durable monitoring or an external alert route.
+
 The crate also exposes an explicit `with_persisted_lease_oracle` option for a
 single trusted authority or development/test cluster. That oracle stores one
 encoded Unix-epoch millisecond value under the volume's `meta/lease-oracle` key

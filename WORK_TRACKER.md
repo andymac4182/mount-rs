@@ -3093,8 +3093,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
-    Publish the dashboards, on-call runbook, escalation thresholds and
-    incident/recovery ownership.
+    The FoundationDB authority and shared-reader handles now expose bounded
+    process-local `stats()` snapshots for publication/read attempts,
+    successes/failures, last provider-time observations and local diagnostic
+    timestamps; the hosted shared-authority path asserts the success/failure
+    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`. Map these
+    snapshots into the approved collector and pager, publish dashboards,
+    escalation thresholds and incident/recovery ownership, then execute the
+    alert drills. The API is an implementation input only: counters reset with
+    a new handle and no production collector, alert route or owner evidence is
+    claimed yet.
   - [ ] **Rollout and rollback:** stage a canary with a holdback, define
     go/no-go and abort criteria, verify backward/forward compatibility of the
     keyspace and configuration, rehearse rollback/authority recovery and

@@ -29,7 +29,10 @@ use std::convert::TryFrom;
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// FoundationDB's hard key limit.
@@ -242,6 +245,139 @@ fn duration_millis(duration: Duration, description: &str) -> Result<u64> {
     Ok(millis)
 }
 
+fn observation_time_ms() -> u64 {
+    system_now_ms().unwrap_or(0)
+}
+
+/// Process-local publication counters for one shared FoundationDB authority.
+///
+/// The snapshot is intended for application-owned metrics and alerting. Its
+/// timestamps describe observations made by this process; they are not used
+/// for lease safety decisions, which continue to use the persisted provider
+/// time and the validated publication policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseAuthorityStats {
+    /// Number of accepted publication attempts, including failed attempts.
+    pub publication_attempts: u64,
+    /// Number of successful authority transactions.
+    pub publication_successes: u64,
+    /// Number of failed or fail-closed publication attempts.
+    pub publication_failures: u64,
+    /// Last provider-time value successfully written or retained.
+    pub last_published_time_ms: Option<u64>,
+    /// Local wall-clock observation time of the last successful publication.
+    pub last_success_at_ms: Option<u64>,
+    /// Local wall-clock observation time of the last failed publication.
+    pub last_failure_at_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct LeaseAuthorityStatsInner {
+    publication_attempts: AtomicU64,
+    publication_successes: AtomicU64,
+    publication_failures: AtomicU64,
+    last_published_time_ms: AtomicU64,
+    last_success_at_ms: AtomicU64,
+    last_failure_at_ms: AtomicU64,
+}
+
+impl LeaseAuthorityStatsInner {
+    fn record_attempt(&self) {
+        self.publication_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_success(&self, published_time_ms: u64) {
+        self.publication_successes.fetch_add(1, Ordering::Relaxed);
+        self.last_published_time_ms
+            .store(published_time_ms, Ordering::Relaxed);
+        self.last_success_at_ms
+            .store(observation_time_ms(), Ordering::Relaxed);
+    }
+
+    fn record_failure(&self) {
+        self.publication_failures.fetch_add(1, Ordering::Relaxed);
+        self.last_failure_at_ms
+            .store(observation_time_ms(), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LeaseAuthorityStats {
+        LeaseAuthorityStats {
+            publication_attempts: self.publication_attempts.load(Ordering::Relaxed),
+            publication_successes: self.publication_successes.load(Ordering::Relaxed),
+            publication_failures: self.publication_failures.load(Ordering::Relaxed),
+            last_published_time_ms: non_zero(self.last_published_time_ms.load(Ordering::Relaxed)),
+            last_success_at_ms: non_zero(self.last_success_at_ms.load(Ordering::Relaxed)),
+            last_failure_at_ms: non_zero(self.last_failure_at_ms.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+/// Process-local read counters for one shared FoundationDB lease oracle.
+///
+/// Applications can export these fields as reader-health and authority-age
+/// signals. A read failure never falls back to a local clock; the provider
+/// lease path remains fail-closed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LeaseOracleStats {
+    /// Number of authority-read attempts, including failed reads.
+    pub read_attempts: u64,
+    /// Number of successful authority reads.
+    pub read_successes: u64,
+    /// Number of failed or fail-closed authority reads.
+    pub read_failures: u64,
+    /// Last provider-time value observed by a successful read.
+    pub last_observed_time_ms: Option<u64>,
+    /// Local wall-clock observation time of the last successful read.
+    pub last_success_at_ms: Option<u64>,
+    /// Local wall-clock observation time of the last failed read.
+    pub last_failure_at_ms: Option<u64>,
+}
+
+#[derive(Default)]
+struct LeaseOracleStatsInner {
+    read_attempts: AtomicU64,
+    read_successes: AtomicU64,
+    read_failures: AtomicU64,
+    last_observed_time_ms: AtomicU64,
+    last_success_at_ms: AtomicU64,
+    last_failure_at_ms: AtomicU64,
+}
+
+impl LeaseOracleStatsInner {
+    fn record_attempt(&self) {
+        self.read_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn record_success(&self, observed_time_ms: u64) {
+        self.read_successes.fetch_add(1, Ordering::Relaxed);
+        self.last_observed_time_ms
+            .store(observed_time_ms, Ordering::Relaxed);
+        self.last_success_at_ms
+            .store(observation_time_ms(), Ordering::Relaxed);
+    }
+
+    fn record_failure(&self) {
+        self.read_failures.fetch_add(1, Ordering::Relaxed);
+        self.last_failure_at_ms
+            .store(observation_time_ms(), Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> LeaseOracleStats {
+        LeaseOracleStats {
+            read_attempts: self.read_attempts.load(Ordering::Relaxed),
+            read_successes: self.read_successes.load(Ordering::Relaxed),
+            read_failures: self.read_failures.load(Ordering::Relaxed),
+            last_observed_time_ms: non_zero(self.last_observed_time_ms.load(Ordering::Relaxed)),
+            last_success_at_ms: non_zero(self.last_success_at_ms.load(Ordering::Relaxed)),
+            last_failure_at_ms: non_zero(self.last_failure_at_ms.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+fn non_zero(value: u64) -> Option<u64> {
+    (value != 0).then_some(value)
+}
+
 /// Safety policy for publishing the shared lease authority.
 ///
 /// The authority service still owns the scheduling loop, but constructing a
@@ -398,6 +534,7 @@ pub struct FoundationDbLeaseAuthority {
     db: Arc<Database>,
     key: Vec<u8>,
     limits: FoundationDbLimits,
+    stats: Arc<LeaseAuthorityStatsInner>,
     _network: Option<Arc<NetworkAutoStop>>,
 }
 
@@ -413,6 +550,7 @@ impl FoundationDbLeaseAuthority {
             db,
             key,
             limits,
+            stats: Arc::new(LeaseAuthorityStatsInner::default()),
             _network: None,
         })
     }
@@ -434,8 +572,15 @@ impl FoundationDbLeaseAuthority {
             db,
             key,
             limits,
+            stats: Arc::new(LeaseAuthorityStatsInner::default()),
             _network: Some(network),
         })
+    }
+
+    /// Return clone-shared publication counters for application-owned
+    /// telemetry and alerting.
+    pub fn stats(&self) -> LeaseAuthorityStats {
+        self.stats.snapshot()
     }
 
     /// Publish a provider-time sample, retaining the larger value already in
@@ -481,33 +626,46 @@ impl FoundationDbLeaseAuthority {
         now_ms: u64,
         max_forward_jump_ms: Option<u64>,
     ) -> Result<u64> {
+        self.stats.record_attempt();
         if now_ms == 0 {
+            self.stats.record_failure();
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("FoundationDB lease authority time must be non-zero"));
         }
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        db.transact_boxed(
-            (),
-            move |trx, _| {
-                let key = key.clone();
-                Box::pin(async move {
-                    configure_transaction(trx, limits)?;
-                    let current = get_owned(trx, &key)
-                        .await?
-                        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
-                        .transpose()?;
-                    let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
-                        .map_err(TxnError::Fs)?;
-                    trx.set(&key, &encode_oracle_time(published));
-                    Ok(published)
-                })
-            },
-            transaction_options(limits, TransactionPolicy::Idempotent),
-        )
-        .await
-        .map_err(TxnError::into_fs)
+        let result = db
+            .transact_boxed(
+                (),
+                move |trx, _| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        configure_transaction(trx, limits)?;
+                        let current = get_owned(trx, &key)
+                            .await?
+                            .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
+                            .transpose()?;
+                        let published = authority_time_sample(current, now_ms, max_forward_jump_ms)
+                            .map_err(TxnError::Fs)?;
+                        trx.set(&key, &encode_oracle_time(published));
+                        Ok(published)
+                    })
+                },
+                transaction_options(limits, TransactionPolicy::Idempotent),
+            )
+            .await
+            .map_err(TxnError::into_fs);
+        match result {
+            Ok(published) => {
+                self.stats.record_success(published);
+                Ok(published)
+            }
+            Err(error) => {
+                self.stats.record_failure();
+                Err(error)
+            }
+        }
     }
 
     /// Publish the authority process's current wall-clock sample.
@@ -547,6 +705,7 @@ impl FoundationDbLeaseAuthority {
             db: Arc::clone(&self.db),
             key: self.key.clone(),
             limits: self.limits,
+            stats: Arc::new(LeaseOracleStatsInner::default()),
             _network: self._network.clone(),
         }
     }
@@ -564,6 +723,7 @@ pub struct FoundationDbSharedLeaseOracle {
     db: Arc<Database>,
     key: Vec<u8>,
     limits: FoundationDbLimits,
+    stats: Arc<LeaseOracleStatsInner>,
     _network: Option<Arc<NetworkAutoStop>>,
 }
 
@@ -579,6 +739,7 @@ impl FoundationDbSharedLeaseOracle {
             db,
             key,
             limits,
+            stats: Arc::new(LeaseOracleStatsInner::default()),
             _network: None,
         })
     }
@@ -599,15 +760,23 @@ impl FoundationDbSharedLeaseOracle {
         oracle._network = Some(network);
         Ok(oracle)
     }
+
+    /// Return clone-shared read counters for application-owned telemetry and
+    /// authority-age/failure alerting.
+    pub fn stats(&self) -> LeaseOracleStats {
+        self.stats.snapshot()
+    }
 }
 
 #[async_trait]
 impl LeaseOracle for FoundationDbSharedLeaseOracle {
     async fn now_ms(&self) -> Result<u64> {
+        self.stats.record_attempt();
         let db = Arc::clone(&self.db);
         let key = self.key.clone();
         let limits = self.limits;
-        db.transact_boxed(
+        let result = db
+            .transact_boxed(
             (),
             move |trx, _| {
                 let key = key.clone();
@@ -631,7 +800,17 @@ impl LeaseOracle for FoundationDbSharedLeaseOracle {
             transaction_options(limits, TransactionPolicy::Idempotent),
         )
         .await
-        .map_err(TxnError::into_fs)
+        .map_err(TxnError::into_fs);
+        match result {
+            Ok(observed) => {
+                self.stats.record_success(observed);
+                Ok(observed)
+            }
+            Err(error) => {
+                self.stats.record_failure();
+                Err(error)
+            }
+        }
     }
 
     fn authority_kind(&self) -> LeaseAuthorityKind {
@@ -2138,6 +2317,40 @@ mod tests {
         .validate()
         .unwrap_err();
         assert_eq!(zero_interval.code, ErrorCode::Einval);
+    }
+
+    #[test]
+    fn authority_stats_preserve_success_and_failure_boundaries() {
+        let stats = LeaseAuthorityStatsInner::default();
+        stats.record_attempt();
+        stats.record_success(2_000_000);
+        stats.record_attempt();
+        stats.record_failure();
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.publication_attempts, 2);
+        assert_eq!(snapshot.publication_successes, 1);
+        assert_eq!(snapshot.publication_failures, 1);
+        assert_eq!(snapshot.last_published_time_ms, Some(2_000_000));
+        assert!(snapshot.last_success_at_ms.is_some());
+        assert!(snapshot.last_failure_at_ms.is_some());
+    }
+
+    #[test]
+    fn oracle_stats_preserve_success_and_failure_boundaries() {
+        let stats = LeaseOracleStatsInner::default();
+        stats.record_attempt();
+        stats.record_success(2_000_000);
+        stats.record_attempt();
+        stats.record_failure();
+
+        let snapshot = stats.snapshot();
+        assert_eq!(snapshot.read_attempts, 2);
+        assert_eq!(snapshot.read_successes, 1);
+        assert_eq!(snapshot.read_failures, 1);
+        assert_eq!(snapshot.last_observed_time_ms, Some(2_000_000));
+        assert!(snapshot.last_success_at_ms.is_some());
+        assert!(snapshot.last_failure_at_ms.is_some());
     }
 
     #[test]

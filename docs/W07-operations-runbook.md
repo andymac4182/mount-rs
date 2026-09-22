@@ -182,6 +182,19 @@ before P7/P13 can close. Metric names are placeholders until the production
 telemetry contract is approved; this table is not evidence that the signals
 are currently emitted.
 
+The FoundationDB integration now exposes bounded process-local snapshots from
+`FoundationDbLeaseAuthority::stats()` and
+`FoundationDbSharedLeaseOracle::stats()`. The authority snapshot supplies
+publication attempts/successes/failures, the last persisted provider-time
+sample and local observation timestamps; the reader snapshot supplies
+authority-read attempts/successes/failures, the last observed provider time
+and local observation timestamps. An embedding service may map these to the
+authority-age/error and reader-failure signals below. They are implementation
+inputs only: counters reset with a new handle, timestamps are diagnostic
+observations rather than lease time, and P7 remains open until a named
+collector/pager receives and exercises the signals in the approved
+production-like environment.
+
 | Signal | Minimum alert condition | Operator action |
 | --- | --- | --- |
 | FoundationDB availability/quorum | Failed readiness, replication or sustained provider errors | Stop writers; follow the quorum/storage response |
