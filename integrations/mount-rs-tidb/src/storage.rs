@@ -358,6 +358,40 @@ where
     Ok(changed)
 }
 
+fn autocommit_error(operation: &str, error: MysqlError) -> FsError {
+    // TiDB can report a statement-level write conflict before the
+    // autocommit transaction is committed, so preserve the existing retryable
+    // conflict classification for that server response. A connection or
+    // other acknowledgement error cannot distinguish commit from rollback;
+    // fail closed instead of allowing the caller to replay the publication.
+    if is_retryable_conflict(&error) {
+        db_error(operation, error)
+    } else {
+        ambiguous_commit_error(operation, &error)
+    }
+}
+
+async fn changed_autocommit_query<P>(
+    connection: &mut Conn,
+    statement: &str,
+    params: P,
+    operation: &str,
+) -> Result<u64>
+where
+    P: Into<Params> + Send,
+{
+    let result = connection
+        .exec_iter(statement, params)
+        .await
+        .map_err(|error| autocommit_error(operation, error))?;
+    let changed = result.affected_rows();
+    result
+        .drop_result()
+        .await
+        .map_err(|error| autocommit_error(operation, error))?;
+    Ok(changed)
+}
+
 async fn locked_lease_row<C: Queryable>(
     connection: &mut C,
     volume_key: &str,
@@ -542,9 +576,9 @@ impl MetadataStore for TidbMetadataStore {
     }
 
     fn publish_includes_flush_barrier(&self) -> bool {
-        // A successful COMMIT acknowledgement is the same provider barrier
-        // as the extra connection probe; ambiguous COMMIT errors still fail
-        // closed and explicit syncfs retains the probe.
+        // A successful autocommit DML acknowledgement includes the
+        // single-statement TiDB commit. Lost acknowledgements fail closed as
+        // ambiguous, and explicit syncfs retains the connection probe.
         true
     }
 
@@ -800,9 +834,13 @@ impl MetadataStore for TidbMetadataStore {
             .get_conn()
             .await
             .map_err(|error| db_error("publish TiDB metadata", error))?;
-        let mut transaction = begin_pessimistic(&mut connection).await?;
-        let changed = match changed_query(
-            &mut transaction,
+        // A conditional UPDATE is already an atomic single-statement
+        // transaction in TiDB. The successful CAS therefore avoids the
+        // START/COMMIT round trips used by the exceptional classification
+        // path below. The predicate carries the full lease and revision fence;
+        // no row lock is needed on the successful path.
+        let changed = changed_autocommit_query(
+            &mut connection,
             &format!(
                 "UPDATE mount_rs_tidb_metadata
                  SET revision=?, namespace=?
@@ -820,15 +858,12 @@ impl MetadataStore for TidbMetadataStore {
             ),
             "publish TiDB metadata",
         )
-        .await
-        {
-            Ok(changed) => changed,
-            Err(error) => return rollback_and(transaction, error).await,
-        };
+        .await?;
         if changed != 1 {
             // The conditional update is the successful-path CAS. Only the
             // exceptional path needs the locked read to preserve the former
             // stale-versus-revision-conflict classification.
+            let mut transaction = begin_pessimistic(&mut connection).await?;
             let row = match locked_publish_row(&mut transaction, &self.0.volume_key).await {
                 Ok(row) => row,
                 Err(error) => return rollback_and(transaction, error).await,
@@ -849,7 +884,6 @@ impl MetadataStore for TidbMetadataStore {
             }
             return rollback_and(transaction, stale()).await;
         }
-        commit(transaction, "publish metadata").await?;
         Ok(next_revision as u64)
     }
 
@@ -1015,6 +1049,21 @@ mod tests {
 
         let connection_error = MysqlError::Driver(DriverError::ConnectionClosed);
         let error = ambiguous_commit_error("release writer", &connection_error);
+        assert!(error.is(ErrorCode::Eio));
+        assert!(error.to_string().contains("commit outcome is unknown"));
+    }
+
+    #[test]
+    fn autocommit_statement_errors_preserve_conflicts_and_fail_closed_acknowledgements() {
+        let conflict = MysqlError::Server(ServerError {
+            code: 1205,
+            message: "Lock wait timeout exceeded".to_owned(),
+            state: "HY000".to_owned(),
+        });
+        assert!(autocommit_error("publish metadata", conflict).is(ErrorCode::Eagain));
+
+        let connection_error = MysqlError::Driver(DriverError::ConnectionClosed);
+        let error = autocommit_error("publish metadata", connection_error);
         assert!(error.is(ErrorCode::Eio));
         assert!(error.to_string().contains("commit outcome is unknown"));
     }
