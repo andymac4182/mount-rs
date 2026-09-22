@@ -952,6 +952,22 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         tracking, but remains feature-compile-only on macOS and does not prove
         live macOS service/mount, production capacity, identity/ACL,
         backup/restore, failover, observability, signing, or release approval.
+        The latest repaired exact-tip W07 qualification at source
+        <code>8b4cbc38</code> passed hosted run <code>35709640688</code> across
+        the durable provider job, macOS feature compilation, and aggregate
+        evidence assembly. The Linux packet covered the policy and workload
+        preflight, durable FoundationDB/RustFS metadata, Node/N-API, Linux
+        CLI/FUSE, restart/reopen, fresh-client, heartbeat, reconciled stats,
+        and ten-round soak; the bounded workload recorded
+        <code>338.55</code> lifecycle IOPS over 1,200 successful operations
+        with zero timeouts or cleanup failures. The aggregate again emitted
+        <code>W07_PLATFORM_QUALIFICATION_PASS provenance=bound</code>. Its
+        base telemetry was <code>p50=3075us</code>,
+        <code>p95/p99=317846us</code>, and <code>39.06</code> ops/s; soak
+        telemetry ranged from 7.51 to 254.49 ops/s. This remains
+        qualification-only and NO-GO for live macOS service/mount, production
+        capacity, identity/ACL, backup/restore, failover, observability,
+        signing, and release approval.
       </>
     ),
     sources: [
@@ -961,7 +977,8 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Previous hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698630720' },
-      { label: 'Latest hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35702352395' },
+      { label: 'Previous hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35702352395' },
+      { label: 'Latest hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35709640688' },
     ],
   },
   'aws-s3': {
@@ -1124,13 +1141,30 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         authentication. No live AWS service PASS is claimable until the
         protected bucket, region, account, versioning, and OIDC role inputs are
         provisioned.
+        The current shared-mainline qualification at source
+        <code>0d017f09</code> passed the authorized <code>myroot</code> and
+        dedicated-role packet: sibling-prefix denial, public SDK/CLI
+        self-test, composed AWS S3 filesystem, process reopen, independent
+        PGlite metadata, writer fencing, PGlite backup/restore, fresh-server
+        reopen, and exact owned-prefix cleanup all passed, emitting
+        <code>AWS_S3_TEST_PASS</code> and
+        <code>AWS_S3_PGLITE_TEST_PASS</code>. This refreshes
+        qualification-account and local-metadata evidence only; production
+        resource, metadata, DR, hosted-release, and operational gates remain
+        open. The subsequent hosted admission run
+        <code>35712627727</code> at source <code>ff5cc581</code> passed trigger,
+        provenance, and contract checks but failed closed before AWS
+        authentication at <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code>;
+        credentialed acceptance steps were skipped. This is a configuration
+        blocker, not an AWS provider failure or acceptance result.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693941024' },
+      { label: 'Previous hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693941024' },
+      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35712627727' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
