@@ -8,10 +8,21 @@ async function exercise(mode) {
   const failSyncfs = mode === "failure"
   const backing = createMemoryDriver()
   const calls = []
+  const boundedCalls = []
   const driver = {
     capabilities: { ...backing.capabilities, durableWrites: true },
     stat: backing.stat.bind(backing),
     readdir: backing.readdir.bind(backing),
+    readdirBounded: async (path, maxEntries) => {
+      boundedCalls.push({ path, maxEntries })
+      if (path === "/adapter-overflow") {
+        // Deliberately violate the optional callback contract so the native
+        // adapter's returned-length guard is exercised separately from the
+        // provider's own EOVERFLOW response.
+        return backing.readdir(path, { withFileTypes: true })
+      }
+      return backing.readdirBounded(path, maxEntries)
+    },
     open: backing.open.bind(backing),
     mkdir: backing.mkdir.bind(backing),
     rmdir: backing.rmdir.bind(backing),
@@ -56,6 +67,88 @@ async function exercise(mode) {
       assert.ok([200, 201, 204].includes(response.status))
     }
     assert.deepEqual(calls, mode === "missing" ? [] : ["syncfs"])
+
+    if (mode === "success") {
+      const request = (method, target, headers = [], body = null) =>
+        server.session.handleRequest({ method, target, headers }, body)
+      assert.equal((await request("MKCOL", "/bounded-tree")).status, 201)
+      assert.ok([200, 201, 204].includes(
+        (await request("PUT", "/bounded-tree/member.txt", [], Buffer.from("bounded bytes"))).status,
+      ))
+
+      const propfind = await request(
+        "PROPFIND",
+        "/bounded-tree",
+        [{ name: "depth", value: "1" }],
+        Buffer.from('<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>'),
+      )
+      assert.equal(propfind.status, 207)
+      assert.ok(
+        boundedCalls.some(({ path, maxEntries }) => path === "/bounded-tree" && maxEntries === 4096),
+        "WebDAV traversal passes its 4,096-entry ceiling to the structural driver",
+      )
+
+      const copy = await request(
+        "COPY",
+        "/bounded-tree",
+        [{ name: "destination", value: "/bounded-copy" }],
+      )
+      assert.ok([201, 204, 207].includes(copy.status))
+      const copied = await request("GET", "/bounded-copy/member.txt")
+      assert.equal(copied.status, 200)
+      assert.deepEqual(copied.body, Buffer.from("bounded bytes"))
+
+      const remove = await request("DELETE", "/bounded-copy")
+      assert.ok([204, 207].includes(remove.status))
+      assert.equal((await request("GET", "/bounded-copy/member.txt")).status, 404)
+
+      await backing.mkdir("/bounded-overflow")
+      await backing.writeFile("/bounded-overflow/alpha", Buffer.from("alpha"))
+      await backing.writeFile("/bounded-overflow/beta", Buffer.from("beta"))
+      await assert.rejects(
+        () => filesystem.readdirBounded("/bounded-overflow", 1),
+        (error) => {
+          assert.equal(error.code, "EOVERFLOW")
+          assert.equal(error.syscall, "scandir")
+          return true
+        },
+      )
+      assert.ok(boundedCalls.some(({ path, maxEntries }) => path === "/bounded-overflow" && maxEntries === 1))
+
+      await backing.mkdir("/adapter-overflow")
+      await backing.writeFile("/adapter-overflow/alpha", Buffer.from("alpha"))
+      await backing.writeFile("/adapter-overflow/beta", Buffer.from("beta"))
+      await assert.rejects(
+        () => filesystem.readdirBounded("/adapter-overflow", 1),
+        (error) => {
+          assert.equal(error.code, "EOVERFLOW")
+          assert.equal(error.syscall, "readdirBounded")
+          return true
+        },
+      )
+
+      const unboundedDriver = { ...driver }
+      delete unboundedDriver.readdirBounded
+      const unboundedFilesystem = createDriver(unboundedDriver)
+      const unboundedServer = createWebdavServer(unboundedFilesystem, {
+        host: "127.0.0.1",
+        port: 0,
+      })
+      try {
+        const unsupported = await unboundedServer.session.handleRequest(
+          {
+            method: "PROPFIND",
+            target: "/bounded-tree",
+            headers: [{ name: "depth", value: "1" }],
+          },
+          Buffer.from('<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>'),
+        )
+        assert.equal(unsupported.status, 501)
+      } finally {
+        await unboundedServer.close().catch(() => {})
+        await unboundedFilesystem.shutdown().catch(() => {})
+      }
+    }
   } finally {
     await server.close().catch(() => {})
     await filesystem.shutdown().catch(() => {})

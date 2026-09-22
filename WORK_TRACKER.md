@@ -997,6 +997,13 @@ provider-lifecycle, power-loss, or durable-lock gates.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
+The structural N-API `FsDriver` now also has an optional
+`readdirBounded(path, maxEntries)` callback. The rebuilt addon and focused
+structural WebDAV regression pass bounded `Depth: 1` PROPFIND, recursive
+collection COPY/DELETE, provider-reported overflow, adapter rejection of an
+over-large callback result, and the absent-callback `ENOTSUP`/`501` boundary;
+the provider callback remains responsible for enforcing the ceiling before it
+materializes its listing.
 The current hosted provider audit confirms the external boundary: Live AWS S3
 run `35679010203` failed its protected preflight with
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
@@ -5713,6 +5720,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 WebDAV structural bounded-listing packet` | Forward the optional structural N-API `FsDriver.readdirBounded(path, maxEntries)` callback and reject over-large callback results as `EOVERFLOW`; exercise bounded PROPFIND, recursive COPY/DELETE, provider overflow, and the explicit absent-capability boundary | Release addon, generated typecheck, WebDAV-only host-enabled server phase, and focused structural WebDAV regression pass; hosted package/provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and same-resource ordering remain open |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
 | `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |
 | `2026-09-22 FUSE forced-unmount deadline packet` (published as `987c593bc08adfb161a55a7a9eee27ff82606310`) | Share the forced `umount`/lazy-detach deadline with final session-task draining so bounded teardown does not add a third full timeout | Host FUSE all-target tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; exact-SHA CI run `35648821996` and Fault injection run `35648821873` are pending, while the Linux-gated timing test and hosted `/dev/fuse` forced-unmount and broader lifecycle gates remain open |
