@@ -3,10 +3,13 @@ name: Fault injection
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: fault-injection-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A manual dispatch is the release-qualification path: retain its terminal
+  # result even when shared mainline continues to move.
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   storage-faults:

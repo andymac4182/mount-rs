@@ -6,9 +6,16 @@ import p9 from "../p9.cjs"
 const { Filesystem } = root
 const {
   P9Session,
+  P9_GETATTR_BASIC,
   P9_NOTAG,
+  P9_RATTACH,
+  P9_RFLUSH,
+  P9_RGETATTR,
   P9_RVERSION,
   P9_RLERROR,
+  P9_TATTACH,
+  P9_TFLUSH,
+  P9_TGETATTR,
   P9_TVERSION,
   encodeMessage,
 } = p9
@@ -31,6 +38,14 @@ function waitUntil(predicate, label) {
   })
 }
 
+function messageHeader(bytes) {
+  return p9.readHeader(new p9.P9Reader(bytes))
+}
+
+function rlerrorCode(bytes) {
+  return p9.decodeMessageAs(bytes, p9.readRlerror).value.ecode
+}
+
 const filesystem = Filesystem.memory()
 const reports = []
 const assertions = []
@@ -45,6 +60,7 @@ const session = new P9Session(filesystem, {
   },
 })
 let structuralSession
+let releaseBlockedStat = () => {}
 
 try {
   assert.ok(session.driver instanceof Filesystem)
@@ -84,8 +100,28 @@ try {
   assert.deepEqual(reports[1].header, { size: 7, type: 250, tag: 17 })
   assert.deepEqual(assertions, [])
 
+  let blockNextStat = false
+  let statStarted = false
+  let statGate = Promise.resolve()
+  const holdNextStat = () => {
+    blockNextStat = true
+    statStarted = false
+    statGate = new Promise((resolve) => {
+      releaseBlockedStat = () => {
+        resolve()
+        releaseBlockedStat = () => {}
+      }
+    })
+  }
   const structuralDriver = {
-    stat: (...args) => filesystem.stat(...args),
+    stat: async (...args) => {
+      if (blockNextStat) {
+        blockNextStat = false
+        statStarted = true
+        await statGate
+      }
+      return filesystem.stat(...args)
+    },
     readdir: (...args) => filesystem.readdir(...args),
     open: (...args) => filesystem.open(...args),
   }
@@ -100,10 +136,122 @@ try {
   )
   assert.ok(Buffer.isBuffer(structuralVersion))
   assert.equal(structuralVersion[4], P9_RVERSION)
-  await structuralSession.destroy()
-  structuralSession = undefined
+
+  const attached = await structuralSession.handleCall(
+    encodeMessage(P9_TATTACH, 1, (writer) => {
+      writer.writeTattach({
+        fid: 1,
+        afid: 0xffff_ffff,
+        uname: "node",
+        aname: "",
+        nUname: 0xffff_ffff,
+      })
+    }),
+  )
+  assert.equal(messageHeader(attached).type, P9_RATTACH)
+  assert.equal(structuralSession.fids.size, 1)
+
+  holdNextStat()
+  let getattrSettled = false
+  const pendingGetattr = structuralSession.handleCall(
+    encodeMessage(P9_TGETATTR, 7, (writer) => {
+      writer.writeTgetattr({ fid: 1, requestMask: P9_GETATTR_BASIC })
+    }),
+  ).then((reply) => {
+    getattrSettled = true
+    return reply
+  })
+  await waitUntil(
+    () => statStarted && structuralSession.inflight === 1,
+    "direct 9P Tgetattr in-flight state",
+  )
+  let flushSettled = false
+  const pendingFlush = structuralSession.handleCall(
+    encodeMessage(P9_TFLUSH, 8, (writer) => {
+      writer.writeTflush({ oldtag: 7 })
+    }),
+  ).then((reply) => {
+    flushSettled = true
+    return reply
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(getattrSettled, false)
+  assert.equal(flushSettled, false)
+  releaseBlockedStat()
+  const [getattrReply, flushReply] = await Promise.all([pendingGetattr, pendingFlush])
+  assert.equal(messageHeader(getattrReply).type, P9_RGETATTR)
+  assert.equal(messageHeader(flushReply).type, P9_RFLUSH)
+  assert.equal(structuralSession.stats.flushed, 1)
+  assert.equal(structuralSession.inflight, 0)
+
+  const generationBeforeReset = structuralSession.generation
+  holdNextStat()
+  const pendingReset = structuralSession.handleCall(
+    encodeMessage(P9_TGETATTR, 9, (writer) => {
+      writer.writeTgetattr({ fid: 1, requestMask: P9_GETATTR_BASIC })
+    }),
+  )
+  await waitUntil(
+    () => statStarted && structuralSession.inflight === 1,
+    "direct 9P reset in-flight state",
+  )
+  const resetReply = await structuralSession.handleCall(
+    encodeMessage(P9_TVERSION, P9_NOTAG, (writer) => {
+      writer.writeTversion({ msize: 8 * 1024, version: "9P2000.L" })
+    }),
+  )
+  assert.equal(messageHeader(resetReply).type, P9_RVERSION)
+  assert.equal(structuralSession.generation, generationBeforeReset + 1)
+  assert.equal(structuralSession.msize, 8 * 1024)
+  assert.equal(structuralSession.fids.size, 0)
+  assert.equal(structuralSession.userFor(1), undefined)
+  releaseBlockedStat()
+  const resetStaleReply = await pendingReset
+  assert.equal(messageHeader(resetStaleReply).type, P9_RLERROR)
+  assert.equal(rlerrorCode(resetStaleReply), 5)
+  assert.equal(structuralSession.inflight, 0)
+
+  const reattached = await structuralSession.handleCall(
+    encodeMessage(P9_TATTACH, 1, (writer) => {
+      writer.writeTattach({
+        fid: 1,
+        afid: 0xffff_ffff,
+        uname: "node",
+        aname: "",
+        nUname: 0xffff_ffff,
+      })
+    }),
+  )
+  assert.equal(messageHeader(reattached).type, P9_RATTACH)
+  const generationBeforeDestroy = structuralSession.generation
+  holdNextStat()
+  const pendingDestroy = structuralSession.handleCall(
+    encodeMessage(P9_TGETATTR, 10, (writer) => {
+      writer.writeTgetattr({ fid: 1, requestMask: P9_GETATTR_BASIC })
+    }),
+  )
+  await waitUntil(
+    () => statStarted && structuralSession.inflight === 1,
+    "direct 9P destroy in-flight state",
+  )
+  let destroySettled = false
+  const destroyPromise = structuralSession.destroy().then(() => {
+    destroySettled = true
+  })
+  await waitUntil(() => destroySettled, "direct 9P destroy cancellation")
+  assert.equal(structuralSession.destroyed, true)
+  assert.equal(structuralSession.msize, undefined)
+  assert.equal(structuralSession.fids.size, 0)
+  assert.equal(structuralSession.generation, generationBeforeDestroy + 1)
+  assert.equal(structuralSession.inflight, 0)
+  releaseBlockedStat()
+  const destroyStaleReply = await pendingDestroy
+  await destroyPromise
+  assert.equal(messageHeader(destroyStaleReply).type, P9_RLERROR)
+  assert.equal(rlerrorCode(destroyStaleReply), 19)
   assert.equal((await filesystem.stat("/")).isDirectory(), true)
 } finally {
+  if (releaseBlockedStat) releaseBlockedStat()
   if (structuralSession) await structuralSession.destroy()
   await session.destroy()
   assert.equal(session.destroyed, true)

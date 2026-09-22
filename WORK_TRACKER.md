@@ -904,7 +904,30 @@ complete.
 > W26 current-status note: the row above is historical summary text. The
 > authoritative current tip, exact hosted packet, every W26 work-item status
 > and production NO-GO boundary are in the latest W26 authority override
-> below, which records `origin/main=e0180c75` and the post-publication ledger.
+> below, which records `origin/main=4098c7df` and the post-publication ledger.
+
+Current W26 authority override (2026-09-22, TiDB publication chunk): the
+verified shared code tip is `origin/main=4098c7df04a03f65269ef932cb921b96d6368297`.
+Commit `4098c7df` changes only the successful TiDB metadata publication path:
+it uses one parameterized autocommit conditional UPDATE acknowledgement and
+keeps the explicit pessimistic locked transaction for zero-row stale-versus-
+revision classification. Retryable statement conflicts remain `EAGAIN`; lost
+or otherwise ambiguous acknowledgements remain fail-closed `EIO`. Focused
+TiDB tests (8 passed, 5 service-gated ignored), full locked workspace tests,
+strict provider/workspace Clippy, formatting and diff checks all pass. The
+sealed security diff scan `c36f104e-965b-4e85-bfde-2d3d222f0de2` reviewed two
+surfaces with zero reportable findings.
+
+The latest terminal hosted packet is still run `35691451007` on earlier SHA
+`dccd8351`: base Ozone passed, PGlite/R2 reached `2,065.669446` IOPS, while
+SQLite/R2 reached `213.947686`, TiDB/R2 `333.356025` and FoundationDB/R2
+`363.254472`; every provider completed 1,200/1,200 operations with zero
+timeouts and cleanup failures, but the aggregate `106631474430` correctly
+failed closed on missing `OZONE_IOPS_PASS`. W26 remains **NO-GO**. Publish the
+ledger/tracker chunk, dispatch a fresh exact-SHA CI matrix, and promote only a
+terminal all-provider/end-to-end aggregate pass. Customer Ozone deployment,
+secure topology, 99.99% availability, five-minute RPO/RTO, backup/DR and the
+release stream remain external ownership boundaries.
 
 Historical W26 TiDB session-setup chunk (published 2026-09-22): the TiDB provider now configures and
 verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
@@ -2024,6 +2047,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
   NO-GO until artifact/package, persistence/rollback, provider, and
   operational gates also close.
+- [x] W04.2 current-tip revalidation: replacement qualification run
+  [35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
+  ran from exact published `d870f900`. macOS-latest
+  `106631238012`, macOS-15-intel `106631238033`, and Ubuntu
+  `106631238088` completed successfully with both fragmented early-rejection
+  and exact `Verify PGlite integration and restart recovery` steps green;
+  ARM Node `106631237930` passed the same two exact steps, and Windows Node
+  `106631238113` passed its package/distribution lane. The macOS, Ubuntu, and
+  ARM logs include `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`; aggregate-native
+  `106634465987` passed artifact aggregation, all five native package
+  validations, and clean-consumer smoke. W04.2 remains closed and current-tip
+  confirmed. The same run's provider/W26 failures are separate production
+  blockers; rollout remains **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
@@ -4721,6 +4757,13 @@ reproducible in a production-like environment.
   and diff checks passed; this is bounded local cancellation cleanup only, so
   live providers, power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open and W01-S3 stays **NO-GO**.
+- [x] The automatic provider runs for published packet `09eca17b` were
+  refreshed: AWS run `35693316456` stopped at
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693316400`
+  stopped at `R2 CI monthly run cap already exceeded: count=326` before live
+  admission. No service PASS is claimable; protected AWS configuration, the R2
+  budget reset, physical power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `d4f43b28` were
   refreshed: AWS run `35692509801` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35692509869`
