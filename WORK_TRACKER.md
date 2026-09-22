@@ -885,7 +885,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
-| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; current published `origin/main` tip is `69c684c7` and includes publication-barrier `c7f0e6d0`, bounded mutation-window `183660a4`, lease-renewal `f10dbf22`, lazy-atime/EOF reduction, R2 content-addressing/cache, single-flight upload coalescing `d05548e8`, metadata batching, queue cancellation safety, same-revision concurrent-create inode rebasing, the corrected Ozone content-addressed contract and deduplicated cleanup, Ozone test lockfile fix `0cef5d44`, FoundationDB test lockfile fix `8428a5ef` and SQL publication fast path `214b9a6b`. The customer-deployed Ozone integration track remains **NO-GO**: terminal run `35683158821` on exact SHA `14dbf2c6` measured SQLite/R2 754.59, PGlite/R2 817.10, TiDB/R2 143.04 and FoundationDB/R2 345.17 IOPS against 1,000; all rows completed 1,200/1,200 lifecycle operations with zero timeout/cleanup failures, but aggregate `106606577835` failed closed on missing `OZONE_IOPS_PASS`. Retained artifacts are composition `10676355562`, TiDB `10675867797`, FoundationDB `10675443241` and base Ozone `10675672094`; the next code chunk must preserve the hard threshold and fail-closed packet. Security scans `e44de27d-96d8-4330-a831-b995d6458a6c`, `47641152-6539-48e1-96b6-bf2201033486`, `739f4f5b-8cc4-4154-93f7-9e486745eab1` and `5a8fcd70-71d4-461b-bb2a-dec8461c22bc` have zero reportable findings with complete local coverage; secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; current published `origin/main` tip is `1626d538` and includes publication-barrier `c7f0e6d0`, bounded mutation-window `183660a4`, lease-renewal `f10dbf22`, lazy-atime/EOF reduction, R2 content-addressing/cache, single-flight upload coalescing `d05548e8`, metadata batching, queue cancellation safety, same-revision concurrent-create inode rebasing, the corrected Ozone content-addressed contract and deduplicated cleanup, Ozone test lockfile fix `0cef5d44`, FoundationDB test lockfile fix `8428a5ef` and SQL publication fast path `214b9a6b`. The customer-deployed Ozone integration track remains **NO-GO**: terminal run `35683158821` on exact SHA `14dbf2c6` measured SQLite/R2 754.59, PGlite/R2 817.10, TiDB/R2 143.04 and FoundationDB/R2 345.17 IOPS against 1,000; all rows completed 1,200/1,200 lifecycle operations with zero timeout/cleanup failures, but aggregate `106606577835` failed closed on missing `OZONE_IOPS_PASS`. Retained artifacts are composition `10676355562`, TiDB `10675867797`, FoundationDB `10675443241` and base Ozone `10675672094`; the next code chunk must preserve the hard threshold and fail-closed packet. Security scans `e44de27d-96d8-4330-a831-b995d6458a6c`, `47641152-6539-48e1-96b6-bf2201033486`, `739f4f5b-8cc4-4154-93f7-9e486745eab1` and `5a8fcd70-71d4-461b-bb2a-dec8461c22bc` have zero reportable findings with complete local coverage; secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -5007,7 +5007,7 @@ listing a source does not mean it has been reviewed or its code can be reused.
 ### W26 current authoritative status — 2026-09-22
 
 The current W26 source of truth is the detailed [progress ledger](docs/w26-progress-ledger.md).
-`origin/main` is `69c684c70758b26b8600ed5b1131cef23e5e13f3`, including the
+`origin/main` is `1626d5381625d81696fa28624342f07087593760`, including the
 published W26 publication-barrier implementation `c7f0e6d0`, bounded mutation
 collection `183660a4`, R2 content-addressed cache, single-flight R2 upload
 coalescing `d05548e8`, metadata mutation batching and queue cancellation
@@ -5034,7 +5034,7 @@ manual run `35683158821` on exact revision
 1,200/1,200 successful lifecycle operations, zero timeouts and zero cleanup
 failures, but all below the hard 1,000-IOPS target; aggregate job
 `106606577835` failed closed on missing `OZONE_IOPS_PASS`. The new provider
-publication fast path is included in current merged tip `69c684c7`, but the
+publication fast path is included in current merged tip `1626d538`, but the
 hosted packet tested its earlier exact revision and remains diagnostic.
 Queued, in-progress, canceled, failed or partial jobs are not acceptance
 evidence. Do not lower the target or convert failed rows to skips.
@@ -5284,7 +5284,7 @@ evidence. Do not lower the target or convert failed rows to skips.
   failed closed. The test corrections are `edb6a43e` and `0282df64`, included
   in current origin. The single-flight R2 upload-coalescing implementation
   `d05548e8` and SQL publication fast path `214b9a6b` are included in current
-  `origin/main` `69c684c7`; terminal run `35683158821` selected exact tested
+  `origin/main` `1626d538`; terminal run `35683158821` selected exact tested
   revision `14dbf2c6` and remains diagnostic because every provider missed the
   hard target.
   Preserve fencing,
