@@ -968,6 +968,15 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         qualification-only and NO-GO for live macOS service/mount, production
         capacity, identity/ACL, backup/restore, failover, observability,
         signing, and release approval.
+        The current implementation at source <code>fba61979</code> overlaps
+        the independent lease, manifest, and authority-time reads inside the
+        existing FoundationDB publication transaction while preserving one
+        read version, lease/fence validation, revision CAS, and fail-closed
+        ambiguous-commit handling. Feature compile/test-target checks and
+        strict Clippy pass, but the focused native tests remain blocked by the
+        missing <code>fdb_c</code> linker library; the prior hosted run tested
+        an ancestor, so no new performance or provider qualification is
+        promoted from this optimization yet.
       </>
     ),
     sources: [
@@ -979,6 +988,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'Previous hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698630720' },
       { label: 'Previous hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35702352395' },
       { label: 'Latest hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35709640688' },
+      { label: 'FoundationDB publication read-overlap source', href: 'https://github.com/andymac4182/mount-rs/commit/fba61979f1f6c9858026cd5ebc4c5d3d357f366b' },
     ],
   },
   'aws-s3': {
