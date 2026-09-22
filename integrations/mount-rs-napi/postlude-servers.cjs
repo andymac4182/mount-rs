@@ -568,7 +568,7 @@ function normalizeServerListenError(error) {
     error &&
     error.code === "GenericFailure" &&
     typeof error.message === "string" &&
-    /address already in use/i.test(error.message)
+    /address already in use|only one usage of each socket address|os error 10048/i.test(error.message)
   ) {
     error.code = "EADDRINUSE"
     if (error.errno === undefined) error.errno = process.platform === "darwin" ? -48 : -98

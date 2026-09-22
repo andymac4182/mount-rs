@@ -70,6 +70,14 @@ impl FsDriver for FixedMtimeDriver {
         self.inner.readdir(path).await
     }
 
+    async fn readdir_bounded(
+        &self,
+        path: &str,
+        max_entries: usize,
+    ) -> mount_rs_core::Result<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
     async fn open(
         &self,
         path: &str,
