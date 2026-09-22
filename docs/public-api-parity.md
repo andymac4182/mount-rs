@@ -352,6 +352,15 @@ Current focused behavior:
   SHA `c42030c1807f6504660892bf829137897e910c5e` passed [Native 9P run `35687955065`](https://github.com/andymac4182/mount-rs/actions/runs/35687955065),
   N-API job `106618714142`, with Rust job `106618713939` also green. Remote
   admission and broader server-boundary parity remain separate gates.
+- The native TCP listener now has interface-qualified hosted evidence for its
+  default admission boundary: a peer sourced from an actual external IPv4
+  interface is rejected as loopback-only, reports one peer-qualified transport
+  error, and does not remain in `server.connections`; hosts without an external
+  IPv4 interface skip this environmental case. Exact SHA
+  `87ccd68c8e2040c90037c6027eb4467b1a7bd42d` passed [Native 9P run `35688474092`](https://github.com/andymac4182/mount-rs/actions/runs/35688474092),
+  N-API job `106620236951`, with Rust job `106620236776` also green. Explicit
+  `allowRemote: true` network admission and broader server-boundary parity
+  remain separate gates.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

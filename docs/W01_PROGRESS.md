@@ -102,6 +102,17 @@ plus all four ignored native lifecycle tests. Local elevated N-API execution
 passed; remote admission, crash/reset, broader parity, and W01 gates remain
 open, so production remains NO-GO.
 
+The latest W01-9P remote-admission packet was published at exact SHA
+`87ccd68c8e2040c90037c6027eb4467b1a7bd42d` and passed [Native 9P run
+`35688474092`](https://github.com/andymac4182/mount-rs/actions/runs/35688474092):
+N-API job `106620236951` passed the interface-qualified default
+loopback-only refusal, wire-framing, full server/attach, shared-lock, and
+teardown phases, and automatic/direct/structural mounted-I/O cleanup. Rust job
+`106620236776` passed the Linux probe plus all four ignored native lifecycle
+tests. Local elevated N-API execution passed against the actual external IPv4
+interface; explicit `allowRemote: true` network admission, crash/reset,
+broader parity, and W01 gates remain open, so production remains NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
