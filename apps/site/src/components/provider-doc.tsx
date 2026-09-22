@@ -446,8 +446,15 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         The newer workflow admission run <code>35670469503</code> at
         <code>d570ab4</code> passed trigger coverage but stopped at the hosted
         monthly budget guard with <code>count=243 limit=20</code>; it provides
-        no new live-R2 pass. Local process-restart evidence in the S3 tracker
-        is deliberately not promoted to live R2 durability.
+        no new live-R2 pass. The transport tracker also records 64 concurrent
+        unique-object PUTs followed by 64 concurrent GETs across two
+        session-owned buckets with exact readback, matching counters, and no
+        retained assertions; this is same-process N-API session evidence, not
+        live-provider or power-loss durability. The newer R2 admission run
+        <code>35675116591</code> passed trigger coverage but failed the bounded
+        usage admission, so its live job was skipped. Local process-restart
+        evidence in the S3 tracker is deliberately not promoted to live R2
+        durability.
       </>
     ),
     sources: [
@@ -459,7 +466,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
-      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670469503' },
+      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35675116591' },
     ],
   },
   rustfs: {
@@ -859,9 +866,23 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35671492720-1</code> with
         SHA-256
         <code>815dfecadab366a9fca9a7501c4a36d771324d8f71b521e0e8082261cbe431c3</code>.
-        The repository has since added a fixed 400-iteration, 64-way,
-        4 KiB-payload, 1,000-IOPS profile; that newer profile still needs a
-        fresh terminal hosted requalification.
+        The current published-tip requalification <code>35675987457</code> at
+        exact revision <code>1670ceba</code> passed the guarded-authority
+        packet and the corrected fixed profile: 400 successful writes, reads,
+        and deletes at 64-way concurrency with 4 KiB payloads, measured
+        <code>64.73</code> lifecycle IOPS, and zero timeouts or cleanup
+        failures. Its base marker recorded
+        <code>p50_us=3394</code>, <code>p95_us=43146</code>,
+        <code>p99_us=43146</code>, and
+        <code>throughput_ops_per_sec=158.97</code>; the five-round soak
+        throughput ranged from 218.16 to 225.92 ops/s. The retained artifact
+        is <code>foundationdb-production-qualification-35675987457-1</code>
+        with SHA-256
+        <code>0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694</code>.
+        The fixed-profile floor is structural rather than a production
+        capacity target; identity/ACL/TLS, backup/restore, production
+        capacity, multi-day operation, failover, macOS coverage, and release
+        approval remain open.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -873,7 +894,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671492720' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35675987457' },
     ],
   },
   'aws-s3': {

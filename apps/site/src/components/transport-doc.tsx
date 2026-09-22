@@ -490,7 +490,16 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         exposes probe/refusal/option helpers plus named <code>mount9p</code>
         delegation and mounted server/connection views. A configured
         <code>P9Server</code> can be adopted when the Linux client probe is
-        usable. Automatic signal ownership and broader upstream parity remain
+        usable. The latest N-API packet now preserves
+        <code>P9Session.stats.messages</code> as a
+        <code>Map&lt;string, number&gt;</code>; exact SHA
+        <code>e8c6043</code> passed hosted run <code>35673543701</code> with
+        mounted-I/O and cleanup checks in both the N-API and Rust jobs. The
+        subsequent fid-view packet at exact SHA <code>ba20d29</code> and run
+        <code>35674581481</code> also passed the Linux probe and automatic,
+        direct, and structural mounted-I/O checks, with writable
+        <code>Fid.iounit</code>/<code>Fid.cursor</code> and array-shaped cursor
+        offsets. Automatic signal ownership and broader upstream parity remain
         open; overall production status remains NO-GO.
       </>
     ),
@@ -501,6 +510,8 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
       { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35628187344' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },
+      { label: 'Latest hosted 9P stats qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673543701' },
+      { label: 'Latest hosted 9P fid qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35674581481' },
       { label: 'Hosted 9P platform-probe qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35672845113' },
       { label: 'Hosted 9P member-boundary qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670279904' },
     ],
@@ -816,7 +827,16 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         The final-ledger-tip status check for run
         <code>35673381803</code> likewise had CI and release-policy jobs
         pending, fault/provider jobs queued or absent, and no hosted WebDAV
-        PASS. The current maturity therefore remains Preview.
+        PASS. The newer exact-tip packet at SHA
+        <code>e5ae05d</code> passed the hosted N-API package jobs on Ubuntu
+        x64, Ubuntu arm64, macOS arm64, and macOS Intel, with the Rust jobs
+        passing on Ubuntu, macOS, and Windows. Its scoped native-WebDAV jobs
+        also passed on macOS and Ubuntu in run <code>35674823787</code>;
+        the overall workflow remained nonterminal because of an unrelated
+        native-FUSE lane. This upgrades the page's hosted package/native
+        evidence without claiming a full workflow pass, live remote-provider
+        durability, power-loss ordering, durable locks, or mounted-host
+        teardown/concurrency. The current maturity therefore remains Preview.
       </>
     ),
     sources: [
@@ -824,6 +844,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'W01 WebDAV progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_WEBDAV_PROGRESS.md' },
       { label: 'Transport evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted native WebDAV jobs', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35640746296' },
+      { label: 'Latest hosted WebDAV package/native qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35674823787' },
       { label: 'Latest hosted WebDAV durable-barrier status', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673381803' },
       { label: 'WebDAV durable-barrier change', href: 'https://github.com/andymac4182/mount-rs/commit/4e19f226' },
       { label: '256-request concurrency change', href: 'https://github.com/andymac4182/mount-rs/commit/efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6' },
