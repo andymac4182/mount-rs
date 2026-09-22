@@ -4,6 +4,39 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 serialized lease-renewal test boundary (2026-09-22)
+
+Test commit
+[`a7e459e6a9749384d409e4f53d6938df9a4414b9`](https://github.com/andymac4182/mount-rs/commit/a7e459e6a9749384d409e4f53d6938df9a4414b9)
+(`test(w26): cover serialized lease renewals`) is published at
+`origin/main`. It adds test-only provider-renewal counters and a 16-way
+regression proving that concurrent operation-lease checks make one provider
+renewal and never overlap. The production runtime is unchanged by this chunk.
+
+Local evidence is complete: the 23-test `mount-rs-chunked` suite, the full
+locked workspace all-target test matrix, strict workspace Clippy with
+`-D warnings`, formatting and diff checks all pass. The test-only diff scan
+`ce953fbe-71f3-44a0-8090-11d4dd502e08` has complete coverage and zero findings;
+the preceding production-runtime scan is also zero-finding.
+
+Fresh manual qualification run
+[`35726132846`](https://github.com/andymac4182/mount-rs/actions/runs/35726132846)
+is bound to exact head `a7e459e6a9749384d409e4f53d6938df9a4414b9`. At
+22:15:45 AEST all seven W26 provider/base/aggregate jobs were queued:
+`ozone-tidb`, `ozone-foundationdb`, `foundationdb-rustfs`, `ozone`, `tidb`,
+`ozone-compositions` and `tidb-rustfs`. Queued is an external hosted-runner
+capacity gate, not provider acceptance. W26.15 remains open at the prior
+terminal 1/4 provider acceptance until a complete exact-head packet supplies
+four individual rows at or above 1,000 IOPS/drive plus all end-to-end markers.
+
+Production remains **NO-GO**. Tier-1 99.99% reliability, five-minute RPO/RTO,
+customer-deployed Ozone security, complete end-to-end evidence and
+customer/Ozone-owned backup/DR are still open; W26 owns compatibility and
+qualification only, customers deploy Ozone, and another stream owns releases.
+The detailed work-item statuses, percentages, evidence, provisional
+engineering estimates, external blockers and session log are in
+[docs/w26-progress-ledger.md](docs/w26-progress-ledger.md).
+
 ## Current W26 exact-head hosted queue recheck (2026-09-22)
 
 At 22:07 AEST, manual run
