@@ -2050,6 +2050,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   persistence/backup/rollback, observability/runbook, ownership, and release
   approval.
 
+- Latest pre-fix exact-tip qualification: non-cancelling run `35683216317` was
+  dispatched at `bdd87108e003a83a01cf9aa479a3e145dbd7cbe3`, before the
+  deterministic WebDAV partial-request plus `resetAndDestroy()` correction
+  `de78011a` reached `origin/main`. ARM `106604465303`, Ubuntu
+  `106604465117`, macOS-latest `106604465439`, macOS-15-intel `106604465281`,
+  and Windows `106604465193` all failed the same old WebDAV peer-reset
+  assertion before the exact PGlite/restart step; no current-tip W04 Node
+  acceptance is claimed. Native FUSE `106604465075` passed rootless,
+  SQLite-fault, and mounted-PGlite checks, FoundationDB/RustFS `106604465204`
+  passed its durable/restart markers, aggregate-native was skipped because the
+  Node matrix failed, Ozone/TiDB measured `103.09`, Ozone/FoundationDB
+  `354.51`, and Ozone compositions `779.82` IOPS against the hard `1000`
+  target, and W26 `106607355160` failed closed without `OZONE_IOPS_PASS`.
+  Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
+  required and production remains **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -3781,6 +3797,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   N-API, W07 and W08 static/policy checks also passed. This is source-health
   evidence only and does not close P01–P09 or change the NO-GO decision.
 
+  After origin/main advanced with the S3 delete-error source fix `d5c3f672` and
+  its gateway coverage, exact merged source
+  `6f8548a9179083ee088d4c1f66ded8d4c3b5b87e` was freshly requalified. The full
+  locked workspace test and strict workspace Clippy exited 0; all runnable tests
+  passed, provider/native rows remained explicit opt-in skips, and affected
+  N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
+  This is source-health evidence only and does not close P01–P09 or change the
+  NO-GO decision.
+
   Hosted W08 policy run `35681936375` at source
   `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
   successfully in 2m48s. Its rollout-ledger and release-identity/provenance
@@ -3802,10 +3827,20 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `62e86dc092dfe9816ef54ca681872ff9f51d8895` passed hosted W08 release-policy
   run `35683936652`, job `106607017325`, which completed successfully in
   approximately 2m47s. Its rollout-ledger and release-identity/provenance steps
-  were green. This is hosted implementation/static evidence only; it does not
-  provide production topology, provider, candidate-release, registry, canary,
-  rollback or owner-approval evidence, so P01–P09 remain open and the decision
-  remains NO-GO.
+    were green. This is hosted implementation/static evidence only; it does not
+    provide production topology, provider, candidate-release, registry, canary,
+    rollback or owner-approval evidence, so P01–P09 remain open and the decision
+    remains NO-GO.
+
+  The immediately subsequent public merge tip
+  `622dd0dc82125ba1979ea7ebf2b6a1b11145c6bb` had W08 policy run `35684358649`
+  cancelled before job creation (`jobs=[]`) when concurrent public tip
+  `9563d2db8d73b8583212eed00f5b909cbcadf27e` arrived. The surviving current
+  public-source-equivalent run `35684400799` at source `9563d2db`, job
+  `106608087688`, completed successfully in 2m05s with both W08 policy steps
+  green. The cancellation is a hosted scheduling boundary, not evidence of a
+  source or production failure; the successful run remains implementation/static
+  evidence only and P01–P09 remain open.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed
@@ -4094,6 +4129,12 @@ reproducible in a production-like environment.
   blocked by `missing_bucket` and R2 run `35683716251` by `count=294 limit=20`;
   physical power-loss durability, broader workload bounds, and native/hosted
   acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The published S3 packet's automatic provider runs were refreshed:
+  AWS run `35684677320` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`,
+  while R2 run `35684677273` stopped at `count=295 limit=20` before live
+  admission. No service PASS is claimable; protected AWS configuration, the
+  R2 budget reset, physical power-loss durability, broader workload bounds,
+  and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
