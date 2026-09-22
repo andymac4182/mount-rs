@@ -82,6 +82,7 @@ import {
   p9ClientProbe,
   p9MountOptions,
   p9Platform,
+  P9DirentPacker,
   type P9AttachOptions,
   type MountP9Options,
   type P9ClientProbe,
@@ -509,12 +510,15 @@ function checkServerAndKvSubpaths(): void {
   const p9DefaultMsize: 1048576 = DEFAULT_MSIZE
   const p9LockEofEnd: 0x10000000000000000n = P9_LOCK_EOF_END
   const p9DefaultMaxLocksPerFile: 1024 = DEFAULT_MAX_LOCKS_PER_FILE
+  const p9DirentPacker = new P9DirentPacker(64)
+  const p9DirentMaxSize: number = p9DirentPacker.maxSize
   void p9DefaultPort
   void p9DefaultSocketMode
   void p9DefaultMaxInFlight
   void p9DefaultMsize
   void p9LockEofEnd
   void p9DefaultMaxLocksPerFile
+  void p9DirentMaxSize
   const p9FidOptions: FidTableOptions = { useDriverIno: true }
   const p9FidTable: FidTable = new FidTable(p9FidOptions)
   const p9Fid = p9FidTable.create(1, "/")

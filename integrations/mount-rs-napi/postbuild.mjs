@@ -298,6 +298,12 @@ types = types.replace(
   "handleRequestStream(head: WebdavRequestHead, body: WebdavRequestStreamBody): Promise<WebdavStreamResponse>",
 )
 if (!types.includes("export type WebdavRequestStreamBody =")) types += webdavRequestStreamTypes
+// Keep the generated P9 message-count declaration aligned with the public
+// postlude, which exposes insertion-ordered counters as a JavaScript Map.
+types = types.replace(
+  /(export interface P9SessionStats \{[\s\S]*?messages: )Record<string, number>/,
+  "$1Map<string, number>",
+)
 types = types.replace(
   /(export interface WebdavSessionStats \{[\s\S]*?methods: )Record<string, number>/,
   "$1Map<string, number>",
