@@ -162,6 +162,18 @@ upstream stream/attach contract or hosted native mount behavior.
   [Native 9P run `35676832586`](https://github.com/andymac4182/mount-rs/actions/runs/35676832586):
   N-API job `106585007802` passed automatic/direct/structural mounted-I/O and
   cleanup, and Rust job `106585007667` passed all four ignored native tests.
+- The bounded body readers `readRread`, `readTwrite`, and `readRreaddir` now
+  preserve the oracle's optional maximum-item argument at the N-API boundary,
+  including the default `P9_MAX_ITEM` and the native reader's bounded error
+  behavior. The 44-case codec differential covers successful bounded bodies
+  and oversized-body errors for all three readers; generated typecheck,
+  syntax, fid/runtime, diff, formatting, strict Clippy, and 18 focused Rust
+  tests pass locally. Exact SHA `bba379ebe4339e951de9cb7ca02b4b499c3a3874`
+  passed [Native 9P run `35677755888`](https://github.com/andymac4182/mount-rs/actions/runs/35677755888):
+  N-API job `106587739639` passed the Linux probe, addon build, and
+  automatic/direct/structural mounted-I/O and cleanup checks, while Rust job
+  `106587739402` passed the Linux probe and all four ignored native lifecycle
+  tests.
 - Graceful server close, external unmount, and retryable unmount are in scope;
   the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
@@ -217,10 +229,22 @@ automatic/direct/structural mounted-I/O and cleanup checks, while Rust job
 tests. The packet closes the identified `framesFrom` iterable/assembler
 signature mismatch only; production remains NO-GO for the broader open gates.
 
+The current bounded-reader packet at exact SHA
+`bba379ebe4339e951de9cb7ca02b4b499c3a3874` passed [Native 9P run
+`35677755888`](https://github.com/andymac4182/mount-rs/actions/runs/35677755888):
+N-API job `106587739639` passed the Linux probe, addon build, and
+automatic/direct/structural mounted-I/O and cleanup checks, while Rust job
+`106587739402` passed the Linux probe and all four ignored native lifecycle
+tests. The packet preserves the optional reader limits for `readRread`,
+`readTwrite`, and `readRreaddir`; local 44-case codec, generated typecheck,
+syntax, fid/runtime, formatting, strict Clippy, and 18-test Rust gates are
+green. Production remains NO-GO for the broader open gates.
+
 ## Evidence ledger
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | N-API 9P bounded-reader maximum parity | The N-API codec facade now preserves the oracle's optional maximum-item argument for `readRread`, `readTwrite`, and `readRreaddir`, with default `P9_MAX_ITEM` behavior and bounded success/error differential coverage in 44 typed cases. Generated typecheck, syntax, fid/runtime, diff, formatting, strict Clippy, and 18 focused Rust tests pass locally. Exact SHA `bba379ebe4339e951de9cb7ca02b4b499c3a3874` passed [Native 9P run `35677755888`](https://github.com/andymac4182/mount-rs/actions/runs/35677755888): N-API job `106587739639` passed automatic/direct/structural mounted-I/O and cleanup, and Rust job `106587739402` passed all four ignored native lifecycle tests | Broader upstream member parity, automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and W01 acceptance remain open; production remains NO-GO |
 | 2026-09-22 | N-API 9P member representation boundaries | The focused session metadata regression now checks effective callback-hook omission from serializable option snapshots, attached `Duplex`/peer/closed state, and pre-listen string/null address/path views; the direct native test asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed [Native 9P run `35670279904`](https://github.com/andymac4182/mount-rs/actions/runs/35670279904): N-API job `106565351978` passed automatic/direct/structural mounted I/O and cleanup, and Rust job `106565352174` passed all four ignored native tests | Broader upstream member parity, automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and W01 acceptance remain open |
 | 2026-09-22 | Hosted member-boundary rerun attempt | Exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` in [Native 9P run `35669536706`](https://github.com/andymac4182/mount-rs/actions/runs/35669536706) passed Rust job `106562666985` and the automatic N-API mount, but direct `./9p` stopped at the new assertion because the test incorrectly expected a native Unix `peer` to be `null`; the actual value was the transport-owned socket path. The assertion and scope wording are corrected to require `stream: undefined` plus a non-empty transport-source peer string | Corrected exact-SHA hosted rerun required; production remains NO-GO |
 | 2026-09-22 | Corrected hosted member-boundary rerun | Exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` in [Native 9P run `35670279904`](https://github.com/andymac4182/mount-rs/actions/runs/35670279904) passed N-API job `106565351978` (`PASS` automatic mount, direct `./9p` probe/mounted I/O/views/cleanup, and structural-driver callback reachability) and Rust job `106565352174` (`4 passed; 0 failed`), qualifying native `stream: undefined` plus the transport-source Unix peer string | Automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and W01 acceptance remain open; production remains NO-GO |
