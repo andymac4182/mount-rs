@@ -191,12 +191,15 @@ surface step, and automatic/direct/structural mounted-I/O cleanup; Rust job
 tests. Broader session/protocol parity, crash/reset scope, and W01 gates remain
 open, so production remains NO-GO.
 
-The next bounded 9P server contract packet caches native `P9Connection` wrappers
-by stable transport id. Its real-TCP regression checks that repeated
+The native server client-identity packet at exact SHA
+`15cb940988913c666d8d592a583e7eb3d2d82241` caches native `P9Connection`
+wrappers by stable transport id. Its real-TCP regression checks that repeated
 `P9Server.clients` reads preserve connection, session, and closed-promise
-identity and that the wrapper disappears after `close()`/`waitClosed()`; local
-focused execution and hosted Native 9P evidence are pending for this revision.
-Production remains NO-GO.
+identity and that the wrapper disappears after `close()`/`waitClosed()`.
+Hosted [Native 9P run `35698924766`](https://github.com/andymac4182/mount-rs/actions/runs/35698924766)
+passed: N-API job `106652302954` passed the new identity step and all hosted
+N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe plus
+all four ignored native lifecycle tests. Production remains NO-GO.
 
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
