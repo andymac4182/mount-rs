@@ -716,7 +716,8 @@ function wrapP9Session(P9Session) {
       enumerable: false,
       writable: true,
       value(...args) {
-        return p9UndefinedForNull(nativeUserFor.apply(this, args))
+        const user = p9UndefinedForNull(nativeUserFor.apply(this, args))
+        return user === undefined ? undefined : { ...user, uid: user.uid ?? undefined }
       },
     })
   }

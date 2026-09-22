@@ -232,6 +232,39 @@ async fn verify_shared_authority(cluster_file: &str, prefix: &str) -> Result<()>
         .expect_err("the old shared-authority writer must be fenced");
     assert_eq!(stale.code, ErrorCode::Estale);
     second.metadata().release_writer(&replacement).await?;
+
+    let authority_stats = authority.stats();
+    assert_eq!(authority_stats.publication_attempts, 3);
+    assert_eq!(authority_stats.publication_successes, 3);
+    assert_eq!(authority_stats.publication_failures, 0);
+    assert_eq!(authority_stats.last_published_time_ms, Some(2_030_001));
+    assert!(authority_stats.last_success_at_ms.is_some());
+
+    let reader_stats = reader_a.stats();
+    assert_eq!(
+        reader_stats.read_attempts,
+        reader_stats.read_successes + reader_stats.read_failures
+    );
+    assert!(reader_stats.read_successes > 0);
+    assert!(reader_stats.read_failures > 0);
+    assert_eq!(reader_stats.last_observed_time_ms, Some(2_030_001));
+    assert!(reader_stats.last_success_at_ms.is_some());
+    assert!(reader_stats.last_failure_at_ms.is_some());
+    println!(
+        "FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts={} publication_successes={} publication_failures={} reader_attempts={} reader_successes={} reader_failures={} last_published_time_ms={} last_observed_time_ms={}",
+        authority_stats.publication_attempts,
+        authority_stats.publication_successes,
+        authority_stats.publication_failures,
+        reader_stats.read_attempts,
+        reader_stats.read_successes,
+        reader_stats.read_failures,
+        authority_stats
+            .last_published_time_ms
+            .expect("authority stats include a publication"),
+        reader_stats
+            .last_observed_time_ms
+            .expect("reader stats include an observation"),
+    );
     drop(first);
     drop(second);
     Ok(())

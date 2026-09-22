@@ -714,6 +714,7 @@ function checkServerAndKvSubpaths(): void {
   const p9Lock: P9Lock | undefined = p9LockTable.at("/")[0]
   const p9LockHolder: P9LockHolder | undefined = p9Locks.getlock(p9LockRequest)
   const p9User: P9User | undefined = p9Session.userFor(1)
+  const p9UserUid: number | undefined = p9User?.uid
   const p9Msize: number | undefined = p9Session.msize
   const p9SessionVersion: string | undefined = p9Session.version
   const connectionId: number = p9Connection.id
@@ -802,6 +803,7 @@ function checkServerAndKvSubpaths(): void {
   void p9SessionStats
   void p9MessageCounts
   void p9User
+  void p9UserUid
   void p9NoFid
   void p9GetattrAll
   void p9Version
