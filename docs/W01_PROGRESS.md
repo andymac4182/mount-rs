@@ -264,6 +264,17 @@ silently converting the documented legacy/auth/xattr, broader-member,
 supervisor-owned crash/reset, or non-Linux native-mount boundaries into claims;
 W01/release remains **NO-GO**.
 
+The follow-up exact head SHA
+`d11f458d7f6ef1923091fbca84a93e63f05e9455` adds the privileged
+`upstream-9p-root` companion job. [Native 9P run `35711056768`](https://github.com/andymac4182/mount-rs/actions/runs/35711056768)
+passed baseline job `106691472428` with the same `144 passed` and `2 skipped`
+non-root result, root job `106691917345` with `146/146`, N-API job
+`106691472270`, and Rust job `106691472165`. The root run exercises both
+previously skipped symlink-ownership cases, closing that evidence gap without
+expanding the advertised 9P scope; the documented legacy/auth/xattr,
+broader-member, supervisor-owned crash/reset, and non-Linux native-mount
+boundaries remain explicit, and W01/release remains **NO-GO**.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
