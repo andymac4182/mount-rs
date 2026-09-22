@@ -259,6 +259,15 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         cleanup tests all passed. This is candidate job-scoped Linux evidence,
         not current-main hosted acceptance or a release decision; exact-tip
         hosted native-FUSE and the wider provider/release gates remain open.
+        The follow-up implementation at source <code>85362348</code> hardens
+        the Linux FUSE control plane at the hosted failure boundary: terminal
+        <code>FUSE_DESTROY</code> aborts blocked positional-read workers
+        immediately, the invalid-device regression uses a ready
+        <code>eventfd</code>, and the retryable-unmount fixture exercises a real
+        mounted path. Host FUSE tests passed <code>15/15</code>, Linux-target
+        test compilation and formatting/diff checks passed, but hosted Linux
+        Rust/native-FUSE confirmation remains required; this is local
+        implementation evidence, not a new hosted acceptance claim.
       </>
     ),
     sources: [
@@ -277,6 +286,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Pending current-tip FUSE run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716566393' },
       { label: 'Lima shipped-CLI FUSE smoke', href: 'https://github.com/andymac4182/mount-rs/commit/32b8596' },
       { label: 'Candidate native FUSE sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },
+      { label: 'FUSE teardown/read control-plane hardening', href: 'https://github.com/andymac4182/mount-rs/commit/85362348e9dd294e0547c3f36268facddc7194c8' },
     ],
   },
   nfs: {
@@ -493,6 +503,15 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         strict Clippy. This is same-server reverse cross-version namespace
         ordering, not cross-process arbitration, native-client ordering,
         crash/power-loss durability, hosted acceptance, or production readiness.
+        The follow-up rename-over-open fix at source <code>350c0357</code>
+        preserves a pinned destination handle when v3 RENAME replaces its
+        name: the old v4 handle remains pathless and readable, while a fresh
+        v3 LOOKUP receives a distinct replacement handle. The focused wire case
+        passed ten reruns; the locked target passed 43 unit and 25 v4-wire
+        cases with warning-denied NFS/N-API Clippy and formatting. This covers
+        same-process cross-version handle lifetime, not native v4 ordering,
+        cross-process recovery, crash/power-loss durability, hosted acceptance,
+        or production readiness.
       </>
     ),
     sources: [
@@ -507,6 +526,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'macOS N-API loader repair', href: 'https://github.com/andymac4182/mount-rs/commit/b7ba3806e5a36f9732b1976e100c5d0e3004dd1e' },
       { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
       { label: 'NFSv3 LOOKUP/v4 REMOVE ordering qualification', href: 'https://github.com/andymac4182/mount-rs/commit/3884c194e705bf672d3d94a4aab5fc548908c9b3' },
+      { label: 'NFS cross-version rename-over-open lifetime', href: 'https://github.com/andymac4182/mount-rs/commit/350c035783198f5a6ef256717373e6ecdd40d16c' },
       { label: 'macOS CLI host-backed NFS smoke', href: 'https://github.com/andymac4182/mount-rs/commit/be382691822327b41bffb9823cd3b235630698b2' },
       { label: 'NFSv4.1 OPEN access-upgrade fix', href: 'https://github.com/andymac4182/mount-rs/commit/512ef9588426d4b84b420bc5634bb043e40ac448' },
       { label: 'Candidate macOS native NFS sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },

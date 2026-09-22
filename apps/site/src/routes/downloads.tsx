@@ -76,6 +76,17 @@ function DownloadsPage() {
             page continues to link only the verified GitHub release archive and
             <code>SHA256SUMS</code> below.
           </p>
+          <p>
+            The later immutable production candidate at source
+            <code>d1a81ad4</code> dispatched W08 release-target run{' '}
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35721892593" {...externalProps()}>
+              35721892593
+            </a>{' '}
+            with attestations enabled, but that run was cancelled before it
+            produced release assets when the candidate was superseded. No new
+            public binary is claimable from it; the verified preview below
+            remains the only downloadable release asset.
+          </p>
         </div>
 
         <section className="download-release-card" aria-labelledby="download-release-heading">

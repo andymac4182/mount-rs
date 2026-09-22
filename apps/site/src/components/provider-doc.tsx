@@ -698,6 +698,21 @@ LIMIT 20;`,
         restore, upgrade/rollback, SLOs/capacity, security sign-off, on-call,
         canary, and release-owner approval remain open. A green functional
         packet is not production deployment evidence.
+        W08.40 adds the credential-free upgrade, compatibility, and rollback
+        policy: pinned current/previous versions, wire/data compatibility,
+        expand-contract migration, interrupted recovery, quorum-preserving
+        rolling upgrades, retained rollback artifacts, writer fencing, and
+        fresh-client readback. Its eight-case static policy/test passed at
+        source <code>66164b78</code>; hosted run
+        <code>35718296219</code> was cancelled before job creation, so P04
+        remains an implementation/static qualification rather than a live
+        upgrade rehearsal. W08.41 adds the matching credential-free
+        observability, SLO, and alerting policy with retention, redaction,
+        error-budget, paging, acknowledgement, runbook, and health-contract
+        controls. Its eight-case static policy/test is integrated at source
+        <code>c0782e3c</code>; current-tip hosted run
+        <code>35721851677</code> remains queued, so no live collector,
+        dashboard, pager, or acknowledgement evidence is claimed.
       </>
     ),
     sources: [
@@ -708,6 +723,10 @@ LIMIT 20;`,
       { label: 'TiDB progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-progress-ledger.md' },
       { label: 'TiDB production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-production-rollout.md' },
       { label: 'W08.39 backup and restore policy', href: 'https://github.com/andymac4182/mount-rs/commit/896330a' },
+      { label: 'W08.40 upgrade and rollback policy', href: 'https://github.com/andymac4182/mount-rs/commit/66164b78' },
+      { label: 'W08.40 hosted policy boundary', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35718296219' },
+      { label: 'W08.41 observability and alerting policy', href: 'https://github.com/andymac4182/mount-rs/commit/c0782e3c' },
+      { label: 'Current-tip W08.41 hosted policy', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35721851677' },
     ],
   },
   foundationdb: {
