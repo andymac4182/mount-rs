@@ -2315,6 +2315,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   lease during shutdown and includes a regression test; runs `35577687152` and
   `35579757447` then passed. Remaining actions are secret rotation before
   expiry and separate Linux FUSE, Windows, and signed/activated FSKit gates.
+- [x] W05.8 Requalify the current successor's bounded WebDAV structural-driver
+  boundary and local end-to-end packet. On 2026-09-22 at `63a969eb`, the
+  focused structural-factory/oracle suite, complete Node CLI/SDK/N-API suite,
+  real PGlite lifecycle/provider/CLI/SDK gate, upstream `1200 passed/82
+  skipped`, and all `40 × 621` seeded differential lanes passed. R2,
+  privileged native mounts, and hosted platform/provider gates remained
+  explicit skips or separate acceptance boundaries; this local packet does
+  not replace terminal same-SHA production evidence.
 
 ## W06 — RustFS integration service
 
