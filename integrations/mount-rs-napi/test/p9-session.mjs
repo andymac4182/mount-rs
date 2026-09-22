@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { pathToFileURL } from "node:url"
 
 import root from "../index.js"
 import p9 from "../p9.cjs"
@@ -46,6 +47,33 @@ function rlerrorCode(bytes) {
   return p9.decodeMessageAs(bytes, p9.readRlerror).value.ecode
 }
 
+function publicSessionMembers(value) {
+  const members = new Set()
+  for (let current = value; current && current !== Object.prototype; current = Object.getPrototypeOf(current)) {
+    for (const name of Object.getOwnPropertyNames(current)) {
+      if (name !== "constructor") members.add(name)
+    }
+  }
+  return [...members].sort()
+}
+
+const expectedSessionMembers = [
+  "assertions",
+  "destroy",
+  "destroyed",
+  "driver",
+  "fids",
+  "generation",
+  "handleCall",
+  "inflight",
+  "locks",
+  "msize",
+  "options",
+  "stats",
+  "userFor",
+  "version",
+]
+
 const filesystem = Filesystem.memory()
 const reports = []
 const assertions = []
@@ -74,6 +102,25 @@ try {
   assert.equal(session.msize, undefined)
   assert.equal(session.version, undefined)
   assert.equal(session.destroyed, false)
+  assert.deepEqual(publicSessionMembers(session), expectedSessionMembers)
+  assert.ok(session.locks)
+  assert.ok(session.fids)
+  assert.ok(session.stats)
+  assert.deepEqual(session.assertions, [])
+
+  if (process.env.MOUNTX_SOURCE) {
+    const oraclePath = pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/9p/session.ts`).href
+    const { P9Session: OracleP9Session } = await import(oraclePath)
+    const { createMemoryDriver } = await import(
+      pathToFileURL(`${process.env.MOUNTX_SOURCE}/src/drivers/memory.ts`).href,
+    )
+    const oracleSession = new OracleP9Session(createMemoryDriver())
+    try {
+      assert.deepEqual(publicSessionMembers(oracleSession), expectedSessionMembers)
+    } finally {
+      await oracleSession.destroy()
+    }
+  }
 
   assert.equal(await session.handleCall(Buffer.from([1, 2, 3])), null)
   await waitUntil(() => reports.length === 1, "direct 9P malformed-frame callback")

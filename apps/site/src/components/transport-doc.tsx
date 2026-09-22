@@ -532,6 +532,26 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         native/API qualifications, not broader
         upstream parity or crash/reset recovery; overall production status
         remains NO-GO.
+        The latest structural-session packet at exact SHA
+        <code>496ed42b</code> passed hosted run <code>35691732267</code>:
+        the N-API job passed the Linux probe, addon build, isolated
+        server/attach selector, direct native/structural session lifecycle,
+        and automatic/direct/structural mounted-I/O cleanup, while the Rust
+        job passed the Linux probe and all four ignored native lifecycle tests.
+        This extends direct <code>P9Session</code> construction to structural
+        <code>FsDriver</code> input and releases the retained adapter exactly
+        once on destroy; process-crash, arbitrary kernel-reset, broader parity,
+        and production acceptance remain open.
+        The follow-up direct-session state-machine packet at exact SHA
+        <code>c6277617</code> passed hosted run <code>35693518562</code>:
+        an in-flight <code>Tgetattr</code> is counted and released by
+        <code>Tflush</code>, <code>Tversion</code> reset clears negotiated
+        state/fids/users and invalidates the stale request with
+        <code>EIO</code>, and <code>destroy()</code> wakes pending work and
+        invalidates it with <code>ENODEV</code>. Generation invalidation wins
+        over a late adapter error while the caller-owned structural source
+        remains alive; both the N-API and Rust jobs passed their Linux probe
+        and mounted-I/O cleanup suites.
       </>
     ),
     sources: [
@@ -540,6 +560,8 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
       { label: 'Latest hosted Native 9P lifecycle', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35685073733' },
+      { label: 'Latest hosted Native 9P structural session', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35691732267' },
+      { label: 'Latest hosted Native 9P state machine', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693518562' },
       { label: 'Hosted 9P wire-framing qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955065' },
       { label: 'Hosted 9P Unix-listener qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },

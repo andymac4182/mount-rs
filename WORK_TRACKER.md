@@ -905,7 +905,44 @@ complete.
 > W26 current-status note: the row above is historical summary text. The
 > authoritative current tip, exact hosted packet, every W26 work-item status
 > and production NO-GO boundary are in the latest W26 authority override
-> below, which records `origin/main=4098c7df` and the post-publication ledger.
+> below, which records `origin/main=5e368011` and the post-publication ledger.
+
+Current W26 authority override (2026-09-22, FoundationDB transaction-sharing
+chunk): the current shared mainline tip is
+`origin/main=9c44d2a4210bcc98d752319aae9b06f65d370337`, containing implementation
+commit `5e3680117c26f5b7bb1b9280eec65a350b3dd2f7`. Commit `5e368011`
+(`perf(w26): share fdb lease authority transaction`) adds the
+source-compatible `LeaseOracle::now_ms_in_transaction` hook, makes the shared
+FoundationDB oracle read its protected authority key inside the already-open
+metadata transaction, and routes acquire/renew/release/publish through that
+hook. Custom clocks and the persisted/development path retain the default
+fallback; authority reads remain read-only and missing/malformed samples fail
+closed. Feature-enabled FoundationDB check and strict Clippy, full locked
+workspace tests, strict workspace Clippy, formatting and diff checks pass.
+The feature-enabled FoundationDB test command reaches link but is blocked
+locally by missing native `fdb_c`; this is an external native gate. Security
+diff scan `2eb14a81-ce6f-4c30-bf98-a3e65479a8cd` has complete changed-file
+coverage over one surface and zero reportable findings.
+
+The latest terminal hosted packet remains run `35691451007` on earlier SHA
+`dccd8351`: base Ozone passed, PGlite/R2 reached `2,065.669446` IOPS, while
+SQLite/R2 reached `213.947686`, TiDB/R2 `333.356025` and FoundationDB/R2
+`363.254472`; all rows completed 1,200/1,200 operations with zero timeouts and
+cleanup failures, but aggregate `106631474430` correctly failed closed on
+missing `OZONE_IOPS_PASS`. Targeted run `35693778762` selected
+`b3fb7988bce1edaafbd44f2adf22bb217ca99671`: base `106636116163` passed,
+compositions `106636116105` failed, TiDB `106636116197` failed and FoundationDB
+`106636116201` was still in progress at capture; no aggregate existed. The
+push-triggered current-code run `35694753908` selected `5e368011` and was
+pending at capture. W26 remains **NO-GO**. Customer Ozone deployment, secure
+topology, 99.99% availability, five-minute RPO/RTO, backup/DR and the release
+stream remain external ownership boundaries.
+
+Current W26 hosted dispatch boundary: poll `35694753908` for the exact
+`5e368011` provider and aggregate results; retain all artifacts/logs and do not
+promote queued, pending, failed, skipped, canceled, incomplete or missing
+marker results. The detailed per-item ledger, provisional estimates, external
+gates and session log are in `docs/w26-progress-ledger.md`.
 
 Current W26 authority override (2026-09-22, TiDB publication chunk): the
 verified shared code tip is `origin/main=4098c7df04a03f65269ef932cb921b96d6368297`.
@@ -2080,6 +2117,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   persistent-volume identity, encrypted backup/restore/RPO/RTO, provider
   scope, collector/pager, named owners, and GO approval open; provider IOPS
   and W26 failures remain current NO-GO evidence.
+- A fresh W04 production-policy refresh is now tracked separately: run
+  [35694364538](https://github.com/andymac4182/mount-rs/actions/runs/35694364538)
+  at shared head `41032645` has queued `pglite-config` job `106638349819`.
+  Prior run `35694245181` was cancelled before any job materialized during
+  concurrent mainline pushes and is non-evidence. Queue state does not change
+  the production NO-GO decision.
+- Terminal W04 production-policy run
+  [35694307118](https://github.com/andymac4182/mount-rs/actions/runs/35694307118),
+  job `106637712246`, passed on shared head `25e275ab` with the explicit
+  PGlite-only/durable/external-secret/bounded-TTL marker and four expected
+  fail-closed negative markers. This closes the credential-free configuration
+  shape check only; it does not close persistent deployment, backup/restore,
+  provider, observability, ownership, or release approval gates.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
