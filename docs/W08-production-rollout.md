@@ -291,6 +291,20 @@ repository implementation/control slice of P06 only; it does not execute a
 production-sized workload or close the capacity, cost, failover or approval
 gate.
 
+The W08.42 implementation was committed as `5dedf181` and published in
+reconciliation merge `d6b1bceac918770e4700e3f44aebb94f1ebb513e`; concurrent
+mainline documentation then advanced the exact public tip through
+`de5c9ebe2c14fb7ae2f2aecb861c6fbf22f446c4` to
+`186b0d081086abbf91bafd80017a15bc2ad71288`, which contains W08.42. The local
+P06 policy/test, shared-wrapper Cargo check, strict Clippy, all P01–P06
+policy/test pairs, rollout/evidence controls, workflow parses and diff check
+passed. Hosted run `35723892801` for `d6b1bcea` ended cancelled with `jobs=[]`;
+run `35723996718` for `de5c9ebe` was queued; current-tip run `35724261088` for
+`186b0d08` was pending at the latest observation. No current-tip terminal
+hosted qualification exists. P06 remains open until representative provider
+workloads produce measured latency, throughput, error, resource, failover,
+soak, scaling and cost evidence with named sign-off.
+
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
 tests and strict Clippy with `-D warnings` using a bounded external Cargo

@@ -5640,6 +5640,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   capacity, cost, failover or production approval. *(Implementation/static
   qualification; provider and production evidence remain external.)*
 
+  Local policy/test output passed with
+  `W08_PRODUCTION_CAPACITY_POLICY_PASS profiles=5 peak_concurrency=32
+  saturation_concurrency=64 soak_hours=4 p95_ms=1000 p99_ms=2000
+  error_rate=0.1 headroom=25 recovery_seconds=300` and
+  `W08_PRODUCTION_CAPACITY_TEST_PASS cases=8`. Implementation commit
+  `5dedf181` was published in reconciliation merge `d6b1bcea`; the current
+  public tip `186b0d08` contains it. Hosted runs for `d6b1bcea` and the later
+  public tips were cancelled or non-terminal, so no provider capacity evidence
+  is claimed. *(Static qualification published; P06 provider gate remains
+  open.)*
+
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
   bounded propfind/copy failure fix, the
