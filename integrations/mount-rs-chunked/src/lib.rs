@@ -34,6 +34,12 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 const LEASE_RENEWAL_MARGIN: Duration = Duration::from_secs(5);
 const DEFAULT_CHUNK_SIZE: usize = 64 * 1024;
 const MAX_PENDING_MUTATIONS: usize = 1024;
+// A small fixed collection window lets concurrently prepared remote block
+// operations enqueue their metadata mutations before the first publisher
+// snapshots the queue. It is deliberately scheduler-yield based rather than
+// time based so core tests remain runtime-independent and single mutations do
+// not wait on an unbounded or provider-controlled delay.
+const MUTATION_BATCH_YIELD_ROUNDS: usize = 8;
 
 /// Runtime configuration for a newly-created namespace.
 ///
@@ -219,9 +225,8 @@ impl Drop for MutationRunnerGuard<'_> {
     }
 }
 
-/// A single cooperative yield is enough to let concurrent remote block
-/// operations enqueue their metadata mutations before the first publisher
-/// takes the batch. This avoids requiring a runtime-spawned worker, which is
+/// A cooperative yield is enough to let concurrent remote block operations
+/// make progress without requiring a runtime-spawned worker, which is
 /// important because the core ChunkedFs tests deliberately run without a
 /// Tokio runtime.
 struct CooperativeYield {
@@ -780,8 +785,13 @@ where
         loop {
             // Let other operations finish their immutable block work and
             // enqueue their prepared metadata mutations before this runner
-            // snapshots the namespace.
-            cooperative_yield().await;
+            // snapshots the namespace. The fixed round count is a bounded
+            // batching window: it improves coalescing for remote providers
+            // without turning publication into a timer or changing the
+            // fenced revision/CAS boundary below.
+            for _ in 0..MUTATION_BATCH_YIELD_ROUNDS {
+                cooperative_yield().await;
+            }
 
             let requests = {
                 let mut queue = match self.inner.mutations.lock() {
