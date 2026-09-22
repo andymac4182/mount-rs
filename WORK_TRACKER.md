@@ -6289,6 +6289,53 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W25 — Actual AWS S3 integration
 
+### Current W25 gate map — 2026-09-22
+
+This map is the current scope summary for W25. A qualification-account or
+credential-free PASS proves only the bounded provider contract and safety
+check it names; it does not promote test resources, local metadata, or CI
+configuration into a production deployment.
+
+| Gate | Current status | Boundary and next evidence |
+| --- | --- | --- |
+| AWS S3 provider and public SDK/CLI qualification | **PASS for W25 qualification** | The authorized `myroot` packet and public consumer paths pass the live block, composed-filesystem, restart/reopen, cleanup, and optional local PGlite pairing rows recorded below. This is provider compatibility evidence; make a separate current-source library release decision after the package/support-matrix and release-artifact gates. |
+| Qualification-account resources and role | **PASS for test scope only** | The read-only audit and scoped-role prefix denial pass for the dedicated test bucket. The bucket, role, prefix, and `myroot` session are not production ownership or least-privilege approval. |
+| Production bucket/IAM/IaC | **OPEN** | The CloudFormation and policy contracts are reviewable and locally validated, but production parameters, change set, role trust, resource creation, and live production audit still require an adopter/deployment owner. |
+| Hosted OIDC and protected environment | **BLOCKED** | Read-only audits still report missing environment protection/reviewer and inputs, GitHub OIDC provider, and immutable-subject role trust. The workflow must remain unauthenticated until those external controls are configured and approved. |
+| Production metadata, recovery, and DR | **OPEN** | Local AWS+PGlite pairing, fencing, restore, and fresh-server reopen are composition evidence. Production metadata ownership, multi-writer scope, schema migration, failure recovery, independent backup/restore, and DR drills remain unverified. |
+| Deployment operations | **OPEN** | Stats, runbooks, provenance binding, and contract fixtures are implementation safeguards. Exporters, retry measurement, credential-expiry/cost alerts, approved SLOs, load/soak/fault/restore, canary, rollback, and post-deploy smoke remain deployment evidence. |
+| Hosted release evidence | **BLOCKED** | The provenance contract is locally fail-closed, but hosted AWS authentication/acceptance is still blocked by external OIDC and protected-environment state; no load/soak/fault/restore, canary, rollback, or post-deploy smoke result is claimed. |
+| Production sign-off | **NO-GO** | W25.5-W25.8 are not all complete. Do not call the adopter/reference deployment production-ready from the qualification packet or local gates. |
+
+### Next verifiable W25 gates
+
+Run these in order and record each result against the exact source and owner:
+
+1. **Library/runtime release decision:** run the current-source locked package
+   gates, supported-platform matrix, security/release-artifact review, and
+   public SDK/CLI provenance check. This is the remaining runtime release
+   decision; it does not require this repository to own a production AWS
+   account, pager, canary, or customer SLO.
+2. **Deployment contract:** the adopter/deployment owner supplies and reviews
+   the production account, bucket, region, prefix, versioning/encryption,
+   runtime and maintenance roles, IaC change set, and protected OIDC
+   environment. Re-run the read-only resource, policy, environment, and OIDC
+   audits before any live acceptance.
+3. **Hosted base acceptance:** run the workflow on `refs/heads/main` with the
+   approved short-lived role and expected account binding. Require the public
+   SDK/CLI, block, composed, restart/reopen, ownership-gated cleanup, and
+   artifact/provenance results; a safe preflight refusal is not acceptance.
+4. **Metadata and recovery acceptance:** select the production metadata
+   provider, then pass multi-writer/fencing, restart, schema migration,
+   backup/restore, failure recovery, and DR tests against the production
+   topology. Hosted PGlite remains optional deployment-confidence evidence
+   unless this repository operates that reference deployment.
+5. **Operations and rollout:** attach exporter/retry/expiry/cost signals to
+   approved SLOs, run load/soak/fault/restore drills, deploy a canary, exercise
+   rollback, and capture post-deploy smoke for the exact released artifact.
+6. **Sign-off:** record the released commit/image, configuration digest,
+   identity, evidence links, rollback owner, and explicit GO/NO-GO decision.
+
 - [x] Scope boundary clarified for this library/runtime: W25 qualification
   evidence determines whether the AWS S3 provider and its public SDK/CLI paths
   are suitable for release, while production bucket/IAM/IaC, hosted OIDC,
