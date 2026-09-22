@@ -523,6 +523,17 @@ workflow still has no runs, the protected environment is unavailable (HTTP
 404), only `v0.1.0-cli-preview` exists, and no production-candidate tag is
 present; P01–P09 remain open and the decision remains NO-GO.
 
+The subsequent TiDB storage source update `2ce6f753` was merged into exact
+qualification boundary `adfae4b1` with the prior N-API/9P changes. Compile-only
+locked workspace checks and strict Clippy passed, but the full linked workspace
+test stopped before execution when macOS `xcrun --sdk macosx --show-sdk-path`
+required an unaccepted Xcode license (link exit 69). The previous exact source
+`35523b9f` remains the latest full linked-test PASS. Public main then advanced
+docs-only through `bd1481ba`; hosted W08 run `35705304456` targets that exact
+tip and was `pending` at 18:32 AEST. This is a native host/toolchain and hosted
+scheduling boundary, not a provider or production acceptance; P01–P09 remain
+open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
