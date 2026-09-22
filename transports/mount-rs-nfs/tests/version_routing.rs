@@ -5,9 +5,9 @@ use mount_rs_nfs::constants::{
     MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_NULL, NFS_PROGRAM, NFS_V3, NFSPROC3_NULL,
 };
 use mount_rs_nfs::rpc::{
-    AUTH_BADCRED, AUTH_SYS, AUTH_TOOWEAK, MSG_ACCEPTED, MSG_DENIED, OpaqueAuth, RPC_AUTH_ERROR,
-    RPC_MISMATCH, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL, RPC_SUCCESS, auth_sys, decode_reply,
-    encode_call, frame_record,
+    AUTH_BADCRED, AUTH_NONE, AUTH_SYS, AUTH_TOOWEAK, MSG_ACCEPTED, MSG_DENIED, OpaqueAuth,
+    RPC_AUTH_ERROR, RPC_MISMATCH, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL, RPC_SUCCESS, auth_sys,
+    decode_reply, encode_call, frame_record,
 };
 use mount_rs_nfs::{NFS_V4, NfsServer, NfsServerOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -118,8 +118,8 @@ async fn malformed_auth_sys_is_denied_before_any_shared_router_dispatch() {
         flavor: AUTH_SYS,
         body: vec![0, 0, 0, 0], // stamp only; missing name, uid, and gid
     };
-    let malformed_null = OpaqueAuth {
-        flavor: 0,
+    let nonempty_null = OpaqueAuth {
+        flavor: AUTH_NONE,
         body: vec![1],
     };
     let mut trailing = auth_sys(1000, 1000, "valid-client");
@@ -129,8 +129,7 @@ async fn malformed_auth_sys_is_denied_before_any_shared_router_dispatch() {
         (2, NFS_PROGRAM, NFS_V3, &malformed),
         (3, NFS_PROGRAM, NFS_V4, &malformed),
         (4, NFS_PROGRAM, 5, &malformed),
-        (5, NFS_PROGRAM, NFS_V4, &malformed_null),
-        (6, NFS_PROGRAM, NFS_V3, &trailing),
+        (5, NFS_PROGRAM, NFS_V3, &trailing),
     ] {
         let record = exchange(
             &mut stream,
@@ -147,7 +146,7 @@ async fn malformed_auth_sys_is_denied_before_any_shared_router_dispatch() {
     }
 
     let valid = auth_sys(1000, 1000, "valid-client");
-    for (xid, version) in [(7, NFS_V3), (8, NFS_V4)] {
+    for (xid, version) in [(6, NFS_V3), (7, NFS_V4)] {
         let record = exchange(
             &mut stream,
             &encode_call(xid, NFS_PROGRAM, version, 0, Some(&valid), None, &[]),
@@ -159,6 +158,16 @@ async fn malformed_auth_sys_is_denied_before_any_shared_router_dispatch() {
         assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
         body.end("valid AUTH_SYS reply").expect("no reply body");
     }
+    let record = exchange(
+        &mut stream,
+        &encode_call(8, NFS_PROGRAM, NFS_V4, 0, Some(&nonempty_null), None, &[]),
+    )
+    .await;
+    let (reply, body) = decode_reply(&record).expect("decode nonempty AUTH_NONE reply");
+    assert_eq!(reply.xid, 8);
+    assert_eq!(reply.reply_stat, MSG_ACCEPTED);
+    assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
+    body.end("nonempty AUTH_NONE reply").expect("no reply body");
     let stats = server.session().stats();
     assert_eq!(stats.requests, 8);
     assert_eq!(stats.replies, 8);

@@ -20,11 +20,13 @@ address. The NFSv4.1 service uses AUTH_NONE/AUTH_SYS, session slots, replay
 cache, stateids, common namespace operations, OPEN/CLOSE, READ/WRITE, and the
 filesystem-backed attributes exposed by `FsDriver`.
 
-The shared router and direct v3/v4 sessions reject malformed `AUTH_NONE` and
-`AUTH_SYS` credential bodies with RPC `AUTH_BADCRED` before protocol dispatch;
-unsupported authentication flavors still receive `AUTH_TOOWEAK`. This is
-wire-format validation, not proof of the sender's identity: `AUTH_SYS` values
-are client-supplied and require a separately trusted deployment boundary.
+The shared router and direct v3/v4 sessions reject malformed `AUTH_SYS`
+credential bodies with RPC `AUTH_BADCRED` before protocol dispatch;
+unsupported authentication flavors still receive `AUTH_TOOWEAK`.
+`AUTH_NONE` accepts a nonempty opaque body, whose contents RFC 5531 leaves
+undefined while recommending a zero length. This is wire-format validation,
+not proof of the sender's identity: `AUTH_SYS` values are client-supplied and
+require a separately trusted deployment boundary.
 
 `NfsServer::clients()` returns live accepted `NfsConnection` objects in arrival
 order; each exposes a stable id, peer, shared v3/v4 sessions, and bounded

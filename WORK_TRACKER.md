@@ -2367,11 +2367,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Clippy, formatting, and diff checks pass. The failed Ubuntu job does not
   count as native-v3 acceptance; a corrected exact-SHA hosted rerun is needed,
   and W01-NFS remains production NO-GO.
-- [x] W01-NFS rejects malformed `AUTH_NONE` and `AUTH_SYS` credential bodies
+- [x] W01-NFS rejects malformed `AUTH_SYS` credential bodies
   before shared-router or direct v3/v4 dispatch, returning RPC `AUTH_BADCRED`
   instead of silently treating a truncated `AUTH_SYS` body as an absent UID/GID.
-  The pre-fix-failing real-TCP test now passes six malformed and two valid
-  cases; the rebuilt release addon passes direct unified/v3/v4 assertions.
+  The pre-fix-failing real-TCP test now passes five malformed and three valid
+  cases, including a nonempty `AUTH_NONE` body allowed by RFC 5531; the
+  rebuilt release addon passes direct unified/v3/v4 assertions.
   Full locked NFS, pinned 266-pass/18-skip upstream parity, complete N-API
   server integration, generated typecheck, strict affected Clippy, formatting,
   and diff checks pass locally. `AUTH_SYS` remains client-asserted identity;

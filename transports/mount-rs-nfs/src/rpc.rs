@@ -128,8 +128,9 @@ pub fn credentials_of(credential: &OpaqueAuth) -> RpcCredentials {
 /// identity by using that helper alone.
 pub(crate) fn checked_credentials_of(credential: &OpaqueAuth) -> Result<RpcCredentials, u32> {
     match credential.flavor {
-        AUTH_NONE if credential.body.is_empty() => Ok(credentials_of(credential)),
-        AUTH_NONE => Err(AUTH_BADCRED),
+        // RFC 5531 recommends an empty AUTH_NONE body but leaves its bytes
+        // undefined, so a nonempty body is not itself a bad credential.
+        AUTH_NONE => Ok(credentials_of(credential)),
         AUTH_SYS => {
             let auth = decode_auth_sys(&credential.body).map_err(|_| AUTH_BADCRED)?;
             Ok(RpcCredentials {
