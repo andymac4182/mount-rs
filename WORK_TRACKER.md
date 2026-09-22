@@ -935,7 +935,9 @@ PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
-published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
+host-enabled provider-backed network matrix also passes 64 concurrent NodeFs
+and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
+The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
 hosted WebDAV PASS is claimable from that packet. The
@@ -1595,6 +1597,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   PUT/GET pairs for both NodeFs and SQLite with exact bytes and matching method
   counters. This is local provider evidence only; hosted remote-provider,
   network, power-loss, durable-lock, and wider ordering gates remain open.
+- [x] The focused host-enabled N-API provider-backed WebDAV network probe is now
+  part of the package test sequence: three repetitions at
+  `MOUNT_RS_WEBDAV_PROVIDER_NETWORK_CONCURRENCY=64 node
+  test/webdav-provider-network-concurrency.mjs` passed 64 concurrent HTTP
+  PUT/GET pairs for both NodeFs and SQLite, including streamed PUT/GET bodies
+  and exact counters. This is local loopback provider evidence only; hosted
+  remote-provider, hosted network, power-loss, durable-lock, and wider ordering
+  gates remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
