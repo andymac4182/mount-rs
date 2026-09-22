@@ -4,6 +4,20 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 exact-head queue recheck after publication (2026-09-22)
+
+At 22:22 AEST, manual run
+[`35726132846`](https://github.com/andymac4182/mount-rs/actions/runs/35726132846)
+still reports exact workflow head `a7e459e6`, status `queued`, and no
+conclusion. Its seven W26 jobs (`ozone-tidb`, `ozone-foundationdb`,
+`foundationdb-rustfs`, `ozone`, `tidb`, `ozone-compositions` and `tidb-rustfs`)
+remain queued. The current shared docs tip is `a82800c1`, a docs-only descendant
+that does not alter the tested source. This is hosted runner capacity, not a
+provider result. W26.15 remains at the prior terminal 1/4 provider acceptance,
+and production remains **NO-GO** until all four providers pass 1,000 IOPS/drive
+with the complete end-to-end packet and customer/Ozone security, SLO, RPO/RTO
+and backup/DR gates closed.
+
 ## Current W26 serialized lease-renewal test boundary (2026-09-22)
 
 Test commit

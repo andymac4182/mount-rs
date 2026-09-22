@@ -5,6 +5,32 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, exact-head queue recheck after publication
+
+At 22:22 AEST, manual run
+[`35726132846`](https://github.com/andymac4182/mount-rs/actions/runs/35726132846)
+still reports exact workflow head `a7e459e6a9749384d409e4f53d6938df9a4414b9`,
+overall status `queued`, and no conclusion. A direct live query confirmed the
+seven W26 jobs remain queued: `ozone-tidb` `106740105296`,
+`ozone-foundationdb` `106740105378`, `foundationdb-rustfs` `106740105428`,
+`ozone` `106740105441`, `tidb` `106740105479`, `ozone-compositions`
+`106740105510` and `tidb-rustfs` `106740105719`. The docs-only mainline tip is
+now `a82800c1`; it does not alter the exact tested source. This is an external
+runner-capacity wait, not provider, performance or acceptance evidence.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Exact-head hosted qualification | **PENDING / unchanged** | Run `35726132846` remains active and queued on exact source `a7e459e6`; all seven W26 jobs are still queued. | Leave the non-canceling manual run active and retrieve artifacts only after terminal completion. |
+| W26 completion percentages | **UNCHANGED** | No terminal provider metric, functional marker or aggregate packet exists. | Do not advance W26.15/W26.14/P14 or promote queued state. |
+| Production readiness | **NO-GO / unchanged** | Hard 1,000 IOPS/drive, complete end-to-end packet, Tier-1 99.99%, five-minute RPO/RTO and customer/Ozone security evidence remain open; backup/DR and releases remain external. | Keep the goal active; continue bounded rechecks or implementation when state changes. |
+
+### Session time log — exact-head queue recheck after publication
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — live recheck (22:22 AEST) | Queried run `35726132846` after publishing docs tip `a82800c1`; verified exact source head and all seven W26 job states. | ~0.1 h | ~0.1 h hosted capacity wait | No hosted state change; evidence remains pending and production stays **NO-GO**. |
+| 2026-09-22 — next gate | Poll the same manual run with bounded waits and inspect exact artifacts only once terminal. | ~0.1–0.25 h per recheck | External runner/provider capacity | Do not dispatch a replacement while this exact-head run remains the authoritative active boundary. |
+
 ## Current authority override — 2026-09-22, serialized lease-renewal test chunk
 
 The newest W26 source/test boundary is published as
