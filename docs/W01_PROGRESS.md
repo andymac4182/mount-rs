@@ -582,6 +582,17 @@ host-enabled macOS run passed 1/1 with the shared Cargo wrapper, and corrected
 hosted CI `35678488755` passed both macOS and Linux native-WebDAV jobs for the
 same flow; the aggregate workflow remained nonterminal on unrelated jobs.
 
+The later manual non-canceling [CI run `35711153805`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805)
+at exact SHA `232443e133abf7c8f20f6ffec5a2a22a747270e0` also passed the
+[macOS native-WebDAV job `106691801834`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805/job/106691801834)
+and [Ubuntu native-WebDAV job `106691802073`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805/job/106691802073).
+No WebDAV files changed between that tested SHA and current mainline
+`c87adf7bf79aa974480bf6397d1873b4300d291d`; this qualifies the hosted native
+mounted-I/O slice only. A fresh full locked workspace suite also passed locally
+with `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-workspace-515`; live providers,
+power-loss/crash durability, durable locks, and stronger same-resource ordering
+remain open, so production remains **NO-GO**.
+
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session.
 The fresh concurrent lock regression passes with two simultaneous writes
 without the submitted token both returning `423`; the refreshed 256-pair
