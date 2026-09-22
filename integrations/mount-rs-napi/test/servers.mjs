@@ -1875,6 +1875,15 @@ const requestedServerPhase = process.env.MOUNT_RS_SERVER_PHASE
 
 await within(
   (async () => {
+    if (requestedServerPhase === "p9") {
+      await runPhase("9P exercise", exerciseP9);
+      await runPhase("9P attached stream", exerciseP9AttachedStream);
+      await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
+      await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);
+      await runPhase("9P attached frame limit", exerciseP9AttachedFrameLimit);
+      await runPhase("9P attached write failure", exerciseP9AttachedWriteFailure);
+      return;
+    }
     if (requestedServerPhase === "webdav") {
       await runPhase("WebDAV exercise", exerciseWebdav)
       return
