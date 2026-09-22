@@ -2597,7 +2597,7 @@ export interface P9StatsLike {
 
 export interface P9User {
   uname: string
-  uid?: number
+  uid: number | undefined
   aname: string
 }
 

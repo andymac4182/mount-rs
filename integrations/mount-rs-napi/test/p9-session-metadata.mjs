@@ -98,10 +98,13 @@ try {
     () => connection.session.userFor(1) !== undefined,
     "P9 metadata attach identity",
   );
-  assert.deepEqual(connection.session.userFor(1), {
+  const user = connection.session.userFor(1)
+  assert.deepEqual(user, {
     uname: "node",
+    uid: undefined,
     aname: "",
   });
+  assert.equal(Object.hasOwn(user, "uid"), true);
   assert.equal(connection.session.msize, 32 * 1024);
   assert.equal(connection.session.version, "9P2000.L");
   assert.equal(connection.session.locks.table.files, 0);
