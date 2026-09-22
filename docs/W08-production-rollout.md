@@ -472,6 +472,18 @@ non-production implementation/static workflow and does not change this
 boundary. No production mutation, candidate publication, canary, rollback or
 approval was attempted or inferred; P01–P09 remain open.
 
+The subsequent source-bearing public updates `fe4a6bbf` and `7de703da`
+(chunked mutation batching and FUSE forced-unmount read draining) were
+requalified in exact public source `245258d9`: the full locked workspace test,
+strict Clippy, six workflow YAML parses, changed N-API/package checks, W07/W08
+tracking/evidence suites and diff hygiene all passed. Public tip `0044d020`
+then added only W05 documentation. W08 run `35701909098` for published merge
+`e44506ab` and run `35702023377` for `7de703da` were cancelled by concurrent
+mainline scheduling; current run `35702239279` targets `0044d020` and was
+pending at 17:59 AEST. These are implementation/static scheduling boundaries,
+not provider or production acceptance, so P01–P09 remain open and the
+decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
