@@ -62,6 +62,10 @@ unrelated push runs. A later manual descendant run `35716722852` has head
 `32b85965deef60c84d90f5fb353f45fb6001a303`, locally verified to include
 `fba61979`, and is also queued. Automatic descendant run `35717708439` is
 rejected because its four provider jobs were canceled by push concurrency.
+Local W26 controls were rechecked at 20:54 AEST: benchmark unit tests, all
+four positive provider policy fixtures (with the TiDB TLS reference supplied
+out of band), the rollout contract and the evidence-packet CLI help all pass;
+this remains local evidence only and does not close hosted qualification.
 
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
