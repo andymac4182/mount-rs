@@ -4713,6 +4713,14 @@ reproducible in a production-like environment.
   is bounded local keep-alive recovery only, so live providers, power-loss
   durability, broader workload bounds, and native/hosted acceptance remain
   open and W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 streaming packet adds the oracle-derived abandoned-
+  download regression `http_server_closes_abandoned_download_handle`: after
+  the first response bytes, the client disconnects while the driver read is
+  parked, the opened handle closes exactly once, and a fresh ranged GET returns
+  `206`. The complete current Rust 5/6/39/5 packet, strict Clippy, formatting,
+  and diff checks passed; this is bounded local cancellation cleanup only, so
+  live providers, power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `d4f43b28` were
   refreshed: AWS run `35692509801` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35692509869`
