@@ -3643,9 +3643,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Tested source base `59d705446608beb69d4c24a03997e21ea6f823db` was freshly
-  reverified after the W26 fenced-metadata publication fast path, the 9P
-  platform-type alias and 9P direct-probe
+  Tested source base `c6d6778517f854ac678a80920fe4fb8afd204808` was freshly
+  reverified after the FoundationDB storage/test qualification changes, 9P
+  undefined-UID preservation, W07 lease-authority telemetry, N-API
+  postbuild/session-metadata changes, the W26 fenced-metadata publication fast
+  path, the 9P platform-type alias and 9P direct-probe
   absence-field normalization and WebDAV
   shared-resource ordering qualification, plus concurrent WebDAV
   mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
@@ -3663,8 +3665,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
-  W08-P01–P09. This exact merged source was requalified after the W26 source
-  change; no source result is inferred from a documentation-only merge.
+  W08-P01–P09. This exact merged source was requalified after the FoundationDB,
+  9P, W07 and N-API source changes; no source result is inferred from a
+  documentation-only merge.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed
