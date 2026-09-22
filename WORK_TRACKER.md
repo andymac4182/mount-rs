@@ -2995,7 +2995,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   That aggregate downloads both platform artifacts, requires both upstream jobs
   to be terminally green, and runs
   `scripts/verify-w07-platform-evidence.mjs` against the Linux schema-2
-  summary/log and the macOS compile marker. This closes the evidence-packet
+  summary/log and the macOS compile marker. The macOS artifact now also carries
+  a run-bound provenance marker, and the verifier requires its repository,
+  workflow, ref, source revision, run, attempt and runner to match the Linux
+  schema-2 provenance before emitting the aggregate pass. This closes the
+  evidence-packet
   integrity gap only: it does not claim a live macOS FoundationDB service or
   cluster, native mount, clean install, signing, or package acceptance. The
   terminal aggregate is green in
