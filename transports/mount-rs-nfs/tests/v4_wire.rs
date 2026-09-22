@@ -167,6 +167,7 @@ const OP_PUTFH: u32 = 22;
 const OP_PUTROOTFH: u32 = 24;
 const OP_READ: u32 = 25;
 const OP_READDIR: u32 = 26;
+const OP_READLINK: u32 = 27;
 const OP_REMOVE: u32 = 28;
 const OP_WRITE: u32 = 38;
 const OP_EXCHANGE_ID: u32 = 42;
@@ -1802,6 +1803,117 @@ fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
         .expect("spawn oversized replay test thread")
         .join()
         .expect("oversized replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_readlink_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-readlink-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized READLINK runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .symlink(&"x".repeat(512), "/long-link")
+                        .await
+                        .unwrap();
+                    driver.write_file("/link-first", b"first").await.unwrap();
+                    driver.write_file("/link-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 256;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1201, b"oversized-readlink-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1204,
+                        compound(
+                            "link-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("link-first")),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("long-link")),
+                                op(OP_READLINK, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 256, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 6),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized READLINK sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_LOOKUP);
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_READLINK),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized READLINK response").unwrap();
+                    assert!(driver.stat("/link-first").await.is_err());
+                    assert!(driver.stat("/link-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1205,
+                        compound(
+                            "changed-link-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("link-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/link-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1206,
+                        compound(
+                            "fresh-link-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("link-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh READLINK sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/link-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized READLINK test thread")
+        .join()
+        .expect("oversized READLINK test thread panicked");
 }
 
 #[test]
