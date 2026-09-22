@@ -12,19 +12,19 @@ for engineering planning, not a commitment.
 | Workstream | W26 — Apache Ozone S3 backend |
 | Ledger snapshot | 2026-09-22, Australia/Brisbane |
 | Repository | `mount-rs` |
-| Snapshot base | `aa08d680e64d414021a76e86232f2e5d6050ad78` (`origin/main`, including the W26 lease-renewal implementation at `f10dbf22` plus the published R2 content-addressing/cache, metadata mutation batching, queue-cancellation hardening, concurrent whole-file-create inode rebasing, corrected Ozone content-addressed block-contract test, deduplicated content-addressed cleanup and the latest concurrent-mainline reconciliation; the exact W26 commits and concurrent-mainline merges are recorded below) |
+| Snapshot base | `d3c0f677c9fb262eab324a88cb42fcaf2a31e1cd` (`origin/main`, including W26 implementation commit `c7f0e6d0`, the published R2 content-addressing/cache, metadata mutation batching, queue-cancellation hardening, concurrent whole-file-create inode rebasing, corrected Ozone content-addressed block-contract test, deduplicated content-addressed cleanup and the latest concurrent-mainline reconciliation; the exact W26 commits and concurrent-mainline merges are recorded below) |
 | Checklist completion | 11 of 12 W26 tracker rows checked: shipped implementation rows are complete, while W26.15 (the terminal 1,000-IOPS remediation/qualification gate) remains open; hosted/provider production gates remain open |
-| Provisional execution completion | W26 implementation scope: 100% for the 11 shipped tracker rows; current terminal qualification packet: **FAILED / NO-GO** because W26.15's hard performance gate is open; production-rollout readiness: 56% (scope, benchmark matrix, lifecycle safety, bounded remote enumeration, provider-bounded KV/N-API contract, durable-provider bounded-listing tests, strict provider-specific hard-threshold IOPS wiring, fail-closed artifact/profile/metric verification and retention, all-provider credential-free production-config policy, one-revision CI evidence-packet aggregation, complete end-to-end surface marker enforcement, the credential-free customer rollout contract, content-addressed R2 caching, metadata mutation batching, concurrent-create inode rebasing, queue cancellation safety, and lease-renewal caching with forced validation at explicit durability/destructive boundaries are implemented and locally tested; no terminal production gates yet). Customer deployment, native, provider-durability, capacity/SLO, backup/DR and release-stream gates remain separately bounded |
-| Current acceptance state | The retained W26 packet on `9c098e5` remains the last accepted hosted result within its documented provider/platform boundaries. The published W26 code now includes optimistic read/write paths, atomic whole-file `FsDriver::write_file`, lazy atime/EOF handling, content-addressed R2 blocks with a bounded process-local cache, fenced metadata mutation batching, a bounded pending queue, cancellation-safe runner cleanup, same-revision rebasing for concurrent new-file creates, cached provider lease renewal with forced validation at explicit metadata/destructive boundaries, a corrected real-Ozone block-contract assertion for content-addressed IDs and cleanup that deletes identical content-addressed IDs only once. Local full locked-workspace tests and strict Clippy pass; the focused ChunkedFs suite has 19 passing tests including canceled-runner recovery, one-publication concurrent mutation coverage and concurrent-create inode rebasing. The latest terminal W26 packet is diagnostic run `35669685204` on exact SHA `f10dbf2257364b4ca5acf2ec2d151b5258883dcb`: all four provider rows completed their 1,200-operation lifecycle with zero timeout/cleanup failures but missed the hard 1,000-IOPS target, and the aggregate failed closed. Security scan `4265d7aa-1425-46dc-8620-b37a60ebf97a` for the final lease-renewal diff is sealed with zero reportable findings and complete coverage, joining the prior local scans; hosted/provider/customer controls remain explicit external boundaries. No Live Cloudflare R2 or Live AWS S3 result is recorded. |
-| Latest hosted workflow | Manual run `35669685204` selected exact tested revision `f10dbf2257364b4ca5acf2ec2d151b5258883dcb`. W26 producer jobs are terminal: `ozone-compositions` `106563124842` failed, `ozone-tidb` `106563125141` failed, `ozone-foundationdb` `106563125176` failed and base `ozone` `106563125215` passed; aggregate `w26-ozone-evidence` `106566312898` failed closed. The parent workflow remains in progress only for unrelated jobs, so it does not change the W26 packet boundary. |
+| Provisional execution completion | W26 implementation scope: 100% for the 11 shipped tracker rows; current terminal qualification packet: **FAILED / NO-GO** because W26.15's hard performance gate is open; production-rollout readiness: 58% (scope, benchmark matrix, lifecycle safety, bounded remote enumeration, provider-bounded KV/N-API contract, durable-provider bounded-listing tests, strict provider-specific hard-threshold IOPS wiring, fail-closed artifact/profile/metric verification and retention, all-provider credential-free production-config policy, one-revision CI evidence-packet aggregation, complete end-to-end surface marker enforcement, the credential-free customer rollout contract, content-addressed R2 caching, metadata mutation batching, concurrent-create inode rebasing, queue cancellation safety, lease-renewal caching with forced validation at explicit durability/destructive boundaries, and the provider publication-barrier capability are implemented and locally tested; no terminal production gates yet). Customer deployment, native, provider-durability, capacity/SLO, backup/DR and release-stream gates remain separately bounded |
+| Current acceptance state | The retained W26 packet on `9c098e5` remains the last accepted hosted result within its documented provider/platform boundaries. The published W26 code now includes optimistic read/write paths, atomic whole-file `FsDriver::write_file`, lazy atime/EOF handling, content-addressed R2 blocks with a bounded process-local cache, fenced metadata mutation batching, a bounded pending queue, cancellation-safe runner cleanup, same-revision rebasing for concurrent new-file creates, cached provider lease renewal with forced validation at explicit metadata/destructive boundaries, and the opt-in provider publication-barrier capability that skips only a redundant post-publish probe while retaining explicit `syncfs` flushes. Local full locked-workspace tests and strict Clippy pass; the focused ChunkedFs suite has 20 passing tests including canceled-runner recovery, one-publication concurrent mutation coverage, concurrent-create inode rebasing and the barrier/syncfs fail-closed regression. The latest terminal W26 packet remains diagnostic run `35669685204` on exact SHA `f10dbf2257364b4ca5acf2ec2d151b5258883dcb`: all four provider rows completed their 1,200-operation lifecycle with zero timeout/cleanup failures but missed the hard 1,000-IOPS target, and the aggregate failed closed. Security scan `e44de27d-96d8-4330-a831-b995d6458a6c` for the new nine-file barrier diff is complete with zero reportable findings and complete coverage, joining the prior local scans; hosted/provider/customer controls remain explicit external boundaries. No Live Cloudflare R2 or Live AWS S3 result is recorded. |
+| Latest hosted workflow | Fresh manual run `35672928117` selected exact hosted revision `fbc8346d292147bba006cfdcbc3b8f8b7127e2e7`, which includes W26 implementation commit `c7f0e6d0`. At the latest live poll, `ozone-compositions` `106573224129`, `ozone-foundationdb` `106573225826` and base `ozone` `106573224191` were queued, `ozone-tidb` `106573223628` was in progress and the aggregate was not yet present. This packet is pending and is not acceptance evidence. |
 | Last terminal hosted W26 packet | Run `35669685204` on exact revision `f10dbf2257364b4ca5acf2ec2d151b5258883dcb`: base Ozone passed; SQLite/R2 measured 631.16 IOPS, PGlite/R2 552.65, TiDB/R2 120.54 and FoundationDB/R2 178.98. Every row completed 400 writes, 400 reads, 400 verified reads and 400 deletes (1,200/1,200 operations), with zero timeouts, zero cleanup failures and success rate 1. The producer rows failed solely `IOPS_TARGET_NOT_MET`; aggregate `106566312898` failed closed on missing `OZONE_IOPS_PASS` markers. This is a diagnostic failure, not acceptance evidence. |
-| Next hosted qualification | Fresh manual run after the next correctness-preserving performance chunk, based on the published exact tested SHA | Re-run the fixed 4 KiB/400-iteration/concurrency-64 profile, inspect retained provider metrics/artifacts and aggregate output, and accept W26.15 only if every configured provider and the complete end-to-end packet emit terminal pass markers on one revision. The strict 1,000-IOPS target is unchanged. | GitHub-hosted runners, Ozone/provider startup, provider latency and artifact retention are external gates; queued, in-progress, canceled, failed or skipped jobs are not evidence |
+| Next hosted qualification | Fresh manual run `35672928117` on exact SHA `fbc8346d292147bba006cfdcbc3b8f8b7127e2e7` | Await terminal W26 producers and aggregate, retrieve retained provider JSON/log artifacts, and accept W26.15 only if every configured provider and the complete end-to-end packet emit terminal pass markers on one revision. The strict 1,000-IOPS target is unchanged. | GitHub-hosted runners, Ozone/provider startup, provider latency and artifact retention are external gates; queued, in-progress, canceled, failed or skipped jobs are not evidence |
 | Local Docker boundary | Docker Desktop capacity was about 5 CPUs and 8.2 GiB; this is sufficient for the durable FoundationDB proof but below the TiDB harness's 10 GiB durable-topology minimum |
-| Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 56% figure reflects scope decisions, local hardening, provider-boundary implementation, strict provider-configuration and artifact-integrity/metric/retention qualification, expanded credential-free security policy, one-revision evidence-packet aggregation, complete end-to-end packet surface enforcement, the credential-free customer rollout contract, content-addressed block caching, metadata batching, cancellation safety and lease-renewal optimization, not deployable readiness |
+| Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 58% figure reflects scope decisions, local hardening, provider-boundary implementation, strict provider-configuration and artifact-integrity/metric/retention qualification, expanded credential-free security policy, one-revision evidence-packet aggregation, complete end-to-end packet surface enforcement, the credential-free customer rollout contract, content-addressed block caching, metadata batching, cancellation safety, lease-renewal optimization and publication-barrier capability, not deployable readiness |
 | W26 production target | Customer-deployed Ozone integration; W26 owns provider/client correctness and CI qualification, not customer deployment, backup/DR or release promotion |
 | Required service envelope | Target 1,000 IOPS per drive; Tier 1 99.99% reliability; 5-minute RPO and 5-minute RTO. RPO/RTO and availability remain dependent on the customer's Ozone topology and operations |
 | Available qualification environment | CI only; no staging environment is available. Production-like evidence must therefore be achieved through controlled hosted CI/provider fixtures and clearly labeled customer-owned prerequisites |
-| Release/acceptance decision | W26 implementation and local qualification controls remain accepted within their documented scope; production rollout remains **NO-GO** because terminal run `35669685204` failed every hard 1,000-IOPS provider row and aggregate job `106566312898` failed closed. The lease-renewal fast path is included in current `origin/main` `aa08d680` via implementation SHA `f10dbf22`, and its final diff scan is sealed with zero reportable findings. Earlier standard, policy, negative-path, strict-IOPS, evidence-packet and rollout-contract scans remain recorded above; no failed packet is promoted, and no broader native, customer secure-runtime, Ozone backup/DR or release claim is made |
+| Release/acceptance decision | W26 implementation and local qualification controls remain accepted within their documented scope; production rollout remains **NO-GO** because terminal run `35669685204` failed every hard 1,000-IOPS provider row and aggregate job `106566312898` failed closed. The provider publication-barrier optimization is included in current `origin/main` `d3c0f677` via implementation SHA `c7f0e6d0`; the hosted qualification packet itself is tied to exact SHA `fbc8346d`. Security scan `e44de27d-96d8-4330-a831-b995d6458a6c` is sealed with zero reportable findings and complete coverage. Fresh run `35672928117` is pending on that exact hosted SHA and is not promoted. Earlier standard, policy, negative-path, strict-IOPS, evidence-packet and rollout-contract scans remain recorded above; no failed or pending packet is promoted, and no broader native, customer secure-runtime, Ozone backup/DR or release claim is made |
 
 ## Terminal hosted Ozone qualification diagnosis
 
@@ -271,11 +271,37 @@ qualification remains an external alternative only if the CI fixture is shown
 not to represent the supported production topology; the target will not be
 lowered and failed rows will not be converted to skips.
 
-### Current work-item status override from terminal run `35669685204`
+### Published metadata publication-barrier fast path
+
+The next W26-owned performance chunk is now implemented and published in
+`perf(w26): skip redundant provider flush probe` (`c7f0e6d0`), included in
+the exact hosted revision `fbc8346d292147bba006cfdcbc3b8f8b7127e2e7` after
+concurrent-mainline reconciliation. `MetadataStore` now exposes a conservative
+opt-in capability stating that a successful provider transaction already
+includes the same acknowledgement barrier as the post-publish `flush` call.
+The default is false for custom providers. SQLite, PGlite, TiDB and
+FoundationDB opt in based on their awaited transaction-commit semantics;
+SDK, observability and N-API erasure layers forward the capability without
+changing provider selection or credentials. `ChunkedFs` still flushes
+immutable blocks before publication, preserves lease/fence/revision CAS and
+fails closed on publish errors. Explicit `syncfs` still calls the provider
+metadata flush, and the new regression proves an opted-in provider skips only
+the redundant post-publish probe while `syncfs` failure still fails closed.
+
+Local evidence is green: focused ChunkedFs tests pass 20/20, the full locked
+workspace/all-target test suite passes, strict workspace Clippy with
+`-D warnings`, formatting and `git diff --check` pass. Security diff scan
+`e44de27d-96d8-4330-a831-b995d6458a6c` reviewed all nine changed source files
+with complete coverage and zero reportable findings. Fresh hosted run
+`35672928117` is selected on the exact published SHA above; its W26 producer
+jobs are not yet terminal, so it is a qualification packet in progress rather
+than acceptance evidence.
+
+### Historical work-item status from terminal run `35669685204`
 
 The detailed rows below retain historical snapshots for auditability. The
-following override is authoritative for the current session and prevents the
-earlier queued/in-progress wording from being mistaken for live status:
+following override records the last terminal packet and prevents its
+historical queued/in-progress wording from being mistaken for the result:
 
 | Work item | Current status | Current completion | Current evidence / remaining action |
 | --- | --- | ---: | --- |
@@ -285,6 +311,17 @@ earlier queued/in-progress wording from being mistaken for live status:
 | W26.4b / W26.14 | CI and complete end-to-end packet fail closed on the performance marker | 100% implementation / 67% and 49% qualification | Base Ozone and functional provider markers passed, but jobs `106563124842`, `106563125141`, `106563125176` and aggregate `106566312898` failed the hard packet; retain artifacts and rerun one exact revision |
 | W26.15 / P8 | **NO-GO**; implementation controls are shipped, performance qualification remains open | 88% implementation / 40% hosted qualification; P8 58% | Every configured provider missed 1,000 IOPS; continue safe publication/provider work or obtain a clearly comparable customer/Ozone capacity qualification; do not lower or skip the gate |
 | P14 | **NO-GO** integration-readiness review | 37% | The latest terminal packet is diagnostic only; close only after all configured providers, full end-to-end markers and the aggregate pass on one revision, with customer/Ozone security, SLO/RPO/RTO, DR and release boundaries still explicit |
+
+### Current live qualification override — run `35672928117`
+
+The current hosted packet supersedes the terminal-row status only as a live
+pending state. It selected exact SHA `fbc8346d292147bba006cfdcbc3b8f8b7127e2e7`
+and includes implementation commit `c7f0e6d0`; `ozone-tidb` is in progress,
+`ozone-compositions`, `ozone-foundationdb` and base `ozone` are queued, and the
+aggregate job is not yet present. No row is acceptance evidence until the
+configured producers and aggregate are terminally successful on this exact
+revision. The terminal failure and completion percentages above remain the
+authoritative qualification baseline while this run is pending.
 
 ## Scope decisions recorded from product direction
 
@@ -713,11 +750,14 @@ separately because they are elapsed wall-clock, not implementation effort.
 | 2026-09-22 — Post-publication shared-tip reconciliation | Merged later concurrent transport/workstream commits after the ledger push and refreshed the current-tip references without changing the exact hosted test SHA. | ~0.1–0.25 h | ~0.25 h remote fetch/merge/push | Current shared tip is `c2670fe3967c01d9f21332ebe1e1b930c30eaf56`; the hosted packet remains correctly tied to W26 implementation SHA `f10dbf2257364b4ca5acf2ec2d151b5258883dcb`. |
 | 2026-09-22 — Terminal lease-renewal hosted packet review | Rechecked run `35669685204`, downloaded the retained base/composition/TiDB/FoundationDB artifacts, inspected provider JSON and producer/aggregate logs, and separated functional marker success from the hard performance failure. | ~0.75–1.25 h | ~0.5–1 h hosted artifact retrieval and unrelated workflow completion | SQLite/R2 631.16, PGlite/R2 552.65, TiDB/R2 120.54 and FoundationDB/R2 178.98 IOPS; all rows had 1,200/1,200 successful lifecycle operations with zero timeout/cleanup failures, but every row failed `IOPS_TARGET_NOT_MET` and aggregate `106566312898` failed closed. W26.15 remains open. |
 | 2026-09-22 — Terminal-result ledger correction | Updated the snapshot, terminal diagnosis, work-item override, production gate references, estimates and current-status boundary from pending to terminal diagnostic state. | ~0.5–0.75 h | ~0.25 h current `origin/main` reconciliation; no staging environment | The exact hosted SHA remains `f10dbf22`, current shared tip is `aa08d680`, and production remains **NO-GO**; the next chunk is safe publication-path performance work. |
+| 2026-09-22 — Provider publication-barrier implementation | Added a conservative opt-in `MetadataStore::publish_includes_flush_barrier()` capability and used it to skip only the redundant post-publish metadata probe for SQLite, PGlite, TiDB and FoundationDB; custom providers remain false by default and explicit `syncfs` still flushes. | ~1.5–2.5 h | ~0.75–1.25 h shared Cargo rebuild/test time; provider commit semantics are a hosted qualification dependency | Commit `c7f0e6d0` passed the focused ChunkedFs suite 20/20, full locked workspace/all-target tests, strict workspace Clippy, formatting and diff checks. The code is included in hosted revision `fbc8346d292147bba006cfdcbc3b8f8b7127e2e7`; this is implementation evidence, not a performance pass. |
+| 2026-09-22 — Publication-barrier security and hosted dispatch | Reviewed the nine-file implementation diff, then dispatched a fresh exact-SHA Ozone qualification run. | ~0.75–1.25 h | Hosted CI queue/provider startup and artifact retention are external elapsed gates | Security scan `e44de27d-96d8-4330-a831-b995d6458a6c` completed with complete coverage and zero reportable findings. Run `35672928117` selected exact SHA `fbc8346d292147bba006cfdcbc3b8f8b7127e2e7`; latest poll had TiDB in progress, compositions/FoundationDB/base queued and no aggregate. No pending state is acceptance evidence. |
+| 2026-09-22 — Publication-barrier ledger/tracker refresh | Updated the W26 ledger and `WORK_TRACKER.md` with the new capability, exact local/security evidence, the terminal 356696 baseline, current run 356729 state, provisional estimates and production blockers. | ~0.5–0.75 h | ~0.25–0.5 h concurrent-mainline reconciliation and push; no staging environment | This documentation chunk is being published to the shared `origin/main` build-on base; production remains **NO-GO** until a terminal one-revision all-provider/end-to-end packet passes the unchanged 1,000-IOPS gate and the external security/SLO/RPO/RTO/DR/release boundaries are satisfied. |
 
 ## Publication record
 
 Authoritative current update (2026-09-22): `origin/main` is
-`aa08d680e64d414021a76e86232f2e5d6050ad78`, and this checkout is being
+`d3c0f677c9fb262eab324a88cb42fcaf2a31e1cd`, and this checkout is being
 updated from that shared tip before the next documentation push.
 The W26 metadata batching commit `c4e9a253` is included through the published
 reconciliation tip `a1cb4ca92bd0c1b619c56231002ee182852b01a8`; queue hardening
@@ -729,14 +769,17 @@ Ozone test compile-check, full locked workspace tests, strict workspace Clippy
 and diff checks are green. Security scans
 `6d5a7665-d8cd-46b7-a9bd-73fec54f5431` and
 `46d4cf32-9d57-4f7e-975f-2616ddc53dc5` and
-`85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8`, `b8f6e846-e497-4ae6-b972-7ae3701ec722`
-and `4265d7aa-1425-46dc-8620-b37a60ebf97a` are complete with zero reportable
-findings within their local scopes. Earlier terminal W26 producer/aggregate
-packet `35655276021` on `4efec58c` failed the strict IOPS gate; the latest
-manual run `35669685204` selected `f10dbf22` and is now terminal for every
-W26 producer and the aggregate. Its aggregate `106566312898` failed the
-strict IOPS gate. No queued, in-progress, canceled or failed job is production
-acceptance evidence.
+`85c31e86-1fc8-4a6d-bb95-ef2d956b9ed8`, `b8f6e846-e497-4ae6-b972-7ae3701ec722`,
+`4265d7aa-1425-46dc-8620-b37a60ebf97a` and
+`e44de27d-96d8-4330-a831-b995d6458a6c` are complete with zero reportable
+findings within their local scopes. The new barrier scan covered all nine
+changed source files. Earlier terminal W26 producer/aggregate packet
+`35655276021` on `4efec58c` and the latest manual run `35669685204` on
+`f10dbf22` failed the strict IOPS gate; `35669685204` is terminal for every
+W26 producer and the aggregate `106566312898`. Fresh run `35672928117` is
+selected on exact SHA `fbc8346d` with TiDB in progress, compositions,
+FoundationDB and base Ozone queued, and no aggregate yet. No queued,
+in-progress, canceled or failed job is production acceptance evidence.
 
 This document is intentionally updated alongside `WORK_TRACKER.md`. The
 ledger's percentages and estimates are snapshots; the tracker checkbox and
@@ -746,16 +789,16 @@ complete.
 Current-status override: historical session rows below preserve what was known
 at the time they were written. The authoritative current state is the snapshot
 and terminal diagnoses above: runs `35635486040`, `35641941218`,
-`35649202405` and `35655276021` are failed diagnostic packets, W26.15 is open,
-and fresh run `35669685204` is terminal for every W26 producer and its
-aggregate: base Ozone passed, all four provider rows failed only the hard
-IOPS target, and aggregate `106566312898` failed closed. No queued,
-in-progress, canceled or failed job is promoted to acceptance. Aggregate
-`106522172018` is an earlier failed diagnostic packet. Current shared tip
-`aa08d680` contains the lazy-atime/EOF, batching/cache, queue-safety,
-concurrent-create, lease-renewal validation (implementation SHA `f10dbf22`), corrected content-addressed contract and deduplicated-cleanup
-work with local test,
-Clippy, compile-check and focused security evidence; it still requires a fresh
+`35649202405`, `35655276021` and `35669685204` are failed diagnostic packets,
+W26.15 is open, and fresh run `35672928117` is pending on exact SHA `fbc8346d`
+with no aggregate yet. The last terminal packet has base Ozone passed, all four
+provider rows failed only the hard IOPS target, and aggregate `106566312898`
+failed closed. No queued, in-progress, canceled or failed job is promoted to
+acceptance. Aggregate `106522172018` is an earlier failed diagnostic packet.
+Current shared tip `d3c0f677` contains the publication-barrier implementation
+(`c7f0e6d0`) plus the lazy-atime/EOF, batching/cache, queue-safety,
+concurrent-create and lease-renewal validation work with local test, Clippy,
+compile-check and focused security evidence; it still requires a fresh
 terminal hosted qualification before W26.15 can move.
 
 The authoritative W26 hosted packet is run `35585066458` on tested revision

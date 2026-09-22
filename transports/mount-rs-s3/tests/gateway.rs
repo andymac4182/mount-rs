@@ -833,7 +833,7 @@ async fn copy_delete_objects_and_multipart_use_driver_state() {
 }
 
 #[tokio::test]
-async fn concurrent_multipart_parts_publish_in_order_and_complete_atomically() {
+async fn concurrent_multipart_parts_publish_in_numeric_order_and_complete_atomically() {
     let driver = MemoryFs::empty();
     let session = Arc::new(S3Session::new(driver));
     let initiated = session
@@ -842,7 +842,10 @@ async fn concurrent_multipart_parts_publish_in_order_and_complete_atomically() {
     assert_eq!(initiated.status, 200);
     let upload_id = xml_field(&initiated.body, "UploadId");
     let first_body = vec![b'a'; MIN_PART_SIZE as usize];
-    let (first, second) = tokio::join!(
+    let second_body = vec![b'b'; MIN_PART_SIZE as usize];
+    let third_body = vec![b'c'; MIN_PART_SIZE as usize];
+    let fourth_body = b"tail".to_vec();
+    let (first, second, third, fourth) = tokio::join!(
         session.handle(request(
             "PUT",
             &format!("/mountx/concurrent.bin?uploadId={upload_id}&partNumber=1"),
@@ -852,16 +855,32 @@ async fn concurrent_multipart_parts_publish_in_order_and_complete_atomically() {
         session.handle(request(
             "PUT",
             &format!("/mountx/concurrent.bin?uploadId={upload_id}&partNumber=2"),
-            b"tail",
+            &second_body,
+            &[],
+        )),
+        session.handle(request(
+            "PUT",
+            &format!("/mountx/concurrent.bin?uploadId={upload_id}&partNumber=3"),
+            &third_body,
+            &[],
+        )),
+        session.handle(request(
+            "PUT",
+            &format!("/mountx/concurrent.bin?uploadId={upload_id}&partNumber=4"),
+            &fourth_body,
             &[],
         )),
     );
     assert_eq!(first.status, 200);
     assert_eq!(second.status, 200);
+    assert_eq!(third.status, 200);
+    assert_eq!(fourth.status, 200);
     let first_etag = header(&first, "etag").expect("first part ETag");
     let second_etag = header(&second, "etag").expect("second part ETag");
+    let third_etag = header(&third, "etag").expect("third part ETag");
+    let fourth_etag = header(&fourth, "etag").expect("fourth part ETag");
     let complete_body = format!(
-        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{first_etag}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{second_etag}</ETag></Part></CompleteMultipartUpload>"
+        "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>{first_etag}</ETag></Part><Part><PartNumber>2</PartNumber><ETag>{second_etag}</ETag></Part><Part><PartNumber>3</PartNumber><ETag>{third_etag}</ETag></Part><Part><PartNumber>4</PartNumber><ETag>{fourth_etag}</ETag></Part></CompleteMultipartUpload>"
     );
     let completed = session
         .handle(request(
@@ -878,7 +897,9 @@ async fn concurrent_multipart_parts_publish_in_order_and_complete_atomically() {
         .await;
     assert_eq!(object.status, 200);
     let mut expected = first_body;
-    expected.extend_from_slice(b"tail");
+    expected.extend_from_slice(&second_body);
+    expected.extend_from_slice(&third_body);
+    expected.extend_from_slice(&fourth_body);
     assert_eq!(object.body, expected);
 }
 
