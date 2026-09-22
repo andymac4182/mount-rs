@@ -4,9 +4,10 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
-Current W26 implementation/qualification boundary (2026-09-22): published
-exactly at `origin/main=116e9ed405cdc1eb37634a2fa381ce387be036db` after the
-atomic-write wrapper fix `116e9ed4` (`perf(w26): preserve atomic write path
+Current W26 implementation/qualification boundary (2026-09-22): the ledger
+publication is now at `origin/main=be60087451bd397b3f8a72186550f465dd9819fb`,
+with the atomic-write wrapper fix in ancestor commit `116e9ed4`
+(`perf(w26): preserve atomic write path
 through wrappers`). The N-API `DriverSlot`, `MountDriver`, observability and
 persistence wrappers now forward the optimized `FsDriver::write_file` path;
 the focused regression proves one atomic write produces one metadata
@@ -16,7 +17,7 @@ diff scan `2582d7c0-130a-454e-beb3-ffba77169e3e` completed with complete
 changed-file coverage and zero reportable findings. The fresh retained manual
 qualification is GitHub Actions run
 `35698854392 <https://github.com/andymac4182/mount-rs/actions/runs/35698854392>`
-on this exact tip; at dispatch capture its four W26 producers were queued and
+on exact implementation SHA `116e9ed4`; at dispatch capture its four W26 producers were queued and
 the aggregate was not yet acceptance evidence. Prior targeted rows remained
 below the hard `>=1,000` IOPS-per-drive target for SQLite/R2 `580.6091135`,
 PGlite/R2 `963.6041014`, TiDB/R2 `385.2624172` and FoundationDB/R2
