@@ -1833,6 +1833,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   tracked as **NO-GO** in
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md).
 
+- Current production-readiness checkpoint: the synchronized tree's clean N-API
+  release build preserves `P9SessionStats.messages` as `Map<string, number>`
+  after `d0a67b22`; generated typecheck, PGlite production-policy fixtures,
+  the 2/2 disk-backed restart plus isolated backup/restore/rollback rehearsal,
+  N-API artifact aggregation, focused FUSE 14/14 tests, formatting, and diff
+  checks pass locally. The hosted run `35674630831` is excluded because its
+  ARM job failed at the pre-`d0a67b22` generated declaration mismatch and was
+  canceled; a replacement exact-tip Node/native/package/provider run is still
+  required. Production remains **NO-GO** for deployment persistence,
+  backup/rollback, provider scope/performance, observability, ownership, and
+  release approval.
+
 - The production-facing Windows N-API server test was hardened after diagnostic
   run `35650347479`, job `106500944953`, reproduced the exact
   `S3 peer-fault callback (+19754ms)` timeout. Phase attribution was published
