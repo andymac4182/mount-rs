@@ -207,15 +207,22 @@ two `P9Server.clients` backing stores. Its real-TCP regression covers both
 native-first and attached-first order, stable native wrappers, and cleanup.
 Local syntax, focused order/identity/member checks, metadata/session/
 observability/type checks, and the elevated `p9` server selector passed.
-Hosted verification is pending publication, so production remains NO-GO.
+Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+`35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+N-API job `106667799214` passed the mixed arrival-order check and all adjacent
+lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+four ignored native lifecycle tests. Production remains NO-GO.
 
 The native connection close-idempotence packet at exact SHA
 `3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native
 `P9Connection.close()` promise at the JavaScript boundary. Its real-TCP
 regression covers concurrent/repeated/post-closure calls, `closed`/
 `waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local focused
-checks passed; hosted verification is pending publication, so production
-remains NO-GO.
+checks passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986`
+passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+N-API job `106667799214` passed the native close-idempotence check and all
+adjacent lifecycle gates, while Rust job `106667799016` passed the Linux probe
+plus all four ignored native lifecycle tests. Production remains NO-GO.
 
 The mounted-view identity packet at exact SHA
 `1a18c7b82285ea557956cb35d15f1af189803d4d` caches the N-API
@@ -224,8 +231,12 @@ The mounted-view identity packet at exact SHA
 regression checks repeated getter identity and cross-view connection identity,
 alongside the existing native stream/peer/session views and cleanup. Local
 syntax, focused lifecycle checks, metadata/session/observability/type checks,
-and the elevated 9P selector passed; hosted verification is pending
-publication, so production remains NO-GO.
+and the elevated 9P selector passed. Published SHA
+`86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+`35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent
+lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+four ignored native lifecycle tests. Production remains NO-GO.
 
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run

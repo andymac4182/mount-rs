@@ -336,16 +336,24 @@ Current focused behavior:
   `P9Server.clients`, so native-listener and `attach()` connections are returned
   in arrival order rather than by backing-store type. Its real-TCP regression
   covers native-first and attached-first order, stable native wrappers, and
-  cleanup. Local focused checks passed; hosted verification is pending
-  publication and production remains NO-GO.
+  cleanup. Local focused checks passed. Published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+  N-API job `106667799214` passed the mixed arrival-order check and all adjacent
+  lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+  four ignored native lifecycle tests. Production remains NO-GO.
 - The native connection close-idempotence packet at exact SHA
   `3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native
   `P9Connection.close()` promise at the JavaScript boundary, matching the
   attached wrapper's and pinned oracle's idempotent teardown behavior. Its
   real-TCP regression covers concurrent/repeated/post-closure calls,
   `closed`/`waitClosed()`, terminal `isClosed`, client removal, and cleanup.
-  Local focused checks passed; hosted verification is pending publication and
-  production remains NO-GO.
+  Local focused checks passed. Published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+  N-API job `106667799214` passed the native close-idempotence check and all
+  adjacent lifecycle gates, while Rust job `106667799016` passed the Linux probe
+  plus all four ignored native lifecycle tests. Production remains NO-GO.
 - The mounted-view identity packet at exact SHA
   `1a18c7b82285ea557956cb35d15f1af189803d4d` caches the `Mounted.server` and
   `Mounted.connection` wrappers and reuses the matching `P9Server.clients`
@@ -353,8 +361,12 @@ Current focused behavior:
   repeated getter identity and cross-view connection identity, alongside the
   existing native stream/peer/session views and cleanup. Local syntax, focused
   lifecycle checks, metadata/session/observability/type checks, and the
-  elevated 9P selector passed; hosted verification is pending publication and
-  production remains NO-GO.
+  elevated 9P selector passed. Published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373):
+  N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent
+  lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
+  four ignored native lifecycle tests. Production remains NO-GO.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port
