@@ -2140,6 +2140,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   not promote W04 or production acceptance. Dispatch a fresh non-cancelling
   qualification from the exact current tip and keep production **NO-GO**.
 
+- Active exact-tip qualification: non-cancelling run `35686870515` was
+  dispatched from the exact published `origin/main` head `6db7a3ca` after the
+  terminal diagnosis above. At the 2026-09-22 14:26 AEST snapshot, Node jobs
+  macOS-15-intel `106615463347`, ARM `106615463353`, and Windows
+  `106615463597` were in progress; macOS-latest `106615463377` and Ubuntu
+  `106615463386` were queued. RustFS, FoundationDB/RustFS, Ozone/TiDB,
+  Ozone/FoundationDB, Ozone compositions, and native WebDAV Ubuntu were in
+  progress; the remaining Rust, native, observability, and provider jobs were
+  queued. No queued or in-progress job is acceptance evidence. The exact
+  PGlite/restart steps, native/package/artifact gates, provider/W26 markers,
+  and production rollout gates remain open; production remains **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
