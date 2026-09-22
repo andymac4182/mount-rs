@@ -1392,6 +1392,7 @@ async function exerciseWebdav() {
   });
   let listening;
   let faultSocket;
+  let exerciseFailed = false;
   try {
     listening = (await listenLifecycle(server, "WebDAV")).listening;
     assert.ok(server.port > 0);
@@ -1535,8 +1536,15 @@ async function exerciseWebdav() {
       [{ name: "depth", value: "1" }],
       Buffer.from('<D:propfind xmlns:D="DAV:"><D:allprop/></D:propfind>'),
     );
-    assert.equal(propfind.status, 207);
-    assert.match(propfind.body.toString("utf8"), /<multistatus xmlns="DAV:">/);
+    if (process.env.MOUNT_RS_STRUCTURAL_SERVERS === "1") {
+      // The pinned JavaScript FsDriver contract has only unbounded readdir;
+      // the native transport must refuse remote directory materialization
+      // rather than silently turning that callback into an unbounded scan.
+      assert.equal(propfind.status, 501);
+    } else {
+      assert.equal(propfind.status, 207);
+      assert.match(propfind.body.toString("utf8"), /<multistatus xmlns="DAV:">/);
+    }
     const proppatch = await directRequest(
       "PROPPATCH",
       "/direct-methods/source.txt",
@@ -1701,38 +1709,18 @@ async function exerciseWebdav() {
       "WebDAV PUT preserves the written prefix when its request body fails",
     );
 
-    await filesystem.writeFile(
-      "/peer-fault-webdav.txt",
-      Buffer.alloc(4 * 1024 * 1024, 0x2d),
-    );
-    const faultReplyCount = server.session.stats.replies;
     const faultReportCount = reports.length;
     faultSocket = (await connectLoopback(server.port)).socket;
     await writeSocket(
       faultSocket,
-      Buffer.from(
-        `GET /peer-fault-webdav.txt HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`,
-      ),
+      Buffer.from("GET /peer-fault-webdav.txt HTTP/1.1\r\nHost: "),
       "WebDAV JavaScript peer-fault request",
     );
-    await within(
-      (async () => {
-        while (server.session.stats.replies <= faultReplyCount) {
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-      })(),
-      "WebDAV JavaScript peer-fault response readiness",
+    faultSocket.resetAndDestroy();
+    const faultReport = await waitForTransportError(
+      reports,
+      "WebDAV JavaScript peer fault",
     );
-    faultSocket.destroy(new Error("deliberate WebDAV peer reset"));
-    await within(
-      (async () => {
-        while (reports.length <= faultReportCount) {
-          await new Promise((resolve) => setImmediate(resolve));
-        }
-      })(),
-      "WebDAV JavaScript peer-fault callback",
-    );
-    const faultReport = reports[faultReportCount];
     assert.ok(faultReport.error instanceof Error);
     assert.match(faultReport.peer, /^127\.0\.0\.1:\d+$/);
     assert.equal(reports.length, faultReportCount + 1);
@@ -1858,6 +1846,9 @@ async function exerciseWebdav() {
     } finally {
       await closeLifecycle(replacementServer, "WebDAV restart replacement", replacementListening);
     }
+  } catch (error) {
+    exerciseFailed = true;
+    throw error;
   } finally {
     if (faultSocket) {
       await runPhase("WebDAV cleanup: fault socket close", () =>
@@ -1867,7 +1858,7 @@ async function exerciseWebdav() {
     await runPhase("WebDAV cleanup: server lifecycle", () =>
       closeLifecycle(server, "WebDAV", listening),
     );
-    assert.equal(reports.length, 1);
+    if (!exerciseFailed) assert.equal(reports.length, 1);
   }
 }
 
