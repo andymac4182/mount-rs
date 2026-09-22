@@ -2044,6 +2044,27 @@ mod tests {
         assert_eq!(options.device, Path::new("/dev/fuse"));
     }
 
+    #[test]
+    fn mount_error_exposes_only_nested_error_sources() {
+        use std::error::Error;
+
+        let io = MountError::Io(io::Error::other("device unavailable"));
+        assert_eq!(io.to_string(), "device unavailable");
+        assert_eq!(
+            io.source().map(ToString::to_string).as_deref(),
+            Some("device unavailable")
+        );
+
+        let option = MountError::InvalidOption("bad option".to_owned());
+        assert!(option.source().is_none());
+        let timeout = MountError::Timeout {
+            operation: "unmount",
+            after: Duration::from_millis(25),
+        };
+        assert_eq!(timeout.to_string(), "unmount did not finish within 25ms");
+        assert!(timeout.source().is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn privileged_mount_data_excludes_helper_metadata_and_flags() {
