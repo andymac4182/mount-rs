@@ -1255,6 +1255,14 @@ async fn basic_auth_is_required_when_configured() {
             .starts_with("Basic realm=")
     );
 
+    let missing_separator = client
+        .request(method("OPTIONS"), &url)
+        .header("authorization", "BasicYWRhOnNlY3JldA==")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(missing_separator.status(), 401);
+
     let authorized = client
         .request(method("OPTIONS"), url)
         .basic_auth("ada", Some("secret"))
