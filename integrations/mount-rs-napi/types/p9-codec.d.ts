@@ -294,7 +294,7 @@ export declare function mount9p(
   mountpoint: string,
   options?: MountP9Options,
 ): Promise<P9Mount>
-export declare function live9pMounts(): Promise<Array<P9Mount>>
+export declare function live9pMounts(): Array<P9Mount>
 export declare function unmountAll9p(): Promise<Array<{ transport?: string; message: string }>>
 
 export declare class P9Reader {

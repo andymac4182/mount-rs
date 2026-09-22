@@ -63,10 +63,11 @@ const signalCounts = {
 }
 let resolveClosed
 const closed = new Promise((resolve) => { resolveClosed = resolve })
-const fakeMounted = { closed }
+const fakeMounted = { active: true, closed }
 p9Module.mount = async () => fakeMounted
 try {
   assert.equal(await p9Module.mount9p({}, "/tmp/mount-rs-p9-signal-test"), fakeMounted)
+  assert.deepEqual(live9pMounts(), [fakeMounted])
   assert.equal(process.listenerCount("SIGINT"), signalCounts.SIGINT + 1)
   assert.equal(process.listenerCount("SIGTERM"), signalCounts.SIGTERM + 1)
 
@@ -88,8 +89,11 @@ try {
     p9Module.unmountAll = nativeUnmountAll
   }
 
+  fakeMounted.active = false
+  assert.deepEqual(live9pMounts(), [])
   resolveClosed()
   await new Promise((resolve) => setImmediate(resolve))
+  assert.deepEqual(live9pMounts(), [])
   assert.equal(process.listenerCount("SIGINT"), signalCounts.SIGINT)
   assert.equal(process.listenerCount("SIGTERM"), signalCounts.SIGTERM)
 
@@ -130,7 +134,7 @@ if (process.platform === "linux") {
   assert.equal(simulatedLinuxProbe.transport, false)
   assert.equal(simulatedLinuxProbe.modules, false)
 }
-assert.deepEqual(await live9pMounts(), [])
+assert.deepEqual(live9pMounts(), [])
 assert.deepEqual(await unmountAll9p(), [])
 
 await assert.rejects(

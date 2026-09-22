@@ -393,7 +393,15 @@ where
         // from starting while this writer is queued.
         let _lifecycle = self.inner.lifecycle.write().await;
         let _gate = self.inner.gate.lock().await;
-        self.flush_pending_atime().await?;
+        // A failed publication fails the coordinator closed. Pending atime
+        // state must not be published after that boundary: snapshot() will
+        // deliberately return the original failure, and returning early here
+        // would strand the provider lease until its TTL expires. The failed
+        // instance is already unusable, so release the lease and preserve the
+        // fail-closed state instead.
+        if !self.failed() {
+            self.flush_pending_atime().await?;
+        }
         // Provider I/O can outlive the lease TTL (for example, a bounded
         // remote R2 write). Refresh our own lease before releasing it so a
         // graceful shutdown is not reported as ESTALE merely because the
@@ -3742,6 +3750,50 @@ mod tests {
             .unwrap();
         assert_eq!(inode.stats.size, 0);
         block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn failed_shutdown_releases_lease_when_pending_atime_cannot_publish() {
+        let metadata = TestMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            loaded: None,
+            fail_publish: Arc::new(AtomicBool::new(false)),
+            fail_flush: Arc::new(AtomicBool::new(false)),
+            publish_includes_flush_barrier: false,
+        };
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks.clone(),
+            options("failed-shutdown-atime"),
+        ))
+        .unwrap();
+        let driver: &dyn FsDriver = &filesystem;
+        block_on(driver.write_file("/file", b"baseline")).unwrap();
+        let file = block_on(filesystem.open("/file", "r+", 0)).unwrap();
+        let mut buffer = [0_u8; 8];
+        assert_eq!(block_on(file.read(&mut buffer, Some(0))).unwrap(), 8);
+
+        metadata.fail_publish.store(true, Ordering::SeqCst);
+        assert_eq!(
+            block_on(file.write(b"attempted", Some(0)))
+                .unwrap_err()
+                .code,
+            ErrorCode::Eio
+        );
+        assert!(filesystem.failed());
+        metadata.fail_publish.store(false, Ordering::SeqCst);
+        block_on(file.close()).unwrap();
+        block_on(filesystem.shutdown())
+            .expect("a failed filesystem must release its lease during shutdown");
+
+        let reopened = block_on(ChunkedFs::open(
+            metadata,
+            blocks,
+            options("failed-shutdown-atime-reopen"),
+        ))
+        .expect("shutdown must release the failed instance lease");
+        block_on(reopened.shutdown()).unwrap();
     }
 
     #[test]

@@ -71,7 +71,7 @@ try {
     clientId: "native-shape-check",
   }), undefined)
   assert.equal(typeof mounted.waitClosed, "function")
-  assert.equal((await live9pMounts()).length, 1)
+  assert.equal(live9pMounts().length, 1)
 
   assert.equal(await readFile(join(mountpoint, "seed.txt"), "utf8"), "direct 9P seed")
   const mountedFile = join(mountpoint, "direct-node-fs.txt")
@@ -96,7 +96,7 @@ try {
     teardownFailure ??= error
   }
   try {
-    const live = (await live9pMounts()).filter(({ active }) => active)
+    const live = live9pMounts().filter(({ active }) => active)
     if (live.length > 0) throw new Error(`direct 9P cleanup left ${live.length} live mount(s)`)
   } catch (error) {
     teardownFailure ??= error

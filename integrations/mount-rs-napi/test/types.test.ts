@@ -78,6 +78,7 @@ import {
   qidType,
   qidVersion,
   walkStep,
+  live9pMounts,
   mount9p,
   p9ClientProbe,
   p9MountOptions,
@@ -232,7 +233,9 @@ const p9PlatformName: "linux" | undefined = p9Platform()
 const p9PlatformLinux: "linux" | undefined = p9Platform("linux")
 const p9PlatformDarwin: "linux" | undefined = p9Platform("darwin")
 declare const p9Mounted: P9Mount
+const p9LiveMounts: Array<P9Mount> = live9pMounts()
 void mount9p
+void p9LiveMounts
 void p9Probe
 void p9ProbeLinux
 void p9ProbeDarwin
