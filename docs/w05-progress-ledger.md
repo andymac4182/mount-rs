@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 18:29 AEST (2026-09-22 08:29 UTC)
+Last updated: 2026-09-22 18:34 AEST (2026-09-22 08:34 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,7 +10,7 @@ hosted or native gate.
 ## Overall position
 
 Current shared-main observation: remote `origin/main` is
-`6c868cb487f0ab13359d3fd79fe26737d51db164` (`6c868cb4`) at this capture;
+`7ed41f8845a02c2d2b8554aecd9d1070347b50af` (`7ed41f8`) at this capture;
 this ledger update is based on that exact fetched mainline and must be safely
 rebased over any later concurrent changes before publication. The deliberately stable W05 hosted-status candidate is
 `25e275ab6d4f918be72dcd8f62a5baca6bbcd251` and its
@@ -397,8 +397,10 @@ gates therefore remain actionable work in this session.
 
 | W05.42 Repair and rerun the production candidate after terminal CI failures | Implementation + hosted CI/native/provider qualification | Implementation repair pushed; immutable hosted rerun pending | 35% | Shared `origin/main` `f94b53d8` contains the TiDB ambiguous-publication proxy fix and the W26 out-of-tree N-API build with a source-clean assertion. Local `./scripts/cargo-shared test -p mount-rs-tidb --tests --locked` passed 8 unit tests; the two real-service tests remain correctly ignored without TiDB. `node benchmarks/storage/test.mjs`, workflow YAML parsing, formatting, and `git diff --check` passed. No R2 credential was read or used. | Create a new stable candidate branch from the repaired mainline; run exact-SHA local full Rust/Clippy/N-API/Node SDK/CLI/PGlite/packaging qualification; dispatch CI, Fault, W04, W07, W08, Native 9P, and attestation workflows; classify every terminal result; close hard Ozone IOPS and native-FUSE gates or record explicit support-scope exclusions; then run W20.6. | 2–6 h active engineering/release work; 4–16 h hosted/provider/platform wait | Live TiDB/Ozone/FoundationDB services, runner/kernel privileges, AWS protected OIDC inputs, R2 UTC-month reset and token rotation, package registries/signing, product support scope, and final-audit approval are external/provider gates. |
 | W05.43 Qualify the repaired immutable candidate across Rust, Node, SDK, CLI, N-API, PGlite, and oracle paths | Local release qualification + release control | Complete locally; same-SHA hosted/provider/native/package closure open | 100% local / 68% overall closure | Exact candidate branch `andymac4182/c/w05-production-candidate-20260922b` at `87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d` passed format/diff checks, the full locked Rust workspace, strict workspace Clippy, optimized release N-API build, the complete pinned-oracle Node/N-API suite, and `scripts/test-pglite.sh`. Node coverage passed SDK/CLI, WebDAV, S3 restart/scope, FUSE/NFS/9P differential paths, Rust-backed sessions, host restart, distribution, and artifact aggregation. The PGlite packet reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 seeded traces; real PGlite reconnect/versioning/VFS/lifecycle/split-store/FUSE and backup/restore rollback passed. R2, AWS, TiDB/RustFS, FoundationDB opt-in, and privileged native mount rows remained explicit skips or security/platform gates; no secret or Keychain value was read. | Dispatch the immutable candidate through CI, Fault, W04, W07, W08, Native 9P, release-target attestation, and package/provenance workflows; retain terminal same-SHA results; rerun live R2 only after the UTC reset and security-approved token rotation; provision AWS through security/OIDC; close Ozone IOPS, native-FUSE, advertised-platform/package, support-scope, and W20.6 gates. | 0 h active implementation; 1–3 h release coordination plus 4–16 h hosted/provider/native/platform wait | Local qualification does not close hosted runner/kernel behavior, live provider services, R2 budget/reset, AWS protected inputs, registries/signing, native privileges, product scope, or final-audit ownership. |
-| W05.44 Dispatch and track the same-SHA hosted release-gate packet | Hosted CI/native/provider/release evidence | In progress; W04/W08 policy and Native 9P terminal green; W07/W08 targets active; CI/Fault remain queued | 70% provisional | On immutable `87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`, dispatched CI `35702348089`, Native 9P `35702349894`, Fault injection `35702350927`, W04 policy `35702351026`, W07 FoundationDB qualification `35702352395`, W08 release targets with `attest=true` `35702352896`, and W08 release policy `35702353241`. W04 policy, W08 release policy, and the full Native 9P workflow are terminal-successful; W07's durable provider job is green but its macOS companion is still open. The dispatch set intentionally excludes Live Cloudflare R2 while its monthly cap is closed, Live AWS while security issue [#3](https://github.com/andymac4182/mount-rs/issues/3) lacks protected inputs, and the production-release publisher. | Poll every run to terminal; inspect redacted logs/artifacts; classify implementation versus provider/runner/native failures; repair any actionable implementation failure on a new immutable candidate; retain terminal same-SHA package/provenance/attestation evidence; then close AWS, post-reset R2, support-scope, and W20.6 gates. | 0.5–1 h active tracking; 2–16 h hosted/provider/native wait | GitHub runner capacity, Linux/macOS kernel privileges, TiDB/Ozone/FoundationDB services, AWS security administration, R2 UTC reset/token rotation, signing/registries, and product release-scope ownership are external gates. |
+| W05.44 Dispatch and track the same-SHA hosted release-gate packet | Hosted CI/native/provider/release evidence | In progress; Fault/W04/W08 policy/Native 9P terminal green; W07/W08 target companions still open; CI queued | 76% provisional | On immutable `87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`, dispatched CI `35702348089`, Native 9P `35702349894`, Fault injection `35702350927`, W04 policy `35702351026`, W07 FoundationDB qualification `35702352395`, W08 release targets with `attest=true` `35702352896`, and W08 release policy `35702353241`. Fault injection is terminal-successful on Windows, Ubuntu, and macOS; W04 policy, W08 release policy, and the full Native 9P workflow are terminal-successful. W07's durable FoundationDB/RustFS job is green but its macOS feature-compile companion remains queued. W08 Linux/macOS builds and macOS downloaded-asset verification are green, while Linux downloaded-asset verification remains queued and the overall run is not terminal. CI remains queued. The dispatch set intentionally excludes Live Cloudflare R2 while its monthly cap is closed, Live AWS while security issue [#3](https://github.com/andymac4182/mount-rs/issues/3) lacks protected inputs, and the production-release publisher. | Poll every run to terminal; inspect redacted logs/artifacts; classify implementation versus provider/runner/native failures; repair any actionable implementation failure on a new immutable candidate; retain terminal same-SHA package/provenance/attestation evidence; then close AWS, post-reset R2, support-scope, and W20.6 gates. | 0.5–1 h active tracking; 2–16 h hosted/provider/native wait | GitHub runner capacity, Linux/macOS kernel privileges, TiDB/Ozone/FoundationDB services, AWS security administration, R2 UTC reset/token rotation, signing/registries, and product release-scope ownership are external gates. |
 | W05.45 Recheck exact-candidate package contents and workspace license inventory | Local packaging / dependency release gate | Complete locally; cross-platform publication and signing open | 100% local / package-publication closure open | On exact `87f3cdf0`, `npm pack --dry-run --ignore-scripts` passed for `@mount-rs/core` and `@mount-rs/virtual-fs`; the core packet contains the Darwin arm64 `.node` artifact, declarations, `LICENSE`, and `THIRD_PARTY_NOTICES.md`, while virtual-fs contains its declarations and notices. `./scripts/cargo-shared metadata --locked --format-version 1` reported 25/25 workspace packages with `Apache-2.0` and zero non-Apache packages. An initial pnpm-specific `pack --ignore-scripts` probe was rejected as an unsupported option and was not treated as evidence; the intended npm dry-runs were then run successfully. | Repeat package dry-runs on the selected final release SHA after any runtime change; complete Linux/Windows/macOS artifact aggregation, clean-install consumer tests, registry publication, signing/provenance, and rollback ownership evidence. | 0.5 h active local verification; 2–8 h platform/registry/signing wait | Platform toolchains, native artifact hosts, package registries, Sigstore/provenance, supported-version policy, and publication ownership are external gates. |
+
+| W05.46 Record terminal Fault and partial W07/W08 hosted results | Hosted CI/native/provider/release evidence | Fault terminal-successful; W07/W08 and CI remain open | 82% provisional | Exact candidate `87f3cdf0` now has Fault injection `35702350927` terminal-successful across Windows (`106663114945`), Ubuntu (`106663115212`), and macOS (`106663115140`), with format, default/all-feature tests, and strict Clippy green on every runner. W07 `35702352395` has its durable FoundationDB/RustFS/Rust/Node/CLI/restart job `106663122874` terminal-successful, but the macOS FoundationDB native feature-compile job `106663122748` remains queued. W08 targets `35702352896` has Linux and macOS release builds successful (`106663124664`, `106663124371`) and macOS downloaded-asset verification successful (`106671605531`); Linux downloaded-asset verification `106671605507` remains queued, so target attestation and the overall W08 run are not terminal. CI `35702348089` remains queued. | Poll CI, W07, and W08 to terminal; inspect W07 durable logs/artifacts and W08 Linux verification plus attestation markers; classify any failures; repair implementation failures on a new immutable candidate; then close AWS security/OIDC, post-reset R2, platform/package publication, support-scope, and W20.6 gates. | 0.5–1 h active tracking; 2–16 h hosted/provider/platform wait | Hosted runner capacity and macOS/Linux native/toolchain availability are external. Ozone/TiDB/FoundationDB service performance, AWS security administration, R2 UTC-month reset/token rotation, registries/signing, and release-scope ownership remain open; no provider or package acceptance is inferred from these partial results. |
 
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
@@ -498,10 +500,10 @@ the non-R2 release packet runs. The primary dispatch IDs are:
 | --- | ---: | --- | --- |
 | CI | `35702348089` | queued | Rust/Node/provider-composition and W26 evidence packet |
 | Native 9P | `35702349894` | terminal success | Linux native 9P probe, addon, Rust and mounted-I/O lifecycle |
-| Fault injection | `35702350927` | queued | Cross-platform failure and cleanup matrix |
+| Fault injection | `35702350927` | terminal success | Cross-platform failure and cleanup matrix; Windows, Ubuntu, and macOS jobs green |
 | W04 production policy | `35702351026` | terminal success | PGlite policy and release-control checks |
-| W07 FoundationDB production qualification | `35702352395` | queued | FoundationDB/RustFS durable provider and platform packet |
-| W08 release targets (`attest=true`) | `35702352896` | queued | Linux/macOS CLI artifacts, SBOM, provenance and attestation |
+| W07 FoundationDB production qualification | `35702352395` | workflow queued; durable job success | FoundationDB/RustFS durable provider packet green; macOS native feature-compile companion queued |
+| W08 release targets (`attest=true`) | `35702352896` | workflow queued; builds/macOS verification success | Linux/macOS CLI artifacts green; Linux downloaded-asset verification and attestation remain queued |
 | W08 release policy | `35702353241` | terminal success | Release manifest, SBOM, rollout and policy checks |
 
 The separate push-triggered CI run `35700818889` and successful push-triggered
@@ -543,8 +545,12 @@ The terminal packet verified the Linux `9p`/`9pnet_fd` kernel client, N-API
 server and direct-session lifecycle, connection identity/member surfaces,
 automatic mounted I/O and cleanup, direct `./9p` mounted I/O and cleanup, and
 structural-driver mounted I/O with callback reachability. The companion Rust
-job also passed its privileged native I/O/lifecycle tests. W07's durable job
-is green but its workflow remains open for the queued macOS compile.
+job also passed its privileged native I/O/lifecycle tests. At 18:32 AEST Fault
+injection `35702350927` completed successfully on all three operating systems.
+W07's durable job `106663122874` is green but its workflow remains open for the
+queued macOS compile `106663122748`. W08's Linux/macOS builds and macOS
+download verification are green; Linux download verification `106671605507`
+and the attestation stage remain queued. CI `35702348089` remains queued.
 
 ### W05.45 exact package evidence (2026-09-22 18:03 AEST)
 
@@ -561,6 +567,37 @@ the successful npm commands above. Cross-platform artifact aggregation,
 registry publication, signing/provenance, and clean-install consumer evidence
 remain hosted/platform gates.
 
+
+### W05.46 hosted terminal and partial boundary (2026-09-22 18:34 AEST)
+
+The exact immutable candidate `87f3cdf0` now has a terminal Fault injection
+PASS: run `35702350927` completed successfully on Windows, Ubuntu, and macOS.
+The three jobs (`106663114945`, `106663115212`, and `106663115140`) each passed
+format, the default and all-feature fault-injection tests, and strict Clippy.
+This closes the cross-platform fault-injection row for this candidate; it does
+not close the remaining CI/provider-composition or release-publication rows.
+
+W07 run `35702352395` has a terminal-successful durable qualification job
+`106663122874`, covering the rollout/evidence policy, optimized N-API build,
+Linux FUSE prerequisite, durable FoundationDB metadata, RustFS chunks,
+restart, bounded workload artifact, and qualification markers. Its macOS
+FoundationDB native feature-compile companion `106663122748` is still queued,
+so W07 remains non-terminal at the workflow level.
+
+W08 release-target run `35702352896` has successful Linux and macOS release
+build jobs (`106663124664` and `106663124371`) and successful macOS downloaded-
+asset verification (`106671605531`). Linux downloaded-asset verification
+`106671605507` remains queued; target attestation and the overall W08 run are
+therefore not yet terminal. Candidate CI `35702348089` remains queued with no
+job evidence. The exact run URLs and job IDs are retained in the W05.44/W05.46
+register rows; no queued result is promoted to production acceptance.
+
+The production decision remains **NO-GO**. Required next actions are to let
+CI, W07, and W08 reach terminal state and inspect their redacted logs and
+artifacts; repair any actionable implementation failure on a new immutable
+candidate; then provision AWS through security issue [#3](https://github.com/andymac4182/mount-rs/issues/3), run one post-reset bounded R2
+requalification after token rotation, complete cross-platform package/signing
+and clean-install evidence, resolve support scope, and run W20.6.
 
 ### W05.36 current-tip evidence (2026-09-22 15:43 AEST)
 
@@ -1074,6 +1111,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 08:32–08:34 UTC (18:32–18:34 AEST) | Re-polled exact-candidate hosted runs and recorded terminal Fault plus W07/W08 partial results | Hosted release-control evidence / ledger maintenance | Fault `35702350927` passed Windows/Ubuntu/macOS. W07 durable job `106663122874` passed while macOS compile `106663122748` stayed queued; W08 builds and macOS asset verification passed while Linux verification `106671605507` stayed queued; CI `35702348089` stayed queued. Ledger updated; production remains NO-GO. |
 | 2026-09-22 08:29 UTC (18:29 AEST) | Reviewed terminal Native 9P logs and job conclusions on immutable candidate `87f3cdf0` | Hosted native/platform evidence | Native 9P `35702349894` passed Linux kernel probes, Rust native I/O/lifecycle, N-API server/session/member/identity, automatic/direct/structural mounted I/O, and cleanup. W07 macOS compile, CI, Fault, and W08 target attestation remain open. |
 | 2026-09-22 08:19 UTC (18:19 AEST) | Reviewed terminal same-SHA W08 release policy evidence after W04 policy passed | Hosted release-control evidence | W08 policy `35702353241` passed rollout/evidence policy, release identity, manifest, SBOM, and provenance checks. CI/Fault/W07/Native 9P/W08 targets remain open. |
 | 2026-09-22 08:16 UTC (18:16 AEST) | Re-polled the immutable packet after hosted scheduling began | Hosted release-control evidence | W04 policy `35702351026` passed; W08 policy `35702353241` started; CI/Fault/W07/Native 9P/W08 targets remain queued. Full production packet remains open. |
