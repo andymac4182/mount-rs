@@ -5,6 +5,43 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22
+
+This block is the current reconciliation point for readers arriving from other
+worktrees. Older rows below remain as an audit trail, but they must not be used
+as current status when they name an earlier tip or hosted run.
+
+| Field | Current value |
+| --- | --- |
+| Shared implementation tip | `origin/main` = `0ca59c85a36227a07730f0282194ef7af8650fbf`; this contains the TiDB isolation chunk `0f95cb7d`, SQLite publication CAS `ba4e89d0`, the FoundationDB lockfile correction `8428a5ef`, and the earlier W26 performance, safety and evidence-packet work. |
+| Current local verification | `./scripts/cargo-shared test --workspace --all-targets --locked` passed; strict workspace Clippy with `-D warnings`, `cargo fmt --all -- --check` and `git diff --check` passed. TiDB focused tests are 7/7, including the effective-isolation fail-closed regression. |
+| Current hosted packet | Manual CI run `35686340751`, exact tested SHA `1e64bc250b5e863620f069aad173945dc474c5b4`; base Ozone `106613849779` passed, composition `106613849813` failed hard IOPS, TiDB `106613849794` failed hard IOPS, FoundationDB `106613849672` failed before its benchmark on the standalone test lockfile, and aggregate `106616062969` failed closed. |
+| Current production decision | **NO-GO**. The run did not contain SQLite `ba4e89d0` or FoundationDB lockfile `8428a5ef`, so it is diagnostic and cannot qualify the current shared tip. The hard 1,000-IOPS target, Tier 1 99.99% objective and five-minute RPO/RTO boundary are unchanged. |
+| Current security evidence | TiDB isolation scan `5975446d-8bb7-457e-92d3-74c5c6ccf671`, SQLite CAS scan `ea882470-0ef4-4f7a-8d91-03c8d85d7fb7` and prior W26 scans completed with full changed-file coverage and zero reportable findings. Hosted/customer TLS, IAM, tenancy, provider-native allocation and recovery evidence remain external gates. |
+
+### Current hosted packet — run `35686340751`
+
+The producer jobs were terminal, and the aggregate was terminally failed. The
+packet is retained as diagnostic evidence only; no failed or incomplete row is
+promoted to acceptance.
+
+| Work item / producer | Status and evidence | Completion | Remaining action | Provisional estimate | External blocker / gate |
+| --- | --- | ---: | --- | ---: | --- |
+| W26.1–W26.2 / base Ozone `106613849779` | **PASS**: Ozone health/readiness, block contract, fault window, gateway failure, restart/reopen and cleanup markers passed on the run SHA | 100% | Preserve the exact marker/artifact in the next one-revision packet | 0–1 h review | Hosted runner, image and customer Ozone topology |
+| W26.3a / compositions `106613849813` | **FAIL / diagnostic**: SQLite/R2 `997.056981` IOPS, elapsed `1,203.542047 ms`, p95 write/read/delete `195.384716/22.844125/12.675054 ms`; PGlite/R2 `592.425705` IOPS, elapsed `2,025.570447 ms`, p95 `263.350230/128.917052/55.045747 ms`; both completed 1,200/1,200 lifecycle operations with zero timeouts and cleanup failures | 100% functional / 43% performance qualification | Re-run after `ba4e89d0` on the current published SHA; keep the hard target and aggregate pass-marker requirement | 1.5–4 d per remediation/review cycle | Ozone capacity, runner variability and PGlite/R2 latency are external inputs; publication cost remains W26-owned |
+| W26.3d / TiDB `106613849794` | **FAIL / diagnostic**: TiDB/R2 `277.585842` IOPS, elapsed `4,322.987050 ms`, p95 write/read/delete `755.523941/182.752699/41.393459 ms`; 1,200/1,200 lifecycle operations, zero timeouts and cleanup failures; TiDB Rust/N-API bounded seed/reopen and Ozone recovery markers passed before the benchmark | 100% functional / 43% performance qualification | Re-run after `0f95cb7d` and compare session-setup latency on the current SHA; preserve restart/fencing/ambiguous-commit markers | 1–3 d hosted review plus further provider work if still below target | Hosted TiDB/PD/TiKV, Ozone topology and provider-native latency |
+| W26.3c / FoundationDB `106613849672` | **FAIL / diagnostic preflight**: Ozone and FoundationDB readiness, image, authority heartbeat, block reachability, fault/restart/reopen and cleanup markers passed, but `tests/foundationdb/Cargo.lock` rejected `--locked`; no benchmark JSON or IOPS row was produced | 90% functional / 0% current benchmark evidence | Re-run on current `0ca59c85`, which includes `8428a5ef`; do not infer throughput from this packet | 0.5–1.5 d hosted review/startup | Hosted FoundationDB runtime and exact lockfile/provider image are external |
+| W26.14 / aggregate `106616062969` | **FAIL / fail closed**: all producer artifacts downloaded, but the packet lacked the required `OZONE_IOPS_PASS` marker after hard provider failure/preflight failure | 100% implementation / 50% hosted qualification | Require every provider, full end-to-end marker set and aggregate pass on one exact current SHA | 0.75–1.5 d review | CI artifact service and producer scheduling |
+| W26.15 / P8 per-drive target | **OPEN / NO-GO**: current diagnostic packet did not qualify; SQLite was close at 997.06 but remains below 1,000 and the other provider rows were lower or absent | 95% W26-owned implementation / 43% hosted qualification | Dispatch a fresh non-canceling matrix against `0ca59c85`; continue only correctness-preserving optimization and keep the target unchanged | 1.5–4 d per cycle plus external queue | Ozone fixture capacity/topology, provider latency, hosted runners and artifact retention |
+| P14 integration-readiness review | **NO-GO** | 40% | Re-audit a terminal all-provider, end-to-end and aggregate pass, then hand off an explicit decision; no release/deployment claim | 1–2 d after W26.15 | Customer secure Ozone topology, 99.99% evidence, RPO/RTO, DR and release stream |
+
+The next hosted matrix must select the exact current published SHA
+`0ca59c85a36227a07730f0282194ef7af8650fbf`. The 356863 packet selected an
+earlier SHA and therefore did not test the SQLite CAS optimization or the
+FoundationDB lockfile correction. CI-only qualification is the available
+environment; customer deployment, backup/DR and release execution remain out
+of W26 ownership.
+
 ## Snapshot
 
 | Field | Current value |
@@ -1321,3 +1358,48 @@ customer and hosted/provider controls explicitly deferred. The companion
 and cross-stream handoff contract; its validator PASS is declaration-only.
 The production decision remains **NO-GO** until terminal one-revision hosted
 evidence and external customer/Ozone gates are complete.
+
+## Current session time log continuation — 2026-09-22
+
+These rows extend the chronological log above. Engineering time is provisional;
+hosted queue, provider startup and artifact-service time are not counted as
+implementation effort.
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — SQLite publication CAS chunk | Implemented and reviewed the SQLite conditional fenced metadata update, retained zero-row classification and transaction boundaries, ran focused/full gates, and published `ba4e89d0` through the shared mainline reconciliation. | ~1.5–2.5 h | ~0.5–1 h fetch/merge/push; live hosted latency external | Local tests, strict Clippy, formatting/diff checks and security scan `ea882470-0ef4-4f7a-8d91-03c8d85d7fb7` passed; exact hosted requalification remains open. |
+| 2026-09-22 — TiDB session-isolation chunk | Moved `REPEATABLE-READ` setup/verification to private-pool connection creation, removed per-transaction negotiation, retained rollback guards and fail-closed validation, and updated the provider contract README. | ~1.5–2.5 h | ~0.75–1.25 h shared-target build wait and remote reconciliation | Focused TiDB 7/7, full locked workspace tests, strict Clippy, formatting/diff checks and security scan `5975446d-8bb7-457e-92d3-74c5c6ccf671` passed; implementation `0f95cb7d` is included in `origin/main` `0ca59c85`. |
+| 2026-09-22 — Hosted run `35686340751` review | Refreshed the completed producer/aggregate job state, downloaded retained artifacts, parsed SQLite/PGlite/TiDB metrics and recorded the FoundationDB `--locked` preflight blocker. | ~0.75–1.25 h | ~0.5–1 h hosted runner/provider startup and artifact retrieval | Base Ozone passed; SQLite `997.06`, PGlite `592.43`, TiDB `277.59` IOPS missed the hard threshold; FoundationDB produced no benchmark; aggregate `106616062969` failed closed. Packet is diagnostic only. |
+| 2026-09-22 — Current ledger reconciliation | Added the exact shared SHA, current work-item statuses, completion percentages, evidence, remaining actions, provisional estimates, external blockers and the latest hosted packet to this ledger; reconciled tracker status for other worktrees. | ~0.75–1.25 h | ~0.25–0.5 h remote status verification | Current authority is `0ca59c85`; production remains **NO-GO**. Next action is a fresh non-canceling W26 matrix on that exact SHA. |
+
+## Current publication record — superseding older snapshots
+
+The current shared build-on boundary is `origin/main` at
+`0ca59c85a36227a07730f0282194ef7af8650fbf`, and this checkout matches it.
+The W26 implementation commit `0f95cb7d` is the TiDB session-isolation
+optimization; `ba4e89d0` is the SQLite metadata-publication CAS optimization;
+`8428a5ef` is the FoundationDB test-lockfile correction. The last hosted run
+`35686340751` selected earlier SHA `1e64bc25` and is diagnostic only. A fresh
+matrix must be dispatched against the current exact SHA; no failed, queued,
+partial or earlier-SHA result is promoted to acceptance.
+
+## Current hosted dispatch override — run `35688061634`
+
+After the ledger publication, concurrent mainline work advanced the shared tip
+to `06fc70612b9387a281ab050f711fc878713177ea`. A fresh manual
+`gh workflow run ci.yml --ref main` was dispatched and GitHub selected that
+exact SHA. The run is currently **queued/in progress**, not acceptance evidence.
+
+| Producer | Job ID | Current state | Acceptance rule |
+| --- | ---: | --- | --- |
+| Ozone base | `106619031921` | queued | Must pass gateway, policy, recovery and cleanup markers |
+| Ozone compositions | `106619031684` | queued | Must pass SQLite/R2 and PGlite/R2 at >=1,000 IOPS plus all composition/end-to-end markers |
+| Ozone TiDB | `106619031746` | queued | Must pass TiDB durable/restart/bounded-listing markers and >=1,000 IOPS |
+| Ozone FoundationDB | `106619031804` | queued | Must pass lockfile/preflight, durable restart, bounded-listing, cleanup and >=1,000 IOPS |
+| W26 aggregate | not created at capture | pending | Must verify all exact-SHA artifacts and emit the complete aggregate pass marker |
+
+The required current code includes SQLite CAS `ba4e89d0`, TiDB isolation
+`0f95cb7d` and FoundationDB lockfile `8428a5ef`. I will not promote any
+producer result until its job and the aggregate are terminal, and the
+production decision remains **NO-GO** while this run is queued or any hard gate
+fails.
