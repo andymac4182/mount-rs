@@ -2257,6 +2257,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) as qualification
   provenance only; this does not override native-FUSE, provider, W26, or
   production-release gates.
+- Fresh manual exact-tip qualification run
+  [35700938192](https://github.com/andymac4182/mount-rs/actions/runs/35700938192)
+  was dispatched from the published `origin/main` SHA `33f52cda`; its four
+  Unix Node jobs are `106658534854`, `106658534921`, `106658535116`, and
+  `106658535160`, with Windows Node `106658534774` and native FUSE
+  `106658535119`. All 23 displayed jobs were queued at the first snapshot, so
+  no current-tip acceptance is claimed; production remains **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
