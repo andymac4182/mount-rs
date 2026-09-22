@@ -20,7 +20,8 @@ use mount_rs_core::{
 };
 
 use crate::handles::{
-    DirectorySnapshots, FileHandleTable, HandleEntry, cookie_verifier, same_verifier,
+    DirectorySnapshots, FileHandleTable, HandleEntry, cookie_verifier, same_backend_inode,
+    same_verifier,
 };
 use crate::rpc::{
     AUTH_NONE, AUTH_SYS, RPC_GARBAGE_ARGS, RPC_PROC_UNAVAIL, RPC_PROG_MISMATCH, RPC_PROG_UNAVAIL,
@@ -3620,11 +3621,21 @@ impl Nfs4Session {
             .await
             .ok()
             .map(|stats| stat_change(&stats));
+        let same_inode = if from == to {
+            true
+        } else {
+            match (self.stat_of(&from).await, self.stat_of(&to).await) {
+                (Ok(source), Ok(destination)) => same_backend_inode(&source, &destination),
+                _ => false,
+            }
+        };
         if let Err(error) = self.driver.rename(&from, &to).await {
             return V4OpResult::new(OP_RENAME, error_status(&error));
         }
-        self.handles.remap(&from, &to);
-        self.remap_exclusive(&from, &to);
+        if !same_inode {
+            self.handles.remap(&from, &to);
+            self.remap_exclusive(&from, &to);
+        }
         self.invalidate(&source_dir);
         self.invalidate(&target_dir);
         let source_after = self

@@ -12,6 +12,12 @@ const FH_MAGIC: u32 = 0x554e_4653; // "UNFS"
 pub const FH_SIZE: usize = 20;
 pub const ROOT_HANDLE_ID: u64 = 1;
 
+/// A rename between two names of this inode is a backend no-op. Compare
+/// lstat identities, not paths or followed symlink targets.
+pub(crate) fn same_backend_inode(source: &Stats, destination: &Stats) -> bool {
+    source.ino > 0 && source.ino == destination.ino && source.dev == destination.dev
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandleEntry {
     pub id: u64,
@@ -616,6 +622,17 @@ mod tests {
             ctime_ms: 0,
             birthtime_ms: 0,
         }
+    }
+
+    #[test]
+    fn same_backend_inode_requires_nonzero_matching_device_and_inode() {
+        let source = stats(7);
+        assert!(same_backend_inode(&source, &source));
+        assert!(!same_backend_inode(&source, &stats(8)));
+        let mut other_device = source.clone();
+        other_device.dev = 2;
+        assert!(!same_backend_inode(&source, &other_device));
+        assert!(!same_backend_inode(&stats(0), &stats(0)));
     }
 
     #[test]

@@ -19,7 +19,7 @@ use mount_rs_core::{
 use crate::constants::*;
 use crate::handles::{
     DirectorySnapshot, DirectorySnapshots, FH_SIZE, FileHandleTable, FileHandleTableOptions,
-    HandleEntry, cookie_verifier, same_verifier,
+    HandleEntry, cookie_verifier, same_backend_inode, same_verifier,
 };
 use crate::protocol::*;
 use crate::rpc::{
@@ -2115,16 +2115,26 @@ impl Nfs3Session {
             } else {
                 self.pre_op(&to_parent).await
             };
+            let same_inode = if from == to {
+                true
+            } else {
+                match (self.stat_of(&from).await, self.stat_of(&to).await) {
+                    (Ok(source), Ok(destination)) => same_backend_inode(&source, &destination),
+                    _ => false,
+                }
+            };
             self.driver.rename(&from, &to).await?;
-            self.handles.remap(&from, &to);
-            self.exclusive_creates
-                .lock()
-                .expect("NFS exclusive-create lock")
-                .forget(&from);
-            self.exclusive_creates
-                .lock()
-                .expect("NFS exclusive-create lock")
-                .forget(&to);
+            if !same_inode {
+                self.handles.remap(&from, &to);
+                self.exclusive_creates
+                    .lock()
+                    .expect("NFS exclusive-create lock")
+                    .forget(&from);
+                self.exclusive_creates
+                    .lock()
+                    .expect("NFS exclusive-create lock")
+                    .forget(&to);
+            }
             self.invalidate(&from_parent);
             self.invalidate(&to_parent);
             Ok::<(), FsError>(())

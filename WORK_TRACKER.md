@@ -2644,6 +2644,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   cancelled without jobs; native v4.1 ordering, cross-process recovery,
   crash/power-loss durability, exact-tip hosted acceptance, and production
   readiness remain open.
+- [x] W01-NFS same-inode hard-link RENAME no longer remaps handles after a
+  backend no-op. A pre-fix real-TCP v3 case gave the surviving source a new
+  opaque ID after alias removal; both v3 and v4 now compare lstat device/inode
+  before updating handle and exclusive-create mappings. HostFs-backed v3 and
+  rootless v4 cases passed ten paired reruns; full locked NFS (44 unit, 27 v4
+  wire), strict NFS/N-API Clippy, formatting, and local opt-in macOS native
+  NFSv3 passed. Native v4.1 ordering, external/cross-process changes,
+  crash/power-loss durability, exact-tip hosted acceptance, and production
+  readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

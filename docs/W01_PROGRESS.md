@@ -1467,6 +1467,8 @@ spent waiting for a hosted job or credential approval.
 
 | 2026-09-22 | W01-NFS | Upgraded rename-over-open wire coverage to HostFs: backing rename replaces the destination bytes, held v4 OPEN reads the original bytes, CLOSE retires the old pathless handle, and the new handle stays live. Focused case passed ten reruns; full locked NFS 43 unit/25 v4 wire, strict NFS Clippy, formatting, and opt-in local macOS native NFSv3 1/1 passed. The previous exact-tip CI run was cancelled with no jobs | — | Local host-backed descriptor and native v3 evidence passed | Native v4.1 ordering, cross-process recovery, crash/power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
 
+| 2026-09-22 | W01-NFS | Fixed same-inode hard-link RENAME corrupting the handle-path map after a backend no-op: the pre-fix v3 wire case gave the surviving source a new opaque ID after removing its alias. Both v3 and v4 paths now preserve mappings and exclusive-create state when lstat device/inode match. HostFs-backed v3 and real-TCP v4 cases passed ten paired reruns; full locked NFS 44 unit/27 v4 wire, strict NFS/N-API Clippy, formatting, and opt-in local macOS native NFSv3 1/1 passed | — | Same-server v3/v4 rename no-op handle identity passed | Native v4.1 ordering, external/cross-process changes, crash/power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:
