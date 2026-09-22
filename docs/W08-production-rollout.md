@@ -216,7 +216,11 @@ access, unbounded objectives and incomplete DR sign-off fail closed. The
 checks are wired into both W08 release workflows. This is a repository
 implementation/control slice of P03 only; it does not prove a backup,
 restore, second region, provider recovery drill or production approval. P03
-remains open.
+remains open. The implementation was published as `896330af` in reconciled
+public merge `924009af061d119404b2ee1f59e86506f7b1cbd2`; shared-wrapper Cargo
+check and strict Clippy passed on that merge. Push-triggered hosted run
+`35716566398` ended cancelled with `jobs=[]`, while dispatched run
+`35716709958` remains queued, so no terminal hosted P03 evidence is claimed.
 
 W08.40 adds the credential-free P04 upgrade, compatibility and rollback
 contract in `tests/tidb/production-upgrade-policy.json`, enforced by
@@ -232,7 +236,11 @@ missing client surfaces, quorum loss, weak retention and incomplete rollback
 controls fail closed. The checks are wired into both W08 release workflows.
 This is a repository implementation/control slice of P04 only; it does not
 prove a live upgrade, rollback, provider compatibility or production approval.
-P04 remains open.
+P04 remains open. The implementation was published as `016052b7` in
+reconciled public merge `66164b78e03309bf9c36ae01ab7e98fc61925373`; shared-
+wrapper Cargo check and strict Clippy passed on that merge. Push-triggered
+hosted run `35718296219` ended cancelled with `jobs=[]`; the queued dispatched
+run predates W08.40, so no terminal hosted P04 evidence is claimed.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
