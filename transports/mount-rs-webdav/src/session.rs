@@ -262,7 +262,14 @@ impl WebdavSession {
     {
         self.count_request(&head.method);
         let result = self.dispatch_stream(&head, &mut body).await;
-        drain_body(&mut body).await;
+        let dispatch_body_fault = matches!(&result, Err(WebdavError::Body(_)));
+        let drain_error = drain_body(&mut body).await;
+        if let Some(error) = drain_error.as_ref()
+            && !is_recoverable_body_drain_error(error)
+            && result.is_ok()
+        {
+            self.report_error(error, &head);
+        }
         let mut response = match result {
             Ok(response) => response,
             Err(error) => {
@@ -270,6 +277,15 @@ impl WebdavSession {
                 fault_response(&error)
             }
         };
+        if dispatch_body_fault
+            || drain_error
+                .as_ref()
+                .is_some_and(|error| !is_recoverable_body_drain_error(error))
+        {
+            response
+                .headers
+                .insert("connection".to_owned(), "close".to_owned());
+        }
         if head.method.eq_ignore_ascii_case("HEAD") {
             response.body = None;
         }
@@ -1698,11 +1714,25 @@ where
     poll_fn(|cx| Pin::new(&mut *body).poll_next_chunk(cx)).await
 }
 
-async fn drain_body<B>(body: &mut B)
+async fn drain_body<B>(body: &mut B) -> Option<WebdavError>
 where
     B: WebdavRequestBody + Unpin,
 {
-    while next_body_chunk(body).await.is_some() {}
+    let mut limit_error = None;
+    while let Some(chunk) = next_body_chunk(body).await {
+        match chunk {
+            Ok(_) => {}
+            Err(error) if is_recoverable_body_drain_error(&error) => {
+                limit_error.get_or_insert(error);
+            }
+            Err(error) => return Some(error),
+        }
+    }
+    limit_error
+}
+
+fn is_recoverable_body_drain_error(error: &WebdavError) -> bool {
+    matches!(error, WebdavError::Fault(fault) if fault.status == 413)
 }
 
 async fn collect_body_stream<B>(body: &mut B, limit: usize) -> Result<Vec<u8>, WebdavError>
