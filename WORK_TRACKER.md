@@ -3432,19 +3432,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   assertions, Ozone/TiDB and Ozone/FoundationDB hard-IOPS misses, W26 dirty
   provenance, and cancelled native FUSE; the exact evidence and estimates are
   in `docs/w05-progress-ledger.md`. No production release is authorized.
-  A new immutable current-tip candidate `d1a81ad4` is now published with a
-  fresh same-SHA packet: CI `35721887870`, Fault `35721895670`, W04
-  `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets
-  with attestations `35721892593`, and Native 9P `35721891380`. These runs are
-  pending terminal evidence; R2 remains cap-closed and AWS remains security-
-  gated.
-  Remaining actions are to let the exact packet reach terminal status, repair
-  any actionable failure on a new immutable candidate, close Ozone capacity
-  and native-FUSE or record approved scope exclusions, obtain AWS protected
-  inputs and OIDC trust through security, rotate R2 credentials after the
-  UTC-month reset, close package/provenance/provider/scope gates, and run
-  W20.6 for a written GO/NO-GO decision. No credential value was read,
-  stored, printed, or placed in Keychain.
+  The immutable `d1a81ad4` packet was superseded after shared mainline added
+  the FUSE destroy cancellation fix and expanded NFS v3/v4 race coverage;
+  cancellation was requested for its queued CI `35721887870`, Fault
+  `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`,
+  W08 targets `35721892593`, and Native 9P `35721891380` runs, so none is
+  release evidence. Current shared main `1f8dcd41` is locally green through
+  the full locked Rust workspace, strict Clippy, focused NFS/FUSE regressions,
+  complete Node SDK/CLI/N-API/oracle/distribution/restart coverage, and the
+  PGlite matrix (`Rust 6/3/0`, `Node 5/3/0`, `CLI 12/2`).
+  Remaining actions are to publish the current-main ledger update, freeze and
+  host-qualify a new immutable candidate, close Ozone capacity and native-FUSE
+  or record approved scope exclusions, obtain AWS protected inputs and OIDC
+  trust through security, rotate R2 credentials after the UTC-month reset,
+  close package/provenance/provider/scope gates, and run W20.6 for a written
+  GO/NO-GO decision. No credential value was read, stored, printed, or placed
+  in Keychain.
 
 ## W06 — RustFS integration service
 
