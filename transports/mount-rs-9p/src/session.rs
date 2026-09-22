@@ -1927,8 +1927,14 @@ mod tests {
             let entered = Arc::clone(&self.entered);
             let release = Arc::clone(&self.release);
             Box::pin(async move {
+                let release_waiter = release.notified();
+                tokio::pin!(release_waiter);
+                // Register the release waiter before publishing the entered
+                // signal. `Notify::notify_waiters` does not retain a permit
+                // for a waiter that has not registered yet.
+                release_waiter.as_mut().enable();
                 entered.notify_one();
-                release.notified().await;
+                release_waiter.await;
                 Err(FsError::new(ErrorCode::Ebadf))
             })
         }

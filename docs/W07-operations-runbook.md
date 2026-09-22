@@ -20,16 +20,23 @@ contents or tenant secrets in this document, tickets or shell history.
 
 | Field | Required value |
 | --- | --- |
-| Record ID | Incident, change, drill or release identifier |
-| Tested revision | Immutable Git revision and artifact digest |
-| Configuration | Approved config digest; secret-manager and certificate version references only |
+| Record ID | `recordId`: incident, change, drill or release identifier; unique within the packet |
+| Tested revision | `revision`: immutable Git revision and artifact digest |
+| Configuration | `configuration`: approved config digest; secret-manager and certificate version references only |
 | Provider versions | FoundationDB server/client, RustFS/S3 provider, Rust/Node/CLI/N-API versions |
 | Topology | Region, zones, coordinators, replication/storage policy and network boundary |
-| Authority | Authority prefix, writer identity reference and consumer identity reference; never credentials |
+| Authority | `authority`: authority prefix, writer identity reference and consumer identity reference; never credentials |
 | Environment | Staging, canary or production identifier; never a secret |
-| People | Incident commander, operator, release owner and approver |
-| Time | Start, detection, acknowledgement, mitigation, recovery and cleanup timestamps |
-| Result | Terminal PASS/FAIL, measured RPO/RTO/SLO impact, rollback and cleanup outcome |
+| People | `people`: incident commander, operator, release owner and approver |
+| Time | `timestamps.startedAt`, `completedAt` and `cleanedUpAt` as ISO-8601 timestamps in non-decreasing order; incident detection/acknowledgement/mitigation/recovery times remain in the linked record |
+| Result | `result`: terminal PASS/FAIL, measured RPO/RTO/SLO impact, rollback and cleanup outcome |
+
+The machine-readable packet verifier requires every evidence record to carry
+all of the fields named above, plus a concrete topology, environment, test/run
+ID, terminal status, owner, cleanup outcome, rollback outcome and evidence
+reference. It rejects placeholders, malformed timestamps, reversed lifecycle
+times and duplicate `recordId` values. This is a fail-closed tracking control;
+it does not authenticate the referenced environment or owner.
 
 ## Admission and preflight
 

@@ -13,7 +13,7 @@ Docker cluster, or a hosted fixture does not authorize a production rollout.
 | Qualification baseline | W07.1, W07.2, W07.4, W07.6 and W07.6a are checked; W07.3, W07.5 and W07.7 remain open in `WORK_TRACKER.md` |
 | Production rollout | **NO-GO** |
 | Primary reason | Hosted Linux qualification is green, but no production topology, identity/ACL proof, clock/failover rehearsal, backup/restore packet, operational telemetry, production load/capacity result, complete native support decision, or release-owner sign-off is recorded |
-| Evidence rule | Every result must identify the tested revision, image/provider versions, topology, test/run ID, terminal status, owner, and cleanup/rollback outcome |
+| Evidence rule | Every result must identify a unique record ID, tested revision, image/provider versions, configuration and authority references, topology, environment, people, ordered ISO-8601 start/completion/cleanup timestamps, test/run ID, terminal status, measured result, owner, and cleanup/rollback outcome |
 
 The detailed tracker is the source of truth for implementation and acceptance
 status. This ledger is the source of truth for the separate production track.
@@ -478,16 +478,18 @@ tests for the tracking control only; they do not create production evidence.
 
 The workflow also validates the machine-readable
 `docs/W07-production-evidence.json` packet with
-`scripts/verify-w07-production-evidence.mjs` and exercises twelve
+`scripts/verify-w07-production-evidence.mjs` and exercises sixteen
 credential-free packet cases with `scripts/test-w07-production-evidence.mjs`.
 The packet has one record for each W07.7 production gate and requires explicit
 remaining actions while **NO-GO**; any future **GO** packet must provide a
-concrete source revision, owner, target environment, terminal run, provider
-versions, cleanup/rollback outcome and evidence reference for every closed
-gate. The workflow also retains this packet beside the qualification log and
-summary in the run artifact, so the seven-gate NO-GO state travels with each
-bounded qualification result. This is admission/tracking integrity only and
-cannot authenticate any production result or release approval.
+concrete source revision, unique record ID, owner, target environment, terminal
+run, provider versions, configuration and authority references, people,
+ordered lifecycle timestamps, measured result, cleanup/rollback outcome and
+evidence reference for every closed gate. The workflow also retains this packet
+beside the qualification log and summary in the run artifact, so the seven-gate
+NO-GO state travels with each bounded qualification result. This is
+admission/tracking integrity only and cannot authenticate any production result
+or release approval.
 
 The real composition test now emits
 `FOUNDATIONDB_LATENCY_PASS workload=composition` with operation count,
