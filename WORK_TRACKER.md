@@ -4,6 +4,28 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 stable hosted qualification dispatch (2026-09-22)
+
+The current shared tip is
+[`73534bce21368b976e0bcfb06a61fd62da853128`](https://github.com/andymac4182/mount-rs/commit/73534bce21368b976e0bcfb06a61fd62da853128),
+which contains the published active-preparation regression commit
+`bd28cf46` and the W26 ledger/tracker update. Manual workflow-dispatch run
+[`35723306179`](https://github.com/andymac4182/mount-rs/actions/runs/35723306179)
+was dispatched from `main` with exact workflow head `73534bce`. Its W26 jobs
+`ozone-tidb`, `ozone-foundationdb`, `ozone-compositions`, `ozone`, `tidb`,
+`tidb-rustfs` and `foundationdb-rustfs` were all queued at capture. This is
+the stable hosted evidence boundary; queued state is not a provider or
+performance result. The older exact-head run `35720016370` remains queued on
+the preceding runtime source and is not promoted for this current ledger
+state.
+
+W26.15, W26.14 and P14 remain open/NO-GO pending four terminal provider rows
+at the hard 1,000 IOPS/drive target, the complete aggregate/end-to-end packet,
+customer/Ozone security and Tier-1 99.99% reliability evidence, five-minute
+RPO/RTO evidence, and customer/Ozone-owned backup/DR evidence. W26 owns
+compatibility and qualification only; customers deploy Ozone and another
+stream owns releases.
+
 ## Current W26 active-preparation regression boundary (2026-09-22)
 
 Test commit

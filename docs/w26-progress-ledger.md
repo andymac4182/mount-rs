@@ -5,6 +5,35 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, stable manual hosted qualification dispatch
+
+At the 21:46 AEST recheck, `origin/main` and the detached checkout were both
+at [`73534bce21368b976e0bcfb06a61fd62da853128`](https://github.com/andymac4182/mount-rs/commit/73534bce21368b976e0bcfb06a61fd62da853128)
+(`docs(w26): record preparation-window regression coverage`). This tip contains
+the published active-preparation regression commit `bd28cf46` and the full
+W26 ledger/tracker update. A new workflow-dispatch run
+[`35723306179`](https://github.com/andymac4182/mount-rs/actions/runs/35723306179)
+was dispatched from `main` and reports exact workflow head
+`73534bce21368b976e0bcfb06a61fd62da853128`. It is now the stable hosted
+qualification boundary for this W26 state; unlike push-triggered descendants,
+it is not being treated as disposable concurrency noise.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Published source and ledger ancestry | **PASS** | `HEAD == origin/main == 73534bce`; the runtime source and regression test are present, and the ledger/tracker are published for other threads. | Continue from this shared tip; no source change is implied by the dispatch. |
+| Stable manual W26 hosted run | **PENDING — run `35723306179`** | Exact-head workflow-dispatch run `35723306179` is queued. W26 jobs `ozone-tidb` (`106730959495`), `ozone-foundationdb` (`106730959622`), `ozone-compositions` (`106730959643`), `ozone` (`106730959647`), `tidb` (`106730959786`), `tidb-rustfs` (`106730959954`) and `foundationdb-rustfs` (`106730959371`) were all queued at capture. | Wait for every provider/base/aggregate job to reach terminal state; accept only complete artifacts from this exact run. |
+| Hosted runner/provider capacity | **BLOCKED — external scheduling gate** | The stable run has no provider, performance or aggregate result yet. The older exact-head run `35720016370` also remains queued; that run is bound to the preceding runtime head and is not the acceptance boundary for this ledger state. | Allow hosted capacity and provider services to execute; do not cancel or substitute unrelated runs. |
+| W26.15 hard IOPS / aggregate / end-to-end | **OPEN — no percentage change** | No metric or aggregate artifact exists for `35723306179` yet. Require four finite provider rows at or above 1,000 IOPS/drive plus all functional, restart, cleanup, authority and lease markers. | Retrieve and classify each artifact; no averaging, skipping or queued-result promotion. |
+| Production readiness | **NO-GO** | Local gates are green, but hosted Ozone/provider evidence is non-terminal. Tier-1 99.99% reliability, five-minute RPO/RTO, customer-deployed Ozone security, customer/Ozone backup/DR and separate release-stream evidence remain open. | Continue W26 compatibility/qualification only; customers deploy Ozone and Ozone/customer owns backup/DR. |
+
+### Session time log — stable manual hosted qualification dispatch
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — hosted status recheck (21:42–21:46 AEST) | Inspected run `35720016370`; its exact-head provider/base/aggregate jobs remain queued. | ~0.1 h | Hosted capacity pending | No older queued result was promoted. |
+| 2026-09-22 — stable dispatch (21:46 AEST) | Dispatched manual run `35723306179` from current `origin/main` `73534bce`; verified exact head and all seven W26 provider/base/aggregate jobs queued. | ~0.1 h | CI/provider queue pending | The new manual run is the authoritative hosted boundary for the current ledger state. |
+| 2026-09-22 — next gate | Poll `35723306179` with bounded waits; download exact artifacts only after terminal completion, classify each provider against 1,000 IOPS/drive, then update W26.15/W26.14/P14. | ~0.5–1.5 d provisional | ~0.5–2 h provisional hosted wait | Keep production **NO-GO** until the complete packet and customer gates close. |
+
 ## Current authority override — 2026-09-22, active-preparation regression-coverage chunk
 
 This is the newest published W26 boundary. Source commit
