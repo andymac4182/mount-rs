@@ -263,13 +263,15 @@ delivery, alert acknowledgement or production approval. P05 remains open.
 
 The W08.41 implementation was committed as `c0782e3c` and published in
 reconciliation merge `e04c28a3058690d08eff4bd7dc528808d57d35cd`; concurrent
-mainline work then fast-forwarded the exact public tip to
-`65776be87f954ef65dfdc68d41687666631ddcfb`, which contains W08.41. The local
-P05 policy/test, shared-wrapper Cargo check, strict Clippy, all P01–P05
+mainline work then fast-forwarded the exact public tip through the ledger
+merge `725a4370` to `3884c194e705bf672d3d94a4aab5fc548908c9b3`, which contains
+W08.41. The local P05 policy/test, shared-wrapper Cargo check, strict Clippy, all P01–P05
 policy/test pairs, rollout/evidence controls, workflow parses and diff check
 passed. Hosted run `35720816013` for `e04c28a3` and follow-on run
-`35720853772` for `65776be8` both ended cancelled before job creation
-(`jobs=[]`), so neither is hosted qualification evidence. P05 remains open:
+`35720853772` for `65776be8`, and ledger-checkpoint run `35721816135` for
+`725a4370` ended cancelled before job creation (`jobs=[]`). Current-tip run
+`35721851677` for `3884c194` was pending at the latest observation, so no
+current-tip hosted qualification evidence exists. P05 remains open:
 the live collector, dashboards/error budget, alert delivery and acknowledgement,
 named on-call ownership, provider-aware staging evidence and production
 approval are still required.
