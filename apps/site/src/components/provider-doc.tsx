@@ -697,7 +697,7 @@ LIMIT 20;`,
     name: 'FoundationDB',
     eyebrow: 'Provider / transactional key-value store',
     maturity: 'Experimental',
-    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, shared-provider consumer selection, and bounded hosted Linux qualification now exist; production identity, recovery, capacity, platform, and release evidence remain open.',
+    maturityNote: 'Real 7.4.7 provider and RustFS composition checkpoints, protected shared lease-authority code, shared-provider consumer selection, and terminal hosted Linux plus macOS feature-compile qualification now exist; live macOS service/mount, production identity, recovery, capacity, and release evidence remain open.',
     summary: (
       <>
         FoundationDB stores the split filesystem in a volume-scoped keyspace.
@@ -910,13 +910,26 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         capacity target; identity/ACL/TLS, backup/restore, production
         capacity, multi-day operation, failover, macOS coverage, and release
         approval remain open.
-        The W07 workflow now assembles a fail-closed cross-platform packet: the
-        Linux qualification must pass alongside an independent macOS
-        native-feature compile lane before it can emit
-        <code>W07_PLATFORM_QUALIFICATION_PASS</code>. Hosted run
-        <code>35696391744</code> at exact source <code>8834abd3</code> is still
-        pending, so this adds a qualification boundary rather than macOS or
-        cross-platform acceptance.
+        The terminal cross-platform qualification packet at exact source
+        <code>a19d37b6</code> passed hosted run <code>35698630720</code>:
+        Linux, macOS FoundationDB feature compilation, and the fail-closed
+        aggregate all passed, including
+        <code>W07_PLATFORM_QUALIFICATION_PASS</code>. Linux retained the
+        durable Node/N-API, CLI/FUSE, restart, fresh-client, RustFS, heartbeat,
+        and ten-round soak packet; the bounded workload recorded 1,200
+        successful lifecycle operations at <code>467.15</code> IOPS with zero
+        timeouts or cleanup failures. Base p95/p99 was <code>25063</code>
+        microseconds at <code>208.39</code> ops/s, with ten-round soak p95/p99
+        from <code>13399</code> to <code>13906</code> microseconds. Retained
+        Linux, macOS, and aggregate artifact digests are
+        <code>0b8ead4a8cf548322f71cf2a391b036f65ebf8412e52fc7720042487f61fcb11</code>,
+        <code>19a86b0d050cdcb792e5c83e925ba0e79f9c3c72f073c21329600ed637c5b241</code>,
+        and
+        <code>a6666fe8afd143d6b525b95f917332dff6af54c1d65f913bfab44c3cc05632f8</code>.
+        This is terminal cross-platform qualification, not a live macOS
+        service/cluster/mount, clean-install, signing/package, production
+        capacity, identity/ACL, backup/restore, failover, observability, or
+        release approval.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -928,8 +941,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35692674674' },
-      { label: 'Latest W07 cross-platform qualification (pending)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696391744' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698630720' },
     ],
   },
   'aws-s3': {
@@ -1280,6 +1292,15 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         failed closed without <code>OZONE_IOPS_PASS</code>. No acceptance or
         production claim is made from this run; the next work is
         correctness-preserving variance diagnosis and requalification.
+        The latest terminal packet <code>35698854392</code> at exact source
+        <code>116e9ed4</code> passed the Ozone base checks and recorded
+        SQLite/R2 at <code>1051.976655</code> IOPS, but PGlite/R2 measured
+        <code>837.779225</code>, TiDB/R2 <code>463.080116</code>, and
+        FoundationDB/R2 <code>450.696578</code> against the unchanged hard
+        <code>1000</code>-IOPS target. Each row completed 1,200/1,200
+        operations with zero timeouts and cleanup failures; the aggregate
+        failed closed without <code>OZONE_IOPS_PASS</code>. This is diagnostic
+        provider evidence, not an Ozone acceptance or production claim.
       </>
     ),
     sources: [
@@ -1291,7 +1312,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Historical hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
       { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
-      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35691451007' },
+      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
       { label: 'Previous hosted Ozone diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35688061634' },
       { label: 'Earlier hosted Ozone diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35686340751' },
     ],
