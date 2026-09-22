@@ -274,6 +274,86 @@ impl FsDriver for StalledResponseFs {
     }
 }
 
+struct StalledWriteFs {
+    inner: MemoryFs,
+    handle: Arc<StalledWriteHandle>,
+}
+
+struct StalledWriteHandle {
+    started: Arc<AtomicBool>,
+    started_notify: Arc<Notify>,
+    released: Arc<Notify>,
+    closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl FileHandle for StalledWriteHandle {
+    async fn read(&self, _buffer: &mut [u8], _position: Option<u64>) -> FsResult<usize> {
+        Ok(0)
+    }
+
+    async fn write(&self, _buffer: &[u8], _position: Option<u64>) -> FsResult<usize> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        self.released.notified().await;
+        Ok(0)
+    }
+
+    async fn stat(&self) -> FsResult<Stats> {
+        Ok(Stats {
+            dev: 0,
+            ino: 2,
+            mode: mount_rs_core::S_IFREG,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            size: 0,
+            blksize: 1,
+            blocks: 0,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        })
+    }
+
+    async fn truncate(&self, _length: u64) -> FsResult<()> {
+        Ok(())
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl FsDriver for StalledWriteFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        if path == "/stalled-write" && flags == "w" {
+            return Ok(Arc::clone(&self.handle) as Arc<dyn FileHandle>);
+        }
+        self.inner.open(path, flags, mode).await
+    }
+}
+
 struct FailingChildStatFs {
     inner: MemoryFs,
 }
@@ -920,6 +1000,60 @@ async fn failed_streaming_put_preserves_the_written_prefix_by_contract() {
     assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
     assert_eq!(&bytes, b"partial");
     handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_streamed_put_closes_file_handle() {
+    let started = Arc::new(AtomicBool::new(false));
+    let started_notify = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(StalledWriteFs {
+        inner: MemoryFs::empty(),
+        handle: Arc::new(StalledWriteHandle {
+            started: Arc::clone(&started),
+            started_notify: Arc::clone(&started_notify),
+            released: Arc::new(Notify::new()),
+            closed: Arc::clone(&closed),
+        }),
+    });
+    let session = Arc::new(WebdavSession::new(
+        Arc::clone(&fs) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    ));
+    let task_session = Arc::clone(&session);
+    let task = tokio::spawn(async move {
+        task_session
+            .handle_request_stream(
+                WebdavRequestHead {
+                    method: "PUT".to_owned(),
+                    target: "/stalled-write".to_owned(),
+                    headers: Default::default(),
+                },
+                FailingRequestBody::new(),
+            )
+            .await
+    });
+
+    timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            started_notify.notified().await;
+        }
+    })
+    .await
+    .expect("streamed PUT write did not start");
+
+    task.abort();
+    match task.await {
+        Err(error) => assert!(error.is_cancelled()),
+        Ok(_) => panic!("cancelled PUT task returned a response"),
+    }
+    timeout(Duration::from_secs(1), async {
+        while !closed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled streamed PUT did not close its file handle");
 }
 
 #[tokio::test]

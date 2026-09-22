@@ -1216,6 +1216,13 @@ passed, and formatting/diff checks passed. This is separate from native server
 shutdown and the N-API body's explicit close seam; hosted/provider,
 power-loss, durable-lock, crash/restart, and stronger same-resource ordering
 remain open.
+Mutation-side provider handles now use the same cancellation-safe close
+boundary: streamed `PUT` and shared file-transfer helpers schedule `close` if
+their request future is abandoned during body polling or provider I/O. The
+stalled-write regression passed, the full WebDAV target passed 35/35, and
+warning-denied Clippy passed. This is separate from response-body cancellation
+and native server shutdown; hosted/provider, power-loss, durable-lock,
+crash/restart, and stronger same-resource ordering remain open.
 The shared WebDAV lock table now fails closed on mutex poisoning across request
 paths that inspect, create, refresh, unlock, or enforce locks; a poisoned table
 returns a `500` server error instead of appearing empty. Public lock snapshots
@@ -6542,6 +6549,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 WebDAV streamed mutation-handle cancellation` | Close mutation-side provider handles when streamed PUT or shared file-transfer futures are cancelled during body polling or provider I/O | Full WebDAV target 35/35, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV poisoned lock-table fail-closed behavior` | Propagate WebDAV lock-table mutex poisoning as a server error across lock-dependent request paths, while retaining poisoned lock state for public snapshots | Full WebDAV target 34/34, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV transport-neutral body cancellation` | Close the provider file handle when a direct `WebdavBody::into_bytes()` consumer is cancelled during a pending response read | Full WebDAV target 33/33, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV streamed-response shutdown lifecycle` | Make streamed file response tasks observe server shutdown, participate in bounded drain, and close provider handles after stalled-read cancellation | Full WebDAV target 32/32, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |

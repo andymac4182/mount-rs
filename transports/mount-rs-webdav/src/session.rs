@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use mount_rs_core::{ErrorCode, FileType, FsDriver, FsError, MkdirOptions, Stats};
+use mount_rs_core::{ErrorCode, FileHandle, FileType, FsDriver, FsError, MkdirOptions, Stats};
 
 use crate::constants::{
     ALLOW_HEADER, COLLECTION_CONTENT_TYPE, DAV_COMPLIANCE, DAV_NS, MAX_DIRECTORY_ENTRIES,
@@ -61,6 +61,55 @@ impl WebdavRequestBody for BytesRequestBody {
         _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Bytes, WebdavError>>> {
         Poll::Ready(self.body.take().map(Ok))
+    }
+}
+
+/// Keeps a mutation-side provider handle closeable when a request future is
+/// cancelled during a body read or provider write. The pinned WebDAV session
+/// uses `try/finally` around the same write loop; an async `Drop` equivalent is
+/// needed here because a cancelled future cannot await its normal close path.
+struct MutationFileCloseGuard {
+    handle: Option<Arc<dyn FileHandle>>,
+}
+
+impl MutationFileCloseGuard {
+    fn new(handle: Arc<dyn FileHandle>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn handle(&self) -> Arc<dyn FileHandle> {
+        Arc::clone(
+            self.handle
+                .as_ref()
+                .expect("mutation file close guard handle"),
+        )
+    }
+
+    async fn close(&mut self) -> Result<(), FsError> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        let result = handle.close().await;
+        if result.is_ok() {
+            self.handle = None;
+        }
+        result
+    }
+}
+
+impl Drop for MutationFileCloseGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let _ = handle.close().await;
+        });
     }
 }
 
@@ -538,7 +587,7 @@ impl WebdavSession {
         // change that supported protocol contract and would require a
         // stronger atomic-replace guarantee than FsDriver exposes.
         let cap = self.options.max_body_bytes;
-        let mut handle = None;
+        let mut close_guard = None;
         let mut written = 0_u64;
         let result: Result<(), WebdavError> = async {
             while let Some(chunk) = next_body_chunk(body).await {
@@ -554,10 +603,15 @@ impl WebdavSession {
                         refuse(413).with_message("the PUT body exceeds its byte budget"),
                     ));
                 }
-                if handle.is_none() {
-                    handle = Some(self.driver.open(path, "w", 0o666).await?);
+                if close_guard.is_none() {
+                    close_guard = Some(MutationFileCloseGuard::new(
+                        self.driver.open(path, "w", 0o666).await?,
+                    ));
                 }
-                let file = handle.as_ref().expect("PUT handle opened above");
+                let file = close_guard
+                    .as_ref()
+                    .expect("PUT handle opened above")
+                    .handle();
                 let mut offset = 0_usize;
                 while offset < chunk.len() {
                     let position = written.checked_add(offset as u64).ok_or_else(|| {
@@ -575,15 +629,17 @@ impl WebdavSession {
                     WebdavError::from(FsError::new(ErrorCode::Eio).with_syscall("write"))
                 })?;
             }
-            if handle.is_none() {
+            if close_guard.is_none() {
                 // An empty request still creates or truncates the resource.
-                handle = Some(self.driver.open(path, "w", 0o666).await?);
+                close_guard = Some(MutationFileCloseGuard::new(
+                    self.driver.open(path, "w", 0o666).await?,
+                ));
             }
             Ok::<(), WebdavError>(())
         }
         .await;
-        let close = match handle {
-            Some(handle) => handle.close().await.map_err(WebdavError::from),
+        let close = match close_guard.as_mut() {
+            Some(guard) => guard.close().await.map_err(WebdavError::from),
             None => Ok(()),
         };
         match (result, close) {
@@ -594,7 +650,9 @@ impl WebdavSession {
     }
 
     async fn write_file(&self, path: &str, body: &[u8]) -> Result<(), WebdavError> {
-        let handle = self.driver.open(path, "w", 0o666).await?;
+        let mut close_guard =
+            MutationFileCloseGuard::new(self.driver.open(path, "w", 0o666).await?);
+        let handle = close_guard.handle();
         let result = async {
             let mut position = 0_u64;
             while position < body.len() as u64 {
@@ -610,7 +668,7 @@ impl WebdavSession {
             Ok::<(), FsError>(())
         }
         .await;
-        let close = handle.close().await;
+        let close = close_guard.close().await;
         result.and(close).map_err(WebdavError::from)
     }
 
@@ -986,20 +1044,24 @@ impl WebdavSession {
         destination: &str,
         size: u64,
     ) -> Result<(), WebdavError> {
-        let from = self.driver.open(source, "r", 0).await?;
-        let to = match self.driver.open(destination, "w", 0o666).await {
-            Ok(handle) => handle,
+        let mut from = MutationFileCloseGuard::new(self.driver.open(source, "r", 0).await?);
+        let from_handle = from.handle();
+        let mut to = match self.driver.open(destination, "w", 0o666).await {
+            Ok(handle) => MutationFileCloseGuard::new(handle),
             Err(error) => {
                 let _ = from.close().await;
                 return Err(error.into());
             }
         };
+        let to_handle = to.handle();
         let result = async {
             let mut position = 0_u64;
             let mut buffer = vec![0_u8; self.options.read_chunk_bytes.max(1)];
             while position < size {
                 let wanted = (size - position).min(buffer.len() as u64) as usize;
-                let count = from.read(&mut buffer[..wanted], Some(position)).await?;
+                let count = from_handle
+                    .read(&mut buffer[..wanted], Some(position))
+                    .await?;
                 if count == 0 {
                     return Err(FsError::new(ErrorCode::Eio)
                         .with_syscall("read")
@@ -1012,7 +1074,7 @@ impl WebdavSession {
                 }
                 let mut written = 0;
                 while written < count {
-                    let n = to
+                    let n = to_handle
                         .write(&buffer[written..count], Some(position + written as u64))
                         .await?;
                     if n == 0 || n > count - written {
