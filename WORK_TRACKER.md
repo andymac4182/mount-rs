@@ -3570,11 +3570,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `32b1a229cd195ad90df592437ccfe10d88cb4804` was freshly
-  reverified after concurrent WebDAV mounted-restart cleanup correction,
-  chunked lease-release fix, 9P synchronous mount inspection, FoundationDB
-  qualification-harness updates, S3 conditional-put/session-concurrency
-  gateway coverage, N-API
+  Tested source base `a99b3a0958855069a41770f824330f82f02f0297` was freshly
+  reverified after 9P direct-probe absence-field normalization and WebDAV
+  shared-resource ordering qualification, plus concurrent WebDAV
+  mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
+  mount inspection, FoundationDB qualification-harness updates, S3
+  conditional-put/session-concurrency gateway coverage, N-API
   provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P bounded-reader,
   9P frame-assembler and WebDAV native-concurrency, R2 upload coalescing, N-API
   declaration/P9 normalization, 9P codec, S3-session-concurrency,
@@ -3587,7 +3588,8 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
-  W08-P01–P09.
+  W08-P01–P09. The later reconciled `HEAD` `dd69b6b2` changed only W05/S3
+  documentation and is source-equivalent to this qualification.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed

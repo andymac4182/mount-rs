@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 12:41 AEST**
+Status snapshot: **2026-09-22 12:49 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -9,31 +9,32 @@ pointer synchronization before the live production-boundary audit was
 `f1362442`. The audit documentation was committed as `fd29a297`, reconciled
 with concurrent mainline work and pushed in public merge tip `a40f5b8d`.
 The current tested source base is merged tip
-`32b1a229cd195ad90df592437ccfe10d88cb4804`, which passed a fresh full locked
-workspace test and strict Clippy run after the WebDAV mounted-restart
-cleanup correction, chunked lease-release fix, 9P synchronous mount inspection,
-FoundationDB qualification-harness updates,
-S3 conditional-put/session-concurrency gateway coverage,
-N-API provider-network cleanup, RustFS/Ozone lockfile refreshes,
-9P bounded-reader fix, 9P frame-assembler, WebDAV native-concurrency, R2
-upload coalescing, N-API declaration/P9 normalization, 9P codec,
+`a99b3a0958855069a41770f824330f82f02f0297`, which passed a fresh full locked
+workspace test and strict Clippy run after the 9P direct-probe absence-field
+normalization and WebDAV shared-resource ordering qualification, in addition
+to the preceding WebDAV mounted-restart cleanup correction, chunked
+lease-release fix, 9P synchronous mount inspection, FoundationDB
+qualification-harness updates, S3 conditional-put/session-concurrency gateway
+coverage, N-API provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P
+bounded-reader fix, 9P frame-assembler, WebDAV native-concurrency, R2 upload
+coalescing, N-API declaration/P9 normalization, 9P codec,
 S3-session-concurrency, session-parity, chunked-durability, FUSE, S3-test and
 WebDAV updates. This is source-health evidence only; provider/native rows
 remain explicit opt-in skips. Changed N-API JavaScript files and package JSON
 also passed static checks, while full local N-API runtime remains blocked by
-absent optional binding artifacts. The earlier public `9b2dabd7` added only a
-WebDAV N-API parity test file whose syntax is clean, while its local runtime is
-blocked by absent optional N-API binding artifacts. This does not close any
-production gate.
+absent optional binding artifacts. The current reconciled `HEAD`
+`dd69b6b29a48fcd34d57620ff72608d4fb6e0822` is source-equivalent to that
+qualification because the subsequent W05/S3 merge changed documentation only.
+This does not close any production gate.
 The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
 mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
 tip `a921fe76`; the subsequent pointer synchronization was published in
-`ff29dad7`. The current source qualification is merged tip `32b1a229`; the
-source-equivalent ledger and reconciliation history were published in public
-ancestry through tip `7cba89a5`, with exact local/remote equality, public-ref
-and ancestry verification at **12:41 AEST**. This is the latest successful
-publication check before the read-only production-boundary audit below.
+`ff29dad7`. The current source qualification is merged tip `a99b3a09`; the
+current reconciled documentation checkpoint is `dd69b6b2`. The latest
+successful publication check before this ledger refresh was verified at
+**12:41 AEST**; the next normal push will publish this source/evidence pointer
+update.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
 `77114d4d`, `229a9cd5`,
 `b7d77432`, `be721a20`,
@@ -455,10 +456,11 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 12:41 AEST
+### Latest evidence refresh — 2026-09-22 12:49 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
+| Current tested merged source base `a99b3a0958855069a41770f824330f82f02f0297`, reconciled docs-only `HEAD` `dd69b6b29a48fcd34d57620ff72608d4fb6e0822` | PASS — source-health and tracking controls; production remains NO-GO | The exact source tree at `a99b3a09` passed the full locked workspace test and strict Clippy with `-D warnings`; changed 9P N-API JavaScript syntax, package JSON, all four W08 validators/tests and `git diff --check` also passed. The later W05/S3 merge changed only documentation, so `dd69b6b2` is source-equivalent. Full provider/native rows remain explicit opt-in skips, and the machine-readable packet remains `decision=NO-GO gates=9 closed=0 evidence_records=0`. | Push this reconciled ledger checkpoint normally, then retain the explicit P01–P09 blockers: provider services/credentials, native hosts, production topology, secret/IAM, DR, capacity, security, drills, protected candidate release, canary, rollback and named approval. |
 | Current tested merged source base `f68106cfcc64f3c7e4c90b2c413fcc393824a526` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact merged source after the S3 conditional-put/session-concurrency changes; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The changed N-API S3-session-concurrency script passed `node --check`, package JSON parsed successfully, and the four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; `git diff --check` passed. The later typed-reader/W26 merge changed documentation only and is source-equivalent. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
 | Current tested merged source base `541365432f4400a2309002a138cfbea75f26d44b` | PASS — full local source-health and W08 tracking verification | After merging the chunked lease-release and 9P synchronous mount-inspection changes, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing and provider/native rows remaining explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0; changed N-API 9P files passed `node --check`, package JSON parsed, all four W08 rollout/evidence commands passed, and `git diff --check` passed. The subsequent WebDAV hosted-result merge changed documentation only and is source-equivalent to this tested tree. This is source-health and tracking-control evidence only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; retain the provider/native and production-like boundaries until their required services, credentials, owners and protected release environment exist. |
 | Current tested merged source base `32b1a229cd195ad90df592437ccfe10d88cb4804` | PASS — full local source-health and W08 tracking verification | After merging the FoundationDB qualification-harness updates, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing and provider/native rows remaining explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0; `bash -n scripts/test-foundationdb.sh` passed, all four W08 rollout/evidence commands passed, and `git diff --check` passed. This is source-health and tracking-control evidence only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; retain the provider/native and production-like boundaries until their required services, credentials, owners and protected release environment exist. |
@@ -620,6 +622,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 12:30–12:35 AEST | Merged concurrent chunked lease-release and 9P synchronous mount-inspection source changes, reran the full locked workspace test and strict Clippy, syntax-checked changed N-API files, parsed package JSON, reran all W08 rollout/evidence suites, and merged the later WebDAV hosted-result documentation as source-equivalent. | ~0.2 engineer-day | ~1m30s test/Clippy/policy/static execution plus ~2 min fetch/merge reconciliation | The exact merged source is test-, lint- and tracking-control clean; provider/native prerequisites and production P01–P09 gates remain external. The source qualification is ready for publication and production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 12:35–12:38 AEST | Merged the current FoundationDB qualification-harness source, reran the full locked workspace test and strict Clippy, checked the new harness with `bash -n`, reran all W08 rollout/evidence suites, and ran diff checks. | ~0.15 engineer-day | ~1m30s test/Clippy/policy execution plus mainline reconciliation | The exact merged source is test-, lint- and tracking-control clean; the provider/native and production boundaries remain explicit. W08 production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 12:38–12:41 AEST | Verified public checkpoint `803db689`, merged the subsequent W01/W04 documentation-only public tip `7cba89a5`, verified `refs/heads/main`, and refreshed the read-only W08 workflow/environment/release/candidate-tag audit. | ~0.08 engineer-day | ~8s public-ref/API observation plus mainline reconciliation | The tested FoundationDB-merged W08 source remains publicly integrated through a source-equivalent tip; the production API/environment/release boundary remains externally blocked. P01–P09 stay open with zero evidence records and production remains NO-GO. |
+| 2026-09-22 12:41–12:49 AEST | Merged the 9P direct-probe absence-field normalization and WebDAV shared-resource ordering source updates, ran the full locked workspace test and strict Clippy on exact merged source `a99b3a09`, syntax-checked the changed N-API files, parsed package JSON, reran all four W08 rollout/evidence validators/tests, and merged the later W05/S3 documentation-only tip as source-equivalent `dd69b6b2`. | ~0.15 engineer-day | ~2m full test/Clippy/static/policy execution plus mainline reconciliation; the initial shared Cargo-target permission retry required elevated access | The merged source is test-, lint- and tracking-control clean; provider/native prerequisites and all P01–P09 production gates remain external. This qualification is ready for normal publication; production remains NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
