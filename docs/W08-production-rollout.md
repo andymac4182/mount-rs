@@ -162,13 +162,13 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Public source base `6797a2d8c5725c5e32eb92a63f143ebc35ea4890` was freshly
-reverified locally after the concurrent 9P frame-assembler, WebDAV native-
-concurrency, R2 upload coalescing, N-API declaration/P9 normalization, 9P
-codec, S3-session-concurrency, session-parity, chunked durability, FUSE,
-S3-test, WebDAV and W05 provider-matrix lockfile updates: the full locked
-workspace test suite exited 0 and strict workspace Clippy with `-D warnings`
-exited 0.
+Merged source base `17140d53bf25ea677085f1505ad94d5688dc3708` was freshly
+reverified locally after the concurrent 9P bounded-reader fix, 9P
+frame-assembler, WebDAV native-concurrency, R2 upload coalescing, N-API
+declaration/P9 normalization, 9P codec, S3-session-concurrency, session-parity,
+chunked durability, FUSE, S3-test, WebDAV and W05 provider-matrix lockfile
+updates: the full locked workspace test suite exited 0 and strict workspace
+Clippy with `-D warnings` exited 0.
 The four W08 rollout/evidence policy commands also passed with 36 functional
 items, 9 open production gates, 7 rollout tests and 11 evidence tests; the
 packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
