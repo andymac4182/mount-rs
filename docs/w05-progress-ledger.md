@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 17:35 AEST (2026-09-22 07:35 UTC)
+Last updated: 2026-09-22 17:53 AEST (2026-09-22 07:53 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,9 +10,9 @@ hosted or native gate.
 ## Overall position
 
 Current shared-main observation: remote `origin/main` is
-`f94b53d822a844c52e5d5615fe375de3da6843b3` (`f94b53d8`) at this capture;
-this ledger update must be safely rebased over any intervening mainline changes
-before publication. The deliberately stable W05 hosted-status candidate is
+`6c868cb487f0ab13359d3fd79fe26737d51db164` (`6c868cb4`) at this capture;
+this ledger update is based on that exact fetched mainline and must be safely
+rebased over any later concurrent changes before publication. The deliberately stable W05 hosted-status candidate is
 `25e275ab6d4f918be72dcd8f62a5baca6bbcd251` and its
 underlying W05 runtime surface is the rejected-request-body drain fix
 `d870f900` plus the structural-driver N-API, PGlite autocommit, S3 pipelining,
@@ -63,6 +63,32 @@ upstream `1200 passed / 82 skipped`, and all 40 five-seed/eight-backend
 trace combinations at 621 operations. Provider credentials, live R2, TiDB /
 RustFS, FoundationDB opt-in, and privileged native mounts remain explicit
 skips rather than failures.
+
+### Latest exact local qualification packet (2026-09-22 17:53 AEST)
+
+The repaired immutable candidate branch
+`andymac4182/c/w05-production-candidate-20260922b` is pinned to exact
+`87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d` (`87f3cdf0`). On that exact
+checkout, the shared-target Rust qualification passed formatting, `git
+diff --check`, the full locked workspace test suite, and strict workspace
+Clippy with `-D warnings`. The optimized release N-API build completed
+successfully in 3m31s. The complete pinned-oracle Node/N-API suite passed
+typecheck, SDK/CLI, WebDAV durability/concurrency, S3 restart and scope,
+FUSE/NFS/9P codec and differential coverage, Rust-backed sessions, host
+restart parity, distribution/export checks, and artifact aggregation; the
+suite produced only explicit capability/provider skips for unset R2/PGlite/
+FoundationDB credentials and opt-in privileged mounts.
+
+The same exact checkout passed `scripts/test-pglite.sh`: Rust SDK `6 pass /
+3 skip / 0 fail`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200 passed / 82
+skipped`, and all 40 five-seed/eight-backend trace combinations at 621
+operations each against MountX oracle revision
+`85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`. The packet includes real PGlite
+reconnect/versioning/VFS/lifecycle/split-store/FUSE, backup/restore rollback,
+cleanup-failure fail-closed, and chunked integration checks. No R2 secret,
+AWS value, or Keychain item was read. This is a complete local
+implementation/package/SDK/CLI qualification, not hosted/provider/native
+release acceptance; production remains **NO-GO**.
 
 Hosted candidate runs, all on the same exact SHA at the capture boundary,
 are: CI `35694325175` terminal `failure`; Fault injection `35694329117` successful; W04
@@ -370,6 +396,7 @@ gates therefore remain actionable work in this session.
 | W05.41 Reconcile terminal candidate CI and release-artifact evidence | Hosted CI failure classification + release control | Complete for terminal classification; production gate remains open | 100% evidence classification / 68% overall closure | Same-SHA candidate CI `35694325175` is terminal `failure` at `25e275ab`. Rust/Node/NFS/WebDAV/9P/Ozone base/RustFS/FoundationDB-RustFS/HTTP-observability/aggregate-native jobs passed. TiDB `106637769088` and TiDB/RustFS `106637769305` failed the stale explicit-COMMIT failure-injection assertion; Ozone/TiDB `106637769210` and Ozone/FoundationDB `106637769419` failed the hard IOPS target with lifecycle correctness and cleanup otherwise green; W26 evidence `106648759164` failed the source-clean attestation with `dirtyEntryCount=1`; native FUSE `106637769402` was cancelled after its rootless file-operation step failed. W08 attestation-enabled run `35697156046` remains terminal-successful with repository attestation IDs `49141286` and `49141266`. | Build a new immutable candidate from shared `f94b53d8`, rerun the full CI matrix and W26 evidence after the staged N-API build/TiDB harness fixes, obtain a passing native-FUSE result or record a supported-scope exclusion, and retain terminal provider performance evidence. CI is not acceptance while any job is failed, cancelled, skipped, or non-terminal. | 1–2 h active classification/follow-up; 2–8 h hosted/provider/native wait | Ozone IOPS capacity, TiDB/Ozone/FoundationDB service startup, native runner/kernel behavior, AWS security/OIDC, R2 cap/reset, package/signing, support scope, and W20.6 approval remain external boundaries. |
 
 | W05.42 Repair and rerun the production candidate after terminal CI failures | Implementation + hosted CI/native/provider qualification | Implementation repair pushed; immutable hosted rerun pending | 35% | Shared `origin/main` `f94b53d8` contains the TiDB ambiguous-publication proxy fix and the W26 out-of-tree N-API build with a source-clean assertion. Local `./scripts/cargo-shared test -p mount-rs-tidb --tests --locked` passed 8 unit tests; the two real-service tests remain correctly ignored without TiDB. `node benchmarks/storage/test.mjs`, workflow YAML parsing, formatting, and `git diff --check` passed. No R2 credential was read or used. | Create a new stable candidate branch from the repaired mainline; run exact-SHA local full Rust/Clippy/N-API/Node SDK/CLI/PGlite/packaging qualification; dispatch CI, Fault, W04, W07, W08, Native 9P, and attestation workflows; classify every terminal result; close hard Ozone IOPS and native-FUSE gates or record explicit support-scope exclusions; then run W20.6. | 2–6 h active engineering/release work; 4–16 h hosted/provider/platform wait | Live TiDB/Ozone/FoundationDB services, runner/kernel privileges, AWS protected OIDC inputs, R2 UTC-month reset and token rotation, package registries/signing, product support scope, and final-audit approval are external/provider gates. |
+| W05.43 Qualify the repaired immutable candidate across Rust, Node, SDK, CLI, N-API, PGlite, and oracle paths | Local release qualification + release control | Complete locally; same-SHA hosted/provider/native/package closure open | 100% local / 68% overall closure | Exact candidate branch `andymac4182/c/w05-production-candidate-20260922b` at `87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d` passed format/diff checks, the full locked Rust workspace, strict workspace Clippy, optimized release N-API build, the complete pinned-oracle Node/N-API suite, and `scripts/test-pglite.sh`. Node coverage passed SDK/CLI, WebDAV, S3 restart/scope, FUSE/NFS/9P differential paths, Rust-backed sessions, host restart, distribution, and artifact aggregation. The PGlite packet reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 seeded traces; real PGlite reconnect/versioning/VFS/lifecycle/split-store/FUSE and backup/restore rollback passed. R2, AWS, TiDB/RustFS, FoundationDB opt-in, and privileged native mount rows remained explicit skips or security/platform gates; no secret or Keychain value was read. | Dispatch the immutable candidate through CI, Fault, W04, W07, W08, Native 9P, release-target attestation, and package/provenance workflows; retain terminal same-SHA results; rerun live R2 only after the UTC reset and security-approved token rotation; provision AWS through security/OIDC; close Ozone IOPS, native-FUSE, advertised-platform/package, support-scope, and W20.6 gates. | 0 h active implementation; 1–3 h release coordination plus 4–16 h hosted/provider/native/platform wait | Local qualification does not close hosted runner/kernel behavior, live provider services, R2 budget/reset, AWS protected inputs, registries/signing, native privileges, product scope, or final-audit ownership. |
 
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
@@ -432,6 +459,33 @@ base/compositions, and aggregate-native. These successes do not override the
 failed/cancelled release gates. The repair commit `f94b53d8` is already on
 `origin/main`; the next production candidate must be created from that exact
 repaired mainline and kept immutable while the hosted matrix runs.
+
+### W05.43 exact local qualification evidence (2026-09-22 17:53 AEST)
+
+The new immutable candidate at `87f3cdf0` is locally complete. The Rust
+packet used the repository's shared Cargo target and passed the locked
+workspace test suite and strict Clippy; formatting and `git diff --check`
+were also green. The optimized N-API build completed without modifying the
+source checkout. The full Node/N-API suite then passed its typecheck,
+factory/lifecycle, WebDAV, S3, FUSE/9P/NFS, codec differential, CLI,
+unstorage, host-restart, distribution, and artifact-aggregation phases.
+
+The PGlite harness completed all local service and matrix phases. Its compact
+acceptance packet was:
+
+| Surface | Result | Boundary |
+| --- | --- | --- |
+| Rust SDK | `6 pass / 3 skip / 0 fail` | Three R2 rows skipped because protected credentials were absent |
+| Node SDK | `5 pass / 3 skip / 0 fail` | R2 and TiDB/RustFS rows skipped because protected services/credentials were absent |
+| Rust and Node CLI | `12 pass / 2 skip / 0 fail` | Live PGlite+R2 runtime remained an explicit provider gate |
+| Upstream compatibility | `1200 passed / 82 skipped` | Skips are oracle-classified unsupported capabilities |
+| Seeded trace parity | `40/40 pass`, `621` operations each | Five seeds × eight local backends, oracle `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8` |
+
+This closes the candidate's local implementation and package evidence only.
+The hosted candidate rerun, AWS security/OIDC inputs, post-reset live R2,
+Ozone hard IOPS, native FUSE, platform/package publication, support scope,
+and W20.6 decision remain open and are tracked as separate hosted/native/
+provider/release gates.
 
 
 ### W05.36 current-tip evidence (2026-09-22 15:43 AEST)
@@ -946,6 +1000,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 07:35–07:53 UTC (17:35–17:53 AEST) | Built the optimized N-API artifact and ran the complete pinned-oracle Node/N-API suite plus `scripts/test-pglite.sh` on immutable candidate `87f3cdf0` | Local production qualification / SDK-CLI-package gate | Full local packet passed: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces. Provider credentials, live R2, TiDB/RustFS, FoundationDB opt-in, and privileged native mounts remained explicit skips or external gates. |
 | 2026-09-22 11:46–11:59 | Completed the exact integrated `6797a2d8` current-tip packet after the 9P/WebDAV successor: full Rust workspace, strict Clippy, optimized N-API, complete Node suite, real PGlite/SDK/CLI/upstream/oracle matrix | Local production qualification | Full packet passed with Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces. The isolated pinned oracle required a frozen no-lifecycle install before the clean rerun; no repository credentials or Keychain access were used. |
 | 2026-09-22 11:59–12:02 | Refreshed same-SHA hosted Actions and reconciled moving shared mainline | Hosted evidence / concurrent-main reconciliation | On `6797a2d8`, W04 `35677127007`, fault `35677126925`, W08 policy `35677126941`, and W08 targets `35677126934` succeeded; R2 `35677126924` failed and CI `35677127048` was cancelled, so no hosted release packet was promoted. Origin advanced to `819c663e`, which is the next qualification target. |
 | 2026-09-22 11:30–11:45 | Re-ran the exact `2d2b66ef` PGlite packet after regenerating the standalone provider-matrix lock for the R2 `tokio` dependency | Local release qualification / lock repair | Full packet passed: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces. The initial stale-lock refusal is retained as a reproducibility defect found and repaired; provider/native opt-ins remain explicit skips. |
