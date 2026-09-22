@@ -3659,6 +3659,60 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    async fn failed_graceful_unmount_restores_retryable_active_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let helper = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-retry-unmount-{}-{suffix}",
+            std::process::id()
+        ));
+        let script = b"#!/bin/sh\nmarker=\"$0.marker\"\nif [ -e \"$marker\" ]; then exit 0; fi\n: > \"$marker\"\nprintf retryable-failure >&2\nexit 7\n";
+        std::fs::write(&helper, script).expect("write retry helper");
+        let mut permissions = std::fs::metadata(&helper)
+            .expect("retry helper metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&helper, permissions).expect("make retry helper executable");
+
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-retry-unmount-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(helper.clone()),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-retry-unmount-test"),
+        };
+
+        let first = mount.unmount().await;
+        assert!(first.is_err(), "first helper attempt should fail");
+        assert!(state.mounted.load(Ordering::Acquire));
+        assert!(state.active.load(Ordering::Acquire));
+        assert!(!state.unmount_started.load(Ordering::Acquire));
+
+        let second = mount.unmount().await;
+        assert!(
+            second.is_ok(),
+            "retry helper attempt should succeed: {second:?}"
+        );
+        assert!(!state.mounted.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+
+        let _ = std::fs::remove_file(&helper);
+        let _ = std::fs::remove_file(helper.with_extension("marker"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
     async fn received_device_descriptor_is_close_on_exec_and_async_safe() {
         use std::fs::File;
         use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd};
