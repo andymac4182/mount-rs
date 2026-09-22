@@ -5,7 +5,8 @@
 //! so the probe accepts that platform's native helper without pretending the
 //! oracle has a macOS mount suite. This file is ignored and environment-gated;
 //! ordinary tests never ask the host kernel to mount anything. The explicit
-//! probe covers one round trip plus eight concurrent native-client I/O pairs.
+//! probe covers one round trip, eight concurrent native-client I/O pairs, and
+//! a server-close/remount restart cycle.
 
 use std::ffi::OsString;
 use std::fs;
@@ -409,7 +410,7 @@ async fn native_concurrent_round_trips(mountpoint: &Path, driver: &Loopback) -> 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires explicit native WebDAV prerequisites and host mount privileges"]
-async fn native_webdav_mount_probe_round_trip_and_concurrency() {
+async fn native_webdav_mount_probe_round_trip_concurrency_and_restart() {
     assert_eq!(
         std::env::var("MOUNT_RS_WEBDAV_NATIVE_TEST").ok().as_deref(),
         Some("1"),
@@ -478,8 +479,56 @@ async fn native_webdav_mount_probe_round_trip_and_concurrency() {
     } else {
         Err("skipped native concurrency after the basic round trip failed".to_owned())
     };
-    let unmount = guard.unmount().await;
-    let close = server.close().await;
+    // Exercise the adverse ordering explicitly: close the HTTP server while
+    // the native client still owns its mount, then unmount, relisten, remount,
+    // and verify that the same driver contents remain available.
+    let close_while_mounted = server.close().await;
+    let unmount_after_close = guard.unmount().await;
+    let close_retry = if close_while_mounted.is_err() {
+        Some(server.close().await)
+    } else {
+        None
+    };
+    let close_after_teardown =
+        close_while_mounted.is_ok() || close_retry.as_ref().is_some_and(|result| result.is_ok());
+    let restart_listen = if close_after_teardown && unmount_after_close.is_ok() {
+        Some(server.listen().await)
+    } else {
+        None
+    };
+    let restart_mount = if restart_listen.as_ref().is_some_and(|result| result.is_ok()) {
+        let result = run_command(
+            &guard.client.mount,
+            &mount_args(
+                &guard.client,
+                &format!("{}/", server.url()),
+                &mountpoint,
+                &config,
+            ),
+        )
+        .await;
+        let active = wait_until_mounted(&guard.client, &mountpoint).await;
+        if active {
+            guard.active = true;
+        }
+        Some(match result {
+            Ok(result) if result.status.success() && active => Ok(()),
+            Ok(result) => Err(format!(
+                "native WebDAV restart mount did not become active ({}): {}",
+                result.status, result.output
+            )),
+            Err(error) => Err(format!("native WebDAV restart mount failed: {error}")),
+        })
+    } else {
+        None
+    };
+    let restart_round_trip = if restart_mount.as_ref().is_some_and(|result| result.is_ok()) {
+        Some(native_round_trip(&mountpoint, &loopback).await)
+    } else {
+        None
+    };
+    let unmount_after_restart = guard.unmount().await;
+    let final_close = server.close().await;
     let remove = fs::remove_dir(&mountpoint);
     assert!(
         round_trip.is_ok(),
@@ -489,7 +538,39 @@ async fn native_webdav_mount_probe_round_trip_and_concurrency() {
         concurrent.is_ok(),
         "native WebDAV concurrent I/O failed: {concurrent:?}"
     );
-    assert!(unmount.is_ok(), "native WebDAV unmount failed: {unmount:?}");
-    assert!(close.is_ok(), "WebDAV server close failed: {close:?}");
+    assert!(
+        close_while_mounted.is_ok(),
+        "WebDAV server close while mounted failed: {close_while_mounted:?}"
+    );
+    assert!(
+        unmount_after_close.is_ok(),
+        "native WebDAV unmount after server close failed: {unmount_after_close:?}"
+    );
+    assert!(
+        close_after_teardown,
+        "WebDAV server did not close after mounted teardown: initial={close_while_mounted:?}, retry={close_retry:?}"
+    );
+    assert!(
+        restart_listen.as_ref().is_some_and(|result| result.is_ok()),
+        "WebDAV server relisten after mounted teardown failed: {restart_listen:?}"
+    );
+    assert!(
+        restart_mount.as_ref().is_some_and(|result| result.is_ok()),
+        "native WebDAV remount after server restart failed: {restart_mount:?}"
+    );
+    assert!(
+        restart_round_trip
+            .as_ref()
+            .is_some_and(|result| result.is_ok()),
+        "native WebDAV post-restart I/O failed: {restart_round_trip:?}"
+    );
+    assert!(
+        unmount_after_restart.is_ok(),
+        "native WebDAV post-restart unmount failed: {unmount_after_restart:?}"
+    );
+    assert!(
+        final_close.is_ok(),
+        "WebDAV final server close failed: {final_close:?}"
+    );
     assert!(remove.is_ok(), "mountpoint cleanup failed: {remove:?}");
 }

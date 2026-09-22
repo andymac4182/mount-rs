@@ -28,7 +28,10 @@ ordinary user on both macOS and Linux. They are protocol tests; they do not
 claim native mount verification. `tests/native_mount.rs` is the separate,
 ignored harness corresponding to the oracle's `test/webdav/mount.test.ts`.
 After the basic round trip it also performs eight concurrent native-client
-write/read pairs and verifies each exact byte payload through the driver.
+write/read pairs and verifies each exact byte payload through the driver. It
+then closes the server while the native mount is still active, unmounts with a
+bounded command, relistens, remounts the same driver, and verifies a post-
+restart round trip.
 Run it only with:
 `MOUNT_RS_WEBDAV_NATIVE_TEST=1 cargo test -p mount-rs-webdav --test native_mount -- --ignored --nocapture`.
 It hard-fails
