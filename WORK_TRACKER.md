@@ -1128,6 +1128,14 @@ read-only hosted snapshot found CI `35672738319` and W08 release targets/policy
 S3 `35672738306` in progress, and Live Cloudflare R2 `35672738332` failed; W04
 policy `35672738331` succeeded and unrelated Native 9P `35672738401` was in
 progress. No hosted WebDAV PASS is claimable from that snapshot.
+The barrier-enabled tree was then requalified through the rebuilt release
+N-API addon: generated typecheck, the isolated host-enabled WebDAV server
+phase, lifecycle, 64-pair direct-session and network/auth/streaming probes,
+NodeFs/SQLite orderly reopen, provider direct/network concurrency, and
+NodeFs/SQLite crash plus in-flight streamed-PUT recovery all passed. This is
+local rebuilt N-API/provider evidence only and does not close hosted
+session/lifecycle/concurrency, live remote-provider, power-loss, or durable-lock
+gates.
 
 For the published 256-request packet `efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6`,
 the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
