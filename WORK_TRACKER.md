@@ -814,6 +814,7 @@ patch):
 | Main | W01 N-API 9P session message-statistics shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-observability.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: `P9Session.stats.messages` now normalizes the native object/hash-map to the oracle's `Map<string, number>`; attached-session observability and session-metadata regressions, generated typecheck, syntax, and diff checks pass locally, with the direct native mount asserting `Map#get("Tversion")`. Exact SHA `e8c6043827e6cd0232a28f94b8fc665e25985f76` passed Native 9P run `35673543701`, N-API job `106575123928` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106575123716` with all four ignored native tests; production remains NO-GO |
 | Main | W01 N-API 9P fid-view declaration and representation parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-fids.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the direct `./9p` fid declaration now matches the native N-API view, with array-shaped `{ offset: bigint, index: number }` cursor offsets and writable `Fid.iounit`/`Fid.cursor`; `node test/p9-fids.mjs`, generated typecheck, syntax, and diff checks pass locally. Exact SHA `ba20d29d7e8ad00b3c4b5270dc21cf6ab913e4c2` passed N-API job `106578252549` and Rust job `106578252700` in Native 9P run `35674581481`; the N-API job passed the Linux probe and automatic/direct/structural mounted-I/O/cleanup checks, and the Rust job passed the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P dirent-packer `maxSize` parity | `integrations/mount-rs-napi/src/p9_codec.rs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/9p-codec.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the native `P9DirentPacker` now exposes the pinned oracle's fixed `maxSize` getter; generated/direct declarations and the 44-case codec differential assert the getter and `size + remaining` invariant after packing. Typecheck, fid/runtime, syntax, formatting, strict Clippy, and focused Rust tests passed locally. Exact SHA `b3757fd288e6f52888873838946343e7cd37f953` passed Native 9P run `35675876913`, N-API job `106582464900` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106582465059` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
+| Main | W01 N-API 9P `framesFrom` iterable/assembler parity | `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/9p-codec.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: `framesFrom` now accepts synchronous or asynchronous byte iterables and an optional caller-owned `P9FrameAssembler`, matching the pinned oracle's shared-limit seam. The 9P differential, generated typecheck, fid/runtime, syntax, and diff checks passed; the full N-API script reached all 9P checks before the unrelated NFS relisten phase hit sandbox `Operation not permitted`. Exact SHA `412c422e2485a5c7ce2caf55892ec6475faab8d8` passed Native 9P run `35676832586`, N-API job `106585007802` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106585007667` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -1172,12 +1173,20 @@ workflow builds the locked addon and runs the full pinned-oracle N-API package
 script, providing hosted cross-platform WebDAV session, streaming, lifecycle,
 concurrency, provider, crash, and parity evidence. The workflow remains
 nonterminal on an unrelated native-FUSE job, so mounted-host concurrency,
-live-provider, power-loss, and durable-lock acceptance remain open.
+live-provider, power-loss, and durable-lock acceptance remained open at that
+snapshot.
+The updated exact-tip CI run `35676711711` at
+`87b2e2f0f95ff58830f04c1bd80e5f49e14b7fea` passed both revised native WebDAV
+jobs, `106584655866` on macOS and `106584656036` on Ubuntu, including the
+eight concurrent native-client write/read pairs. Mounted-I/O concurrency is
+now hosted evidence; adverse mounted-host teardown/restart, live-provider,
+power-loss, durable-lock, and wider ordering acceptance remain open.
 The ignored native WebDAV harness now performs eight concurrent native-client
 write/read pairs after the basic round trip and verifies every payload through
 the driver. The host-enabled macOS run passed 1/1 with the shared Cargo
-wrapper; hosted Linux/macOS reruns are required before mounted-host
-concurrency is accepted, and mounted-host teardown remains open.
+wrapper. At this local evidence snapshot, hosted Linux/macOS reruns were still
+required; the follow-up hosted run above passed mounted-I/O concurrency, while
+mounted-host teardown remains open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
