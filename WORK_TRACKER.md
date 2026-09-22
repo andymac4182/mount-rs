@@ -4,6 +4,25 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+Current W26 exact-head replacement qualification boundary (2026-09-22): run
+`35707725455 <https://github.com/andymac4182/mount-rs/actions/runs/35707725455>`
+targeted source/lockfile SHA `1ceaa96486a96ed4288c079dcde2b3b2d18900bb` after
+the standalone Ozone lockfile correction. Base job `106680595638` passed.
+The producer packet completed the required functional/restart/cleanup markers,
+but the hard per-drive performance gate is currently `1/4`: PGlite/R2 passed
+at `1340.137102` IOPS; SQLite/R2 failed at `781.576517`, TiDB/R2 at
+`492.510872`, and FoundationDB/R2 at `306.794117`. The three failures are
+hard IOPS failures with complete lifecycle metrics, not skipped or missing
+tests. Aggregate job `106685891954` is still queued, so no aggregate result is
+promoted. The latest docs-only mainline tip is
+`58fc18c0a3d62dc92108a2be4efff81eb023950a`; it does not alter the tested
+source/lockfile SHA. Production remains **NO-GO** until all providers pass the
+1,000-IOPS/drive gate and the complete end-to-end, security, Tier-1 99.99%
+SLO, five-minute RPO/RTO and customer-owned backup/DR evidence is satisfied.
+W26 continues to own Ozone compatibility and qualification only; customers
+deploy Ozone, backup/DR remains with Ozone/customer ownership, and releases
+remain with the separate stream.
+
 Current W26 CI-reproducibility boundary (2026-09-22): lockfile fix commit
 `1ceaa96486a96ed4288c079dcde2b3b2d18900bb`
 (`fix(w26): sync Ozone test lockfile`) is published and verified on
