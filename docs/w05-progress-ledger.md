@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 21:42 AEST (2026-09-22 11:42 UTC)
+Last updated: 2026-09-22 21:50 AEST (2026-09-22 11:50 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,12 +10,13 @@ hosted or native gate.
 ## Overall position
 
 Current shared-main observation: remote `origin/main` is
-`1f8dcd41` at this capture. The prior immutable W05 candidate boundary
-`d1a81ad45158dc80647b723f175c01a98b9ed458` (`d1a81ad4`) is superseded by
+`849c76a2c642141579f4ad75cf504e7e49e818df` (`849c76a2`) at this capture.
+The exact pushed W05 candidate boundary is the same SHA, held immutable on
+branch `andymac4182/c/w05-production-candidate-20260922e`; its fresh
+same-SHA hosted packet is running. The prior immutable W05 candidate boundary
+`d1a81ad45158dc80647b723f175c01a98b9ed458` (`d1a81ad4`) was superseded by
 the FUSE/NFS code successors now on shared main; its seven queued hosted
-workflows were cancellation-requested and contribute no acceptance. A new
-immutable candidate from the current shared tip is pending after this local
-requalification. The earlier exact pushed W05
+workflows were cancellation-requested and contribute no acceptance. The earlier exact pushed W05
 implementation boundary
 `515bdc00792a62403b0ee7b94e904434d067f43b` (`515bdc00`) was fully qualified
 locally before the concurrent W01/AWS/W08/NFS mainline changes were rebased.
@@ -901,6 +902,38 @@ from the resulting shared tip, dispatch the same non-R2/AWS hosted packet, and
 retain terminal exact-SHA evidence before production review. Production
 remains **NO-GO**.
 
+### W05.63 current settled candidate frozen and same-SHA packet dispatched (2026-09-22 21:50 AEST)
+
+After the current-main local packet completed, three documentation-only
+successors landed on shared main. The exact current tip
+`849c76a2c642141579f4ad75cf504e7e49e818df` was therefore frozen without a
+code delta from the fully requalified `9e756db3` implementation tip. The
+immutable candidate branch is
+`andymac4182/c/w05-production-candidate-20260922e`; it must not be mutated.
+
+Fresh hosted workflows were dispatched against this exact branch and SHA:
+
+| Gate | Run |
+| --- | --- |
+| CI | `35723736254` |
+| Fault injection | `35723733151` |
+| W04 production policy | `35723736618` |
+| W07 FoundationDB | `35723740111` |
+| W08 release policy | `35723734639` |
+| W08 release targets, attestations enabled | `35723735941` |
+| Native 9P | `35723734187` |
+
+R2 was not dispatched because the September usage envelope remains closed;
+the existing budget policy remains capped at `20` accepted attempts × `$4`
+assumed cost (`$80`) with a `$100` monthly ceiling, but a post-reset token
+rotation and live requalification are still required. AWS was not dispatched
+because the protected `aws-s3-ci` environment and OIDC role remain absent;
+Security issue [#3](https://github.com/andymacclenaghan/mount-rs/issues/3)
+remains the approved provisioning path, with no Keychain access. Production
+remains **NO-GO** until this packet is terminal, live providers are closed,
+package/provenance and support scope are approved, and W20.6 issues a written
+GO.
+
 ### W05.56 terminal Native 9P lifecycle and root-conformance acceptance (2026-09-22 20:46 AEST)
 
 Native 9P run `35714145176` is terminal-successful at exact candidate SHA
@@ -1443,6 +1476,7 @@ in Keychain; no security request was fabricated.
 | PR-21 / W05.60 | Latest shared-code local requalification and immutable-candidate preparation | Local current-code packet complete; new hosted packet not yet dispatched | 100% local / 0% current-tip hosted provisional | Current `origin/main` `2bb84624` is code-equivalent to tested `65776be8` after documentation/lockfile-only successors. Focused NFS/FoundationDB, full locked Rust, strict Clippy, formatting/diff, optimized Darwin addon load, full Node/N-API, and PGlite/Rust/Node/CLI matrix passed; live R2/TiDB/RustFS remained explicit skips. | Freeze `2bb84624`, dispatch fresh same-SHA hosted workflows, retain artifacts, and close R2/AWS/Ozone/native/package/scope/W20.6 gates. | 1.5–3 h active; 4–16 h hosted/provider/native/publication wait | Mainline movement, runner queues, R2 cap/rotation, AWS security/OIDC, Ozone capacity, native privileges, signing/registries, support scope, and final audit remain external. |
 | PR-22 / W05.61 | Immutable current-tip candidate and same-SHA hosted packet dispatch | Candidate published; seven non-R2/AWS workflows pending | 100% local / 5% hosted provisional | Candidate branch `andymac4182/c/w05-production-candidate-20260922d` resolves to `d1a81ad45158dc80647b723f175c01a98b9ed458`; CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets/attestations `35721892593`, and Native 9P `35721891380` were dispatched on that branch. R2 and AWS were intentionally held behind the cap and security request. | Poll all seven workflows, retain terminal artifacts, repair any implementation failure on a new candidate, then close R2/AWS/Ozone/native/package/scope/W20.6. | 0.5–1.5 h active; 4–16 h hosted/provider/native/publication wait | GitHub queues, R2 cap/rotation, AWS security/OIDC, Ozone capacity, native privileges, signing/registries, support scope, and final audit remain external. |
 | PR-23 / W05.62 | Requalify current mainline after FUSE/NFS successors and supersede stale hosted packet | Current-main local packet green; superseded candidate packet cancellation-requested; new candidate not yet dispatched | 100% local / 0% current-tip hosted provisional | Shared `origin/main` `1f8dcd41` includes the FUSE destroy cancellation fix and expanded NFS v3/v4 race coverage. Full locked Rust workspace, strict Clippy, focused NFS/FUSE suites, complete Node/N-API SDK/CLI/oracle/distribution/restart suite, and `scripts/test-pglite.sh` passed. The PGlite matrix reported Rust SDK `6/3/0`, Node SDK `5/3/0`, and CLI `12/2`; live R2/TiDB/RustFS remained explicit skips. The seven queued runs for superseded `d1a81ad4` (CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets `35721892593`, Native 9P `35721891380`) were cancellation-requested and are not acceptance. | Publish this ledger update, freeze a new immutable candidate from the resulting shared tip, dispatch the exact-SHA hosted packet, retain terminal artifacts, and close R2/AWS/Ozone/native/package/scope/W20.6. | 1–3 h active local qualification/release coordination; 4–16 h hosted/provider/native/publication wait | GitHub runner backlog, R2 cap/rotation, AWS security/OIDC, Ozone capacity, native privileges, signing/registries, support scope, and final audit remain external. |
+| PR-24 / W05.63 | Freeze settled current candidate and dispatch fresh same-SHA hosted packet | Current candidate published; seven non-R2/AWS workflows running or queued | 100% local / 5% hosted provisional | Immutable branch `andymac4182/c/w05-production-candidate-20260922e` resolves to exact `849c76a2c642141579f4ad75cf504e7e49e818df`. The code was requalified at its immediate implementation predecessor: focused NFS (`43` unit, `25` v4 wire), chunked (`22`), full locked Rust workspace, strict Clippy, optimized Darwin addon load (`253` exports, `stroff` aligned, minos 11.0, SDK 26.0), full Node/N-API suite, diagnostic WebDAV provider concurrency, and PGlite Rust/Node/CLI matrix (`6/3/0`, `5/3/0`, `12/2`). Exact-SHA runs: CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`, W08 policy `35723734639`, W08 targets/attestations `35723735941`, and Native 9P `35723734187`. | Poll every run to terminal, retain artifacts/source bindings, repair any actionable product failure on a new immutable candidate, then close post-reset R2, Security-provisioned AWS/OIDC, Ozone/native/package/support-scope gates, and W20.6. | 1–2 h active dispatch/tracking; 4–16 h hosted/provider/native/publication wait | GitHub runner queues, R2 reset/token rotation, AWS security administration, Ozone capacity, native privileges, registries/signing, support scope, and final audit remain external. |
 
 ### Current immutable-candidate addendum (2026-09-22 17:09 AEST)
 
@@ -1585,6 +1619,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 11:42–11:51 UTC (21:42–21:51 AEST) | Rechecked the settled implementation tip, froze immutable candidate `849c76a2`, and dispatched the fresh same-SHA non-R2/AWS packet | Release engineering / local qualification / hosted coordination | The exact candidate branch `andymac4182/c/w05-production-candidate-20260922e` was created from `origin/main`; CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`, W08 policy `35723734639`, W08 targets `35723735941` with attestations, and Native 9P `35723734187` were dispatched. R2 remains closed by the monthly cap and AWS remains security/OIDC gated; terminal hosted evidence is the next checkpoint. |
 | 2026-09-22 11:31–11:42 UTC (21:31–21:42 AEST) | Requalified current shared mainline after the FUSE/NFS successors, completed the full Rust/Clippy and Node/PGlite packet, and superseded the stale `d1a81ad4` hosted packet | Current-tip local release qualification / hosted queue hygiene | Full locked Rust workspace and strict Clippy passed; Node/N-API SDK/CLI/oracle/distribution/restart passed; PGlite passed Rust `6/3/0`, Node `5/3/0`, CLI `12/2`; focused NFS/FUSE regressions passed. Cancellation was requested for the seven queued `d1a81ad4` workflows; no hosted acceptance was inferred. Next state is a new immutable candidate from the resulting shared tip; R2/AWS remain cap/security gated. |
 | 2026-09-22 11:26–11:31 UTC (21:26–21:31 AEST) | Published immutable candidate `d1a81ad4` and dispatched the fresh same-SHA non-R2/AWS hosted packet | Release engineering / hosted qualification coordination | Candidate branch `andymac4182/c/w05-production-candidate-20260922d` was verified at the exact SHA; CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets `35721892593` with attestations, and Native 9P `35721891380` were dispatched. R2/AWS remain held by cap/security gates; W05.61/PR-22 records the next terminal-evidence checkpoint. |
 | 2026-09-22 10:56–11:04 UTC (20:56–21:04 AEST) | Re-polled the exact candidate, retrieved terminal W07/W08/native/platform logs, and reconciled the new hosted evidence | Hosted provider/platform/native/package evidence | W07 passed with bound provenance and artifacts; W08 Linux/macOS builds and downloaded-asset verification passed with attestations queued; native FUSE, Rust macOS/Windows, and macOS NFS passed. W05.59/PR-20 records these green sub-gates while production remains NO-GO. |

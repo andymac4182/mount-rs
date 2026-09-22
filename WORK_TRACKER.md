@@ -1214,7 +1214,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
-| W05 | Cloudflare R2 | Current immutable candidate `d1a81ad4` is code-equivalent to locally requalified `65776be8`: focused NFS/FoundationDB, full locked Rust workspace, strict Clippy, optimized dyld-safe macOS N-API load, full Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths pass with explicit live-provider skips. Fresh same-SHA CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets/attestations `35721892593`, and Native 9P `35721891380` are dispatched and pending. The prior immutable candidate `7efded54` has classified Ozone/TiDB and Ozone/FoundationDB capacity failures plus an artifact-service timeout. Live R2/AWS remain held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
+| W05 | Cloudflare R2 | Current immutable candidate `849c76a2` is code-equivalent to the fully requalified implementation tip `9e756db3`: focused NFS (`43` unit, `25` v4 wire) and chunked (`22`) suites, full locked Rust workspace, strict Clippy, optimized dyld-safe macOS N-API load, full Node SDK/CLI/N-API, diagnostic WebDAV provider concurrency, PGlite, provider-matrix, and CLI paths pass with explicit live-provider skips. Fresh same-SHA CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`, W08 policy `35723734639`, W08 targets/attestations `35723735941`, and Native 9P `35723734187` are dispatched and pending. The prior immutable candidate `d1a81ad4` was superseded and its queued packet cancellation-requested. Earlier candidates classified Ozone/TiDB and Ozone/FoundationDB capacity failures plus an artifact-service timeout. Live R2/AWS remain held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest current-public-main exact-tip terminal cross-platform qualification packet is green at [run `35712676265`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265) / exact source `ff5cc58188d9783a80de96698a187e1f6416b83e`, Linux job `106696766067`, macOS job `106696766203`, aggregate job `106702286990`; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, authority heartbeat/stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,311µs, p95/p99 37,919µs and 164.77 ops/s, ten-round soak p95/p99 was 9,841–17,582µs at 269.41–330.32 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 716.30 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10688222438`, macOS artifact ID `10688396103` and aggregate artifact ID `10688622703` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. A follow-up cross-platform refresh, run [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938), was dispatched from exact source `e984c2321317e9d93b8db1ec98dc428662b17d34`; Linux job `106707845243` and macOS job `106707844852` remain queued with no terminal result, so it contributes no evidence yet. Later mainline commits have advanced beyond that tested revision and any result must be evaluated against its exact source binding. This remains hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W07 current checkpoint | FoundationDB | Hosted run [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938) at exact source `e984c2321317e9d93b8db1ec98dc428662b17d34` is terminally failed: macOS job `106707844852` passed, but Linux job `106707845243` stopped because `tests/foundationdb/Cargo.lock` could not be updated under `--locked`, and aggregate job `106719306381` failed closed. The lockfile repair is published at `65776be87f954ef65dfdc68d41687666631ddcfb`. Replacement run [35720906902](https://github.com/andymacclenaghan/mount-rs/actions/runs/35720906902) is queued from that exact published source with Linux job `106723334768` and macOS job `106723334336`; it contributes no evidence until terminal. Production remains **NO-GO**; W07.3, W07.5 and W07.7 remain open. | Main |
@@ -3529,17 +3529,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   cancellation was requested for its queued CI `35721887870`, Fault
   `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`,
   W08 targets `35721892593`, and Native 9P `35721891380` runs, so none is
-  release evidence. Current shared main `1f8dcd41` is locally green through
-  the full locked Rust workspace, strict Clippy, focused NFS/FUSE regressions,
-  complete Node SDK/CLI/N-API/oracle/distribution/restart coverage, and the
-  PGlite matrix (`Rust 6/3/0`, `Node 5/3/0`, `CLI 12/2`).
-  Remaining actions are to publish the current-main ledger update, freeze and
-  host-qualify a new immutable candidate, close Ozone capacity and native-FUSE
-  or record approved scope exclusions, obtain AWS protected inputs and OIDC
-  trust through security, rotate R2 credentials after the UTC-month reset,
-  close package/provenance/provider/scope gates, and run W20.6 for a written
-  GO/NO-GO decision. No credential value was read, stored, printed, or placed
-  in Keychain.
+  release evidence. Current shared main `849c76a2` is locally green through
+  focused NFS (`43` unit, `25` v4 wire) and chunked (`22`) regressions, the
+  full locked Rust workspace, strict Clippy, optimized Darwin N-API load,
+  complete Node SDK/CLI/N-API/oracle/distribution/restart coverage, diagnostic
+  WebDAV provider concurrency, and the PGlite matrix (`Rust 6/3/0`, `Node
+  5/3/0`, `CLI 12/2`).
+  Current shared main `849c76a2` is now frozen as immutable candidate
+  `andymac4182/c/w05-production-candidate-20260922e`; fresh same-SHA runs are
+  CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`,
+  W08 policy `35723734639`, W08 targets/attestations `35723735941`, and Native
+  9P `35723734187`. They remain pending terminal evidence. Remaining actions
+  are to close Ozone capacity and native-FUSE or record approved scope
+  exclusions, obtain AWS protected inputs and OIDC trust through security,
+  rotate R2 credentials after the UTC-month reset, close package/provenance/
+  provider/scope gates, and run W20.6 for a written GO/NO-GO decision. No
+  credential value was read, stored, printed, or placed in Keychain.
 
 ## W06 — RustFS integration service
 
