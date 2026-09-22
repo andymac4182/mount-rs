@@ -1906,6 +1906,74 @@ async fn lock_cleanup_retains_lock_when_provider_stat_fails() {
 }
 
 #[tokio::test]
+async fn poisoned_lock_table_fails_closed_without_mutating_resource() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let created = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            b"before".as_slice(),
+        )
+        .await;
+    assert_eq!(created.status, 201);
+
+    let locked = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(locked.status, 200);
+
+    let lock_table = Arc::clone(&session.locks);
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = lock_table.lock().expect("lock table should start healthy");
+        panic!("poison the WebDAV lock table");
+    }));
+    assert!(poisoned.is_err());
+
+    let rejected = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            b"after".as_slice(),
+        )
+        .await;
+    assert_eq!(rejected.status, 500);
+
+    let unchanged = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "GET".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(unchanged.status, 200);
+    assert_eq!(
+        unchanged
+            .body
+            .expect("GET body")
+            .into_bytes()
+            .await
+            .expect("GET bytes"),
+        b"before"
+    );
+}
+
+#[tokio::test]
 async fn chunked_put_streams_request_body_over_a_real_connection() {
     let server = server().await;
     let mut stream = TcpStream::connect(("127.0.0.1", server.port()))

@@ -1216,6 +1216,14 @@ passed, and formatting/diff checks passed. This is separate from native server
 shutdown and the N-API body's explicit close seam; hosted/provider,
 power-loss, durable-lock, crash/restart, and stronger same-resource ordering
 remain open.
+The shared WebDAV lock table now fails closed on mutex poisoning across request
+paths that inspect, create, refresh, unlock, or enforce locks; a poisoned table
+returns a `500` server error instead of appearing empty. Public lock snapshots
+recover the poisoned guard for observability. The deliberate-poison regression
+confirmed that a locked `PUT` does not mutate the existing resource; the full
+WebDAV target passed 34/34, warning-denied Clippy passed, and formatting/diff
+checks passed. Hosted/provider, power-loss, durable-lock, crash/restart, and
+stronger same-resource ordering remain open.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
@@ -6534,6 +6542,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 WebDAV poisoned lock-table fail-closed behavior` | Propagate WebDAV lock-table mutex poisoning as a server error across lock-dependent request paths, while retaining poisoned lock state for public snapshots | Full WebDAV target 34/34, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV transport-neutral body cancellation` | Close the provider file handle when a direct `WebdavBody::into_bytes()` consumer is cancelled during a pending response read | Full WebDAV target 33/33, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV streamed-response shutdown lifecycle` | Make streamed file response tasks observe server shutdown, participate in bounded drain, and close provider handles after stalled-read cancellation | Full WebDAV target 32/32, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV streamed-response fault evidence` | Prove that a short driver read fails an HTTP response body and reaches the peer-qualified transport-error hook | Focused WebDAV target 28/28, warning-denied Clippy and formatting pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
@@ -218,12 +218,19 @@ impl WebdavSession {
             .unwrap_or_default()
     }
 
-    pub fn lock_count(&self) -> usize {
-        let now = self.now();
+    fn lock_table(&self) -> Result<MutexGuard<'_, DavLockTable>, WebdavError> {
         self.locks
             .lock()
-            .map(|mut locks| locks.size(now))
-            .unwrap_or(0)
+            .map_err(|_| WebdavError::Body("lock table poisoned".to_owned()))
+    }
+
+    pub fn lock_count(&self) -> usize {
+        let now = self.now();
+        let mut locks = match self.locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks.size(now)
     }
 
     /// Return the active write locks in this session after expiring stale
@@ -232,10 +239,11 @@ impl WebdavSession {
     /// parity inspection.
     pub fn lock_records(&self) -> Vec<DavLock> {
         let now = self.now();
-        self.locks
-            .lock()
-            .map(|mut locks| locks.all(now))
-            .unwrap_or_default()
+        let mut locks = match self.locks.lock() {
+            Ok(locks) => locks,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        locks.all(now)
     }
 
     /// Answer one request and never reject.  Driver and protocol errors become
@@ -640,7 +648,7 @@ impl WebdavSession {
                 .into());
         }
         self.require_writable(path, guard, true)?;
-        let locked = self.locked_members(path, guard);
+        let locked = self.locked_members(path, guard)?;
         if !locked.is_empty() {
             return Ok(self.multistatus(&locked));
         }
@@ -649,12 +657,12 @@ impl WebdavSession {
         // into a multistatus (matching mountx's #delete / #deleteTree split).
         if !stats.is_directory() {
             self.driver.unlink(path).await?;
-            self.discard_unmapped(path).await;
+            self.discard_unmapped(path).await?;
             self.durability_barrier().await?;
             return Ok(WebdavResponse::empty(204));
         }
         let (failures, mutated) = self.delete_tree(path).await;
-        self.discard_unmapped(path).await;
+        self.discard_unmapped(path).await?;
         if mutated {
             self.durability_barrier().await?;
         }
@@ -801,21 +809,13 @@ impl WebdavSession {
             self.require_writable(path, guard, true)?;
         }
         self.require_writable(&destination, guard, existing.is_none())?;
-        let locked = [
-            if moving {
-                self.locked_members(path, guard)
-            } else {
-                Vec::new()
-            },
-            if existing.is_some() {
-                self.locked_members(&destination, guard)
-            } else {
-                Vec::new()
-            },
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
+        let mut locked = Vec::new();
+        if moving {
+            locked.extend(self.locked_members(path, guard)?);
+        }
+        if existing.is_some() {
+            locked.extend(self.locked_members(&destination, guard)?);
+        }
         if !locked.is_empty() {
             return Ok(self.multistatus(&locked));
         }
@@ -856,14 +856,14 @@ impl WebdavSession {
         if moving {
             self.driver.rename(path, &destination).await?;
             mutated = true;
-            self.discard_unmapped(path).await;
-            self.discard_unmapped(&destination).await;
+            self.discard_unmapped(path).await?;
+            self.discard_unmapped(&destination).await?;
         } else {
             let (failures, copied) = self
                 .copy_tree(path, &destination, &stats, depth == Depth::Infinity)
                 .await;
             mutated |= copied;
-            self.discard_unmapped(&destination).await;
+            self.discard_unmapped(&destination).await?;
             if !failures.is_empty() {
                 if mutated {
                     self.durability_barrier().await?;
@@ -1179,11 +1179,10 @@ impl WebdavSession {
             }
             "supportedlock" => Some(supported_lock_node()),
             "lockdiscovery" => {
-                let locks = self
-                    .locks
-                    .lock()
-                    .map(|mut locks| locks.covering(path, now))
-                    .unwrap_or_default();
+                let locks = {
+                    let mut table = self.lock_table()?;
+                    table.covering(path, now)
+                };
                 Some(lock_discovery_node(&locks, now))
             }
             "quota-available-bytes" | "quota-used-bytes" => self.quota(name, path).await?,
@@ -1344,10 +1343,8 @@ impl WebdavSession {
         };
         let existing = self.stat_or_absent(path).await?;
         if let Some(conflict) = self
-            .locks
-            .lock()
-            .ok()
-            .and_then(|mut locks| locks.conflict(path, depth, info.exclusive, guard.now))
+            .lock_table()?
+            .conflict(path, depth, info.exclusive, guard.now)
         {
             return Err(self.conflicting_lock(&conflict).into());
         }
@@ -1358,21 +1355,17 @@ impl WebdavSession {
             self.write_file(path, &[]).await?;
             self.durability_barrier().await?;
         }
-        let grant = self
-            .locks
-            .lock()
-            .map_err(|_| WebdavError::Body("lock table poisoned".to_owned()))?
-            .create(
-                DavLockRequest {
-                    path: path.to_owned(),
-                    collection,
-                    depth,
-                    exclusive: info.exclusive,
-                    owner: info.owner,
-                    timeout,
-                },
-                guard.now,
-            );
+        let grant = self.lock_table()?.create(
+            DavLockRequest {
+                path: path.to_owned(),
+                collection,
+                depth,
+                exclusive: info.exclusive,
+                owner: info.owner,
+                timeout,
+            },
+            guard.now,
+        );
         let lock = match grant {
             DavLockGrant::Granted(lock) => lock,
             DavLockGrant::Conflict(lock) => return Err(self.conflicting_lock(&lock).into()),
@@ -1400,14 +1393,15 @@ impl WebdavSession {
                 .with_message("a bodyless LOCK needs an If header")
                 .into());
         }
-        let token = guard.submitted.iter().find_map(|token| {
-            self.locks
-                .lock()
-                .ok()
-                .and_then(|mut locks| locks.find(token, guard.now))
-                .filter(|lock| DavLockTable::in_scope(lock, path))
-                .map(|lock| lock.token)
-        });
+        let token = {
+            let mut locks = self.lock_table()?;
+            guard.submitted.iter().find_map(|token| {
+                locks
+                    .find(token, guard.now)
+                    .filter(|lock| DavLockTable::in_scope(lock, path))
+                    .map(|lock| lock.token)
+            })
+        };
         let Some(token) = token else {
             return Err(refuse(412)
                 .with_condition("lock-token-matches-request-uri", Vec::new())
@@ -1415,10 +1409,8 @@ impl WebdavSession {
         };
         self.require_if(guard, path).await?;
         let lock = self
-            .locks
-            .lock()
-            .ok()
-            .and_then(|mut locks| locks.refresh(&token, timeout, guard.now))
+            .lock_table()?
+            .refresh(&token, timeout, guard.now)
             .ok_or_else(|| {
                 refuse(412).with_condition("lock-token-matches-request-uri", Vec::new())
             })?;
@@ -1437,11 +1429,8 @@ impl WebdavSession {
                 .into());
         };
         let now = self.now();
-        let lock = self
-            .locks
-            .lock()
-            .ok()
-            .and_then(|mut locks| locks.find(&token, now));
+        let mut locks = self.lock_table()?;
+        let lock = locks.find(&token, now);
         if lock
             .as_ref()
             .is_none_or(|lock| !DavLockTable::in_scope(lock, path))
@@ -1450,9 +1439,7 @@ impl WebdavSession {
                 .with_condition("lock-token-matches-request-uri", Vec::new())
                 .into());
         }
-        if let Ok(mut locks) = self.locks.lock() {
-            locks.remove(&token);
-        }
+        locks.remove(&token);
         Ok(WebdavResponse::empty(204))
     }
 
@@ -1523,17 +1510,14 @@ impl WebdavSession {
                     cached.clone()
                 } else {
                     let stats = self.stat_or_absent(resource).await?;
-                    let tokens = self
-                        .locks
-                        .lock()
-                        .map(|mut locks| {
-                            locks
-                                .covering(resource, now)
-                                .into_iter()
-                                .map(|lock| lock.token)
-                                .collect()
-                        })
-                        .unwrap_or_default();
+                    let tokens = {
+                        let mut locks = self.lock_table()?;
+                        locks
+                            .covering(resource, now)
+                            .into_iter()
+                            .map(|lock| lock.token)
+                            .collect()
+                    };
                     let state = ResourceState {
                         tokens,
                         etag: stats
@@ -1562,26 +1546,19 @@ impl WebdavSession {
         guard: &Guard,
         membership: bool,
     ) -> Result<(), WebdavError> {
-        let mut blocking = self
-            .locks
-            .lock()
-            .map(|mut locks| {
-                locks
-                    .covering(path, guard.now)
-                    .into_iter()
-                    .filter(|lock| !guard.submitted.contains(&lock.token))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
+        let mut locks = self.lock_table()?;
+        let mut blocking = locks
+            .covering(path, guard.now)
+            .into_iter()
+            .filter(|lock| !guard.submitted.contains(&lock.token))
+            .collect::<Vec<_>>();
         if membership && path != "/" {
             let parent = parent(path);
-            if let Ok(mut locks) = self.locks.lock() {
-                for lock in locks.covering(&parent, guard.now) {
-                    if !guard.submitted.contains(&lock.token)
-                        && !blocking.iter().any(|existing| existing.token == lock.token)
-                    {
-                        blocking.push(lock);
-                    }
+            for lock in locks.covering(&parent, guard.now) {
+                if !guard.submitted.contains(&lock.token)
+                    && !blocking.iter().any(|existing| existing.token == lock.token)
+                {
+                    blocking.push(lock);
                 }
             }
         }
@@ -1600,44 +1577,37 @@ impl WebdavSession {
         }
     }
 
-    fn locked_members(&self, path: &str, guard: &Guard) -> Vec<Failure> {
-        self.locks
-            .lock()
-            .map(|mut locks| {
-                locks
-                    .within(path, guard.now)
-                    .into_iter()
-                    .filter(|lock| {
-                        lock.path != path
-                            && !guard.submitted.iter().any(|token| token == &lock.token)
-                    })
-                    .map(|lock| Failure {
-                        path: lock.path,
-                        collection: lock.collection,
-                        status: 423,
-                    })
-                    .collect()
+    fn locked_members(&self, path: &str, guard: &Guard) -> Result<Vec<Failure>, WebdavError> {
+        let mut locks = self.lock_table()?;
+        Ok(locks
+            .within(path, guard.now)
+            .into_iter()
+            .filter(|lock| {
+                lock.path != path && !guard.submitted.iter().any(|token| token == &lock.token)
             })
-            .unwrap_or_default()
+            .map(|lock| Failure {
+                path: lock.path,
+                collection: lock.collection,
+                status: 423,
+            })
+            .collect())
     }
 
-    async fn discard_unmapped(&self, path: &str) {
+    async fn discard_unmapped(&self, path: &str) -> Result<(), WebdavError> {
         let now = self.now();
-        let locks = self
-            .locks
-            .lock()
-            .map(|mut locks| locks.within(path, now))
-            .unwrap_or_default();
+        let locks = {
+            let mut table = self.lock_table()?;
+            table.within(path, now)
+        };
         for lock in locks {
             // A provider error leaves the namespace unknown. Retain the lock
             // until absence is confirmed instead of treating an I/O failure
             // as proof that its root was unmapped.
-            if matches!(self.stat_or_absent(&lock.path).await, Ok(None))
-                && let Ok(mut table) = self.locks.lock()
-            {
-                table.remove(&lock.token);
+            if matches!(self.stat_or_absent(&lock.path).await, Ok(None)) {
+                let _ = self.lock_table()?.remove(&lock.token);
             }
         }
+        Ok(())
     }
 
     async fn stat(&self, path: &str) -> Result<Stats, WebdavError> {
