@@ -59,7 +59,19 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P Unix listener packet was published at exact test SHA
+The latest W01-9P transport-teardown packet was published at exact SHA
+`1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
+`35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
+N-API job `106610049913` passed addon build, the isolated TCP/Unix/attached
+server lifecycle, server close with an open fid, paused-peer FIN teardown,
+silent TCP reset, orderly client EOF, and automatic/direct/structural mounted
+I/O cleanup. Rust job `106610049705` passed the Linux probe plus all four
+ignored native lifecycle tests. Local focused Rust tests, strict Clippy,
+addon rebuild, syntax/diff checks, and elevated N-API execution passed. The
+process-crash and arbitrary-kernel-reset recovery boundary remains explicit;
+broader W01 acceptance remains NO-GO.
+
+The preceding W01-9P Unix listener packet was published at exact test SHA
 `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` and is included in descendant head
 `d43f5ea4e4334912de86ac0db818392531a7d4ec`. Its [Native 9P run
 `35683716217`](https://github.com/andymac4182/mount-rs/actions/runs/35683716217)
