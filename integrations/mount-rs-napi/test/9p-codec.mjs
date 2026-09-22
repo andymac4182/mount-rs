@@ -432,4 +432,10 @@ assertBytes(nativeDirents, upstreamDirents, "9P dirent bytes")
 assert.deepEqual(plain(native.readDirents(nativeDirents)), plain(upstreamProtocol.readDirents(upstreamDirents)), "9P dirent list")
 assert.equal(native.direntSize("café"), upstreamProtocol.direntSize("café"))
 
+const packer = new native.P9DirentPacker(64)
+assert.equal(packer.maxSize, 64, "9P dirent packer maxSize")
+assert.equal(packer.size + packer.remaining, packer.maxSize, "9P dirent packer budget")
+assert.equal(packer.add(dirents[0]), true, "9P dirent packer add")
+assert.equal(packer.maxSize, 64, "9P dirent packer maxSize remains stable")
+
 console.log(`mount-rs N-API 9P codec differential: PASS (${cases.length} typed cases)`)

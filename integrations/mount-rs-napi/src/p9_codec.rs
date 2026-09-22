@@ -1977,6 +1977,14 @@ impl NativeP9DirentPacker {
     }
 
     #[napi(getter)]
+    pub fn max_size(&self) -> napi::Result<u32> {
+        u32_len(
+            self.inner.size().saturating_add(self.inner.remaining()),
+            "dirent packer max size",
+        )
+    }
+
+    #[napi(getter)]
     pub fn size(&self) -> napi::Result<u32> {
         u32_len(self.inner.size(), "dirent packer size")
     }
