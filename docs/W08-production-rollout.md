@@ -32,7 +32,7 @@ planning result.
 | --- | --- | --- |
 | P01 — deployment scope, topology and support matrix | Open — 25% | Approved managed/self-hosted TiDB/PD/TiKV and block-store topology, regions, HA/quorum, network/TLS policy, resource limits, supported versions, tenancy, IaC and a production-like staging smoke/restart result; the checked-in `verify-w08-production-topology.mjs` policy now requires a replicated-durable shape with 3 PD, 3 TiKV, 2 SQL frontends, majority quorum, pinned coherent versions, private TLS networking and the durable resource floor. This is repository shape control only. A fresh local single-node v8.5.7 smoke attempt entered PD startup but exited 125 on `Bad response from Docker engine`; the preceding durable attempt failed closed below the 10 GiB Docker floor. Neither produced `TIDB_ACCEPTANCE` or production evidence. |
 | P02 — secrets, IAM, rotation and audit | Open — 20% | Secret-manager injection, least-privilege metadata/block identities, rotation and revocation without data loss, break-glass procedure, audit and redaction evidence; the checked-in P02 policy now requires an external secret manager, workload/managed identity, exactly the three production references, bounded rotation with overlap/revocation, redacted access auditing and a two-person break-glass procedure reference. This is shape control only; the existing production-config gate rejects inline secret strings and requires external env references. |
-| P03 — backup, restore and disaster recovery | Open — 10% | Defined RPO/RTO and retention, encrypted backups/versioning, clean-environment restore, metadata/block consistency, corruption/partial-object handling and recovery sign-off |
+| P03 — backup, restore and disaster recovery | Open — 10% | Defined RPO/RTO and retention, encrypted backups/versioning, clean-environment restore, metadata/block consistency, corruption/partial-object handling and recovery sign-off; the checked-in `verify-w08-production-backup.mjs` policy now requires transactionally consistent TiDB metadata snapshots, immutable/versioned encrypted blocks, isolated restore with no production-writer access, corruption/partial-object/region-loss cases, bounded 60-minute RPO and 240-minute RTO, a second region and data-owner/release-owner sign-off references. This is repository shape control only. |
 | P04 — upgrade, compatibility and rollback | Open — 10% | Rehearsed TiDB/RustFS/client version matrix, schema/config migration, rolling upgrade, interrupted-upgrade recovery, retained-data rollback and compatibility sign-off |
 | P05 — observability, SLOs and alerting | Open — 15% gate weight; local/hosted HTTP contract passed | The HTTP transport's unauthenticated `/healthz` and `/readyz` contract, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` are locally tested and passed in terminal hosted job `106340034907`; exit still requires provider-aware checks where applicable, production collector, dashboards, SLO/error-budget thresholds, paging, retention/redaction and an exercised alert route |
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
@@ -202,6 +202,21 @@ workflow-shape checks passed on that merge. Hosted W08 release-policy run
 `35713249813`, job `106698749633`, exact head
 `e86c9ccbd394df3b8ec23551691c199e1753ede2`, completed successfully in 2m49s;
 this is hosted implementation/static evidence only. P02 remains open.
+
+W08.39 adds the credential-free P03 backup, restore and disaster-recovery
+contract in `tests/tidb/production-backup-policy.json`, enforced by
+`scripts/verify-w08-production-backup.mjs` and its eight-case regression suite.
+The policy requires transactionally consistent `tidb-br` metadata snapshots
+with revision capture, encrypted immutable/versioned block retention,
+isolated restore with a separate identity and no production-writer access,
+fresh-client readback, corruption/partial-object/region-loss cases, bounded
+60-minute RPO and 240-minute RTO, a second region and data-owner/release-owner
+sign-off references. Weak retention, missing consistency, unsafe restore
+access, unbounded objectives and incomplete DR sign-off fail closed. The
+checks are wired into both W08 release workflows. This is a repository
+implementation/control slice of P03 only; it does not prove a backup,
+restore, second region, provider recovery drill or production approval. P03
+remains open.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

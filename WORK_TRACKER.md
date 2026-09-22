@@ -5203,6 +5203,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   configured secret manager, IAM grants, credential rotation, audit events or
   production approval. *(Implementation/static qualification; provider and
   production evidence remain external.)*
+- [x] W08.39 **External backup, restore and DR policy:** added
+  `scripts/verify-w08-production-backup.mjs` and its eight-case
+  `scripts/test-w08-production-backup.mjs` control over
+  `tests/tidb/production-backup-policy.json`. The credential-free contract
+  requires transactionally consistent TiDB metadata snapshots, revision
+  capture, encrypted immutable/versioned block retention, isolated restore
+  with separate identity and no production-writer access, fresh-client
+  readback, corruption/partial-object/region-loss cases, bounded 60-minute
+  RPO and 240-minute RTO, a second region and data-owner/release-owner
+  sign-off references. Missing consistency, unsafe restore access, weak
+  retention, unbounded recovery objectives and incomplete DR sign-off fail
+  closed. The checks are wired into both W08 release workflows. This is a P03
+  implementation/control boundary only; it does not prove a backup, restore,
+  second region, provider recovery drill or production approval.
+  *(Implementation/static qualification; provider and production evidence
+  remain external.)*
 
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV

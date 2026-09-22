@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "environment_class": "production-like-staging",
+  "identity_mode": "workload-identity",
+  "metadata": {
+    "method": "tidb-br",
+    "consistency": "transactional-snapshot",
+    "revision_capture": true,
+    "retention_days": 35,
+    "encryption": "customer-managed-key",
+    "key_source": "external-secret-manager"
+  },
+  "blocks": {
+    "versioning": true,
+    "immutability": "object-lock",
+    "retention_days": 35,
+    "encryption": "customer-managed-key",
+    "integrity": "sha256-manifest",
+    "prefix_isolation": "tenant-volume"
+  },
+  "restore": {
+    "isolated_environment": true,
+    "separate_identity": true,
+    "production_writer_access": false,
+    "metadata_block_consistency": true,
+    "fresh_client_readback": true,
+    "corruption_case": true,
+    "partial_object_case": true,
+    "region_loss_case": true,
+    "rpo_minutes": 60,
+    "rto_minutes": 240
+  },
+  "dr": {
+    "second_region": true,
+    "runbook_ref": "docs/W08-operations-runbook.md#backup-restore-and-rollback",
+    "signoff_roles": ["data-owner", "release-owner"]
+  }
+}
