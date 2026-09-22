@@ -47,6 +47,14 @@ W26 continues to own compatibility and qualification only; customers deploy
 Ozone, backup/DR remains Ozone/customer owned, and releases remain with the
 separate stream.
 
+Fresh exact-head qualification run `35715790619
+<https://github.com/andymac4182/mount-rs/actions/runs/35715790619>` is now
+queued from `main` at workflow head
+`af7e73dfb7f54a31c1a91be829238571950a48e1`; source
+`fba61979f1f6c9858026cd5ebc4c5d3d357f366b` is an ancestor and therefore
+included. Its SQLite, PGlite, TiDB, FoundationDB and aggregate jobs have no
+terminal result yet, so no performance or end-to-end result is promoted.
+
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
 (`perf(w26): avoid redundant FoundationDB chunk clears`) is now on
