@@ -1087,6 +1087,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Reconciled the FUSE README boundary with the current dispatch: session-scoped `GETLK`/`SETLK` are supported, `SETLKW` deliberately returns `EAGAIN`, and Linux handles targeted `INTERRUPT`; hosted native lock/interrupt and lifecycle evidence remain open | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Rechecked deterministic FUSE lifecycle coverage: 14 library tests and 20 focused session tests passed with an isolated Cargo target; Darwin cannot execute the Linux-gated `/dev/fuse` lifecycle, crash/restart, concurrency, locks or durability scenarios | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Rechecked deterministic mount-free durability barriers: all 4 `sync_barrier` tests passed for `SYNCFS`, `FSYNCDIR`, durable/volatile `FLUSH`, and backend errors; this does not qualify kernel persistence or crash recovery | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Linux-target `cargo check --tests` passed for the FUSE crate; executable cross-linking is unavailable on Darwin due to incompatible host linker flags, so no Linux runtime result is inferred | W01 remains NO-GO |
 
 ## Definition of W01 complete
 
