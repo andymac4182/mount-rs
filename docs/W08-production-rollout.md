@@ -162,11 +162,12 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Merged source base `a09984141bcb04875dbfadf180d2ca8bfbb8824c` was freshly
-reverified locally after concurrent N-API declaration and P9 normalization, 9P
-codec, S3-session-concurrency, session-parity, chunked durability, FUSE,
-S3-test, WebDAV, lockfile, NFS and provider updates: the full locked workspace
-test suite exited 0 and strict workspace Clippy with `-D warnings` exited 0.
+Merged source base `944c78c602ecd0653d4f5f705f94c8d2f5ff81e6` was freshly
+reverified locally after concurrent 9P frame-assembler and WebDAV native-
+concurrency, R2 upload coalescing, N-API declaration and P9 normalization, 9P codec,
+S3-session-concurrency, session-parity, chunked durability, FUSE, S3-test,
+WebDAV, lockfile, NFS and provider updates: the full locked workspace test
+suite exited 0 and strict workspace Clippy with `-D warnings` exited 0.
 The four W08 rollout/evidence policy commands also passed with 36 functional
 items, 9 open production gates, 7 rollout tests and 11 evidence tests; the
 packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
@@ -174,6 +175,14 @@ package JSON also passed static checks. This is source-health and tracking-
 control evidence only and does not close any production gate. Provider/native
 rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in
 skips.
+
+A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
+positive production-config fixture with a non-secret TLS-policy URL supplied
+out of band; the insecure/inline-secret fixture failed closed as expected. The
+pending release-manifest fixture passed, the strict accepted fixture passed
+with `--require-release-acceptance`, and the invalid fixture failed closed.
+These are repository policy controls only: no provider connection, artifact
+signature, SBOM service, canary, rollback or approval was performed.
 
 The latest read-only production-boundary audit at **2026-09-22 11:08 AEST**
 returned HTTP 404 from the W08 production workflow query and `w08-production`
