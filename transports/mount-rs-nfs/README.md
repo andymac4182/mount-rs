@@ -91,6 +91,9 @@ The same wire test now opens and writes a v4.1 file, removes its namespace
 entry through v3, confirms v3 LOOKUP returns `NFS3ERR_NOENT`, then reads the
 exact bytes through the held v4.1 stateid and closes it. This is live
 open-unlink state retention, not recovery of the open across server restart.
+The same session's `TEST_STATEID` reply reports the open state valid before
+`CLOSE` and `NFS4ERR_BAD_STATEID` afterward, so successful close is not merely
+an acknowledged no-op.
 
 NFSv4.1 channel and state ceilings are available through
 `NfsSessionOptions.nfs4` and the nested N-API `nfs4`/`Nfs4StateKnobs` option:

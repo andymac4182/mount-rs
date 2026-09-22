@@ -216,6 +216,8 @@ semantics.
 
 | 2026-09-22 | v4.1 open retained across v3 unlink | The bidirectional real-TCP test now opens and writes a file through v4.1, removes its name through v3, verifies v3 LOOKUP returns `NFS3ERR_NOENT`, then reads the exact bytes through the original v4.1 handle/stateid and closes that state. Focused wire 1/1, full locked NFS (42 unit plus all integrations including 21 v4 wire), strict NFS Clippy, pinned upstream parity (266 passed, 18 explicit skips), and opt-in macOS native NFSv3 mount 1/1 pass locally. | This qualifies live, one-server cross-version open-unlink retention. It does not qualify native-client ordering, cross-process open-state recovery, durable leases/replay/handles, physical power-loss durability, exact-tip hosted CI, or production readiness. Non-cancelling manual CI runs are queued, not passes |
 
+| 2026-09-22 | cross-version unlinked OPEN state retirement | The real-TCP v3/v4.1 open-unlink test now sends `TEST_STATEID` on the original v4.1 stateid after the v3 unlink and before v4.1 CLOSE, receiving `NFS4_OK`; after CLOSE, the same session and stateid return `NFS4ERR_BAD_STATEID`. Focused wire 1/1, full locked NFS (42 unit plus all integrations including 21 v4 wire), strict NFS Clippy, pinned upstream parity (266 passed, 18 explicit skips), and opt-in macOS native NFSv3 1/1 pass locally. | This proves one live session's state transition, not durable or cross-process state recovery, native-client ordering, physical power-loss durability, exact-tip hosted acceptance, or production readiness. Manual CI at older SHAs remains queued and is not acceptance evidence |
+
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:

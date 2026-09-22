@@ -1416,6 +1416,8 @@ spent waiting for a hosted job or credential approval.
 
 | 2026-09-22 | W01-NFS | Extended the bidirectional v3/v4.1 wire case through an open-unlink boundary: v4.1 OPEN/WRITE, v3 REMOVE/LOOKUP `NFS3ERR_NOENT`, then exact v4.1 held-stateid READ and CLOSE. Focused wire, full locked NFS (42 unit plus 21 v4 wire), strict NFS Clippy, pinned upstream parity (266 pass/18 explicit skips), and opt-in native macOS NFSv3 mount pass locally | — | 75% W01.4 planning view | Live one-server state retention is not cross-process open recovery, native-client ordering, durable v4 lease/replay/handle state, power-loss durability, exact-tip hosted acceptance, or production readiness; W01 stays NO-GO |
 
+| 2026-09-22 | W01-NFS | Added wire `TEST_STATEID` before and after CLOSE on a v4.1 file unlinked through v3: the original stateid is valid while open and `NFS4ERR_BAD_STATEID` after close. Focused and full locked NFS (42 unit and 21 v4 wire), strict NFS Clippy, pinned parity (266 pass/18 explicit skips), and opt-in macOS NFSv3 mount pass locally | — | 75% W01.4 planning view | One live session's close transition does not prove durable v4 state, cross-process recovery, native-client ordering, power-loss durability, exact-tip hosted acceptance, or production readiness; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:
