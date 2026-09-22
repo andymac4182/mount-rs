@@ -3629,8 +3629,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Tested source base `a99b3a0958855069a41770f824330f82f02f0297` was freshly
-  reverified after 9P direct-probe absence-field normalization and WebDAV
+  Tested source base `522390782c5bc42ca7f790f2c8d0e20daebf3165` was freshly
+  reverified after the 9P platform-type alias and 9P direct-probe
+  absence-field normalization and WebDAV
   shared-resource ordering qualification, plus concurrent WebDAV
   mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
   mount inspection, FoundationDB qualification-harness updates, S3
@@ -3647,8 +3648,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
-  W08-P01–P09. The later reconciled `HEAD` `dd69b6b2` changed only W05/S3
-  documentation and is source-equivalent to this qualification.
+  W08-P01–P09. The later reconciled `HEAD` `8b364ce8` changed only W07/site
+  documentation and provider-copy text and is source-equivalent to this
+  qualification.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed

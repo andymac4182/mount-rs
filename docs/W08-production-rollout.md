@@ -162,8 +162,9 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Tested source base `a99b3a0958855069a41770f824330f82f02f0297` was freshly
-reverified locally after the 9P direct-probe absence-field normalization and
+Tested source base `522390782c5bc42ca7f790f2c8d0e20daebf3165` was freshly
+reverified locally after the 9P platform-type alias and 9P direct-probe
+absence-field normalization and
 WebDAV shared-resource ordering qualification, plus the concurrent WebDAV
 mounted-restart cleanup correction, chunked lease-release fix, 9P synchronous
 mount inspection, FoundationDB qualification-harness updates and S3
@@ -181,8 +182,9 @@ packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
 package JSON also passed static checks. This is source-health and tracking-
 control evidence only and does not close any production gate. Provider/native
 rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in
-skips. The later reconciled `HEAD` `dd69b6b2` changed only W05/S3
-documentation and is source-equivalent to this qualification.
+skips. The later reconciled `HEAD` `8b364ce8` changed only W07/site
+documentation and provider-copy text and is source-equivalent to this
+qualification.
 
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
