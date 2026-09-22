@@ -29,8 +29,9 @@ use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
     NFS4ERR_BAD_STATEID, NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC,
     NFS4ERR_REP_TOO_BIG_TO_CACHE, NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP,
-    NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS,
-    NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
+    NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_STALE,
+    NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
+    UNSTABLE4,
 };
 use mount_rs_nfs::xdr::encode_xdr;
 use mount_rs_nfs::{
@@ -1354,6 +1355,16 @@ fn nfs_v4_open_racing_v3_unlink_keeps_the_shared_handle_pathless() {
 
 #[test]
 fn nfs_v4_open_survives_v3_rename_over_its_name() {
+    struct HostRoot(PathBuf);
+
+    impl Drop for HostRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("source.txt"));
+            let _ = std::fs::remove_file(self.0.join("destination.txt"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
     std::thread::Builder::new()
         .name("nfs-cross-version-rename-over-open".into())
         .stack_size(8 * 1024 * 1024)
@@ -1365,17 +1376,30 @@ fn nfs_v4_open_survives_v3_rename_over_its_name() {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    let inner = MemoryFs::empty();
+                    let nonce = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock after Unix epoch")
+                        .as_nanos();
+                    let host_root = (0..32)
+                        .find_map(|attempt| {
+                            let path = std::env::temp_dir().join(format!(
+                                "mount-rs-nfs-rename-over-open-{}-{nonce}-{attempt}",
+                                std::process::id()
+                            ));
+                            match std::fs::create_dir(&path) {
+                                Ok(()) => Some(HostRoot(path)),
+                                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                    None
+                                }
+                                Err(error) => panic!("create host-backed NFS root: {error}"),
+                            }
+                        })
+                        .expect("claim a unique host-backed NFS root");
                     let old_payload = b"held destination";
-                    inner
-                        .write_file("/destination.txt", old_payload)
-                        .await
-                        .unwrap();
-                    inner
-                        .write_file("/source.txt", b"replacement source")
-                        .await
-                        .unwrap();
-                    let server = NfsServer::new(inner, NfsServerOptions::default());
+                    std::fs::write(host_root.0.join("destination.txt"), old_payload).unwrap();
+                    std::fs::write(host_root.0.join("source.txt"), b"replacement source").unwrap();
+                    let server =
+                        NfsServer::new(HostFs::new(&host_root.0), NfsServerOptions::default());
                     let address = server.listen().await.unwrap();
                     let mut v3_stream = TcpStream::connect(address).await.unwrap();
                     let mut mount = rpc_call(
@@ -1441,6 +1465,11 @@ fn nfs_v4_open_survives_v3_rename_over_its_name() {
                     .await;
                     assert_eq!(read_rename_res(&mut renamed).unwrap().status, NFS3_OK);
                     renamed.end("v3 rename-over response").unwrap();
+                    assert_eq!(
+                        std::fs::read(host_root.0.join("destination.txt")).unwrap(),
+                        b"replacement source"
+                    );
+                    assert!(!host_root.0.join("source.txt").exists());
                     let mut replacement = rpc_call(
                         &mut v3_stream,
                         903,
@@ -1485,6 +1514,68 @@ fn nfs_v4_open_survives_v3_rename_over_its_name() {
                         old_payload
                     );
                     read.end("read replaced destination response").unwrap();
+
+                    client.sequence += 1;
+                    let mut closed = rpc(
+                        &mut v4_stream,
+                        915,
+                        compound(
+                            "close-replaced-destination",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&old_handle)),
+                                op(OP_CLOSE, |writer| {
+                                    writer.u32(1);
+                                    writer.fixed_opaque(&stateid, 16);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut closed, 3);
+                    consume_sequence_result(&mut closed, "close replaced destination");
+                    parse_result_header(&mut closed, OP_PUTFH);
+                    parse_result_header(&mut closed, OP_CLOSE);
+                    let _ = closed.fixed_opaque(16, "close replaced stateid").unwrap();
+                    closed.end("close replaced destination response").unwrap();
+
+                    client.sequence += 1;
+                    let mut retired = rpc(
+                        &mut v4_stream,
+                        916,
+                        compound(
+                            "retired-replaced-destination",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&old_handle)),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut retired, 2), NFS4ERR_STALE);
+                    consume_sequence_result(&mut retired, "retired replaced destination");
+                    assert_eq!(parse_result_status(&mut retired, OP_PUTFH), NFS4ERR_STALE);
+                    retired
+                        .end("retired replaced destination response")
+                        .unwrap();
+
+                    client.sequence += 1;
+                    let mut current = rpc(
+                        &mut v4_stream,
+                        917,
+                        compound(
+                            "replacement-handle-live",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&new_handle)),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut current, 2);
+                    consume_sequence_result(&mut current, "replacement handle live");
+                    parse_result_header(&mut current, OP_PUTFH);
+                    current.end("replacement handle live response").unwrap();
                     server.close().await.unwrap();
                 });
         })

@@ -2594,6 +2594,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFS/N-API Clippy, and formatting pass locally. Native v4 ordering,
   cross-process recovery, crash/power-loss durability, exact-tip hosted
   acceptance, and production readiness remain open.
+- [x] W01-NFS requalified rename-over-open with `HostFs`: a real backing
+  rename replaces destination bytes, the old v4 OPEN reads its original bytes,
+  CLOSE retires the pathless old handle, and the replacement handle remains
+  valid. The focused wire case passed ten reruns, full locked NFS passed 43
+  unit/25 v4 wire, strict NFS Clippy and formatting passed, and local opt-in
+  macOS native NFSv3 passed 1/1. The previous exact-tip hosted CI run was
+  cancelled without jobs; native v4.1 ordering, cross-process recovery,
+  crash/power-loss durability, exact-tip hosted acceptance, and production
+  readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

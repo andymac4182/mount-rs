@@ -1465,6 +1465,8 @@ spent waiting for a hosted job or credential approval.
 
 | 2026-09-22 | W01-NFS | Fixed rename-overwrite dropping a pinned destination handle: the pre-fix unit case returned `ESTALE` for a still-open opaque handle. A pathless pinned identity now survives replacement and is retired on final unpin; a real-TCP v4 OPEN/v3 RENAME-over case reads the original held bytes while a fresh v3 LOOKUP gets a distinct replacement handle. Focused wire 10/10 reruns, full locked NFS 43 unit and 25 v4 wire, strict NFS/N-API Clippy, and formatting passed in an isolated target | — | Same-process cross-version rename-over-open lifetime passed | Native v4 ordering, cross-process state, crash/power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
 
+| 2026-09-22 | W01-NFS | Upgraded rename-over-open wire coverage to HostFs: backing rename replaces the destination bytes, held v4 OPEN reads the original bytes, CLOSE retires the old pathless handle, and the new handle stays live. Focused case passed ten reruns; full locked NFS 43 unit/25 v4 wire, strict NFS Clippy, formatting, and opt-in local macOS native NFSv3 1/1 passed. The previous exact-tip CI run was cancelled with no jobs | — | Local host-backed descriptor and native v3 evidence passed | Native v4.1 ordering, cross-process recovery, crash/power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:
