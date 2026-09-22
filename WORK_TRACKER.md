@@ -52,6 +52,11 @@ attempt exposed an incorrect `peer: null` expectation for Unix sockets, so a
 corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P
 run `35670279904`, qualifying native `stream: undefined` and its
 transport-source peer string.
+The attached-connection wrapper packet at exact SHA
+`1c791cf67861efdfe8e5da223048904c88c6b168` now implements the declared
+`waitClosed()` member and awaits it in metadata teardown. Local focused 9P
+checks passed; Native 9P run `35696071202` is pending with `jobs: []`, so no
+hosted PASS is claimed and production remains NO-GO.
 The latest N-API packet normalizes the oracle's optional absence shapes at the
 JavaScript boundary: pre-version `msize`/`version`, unknown `userFor(fid)`, and
 conflict-free table/session `getlock()` now return `undefined`. Exact SHA

@@ -303,6 +303,15 @@ Current focused behavior:
   `007e6545d1b25d708abfa10f2120f81fba59a74a` passed the same hosted N-API step
   in [Native 9P run `35682638941`](https://github.com/andymac4182/mount-rs/actions/runs/35682638941),
   job `106602684115`, with the companion Rust job `106602683880` also green.
+- The attached `P9Connection` wrapper now implements the declared
+  `waitClosed(): Promise<void>` member alongside `closed`; the metadata
+  teardown regression checks the method and awaits it after `close()`. Local
+  metadata, direct-session, observability, fid, mount-helper, generated
+  typecheck, syntax, diff, and elevated server-selector checks passed. Exact
+  SHA `1c791cf67861efdfe8e5da223048904c88c6b168` has [Native 9P run
+  `35696071202`](https://github.com/andymac4182/mount-rs/actions/runs/35696071202)
+  pending with no materialized jobs (`jobs: []`); this is not hosted PASS
+  evidence.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port
