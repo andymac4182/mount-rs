@@ -3448,6 +3448,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   source-health and tracking-control evidence only and does not close
   W08-P01–P09.
 
+  A fresh 11:36 AEST repository-policy check passed the positive production
+  config fixture with an out-of-band non-secret TLS-policy URL, failed closed
+  on the insecure/inline-secret fixture, passed the pending and strict accepted
+  release-manifest fixtures, and failed closed on the invalid manifest. These
+  are admission-control checks only; no provider, signing, SBOM, canary,
+  rollback or approval evidence was created, so P01/P02/P07/P09 remain open.
+
 ### W08 production rollout track — NO-GO (15% provisional)
 
 The demo and W08 functional acceptance are not production approval. Track the

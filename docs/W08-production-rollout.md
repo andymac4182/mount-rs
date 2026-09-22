@@ -175,6 +175,14 @@ control evidence only and does not close any production gate. Provider/native
 rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in
 skips.
 
+A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
+positive production-config fixture with a non-secret TLS-policy URL supplied
+out of band; the insecure/inline-secret fixture failed closed as expected. The
+pending release-manifest fixture passed, the strict accepted fixture passed
+with `--require-release-acceptance`, and the invalid fixture failed closed.
+These are repository policy controls only: no provider connection, artifact
+signature, SBOM service, canary, rollback or approval was performed.
+
 The latest read-only production-boundary audit at **2026-09-22 11:08 AEST**
 returned HTTP 404 from the W08 production workflow query and `w08-production`
 environment API; `gh release list` could not resolve the repository, and
