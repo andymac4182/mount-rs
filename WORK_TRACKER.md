@@ -818,6 +818,7 @@ patch):
 | Main | W01 N-API 9P bounded-reader maximum parity | `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/9p-codec.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: `readRread`, `readTwrite`, and `readRreaddir` now preserve the pinned oracle's optional maximum-item argument, including default `P9_MAX_ITEM` and bounded success/error behavior. The 44-case differential, generated typecheck, syntax, fid/runtime, diff, formatting, strict Clippy, and 18 focused Rust tests passed locally. Exact SHA `bba379ebe4339e951de9cb7ca02b4b499c3a3874` passed Native 9P run `35677755888`, N-API job `106587739639` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106587739402` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P typed-reader maximum parity | `integrations/mount-rs-napi/src/p9_codec.rs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/9p-codec.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: native `P9Reader.readRread`, `readTwrite`, and `readRreaddir` now preserve the same optional maximum-item argument as the public helpers. The helper/typed-reader differential, generated declarations, typecheck, syntax, fid/runtime, diff, formatting, strict Clippy, and 18 focused Rust tests passed locally. Exact SHA `4ecdb63db64711e0fadf77d4612b6394f57f3f4d` passed Native 9P run `35678757675`, N-API job `106590841909` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106590841982` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P synchronous direct live-mount parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: direct `./9p` `live9pMounts()` now returns the oracle-compatible synchronous `Array<P9Mount>`; its process-local registry tracks direct `mount9p()` results regardless of `signals`, prunes inactive mounts, and removes closed mounts. The root all-transport `liveMounts()` registry remains asynchronous. Local addon build, helper/typecheck/syntax, 44-case codec, fid/session/observability, formatting, strict Clippy, and 18 focused Rust tests passed. Exact SHA `56291e3f9b4274fec2111e4e2f88696e98f3a548` passed Native 9P run `35679754417`, N-API job `106593941892` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106593942012` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
+| Main | W01 N-API 9P direct probe absence-shape parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: direct `./9p` `p9ClientProbe()` now always owns `platform` and `reason`, normalizing native `null`/omitted values to `undefined`; the direct declaration requires `platform: "linux" | undefined` and `reason: string | undefined`, while the root automatic `JsP9ClientProbe` boundary remains unchanged. Local addon/generated build, helper, required-field typecheck, syntax, and diff checks passed. Exact SHA `7389be4d5ea4930075cf5278032614e931054620` passed Native 9P run `35680542975`, N-API job `106596362070` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106596362200` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -862,7 +863,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest terminal qualification is green at [run `35675987457`](https://github.com/andymac4182/mount-rs/actions/runs/35675987457) / exact source `1670ceba81b24c1ed39b8ab396671324c7f28193`, with six rollout-ledger, five qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the base composition marker was p95/p99 43,146µs at 158.97 ops/s and five-round soak p95/p99 ranged 12,701–14,187µs with throughput 218.16–225.92 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 64.73 lifecycle IOPS with all 1,200 operations successful, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35675987457-1` (ID `10673640911`, SHA-256 `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`) was retained with the seven-gate packet still NO-GO; production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest terminal qualification is green at [run `35680085315`](https://github.com/andymac4182/mount-rs/actions/runs/35680085315) / exact source `71972b28ca7ae561325342ddf466c8353546547a`, with six rollout-ledger, five qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the validated 30-second bounded authority heartbeat stayed live across staged clients and service restart with a 120-second forward-jump bound; the base composition marker was p95/p99 28,220µs at 218.60 ops/s and five-round soak passed; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 202.31 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35680085315-1` (ID `10675087310`, SHA-256 `f9b47245760b4d03ddeeb9461b51bb1f29c8ce913920cbc629309ba024d2ecc5`) was retained with the seven-gate packet still NO-GO; the heartbeat is not production monitoring or deployment-credential evidence, and production authority, failover, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -979,6 +980,18 @@ provider-lifecycle, power-loss, or durable-lock gates.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
+The current hosted provider audit confirms the external boundary: Live AWS S3
+run `35679010203` failed its protected preflight with
+`AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
+inputs, while Live Cloudflare R2 run `35680542993` failed its bounded-usage
+admission with `count=285 limit=20`. The exact-tip CI for this WebDAV scope
+chunk was cancelled by successor mainline publication; replacement CI
+`35680709436` at origin tip `1bdf8846` had no jobs at the audit snapshot.
+The following exact-tip CI run `35681063238` at published WebDAV tip
+`7282bce8` began, but native-WebDAV jobs `106597988170` (macOS) and
+`106597988268` (Ubuntu) were cancelled by successor tip `2bcd9aa4`; replacement
+CI `35681127696` was pending at the audit snapshot. The earlier terminal
+hosted native-WebDAV run remains the latest claimable hosted WebDAV result.
 The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
@@ -2283,6 +2296,32 @@ Evidence landed without closing the remaining W01 acceptance gates:
   bounded authority heartbeat and checks its liveness across each staged client
   and service-restart gate; deployment-level credentials, monitored
   clock/cadence telemetry and failover evidence remain pending.
+  Heartbeat-corrected current-tip requalification
+  [35680085315](https://github.com/andymac4182/mount-rs/actions/runs/35680085315)
+  (job `106594973866`, exact revision
+  `71972b28ca7ae561325342ddf466c8353546547a`) completed green in 10m05s on
+  Ubuntu 24.04/Linux `amd64`. It passed the policy and negative fixtures,
+  rollout/qualification/workload/evidence regression cases, the validated
+  lease policy and a bounded independent authority heartbeat at 30-second
+  cadence with a 120-second maximum forward-jump bound; heartbeat liveness
+  stayed true across staged clients and service restart. Durable
+  FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, five-round soak,
+  fresh-client and RustFS integration paths passed. The retained workload
+  artifact records 400 successful writes, reads and deletes, 1,200 successful
+  lifecycle operations, measured 202.31 IOPS, zero timeouts and zero cleanup
+  failures. The retained artifact is
+  `foundationdb-production-qualification-35680085315-1` (ID `10675087310`)
+  with SHA-256
+  `f9b47245760b4d03ddeeb9461b51bb1f29c8ce913920cbc629309ba024d2ecc5`;
+  provenance records runner `GitHub Actions 1000024955`, Node 24.21.0,
+  RustFS `1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff`,
+  FoundationDB image
+  `sha256:0d19ffb2aa154259f2da0f8941e1549b4c331f47008af5755a83f6247edeabf1`,
+  and the `mount-rs-split-foundationdb-r2` split-store topology. The retained
+  packet is still `NO-GO` with seven open gates and zero evidence records; the
+  test heartbeat is not deployment-level authority credentials, monitored
+  production clock/cadence telemetry or failover evidence, so W07.3 remains
+  open.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -2401,6 +2440,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`.
   Live macOS service/cluster acceptance, the complete advertised
   platform/package matrix and production owner gates remain open.
+  Heartbeat-corrected current-tip requalification
+  [35680085315](https://github.com/andymac4182/mount-rs/actions/runs/35680085315)
+  (job `106594973866`, exact revision
+  `71972b28ca7ae561325342ddf466c8353546547a`) completed green in 10m05s and
+  passed live Node/N-API, Linux CLI/FUSE mount and reopen, durable
+  FoundationDB/RustFS service restart/authority republish, fresh-client
+  reopen and RustFS integration on Ubuntu 24.04/Linux `amd64`. It also kept
+  the independent 30-second authority heartbeat live across staged clients
+  and service restart, and retained the corrected 400-iteration workload
+  artifact with 1,200 successful lifecycle operations, 202.31 measured IOPS,
+  zero timeouts and zero cleanup failures. Its retained artifact is
+  `foundationdb-production-qualification-35680085315-1` (ID `10675087310`)
+  with SHA-256
+  `f9b47245760b4d03ddeeb9461b51bb1f29c8ce913920cbc629309ba024d2ecc5`.
+  Live macOS service/cluster acceptance, the complete advertised
+  platform/package matrix, production capacity/observability/recovery and
+  production owner gates remain open; the test heartbeat is not production
+  monitoring or deployment-credential evidence.
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
@@ -3007,7 +3064,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35675987457` recorded base
+    latency and throughput; prior terminal hosted run `35675987457` recorded base
     `operations=15 p50_us=3394 p95_us=43146 p99_us=43146 total_ms=94
     throughput_ops_per_sec=158.97` at exact revision
     `1670ceba81b24c1ed39b8ab396671324c7f28193`; its five isolated soak-round
@@ -3024,7 +3081,14 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     throughput_ops_per_sec=111.17`; soak p95/p99 ranged from 13,388µs to
     15,041µs and throughput from 206.94 to 236.23 ops/s. Production-shaped
     duration, retry/error budget, resource growth, safe capacity, cost and
-    scaling triggers are still required.
+    scaling triggers are still required. The newer heartbeat-corrected
+    current-tip run `35680085315` at exact revision
+    `71972b28ca7ae561325342ddf466c8353546547a` passed the same bounded
+    workload with 202.31 measured lifecycle IOPS, 1,200 successful operations,
+    zero timeouts/cleanup failures, a 30-second authority heartbeat and
+    service-restart liveness checks. This is a stronger implementation
+    qualification checkpoint, not production capacity, monitoring or failover
+    evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.

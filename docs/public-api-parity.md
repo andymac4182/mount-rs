@@ -232,6 +232,16 @@ direct synchronous registry only; it does not promote the root asynchronous
 registry or automatic cross-transport signal ownership into the direct 9P
 contract.
 
+The direct `./9p` `p9ClientProbe()` result also now always owns the oracle's
+`platform` and `reason` keys, using `undefined` for absent values. The direct
+declaration requires `platform: "linux" | undefined` and
+`reason: string | undefined`; the root automatic `JsP9ClientProbe` and native
+zero-argument binding shapes remain separate boundaries. Exact SHA
+`7389be4d5ea4930075cf5278032614e931054620` passed [Native 9P run
+`35680542975`](https://github.com/andymac4182/mount-rs/actions/runs/35680542975),
+N-API job `106596362070`, and Rust job `106596362200`, with local addon,
+helper, typecheck, syntax, and diff checks green.
+
 No native mount, unmount, signal, or live-filesystem result should be inferred
 from component tests. The CLI and integration test prerequisites remain an
 explicit evidence boundary.

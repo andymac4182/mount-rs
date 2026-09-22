@@ -59,7 +59,16 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P direct-facade packet at exact SHA
+The latest W01-9P direct-probe packet at exact SHA
+`7389be4d5ea4930075cf5278032614e931054620` passed [Native 9P run
+`35680542975`](https://github.com/andymac4182/mount-rs/actions/runs/35680542975):
+N-API job `106596362070` and Rust job `106596362200` both passed their Linux
+probes and supported lifecycle gates. The packet restores the oracle-shaped
+own `platform`/`reason` fields on the direct `P9ClientProbe` result while
+leaving the root automatic-probe boundary unchanged; broader W01 acceptance
+remains NO-GO.
+
+The preceding W01-9P direct-facade packet at exact SHA
 `56291e3f9b4274fec2111e4e2f88696e98f3a548` passed [Native 9P run
 `35679754417`](https://github.com/andymac4182/mount-rs/actions/runs/35679754417):
 N-API job `106593941892` and Rust job `106593942012` both passed their Linux
@@ -169,6 +178,21 @@ and durable locks remain open gates.
 The current shell has no AWS/R2/Cloudflare credential names available, so live
 provider acceptance remains an explicit external blocker; no credential values
 were read or persisted.
+
+The current hosted provider audit confirms that boundary: Live AWS S3 run
+`35679010203` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` with its
+protected bucket/region/account/role inputs empty, while Live Cloudflare R2 run
+`35680542993` stopped at the bounded-usage gate (`count=285`, limit `20`). The
+exact-tip CI run for the published WebDAV scope chunk was cancelled by a
+successor mainline push; replacement CI `35680709436` at current origin tip
+`1bdf8846` had no jobs at the audit snapshot, so no fresh hosted WebDAV result
+is promoted.
+
+The next exact-tip CI run `35681063238` at published WebDAV tip `7282bce8`
+started, but native-WebDAV jobs `106597988170` (macOS) and `106597988268`
+(Ubuntu) were cancelled by successor tip `2bcd9aa4`; replacement CI
+`35681127696` was pending at the audit snapshot. The earlier terminal hosted
+native-WebDAV run remains the latest claimable hosted WebDAV result.
 
 For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
 exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy

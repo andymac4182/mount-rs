@@ -114,6 +114,7 @@ import {
   type P9User,
   type P9Mount,
   type P9MountTarget,
+  type P9Platform,
 } from "@mount-rs/core/9p"
 import {
   createS3Server,
@@ -230,8 +231,8 @@ const p9ProbeLinux: P9ClientProbe = p9ClientProbe("linux")
 const p9ProbeDarwin: P9ClientProbe = p9ClientProbe("darwin")
 const p9OptionsString: string = p9MountOptions(p9Target, p9MountConfig)
 const p9PlatformName: "linux" | undefined = p9Platform()
-const p9PlatformLinux: "linux" | undefined = p9Platform("linux")
-const p9PlatformDarwin: "linux" | undefined = p9Platform("darwin")
+const p9PlatformLinux: P9Platform | undefined = p9Platform("linux")
+const p9PlatformDarwin: P9Platform | undefined = p9Platform("darwin")
 declare const p9Mounted: P9Mount
 const p9LiveMounts: Array<P9Mount> = live9pMounts()
 const p9ProbeRequired: {
