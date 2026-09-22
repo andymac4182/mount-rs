@@ -54,7 +54,7 @@ function parseMacosProvenance(macosLog) {
   if (!/^[0-9a-f]{40}$/iu.test(sourceRevision)) {
     failure("macos-provenance-source-revision-invalid");
   }
-  return {
+  const provenance = {
     repository,
     workflow,
     ref,
@@ -63,6 +63,8 @@ function parseMacosProvenance(macosLog) {
     runAttempt,
     runner: runner.trim(),
   };
+  requireString(provenance.runner, "macos-provenance-runner");
+  return provenance;
 }
 
 export function validateW07PlatformEvidence({
@@ -146,7 +148,6 @@ export function validateW07PlatformEvidence({
     "sourceRevision",
     "runId",
     "runAttempt",
-    "runner",
   ]) {
     if (macosProvenance[field] !== linuxSummary.provenance[field]) {
       failure(`macos-provenance-${field}-mismatch`);

@@ -16,7 +16,7 @@ const linuxLog = [
 ].join("\n");
 const macosLog = [
   "W07_MACOS_FOUNDATIONDB_COMPILE_PASS provider=mount-rs-foundationdb cli=native_lifecycle napi=foundationdb",
-  "W07_MACOS_FOUNDATIONDB_COMPILE_PROVENANCE repository=andymac4182/mount-rs workflow=W07 FoundationDB production qualification ref=refs/heads/main source_revision=" + sourceRevision + " run_id=123 run_attempt=1 runner=GitHub Actions 1",
+  "W07_MACOS_FOUNDATIONDB_COMPILE_PROVENANCE repository=andymac4182/mount-rs workflow=W07 FoundationDB production qualification ref=refs/heads/main source_revision=" + sourceRevision + " run_id=123 run_attempt=1 runner=GitHub Actions macOS 1",
 ].join("\n");
 const linuxSummary = {
   schema: 2,
@@ -57,6 +57,7 @@ const cases = [
       });
       assert.equal(result.expectedSoakRounds, 10);
       assert.equal(result.sourceRevision, sourceRevision);
+      assert.equal(result.macosProvenance.runner, "GitHub Actions macOS 1");
     },
   },
   {
