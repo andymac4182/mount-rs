@@ -120,6 +120,10 @@ types = types.replace(
 types = types.replace(
   /export declare class P9Session \{([\s\S]*?)\n\}/g,
   (declaration, body) => {
+    body = body.replace(
+      /constructor\(driver: Filesystem(?=, options)/,
+      "constructor(driver: Filesystem | FsDriver",
+    )
     if (!/\bhandleCall\(/.test(body)) {
       body = `\n  handleCall(bytes: Uint8Array): Promise<Buffer | null>${body}`
     }

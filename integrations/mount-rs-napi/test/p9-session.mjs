@@ -44,6 +44,7 @@ const session = new P9Session(filesystem, {
     assertions.push(message)
   },
 })
+let structuralSession
 
 try {
   assert.ok(session.driver instanceof Filesystem)
@@ -82,7 +83,28 @@ try {
   assert.equal(reports[1].error.code, "ENOTSUP")
   assert.deepEqual(reports[1].header, { size: 7, type: 250, tag: 17 })
   assert.deepEqual(assertions, [])
+
+  const structuralDriver = {
+    stat: (...args) => filesystem.stat(...args),
+    readdir: (...args) => filesystem.readdir(...args),
+    open: (...args) => filesystem.open(...args),
+  }
+  structuralSession = new P9Session(structuralDriver, { msize: 16 * 1024 })
+  assert.ok(structuralSession instanceof P9Session)
+  assert.ok(structuralSession.driver instanceof Filesystem)
+  const structuralVersion = await structuralSession.handleCall(
+    encodeMessage(P9_TVERSION, P9_NOTAG, (writer) => {
+      writer.u32(16 * 1024)
+      writer.string("9P2000.L")
+    }),
+  )
+  assert.ok(Buffer.isBuffer(structuralVersion))
+  assert.equal(structuralVersion[4], P9_RVERSION)
+  await structuralSession.destroy()
+  structuralSession = undefined
+  assert.equal((await filesystem.stat("/")).isDirectory(), true)
 } finally {
+  if (structuralSession) await structuralSession.destroy()
   await session.destroy()
   assert.equal(session.destroyed, true)
   await filesystem.shutdown()

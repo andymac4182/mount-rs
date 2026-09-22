@@ -657,7 +657,7 @@ export declare class P9Session {
    * boundary. Socket ownership remains with `P9Server`; this object only
    * owns the protocol/fid/lock session state and the driver's shared Arc.
    */
-  constructor(driver: Filesystem, options?: P9SessionOptions | undefined | null)
+  constructor(driver: Filesystem | FsDriver, options?: P9SessionOptions | undefined | null)
   /**
    * Handle one complete 9P frame without a socket. Malformed framing
    * returns `null`; protocol and driver failures remain encoded as an

@@ -13,6 +13,7 @@ const P9_LOCK_TABLE_SHAPES_WRAPPED = Symbol("mountRsP9LockTableShapesWrapped")
 const P9_LOCK_CLIENT_SHAPES_WRAPPED = Symbol("mountRsP9LockClientShapesWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
+const P9_SESSION_STATE = new WeakMap()
 const MOUNT_CLOSED_STATE = new WeakMap()
 const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
 const S3_STREAM_WRAPPED = Symbol("mountRsS3StreamWrapped")
@@ -696,6 +697,25 @@ function wrapP9Session(P9Session, binding) {
     return P9Session
   }
   const prototype = P9Session.prototype
+  const nativeDestroy = prototype.destroy
+  if (typeof nativeDestroy === "function") {
+    Object.defineProperty(prototype, "destroy", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value: async function (...args) {
+        try {
+          return await nativeDestroy.apply(this, args)
+        } finally {
+          const state = P9_SESSION_STATE.get(this)
+          if (state && !state.released) {
+            state.released = true
+            await state.driver.shutdown()
+          }
+        }
+      },
+    })
+  }
   for (const name of ["msize", "version"]) {
     const descriptor = Object.getOwnPropertyDescriptor(prototype, name)
     if (!descriptor || typeof descriptor.get !== "function") continue
@@ -743,21 +763,29 @@ function wrapP9Session(P9Session, binding) {
   return new Proxy(P9Session, {
     construct(target, args) {
       const [driver, options] = args
-      if (!options || typeof options !== "object" ||
-          typeof options.onError !== "function") {
-        return Reflect.construct(target, args)
-      }
-      const state = { p9Options: { onError: options.onError } }
-      const forwarded = [
-        driver,
-        {
+      const structural = !(driver instanceof binding.Filesystem)
+      let adapted = driver
+      if (structural) adapted = binding.createDriver(driver)
+
+      const forwarded = [adapted, ...args.slice(1)]
+      if (options && typeof options === "object" &&
+          typeof options.onError === "function") {
+        const state = { p9Options: { onError: options.onError } }
+        forwarded[1] = {
           ...options,
           onError(error, header) {
             return p9SessionError(binding, state, error, header)
           },
-        },
-      ]
-      return Reflect.construct(target, forwarded)
+        }
+      }
+      try {
+        const session = Reflect.construct(target, forwarded)
+        if (structural) P9_SESSION_STATE.set(session, { driver: adapted, released: false })
+        return session
+      } catch (error) {
+        if (structural) void adapted.shutdown().catch(() => {})
+        throw error
+      }
     },
   })
 }

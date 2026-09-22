@@ -702,6 +702,13 @@ function checkServerAndKvSubpaths(): void {
   })
   const directP9Call: Promise<Buffer | null> = directP9Session.handleCall(Buffer.alloc(0))
   const directP9Destroy: Promise<void> = directP9Session.destroy()
+  const directStructuralDriver: FsDriver = {
+    stat: (...args) => filesystem.stat(...args),
+    readdir: (...args) => filesystem.readdir(...args),
+    open: (...args) => filesystem.open(...args) as unknown as ReturnType<FsDriver["open"]>,
+  }
+  const directStructuralP9Session: P9Session = new P9Session(directStructuralDriver)
+  const directStructuralP9Destroy: Promise<void> = directStructuralP9Session.destroy()
   const p9SessionOptions: P9SessionOptions = p9Session.options
   const p9SessionOptionLocks: P9LockTable | undefined = p9SessionOptions.locks
   const p9SessionStats: P9SessionStats = p9Session.stats
@@ -752,6 +759,7 @@ function checkServerAndKvSubpaths(): void {
   void attachedP9Destroy
   void directP9Call
   void directP9Destroy
+  void directStructuralP9Destroy
   void disposal
   const connectionClose: Promise<void> = p9Connection.close()
   const connectionWaitClosed: Promise<void> = p9Connection.waitClosed()
