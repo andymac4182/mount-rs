@@ -25,6 +25,28 @@ W26 continues to own Ozone compatibility and qualification only; customers
 deploy Ozone, backup/DR remains with Ozone/customer ownership, and releases
 remain with the separate stream.
 
+Current W26 FoundationDB publication read-overlap boundary (2026-09-22):
+source commit `fba61979f1f6c9858026cd5ebc4c5d3d357f366b`
+(`perf(w26): overlap FoundationDB publication reads`) is now on `origin/main`.
+The hot metadata publication still uses one
+transaction/read version, lease/fence predicate, revision CAS, shared
+authority time and fail-closed ambiguous-commit handling; the lease,
+manifest and authority reads are only polled concurrently. The direct
+`futures-util` dependency and root lockfile entry are included in that source
+chunk. Formatting, diff checks, FoundationDB feature lib/test-target checks,
+strict Clippy and portable feature-off tests pass; focused native tests reach
+only the missing `fdb_c` linker gate. Security scan
+`26c525f1-03bc-4a3a-9c91-b7577eab8316` has complete changed-file coverage
+and zero findings. The prior run `35712159705` tested the ancestor
+`ff0ccfdd`, not `fba61979`, so a fresh exact-head Ozone run is required before
+promoting any performance result. Production remains **NO-GO** until the new
+source passes all feasible provider rows at the hard 1,000-IOPS/drive target,
+the aggregate contains every end-to-end marker, and customer/Ozone security,
+Tier-1 99.99% SLO, five-minute RPO/RTO and backup/DR evidence are closed.
+W26 continues to own compatibility and qualification only; customers deploy
+Ozone, backup/DR remains Ozone/customer owned, and releases remain with the
+separate stream.
+
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
 (`perf(w26): avoid redundant FoundationDB chunk clears`) is now on
