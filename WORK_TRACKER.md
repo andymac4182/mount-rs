@@ -2675,8 +2675,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   actions while **NO-GO**; any future **GO** packet must carry a concrete
   source revision, accountable owner, target environment, terminal run,
   provider versions, cleanup/rollback outcome and evidence reference for every
-  closed gate. This is admission/tracking integrity only and cannot
-  authenticate production evidence or release approval.
+  closed gate. The workflow retains this packet beside the qualification log
+  and summary in the run artifact, so the seven-gate NO-GO state travels with
+  each bounded qualification result. This is admission/tracking integrity
+  only and cannot authenticate production evidence or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
