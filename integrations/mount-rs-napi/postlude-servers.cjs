@@ -8,6 +8,9 @@
 const SERVER_WRAPPED = Symbol("mountRsServerLifecycleWrapped")
 const CONNECTION_WRAPPED = Symbol("mountRsConnectionLifecycleWrapped")
 const P9_SERVER_WRAPPED = Symbol("mountRsP9ServerWrapped")
+const P9_SESSION_SHAPES_WRAPPED = Symbol("mountRsP9SessionShapesWrapped")
+const P9_LOCK_TABLE_SHAPES_WRAPPED = Symbol("mountRsP9LockTableShapesWrapped")
+const P9_LOCK_CLIENT_SHAPES_WRAPPED = Symbol("mountRsP9LockClientShapesWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
 const MOUNT_CLOSED_STATE = new WeakMap()
@@ -203,6 +206,10 @@ function p9PeerOf(stream, fallback) {
 
 function p9ErrorCode(error) {
   return error && typeof error === "object" ? error.code : undefined
+}
+
+function p9UndefinedForNull(value) {
+  return value === null ? undefined : value
 }
 
 function reviveP9Error(binding, error) {
@@ -667,6 +674,61 @@ function wrapP9Connection(P9Connection) {
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
 }
 
+function wrapP9Session(P9Session) {
+  if (!P9Session || !P9Session.prototype || P9Session.prototype[P9_SESSION_SHAPES_WRAPPED]) {
+    return
+  }
+  const prototype = P9Session.prototype
+  for (const name of ["msize", "version"]) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, name)
+    if (!descriptor || typeof descriptor.get !== "function") continue
+    const native = descriptor.get
+    Object.defineProperty(prototype, name, {
+      configurable: true,
+      enumerable: descriptor.enumerable,
+      get() {
+        return p9UndefinedForNull(native.call(this))
+      },
+    })
+  }
+  const nativeUserFor = prototype.userFor
+  if (typeof nativeUserFor === "function") {
+    Object.defineProperty(prototype, "userFor", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value(...args) {
+        return p9UndefinedForNull(nativeUserFor.apply(this, args))
+      },
+    })
+  }
+  Object.defineProperty(prototype, P9_SESSION_SHAPES_WRAPPED, { value: true })
+}
+
+function wrapP9LockGetter(ctor, marker) {
+  if (!ctor || !ctor.prototype || ctor.prototype[marker]) return
+  const prototype = ctor.prototype
+  const nativeGetlock = prototype.getlock
+  if (typeof nativeGetlock !== "function") return
+  Object.defineProperty(prototype, "getlock", {
+    configurable: true,
+    enumerable: false,
+    writable: true,
+    value(...args) {
+      return p9UndefinedForNull(nativeGetlock.apply(this, args))
+    },
+  })
+  Object.defineProperty(prototype, marker, { value: true })
+}
+
+function wrapP9LockTable(P9LockTable) {
+  wrapP9LockGetter(P9LockTable, P9_LOCK_TABLE_SHAPES_WRAPPED)
+}
+
+function wrapP9LockClient(P9LockClient) {
+  wrapP9LockGetter(P9LockClient, P9_LOCK_CLIENT_SHAPES_WRAPPED)
+}
+
 function wrapNfsConnection(NfsConnection) {
   if (!NfsConnection || !NfsConnection.prototype || NfsConnection.prototype[CONNECTION_WRAPPED]) {
     return
@@ -852,6 +914,9 @@ module.exports = function installServers(binding) {
   for (const name of ["NfsServer", "P9Server", "S3Server", "WebdavServer"]) {
     wrapServer(binding && binding[name])
   }
+  wrapP9Session(binding && binding.P9Session)
+  wrapP9LockTable(binding && binding.P9LockTable)
+  wrapP9LockClient(binding && binding.P9LockClient)
   wrapP9Connection(binding && binding.P9Connection)
   wrapNfsConnection(binding && binding.NfsConnection)
   wrapS3Session(binding && binding.S3Session)

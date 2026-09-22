@@ -137,6 +137,13 @@ types = types.replaceAll("get handle(): FileHandle | null", "get handle(): FileH
 types = types.replaceAll("get qid(): NativeP9Qid | null", "get qid(): NativeP9Qid | undefined")
 types = types.replaceAll("get(fid: number): P9Fid | null", "get(fid: number): P9Fid | undefined")
 types = types.replaceAll("resume(entry: P9Fid, offset: bigint): P9DirResume | null", "resume(entry: P9Fid, offset: bigint): P9DirResume | undefined")
+// The P9 server postlude translates these native null option values to
+// undefined for the public Node facade. Keep generated declarations aligned
+// with that runtime boundary after every clean napi build.
+types = types.replaceAll("getlock(request: P9LockRequest): P9LockHolder | null", "getlock(request: P9LockRequest): P9LockHolder | undefined")
+types = types.replaceAll("userFor(fid: number): P9User | null", "userFor(fid: number): P9User | undefined")
+types = types.replaceAll("get msize(): number | null", "get msize(): number | undefined")
+types = types.replaceAll("get version(): string | null", "get version(): string | undefined")
 types = types.replace(
   /export declare class P9Server \{([\s\S]*?)\n\}/g,
   (declaration, body) => {

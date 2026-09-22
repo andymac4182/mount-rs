@@ -5,7 +5,13 @@ import { mkdtemp, readFile, rmdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
-const { live9pMounts, mount9p, p9ClientProbe, unmountAll9p } = p9
+const {
+  P9_LOCK_TYPE_RDLCK,
+  live9pMounts,
+  mount9p,
+  p9ClientProbe,
+  unmountAll9p,
+} = p9
 
 if (process.env.MOUNT_RS_NAPI_P9_NATIVE_MOUNT !== "1") {
   console.log(
@@ -50,6 +56,18 @@ try {
   assert.equal(mounted.connection.stream, undefined)
   assert.equal(typeof mounted.connection.peer, "string")
   assert.ok(mounted.connection.peer.length > 0)
+  assert.equal(typeof mounted.connection.session.msize, "number")
+  assert.equal(mounted.connection.session.version, "9P2000.L")
+  assert.equal(mounted.connection.session.userFor(0xffff_fffe), undefined)
+  assert.equal(mounted.connection.session.locks.getlock({
+    path: "/no-such-lock",
+    fid: 0,
+    type: P9_LOCK_TYPE_RDLCK,
+    start: 0n,
+    length: 1n,
+    procId: 1,
+    clientId: "native-shape-check",
+  }), undefined)
   assert.equal(typeof mounted.waitClosed, "function")
   assert.equal((await live9pMounts()).length, 1)
 

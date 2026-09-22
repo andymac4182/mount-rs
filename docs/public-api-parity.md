@@ -255,6 +255,12 @@ Current focused behavior:
   be round-tripped through the native getter. The focused metadata regression
   checks those snapshots plus the attached stream/peer state; the hosted direct
   mount test checks the native stream/peer representation.
+- The optional session/lock return shapes follow the oracle at the JavaScript
+  boundary: `P9Session.msize`, `P9Session.version`, and `P9Session.userFor()`
+  return `undefined` before negotiation or for an unknown fid, while
+  conflict-free `P9LockTable.getlock()` and `P9LockClient.getlock()` return
+  `undefined`; the native binding's internal `null` values are normalized by
+  the postlude.
 - The N-API P9 session now exposes the scalar session policy through
   `session.options` and the attach identity through `userFor(fid)`; the server
   exposes its effective scalar policy through `server.options`. These members
