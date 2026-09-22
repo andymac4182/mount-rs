@@ -577,9 +577,11 @@ module.exports.p9ClientProbe = (platform) => {
   const probe = platform === undefined || (platform === "linux" && process.platform === "linux")
     ? nativeP9ClientProbe()
     : p9ProbeForPlatform(platform)
-  if (probe.platform === null) probe.platform = undefined
-  if (probe.reason === null) probe.reason = undefined
-  return probe
+  return {
+    ...probe,
+    platform: probe.platform ?? undefined,
+    reason: probe.reason ?? undefined,
+  }
 }
 module.exports.p9Platform = (platform) => {
   if (platform !== undefined) return platform === "linux" ? "linux" : undefined

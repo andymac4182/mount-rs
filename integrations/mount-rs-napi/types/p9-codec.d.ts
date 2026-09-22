@@ -276,12 +276,12 @@ export interface P9Mount extends Mounted {
 
 export interface P9ClientProbe {
   usable: boolean
-  platform?: "linux"
+  platform: "linux" | undefined
   kernel: boolean
   transport: boolean
   modules: boolean
   root: boolean
-  reason?: string
+  reason: string | undefined
 }
 
 export declare function p9ClientProbe(platform?: NodeJS.Platform): P9ClientProbe
