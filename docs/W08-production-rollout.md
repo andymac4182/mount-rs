@@ -493,6 +493,16 @@ new W08 provider or production result is inferred. Hosted W08 run
 18:07 AEST, so it is not evidence. P01–P09 remain open and the decision
 remains NO-GO.
 
+The public mainline subsequently advanced to merge
+`b4e7c8686cc8fe9006e880b8eaccb4a6bc4262f3`, preserving the W08 ledger and
+concurrent W07/W05/W26 updates. The latest exact W08 Rust qualification is
+still `245258d9` after the FUSE/chunked source `7de703da`; no new W08
+provider/native result is inferred for the later documentation/control
+changes. Hosted W08 run `35703582574` targets the exact merge and remained
+`pending` at 18:14 AEST. The same read-only audit found no production-release
+runs, HTTP 404 for `w08-production`, only `v0.1.0-cli-preview`, and no
+production-candidate tag. P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
