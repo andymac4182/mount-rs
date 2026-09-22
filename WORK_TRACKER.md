@@ -1094,7 +1094,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
-| W05 | Cloudflare R2 | Immutable candidate `7efded54` is locally green through the current Rust workspace/NFS/S3/Clippy suite, dyld-safe macOS N-API package load, full Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths. W04 policy `35714141926` and W08 policy `35714144646` passed; CI `35714144497` remains queued overall with macOS Intel failing only at final artifact upload after functional steps passed, Fault `35714146067` is queued with Windows/Ubuntu success, W07 `35714147247` is in progress, W08 targets `35714146811` is in progress, and Native 9P `35714145176` is queued with substantive jobs green and its root companion queued. Live R2/AWS remain held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
+| W05 | Cloudflare R2 | Immutable candidate `7efded54` is locally green through the current Rust workspace/NFS/S3/Clippy suite, dyld-safe macOS N-API package load, full Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths. W04 policy `35714141926` and W08 policy `35714144646` passed; Fault `35714146067` is terminal-successful on all three OSes, Native 9P `35714145176` is terminal-successful including root conformance 146/146, W07 has its compile/durable jobs green with assembly queued, W08 has Linux/macOS builds green with asset verification queued, and CI `35714144497` remains queued with the isolated macOS artifact finalization timeout plus provider/native jobs incomplete. Live R2/AWS remain held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest current-public-main exact-tip terminal cross-platform qualification packet is green at [run `35712676265`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265) / exact source `ff5cc58188d9783a80de96698a187e1f6416b83e`, Linux job `106696766067`, macOS job `106696766203`, aggregate job `106702286990`; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, authority heartbeat/stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,311µs, p95/p99 37,919µs and 164.77 ops/s, ten-round soak p95/p99 was 9,841–17,582µs at 269.41–330.32 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 716.30 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10688222438`, macOS artifact ID `10688396103` and aggregate artifact ID `10688622703` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. This is current-public-main hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
@@ -3300,17 +3300,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  Shared `origin/main` advanced to `75878718` while the W05.52 candidate was
+  Shared `origin/main` advanced to `05e320ad` while the W05.52 candidate was
   being qualified. Immutable candidate `7efded54` is locally green through
   the current Rust workspace/NFS/S3/Clippy, dyld-safe macOS N-API build and
   load, complete Node SDK/CLI/N-API suite, real PGlite lifecycle, and
   Rust/Node/CLI provider matrix. W04 policy `35714141926` and W08 policy
-  `35714144646` passed; CI `35714144497` remains queued overall with macOS
-  Intel failing only at final artifact upload after functional steps passed,
-  Fault `35714146067` is queued with Windows/Ubuntu success, W07
-  `35714147247` is in progress, W08 targets `35714146811` is in progress, and
-  Native 9P `35714145176` is queued with substantive jobs green and its root
-  companion queued. The prior immutable candidate
+  `35714144646` passed; Fault `35714146067` is terminal-successful on all
+  three OSes, Native 9P `35714145176` is terminal-successful including root
+  conformance 146/146, W07 has compile/durable success with assembly queued,
+  W08 has Linux/macOS build success with asset verification queued, and CI
+  `35714144497` remains queued with the isolated macOS artifact finalization
+  timeout plus provider/native jobs incomplete. The prior immutable candidate
   `25e275ab` has terminal CI `failure`: TiDB/TiDB-RustFS stale harness
   assertions, Ozone/TiDB and Ozone/FoundationDB hard-IOPS misses, W26 dirty
   provenance, and cancelled native FUSE; the exact evidence and estimates are
