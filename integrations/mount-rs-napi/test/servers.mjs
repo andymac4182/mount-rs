@@ -136,6 +136,17 @@ function writeSocket(socket, bytes, label) {
   );
 }
 
+function externalIPv4() {
+  return Object.values(networkInterfaces())
+    .flat()
+    .find(
+      (entry) =>
+        entry !== undefined &&
+        (entry.family === "IPv4" || entry.family === 4) &&
+        !entry.internal,
+    );
+}
+
 class BufferedSocket {
   #socket;
   #chunks = [];
@@ -202,8 +213,10 @@ class BufferedSocket {
   }
 }
 
-async function connectLoopback(port) {
-  const socket = net.createConnection({ host: "127.0.0.1", port });
+async function connectLoopback(port, { host = "127.0.0.1", localAddress } = {}) {
+  const options = { host, port };
+  if (localAddress !== undefined) options.localAddress = localAddress;
+  const socket = net.createConnection(options);
   await within(
     new Promise((resolve, reject) => {
       socket.once("connect", resolve);
@@ -794,8 +807,8 @@ async function p9Request(socket, reader, type, tag, body, expectedType) {
   return response.subarray(7);
 }
 
-async function connectP9Session(server, msize = 65_536) {
-  const { socket, reader } = await connectLoopback(server.port);
+async function connectP9Session(server, msize = 65_536, endpoint) {
+  const { socket, reader } = await connectLoopback(server.port, endpoint);
   const versionMsize = Buffer.alloc(4);
   versionMsize.writeUInt32LE(msize, 0);
   await p9Request(
@@ -1437,14 +1450,7 @@ async function exerciseP9WireFraming() {
 }
 
 async function exerciseP9RemoteAdmission() {
-  const external = Object.values(networkInterfaces())
-    .flat()
-    .find(
-      (entry) =>
-        entry !== undefined &&
-        (entry.family === "IPv4" || entry.family === 4) &&
-        !entry.internal,
-    );
+  const external = externalIPv4();
   if (external === undefined) {
     markPhase("9P remote admission skipped: no external IPv4 interface");
     return;
@@ -1485,6 +1491,50 @@ async function exerciseP9RemoteAdmission() {
     assert.equal(reports.length, 1);
   } finally {
     if (socket) socket.destroy();
+    await server.close();
+  }
+}
+
+async function exerciseP9RemoteAdmissionOptIn() {
+  const external = externalIPv4();
+  if (external === undefined) {
+    markPhase("9P remote admission opt-in skipped: no external IPv4 interface");
+    return;
+  }
+
+  const server = createP9Server(memoryFilesystem(), {
+    host: "0.0.0.0",
+    port: 0,
+    allowRemote: true,
+  });
+  let connection;
+  try {
+    await within(server.listen(), "9P remote admission opt-in listen");
+    connection = await connectP9Session(server, 8_192, {
+      host: external.address,
+      localAddress: external.address,
+    });
+    assert.equal(server.connections, 1);
+    assert.match(connection.connection.peer, new RegExp(`^${external.address}:\\d+$`));
+    assert.equal(connection.connection.session.msize, 8_192);
+
+    const getattrBody = Buffer.alloc(12);
+    getattrBody.writeUInt32LE(1, 0);
+    getattrBody.writeBigUInt64LE(p9.P9_GETATTR_BASIC, 4);
+    const getattrReply = await p9Request(
+      connection.socket,
+      connection.reader,
+      p9.P9_TGETATTR,
+      4,
+      getattrBody,
+      p9.P9_RGETATTR,
+    );
+    assert.ok(getattrReply.length > 0);
+  } finally {
+    if (connection?.socket) connection.socket.destroy();
+    if (connection?.connection) {
+      await within(connection.connection.closed, "9P remote admission opt-in cleanup");
+    }
     await server.close();
   }
 }
@@ -2693,6 +2743,7 @@ await within(
       await runPhase("9P server boundary", exerciseP9ServerBoundary);
       await runPhase("9P wire framing", exerciseP9WireFraming);
       await runPhase("9P remote admission", exerciseP9RemoteAdmission);
+      await runPhase("9P remote admission opt-in", exerciseP9RemoteAdmissionOptIn);
       await runPhase("9P Unix listener policy", exerciseP9Unix);
       await runPhase("9P teardown", exerciseP9Teardown);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
@@ -2717,6 +2768,7 @@ await within(
     await runPhase("9P server boundary", exerciseP9ServerBoundary);
     await runPhase("9P wire framing", exerciseP9WireFraming);
     await runPhase("9P remote admission", exerciseP9RemoteAdmission);
+    await runPhase("9P remote admission opt-in", exerciseP9RemoteAdmissionOptIn);
     await runPhase("9P Unix listener policy", exerciseP9Unix);
     await runPhase("9P teardown", exerciseP9Teardown);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
