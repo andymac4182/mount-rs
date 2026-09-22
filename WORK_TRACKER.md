@@ -2055,6 +2055,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   is one-host process-crash namespace evidence, not a directory-fsync or
   power-loss guarantee, durable v4 session/lease/replay/handle recovery,
   native-client ordering, or exact-tip hosted acceptance; W01-NFS is NO-GO.
+- [x] The forced-crash NFSv4.1 lane also verifies same-directory rename across
+  a server-process replacement. A seeded host file is renamed by a successful
+  wire `RENAME`; the replacement session sees `NFS4ERR_NOENT` for the old name
+  and success for the new name through wire `LOOKUP`, while the host bytes at
+  the new path remain exact. Direct process-restart passes 2/2, the full
+  locked NFS target passes 41 unit and all applicable integrations (including
+  20 v4 wire), and strict Clippy, formatting, and diff checks pass. This is
+  process-crash namespace recovery, not directory-fsync/power-loss durability,
+  durable v4 state, native-client ordering, or hosted acceptance; W01-NFS
+  remains NO-GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second
