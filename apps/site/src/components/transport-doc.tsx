@@ -234,10 +234,14 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         and provider gates remain open.
         The latest terminal CI packet <code>35698854392</code> at source
         <code>116e9ed4</code> canceled its native-FUSE job before a hosted
-        <code>/dev/fuse</code> result; the current exact-tip run
-        <code>35700938192</code> is still nonterminal. No new native-FUSE
-        acceptance is promoted, and callback delivery, close races,
-        crash/restart, concurrency, locks, and durability remain open.
+        <code>/dev/fuse</code> result. A newer manual run
+        <code>35715585800</code> at source <code>e175f80a</code> left native-FUSE
+        job <code>106706185799</code> queued with no runner, completion time,
+        conclusion, or step output; mainline has since advanced to
+        <code>e984c232</code>. No hosted native-FUSE result is claimable from
+        that queue blocker, and exact-current-tip terminal evidence remains
+        required. Callback delivery, close races, crash/restart, concurrency,
+        locks, and durability remain open.
       </>
     ),
     sources: [
@@ -251,6 +255,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Latest hosted FUSE status packet', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
       { label: 'Current exact-tip FUSE qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35700938192' },
       { label: 'Lima in-process PGlite qualification', href: 'https://github.com/andymac4182/mount-rs/commit/467da6a7' },
+      { label: 'Hosted FUSE queue blocker', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715585800' },
     ],
   },
   nfs: {
