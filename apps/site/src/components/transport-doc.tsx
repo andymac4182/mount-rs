@@ -484,6 +484,15 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         protocol parsing; <code>AUTH_SYS</code> remains client-asserted identity
         rather than cryptographic authentication, and native ordering, crash
         durability, hosted acceptance, and production readiness remain open.
+        The latest symmetric namespace-ordering regression at source
+        <code>3884c194</code> pauses a v3 LOOKUP after backend stat but before
+        handle binding, then proves a v4.1 REMOVE waits until that handle is
+        bound. The v3 handle becomes <code>NFS3ERR_STALE</code>, a fresh name
+        lookup returns <code>NFS3ERR_NOENT</code>, and the focused case passes
+        ten reruns; the locked target passes 42 unit and 24 v4-wire cases with
+        strict Clippy. This is same-server reverse cross-version namespace
+        ordering, not cross-process arbitration, native-client ordering,
+        crash/power-loss durability, hosted acceptance, or production readiness.
       </>
     ),
     sources: [
@@ -497,6 +506,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'NFSv4 process-restart rename qualification', href: 'https://github.com/andymac4182/mount-rs/commit/6d520dd2903a03230e673840b47934e7374959f3' },
       { label: 'macOS N-API loader repair', href: 'https://github.com/andymac4182/mount-rs/commit/b7ba3806e5a36f9732b1976e100c5d0e3004dd1e' },
       { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
+      { label: 'NFSv3 LOOKUP/v4 REMOVE ordering qualification', href: 'https://github.com/andymac4182/mount-rs/commit/3884c194e705bf672d3d94a4aab5fc548908c9b3' },
       { label: 'macOS CLI host-backed NFS smoke', href: 'https://github.com/andymac4182/mount-rs/commit/be382691822327b41bffb9823cd3b235630698b2' },
       { label: 'NFSv4.1 OPEN access-upgrade fix', href: 'https://github.com/andymac4182/mount-rs/commit/512ef9588426d4b84b420bc5634bb043e40ac448' },
       { label: 'Candidate macOS native NFS sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },
@@ -1070,7 +1080,8 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         checks. The exact-tip hosted queue run <code>35681063238</code> was
         canceled when successor tip <code>2bcd9aa4</code> arrived, and its
         replacement <code>35681127696</code> was later canceled before jobs
-        materialized. No newer hosted WebDAV result is claimable, so
+        materialized. No newer hosted WebDAV result was claimable at that
+        checkpoint, so
         <code>35678488755</code> remains the latest terminal native result and
         the current maturity remains Preview.
         The subsequent exact-tip audit run <code>35687955166</code> was
@@ -1091,21 +1102,24 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         and diff checks. Manual current-package run
         <code>35714570430</code> at exact source
         <code>92a6539e6a91d67a811b77cf688fc4ad2177f858</code> is live: its
-        macOS arm64, macOS Intel, and Ubuntu arm64 Node jobs completed
-        successfully, while Ubuntu Node remains queued. The macOS native
-        WebDAV job <code>106702902262</code> then completed checkout,
-        toolchain/cache, and native WebDAV I/O successfully; the Ubuntu native
-        WebDAV job <code>106702902155</code> remains queued. No terminal
-        cross-platform hosted WebDAV result is claimable, so live-provider,
-        physical power-loss, durable-lock, and stronger same-resource-ordering
-        gates remain open.
+        Node Ubuntu x64/arm64 and macOS arm64/Intel jobs completed
+        successfully, and the native WebDAV jobs on Ubuntu and macOS also
+        passed. The aggregate remained nonterminal on unrelated jobs, and no
+        WebDAV, N-API, CI-workflow, or native-build files changed through
+        current tip <code>f9e338e6</code>, so this closes the current hosted
+        package/native slices only. A completion audit at source
+        <code>c990cc52</code> records the same supported 4-OS matrix alongside
+        the local protocol/session/provider-crash evidence. Live provider
+        behavior, physical power-loss/crash durability, and external AWS/R2
+        admission remain open; durable-lock persistence and stronger
+        same-resource ordering are explicit supported-scope exclusions.
         A current published-tip Rust requalification at source
         <code>ebac1450</code> passed WebDAV 41/41, warning-denied Clippy,
         formatting, <code>git diff --check</code>, and the no-worktree-target
         check. A relevance audit found no changes between the hosted SHA and
         this tip in the WebDAV transport, N-API binding, CI workflow, or native
-        build wrapper, so the hosted macOS result covers the current
-        implementation; Ubuntu native WebDAV remains queued.
+        build wrapper, so the hosted package/native matrix covers the current
+        implementation for its supported packet.
       </>
     ),
     sources: [
@@ -1127,6 +1141,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'Current-package WebDAV qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714570430' },
       { label: 'Current WebDAV Rust requalification', href: 'https://github.com/andymac4182/mount-rs/commit/ebac1450' },
       { label: 'Hosted WebDAV result relevance audit', href: 'https://github.com/andymac4182/mount-rs/commit/f9e338e6' },
+      { label: 'WebDAV completion audit', href: 'https://github.com/andymac4182/mount-rs/commit/c990cc52' },
       { label: 'Current WebDAV oracle parity', href: 'https://github.com/andymac4182/mount-rs/commit/72011a0' },
     ],
   },
