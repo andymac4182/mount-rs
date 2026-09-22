@@ -162,25 +162,26 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Source base `f4f672dd9a722addad87b5c7af6e1bff22db1a49` was freshly reverified
-locally after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider,
-Ozone, FUSE, chunked, bounded-teardown and restart-fencing updates: the full
-locked workspace test suite exited 0 and strict workspace Clippy with
-`-D warnings` exited 0. The four W08 rollout/evidence policy commands also
-passed with 36 functional items, 9 open production gates, 7 rollout tests and
-11 evidence tests; the packet remains NO-GO with zero evidence records. This
-is source-health and tracking-control evidence only and does not close any
-production gate. Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE
-or NFS remained explicit opt-in skips.
+Source base `eeb628da9deed5ad0b9670756b406556a659f9b8` was freshly reverified
+locally after concurrent FUSE, N-API, S3-test, WebDAV, lockfile, NFS, 9P and
+provider updates: the full locked workspace test suite exited 0 and strict
+workspace Clippy with `-D warnings` exited 0. The four W08 rollout/evidence
+policy commands also passed with 36 functional items, 9 open production gates,
+7 rollout tests and 11 evidence tests; the packet remains NO-GO with zero
+evidence records. A subsequent unrelated documentation-only merge is
+source-equivalent to this tested tree. This is source-health and
+tracking-control evidence only and does not close any production gate.
+Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained
+explicit opt-in skips.
 
-The latest read-only production-boundary audit at **2026-09-22 10:24 AEST**
-again returned HTTP 404 from the GitHub repository, `w08-production` environment
-and environment-secret API surfaces. `gh release list` could not resolve the
-repository and `gh run list --workflow w08-production-release.yml` returned
-HTTP 404, so the last successful release observation (08:38 AEST: only
-`v0.1.0-cli-preview`) is retained as the latest known release state rather than
-replaced with an unsupported claim. `git ls-remote` found no
+The latest read-only production-boundary audit at **2026-09-22 10:38 AEST**
+returned HTTP 404 from both W08 workflow-list queries, the `w08-production`
+environment API, and the repository release surface. `gh release list` could
+not resolve the repository, so the last successful release observation (08:38
+AEST: only `v0.1.0-cli-preview`) is retained as the latest known release state
+rather than replaced with an unsupported claim. `git ls-remote` found no
 `v*-cli-production-candidate*` tag, while the fetched public mainline contains
+both `.github/workflows/w08-release-policy.yml` and
 `.github/workflows/w08-production-release.yml`. This remains an external
 GitHub/API and release-configuration blocker; no production gate is closed.
 

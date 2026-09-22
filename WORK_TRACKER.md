@@ -811,6 +811,7 @@ patch):
 | Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P run `35670279904` with N-API job `106565351978` and Rust job `106565352174`, so this representation boundary is hosted-qualified; production remains NO-GO for the broader outstanding gates |
 | Main | W01 N-API 9P optional absence-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-locks.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the JavaScript facade converts native `null` absence results to oracle-compatible `undefined` for session `msize`/`version`/`userFor` and table/session `getlock`; declarations and focused runtime/type/syntax/diff checks pass locally. Exact SHA `0d520a1d0a9af44e08e65c5f0638a640bb3c08db` passed Native 9P run `35671509538`, N-API job `106569412372` with automatic/direct/structural mounted I/O and cleanup plus direct native session/lock assertions, and Rust job `106569412047` with all four ignored tests; production remains NO-GO for the broader open gates |
 | Main | W01 N-API 9P platform-probe argument parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the direct `./9p` facade accepts oracle-compatible optional platform arguments for `p9ClientProbe(platform?)` and `p9Platform(platform?)`; the no-argument probe remains native-backed, while override calls report deterministic Linux/non-Linux facts without attempting a mount. Typecheck and the host-independent mount-helper regression pass locally. Exact SHA `9da45327a9e09a9f827a9630869d1a32119674e3` also passed Native 9P run `35672845113`, N-API job `106573050491` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106573049500` with all four ignored native tests; production remains NO-GO |
+| Main | W01 N-API 9P session message-statistics shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-observability.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: `P9Session.stats.messages` now normalizes the native object/hash-map to the oracle's `Map<string, number>`; attached-session observability and session-metadata regressions, generated typecheck, syntax, and diff checks pass locally, with the direct native mount asserting `Map#get("Tversion")`. Exact SHA `e8c6043827e6cd0232a28f94b8fc665e25985f76` passed Native 9P run `35673543701`, N-API job `106575123928` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106575123716` with all four ignored native tests; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -1122,6 +1123,11 @@ state. The focused 20-test Rust target exercises this contract across the
 mutation methods and an injected failure/retry path; provider-specific
 power-loss ordering, live remote-provider behavior, hosted lifecycle, and
 durable-lock acceptance remain open.
+The narrow structural N-API `FsDriver` seam now forwards an optional
+`syncfs()` callback as well; the WebDAV regression reaches it through
+`createWebdavServer` and confirms both acknowledgement after success and a
+500 response after callback failure. Durable structural drivers without the
+callback continue to fail closed with `ENOSYS`.
 At exact published packet `4e19f22648dc8f6fa622b70e76f70ca4540a3483`, the
 read-only hosted snapshot found CI `35672738319` and W08 release targets/policy
 `35672738309`/`35672738333` pending, Fault injection `35672738370` and Live AWS
@@ -3342,16 +3348,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source base `f4f672dd9a722addad87b5c7af6e1bff22db1a49` was freshly reverified
-  after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider, Ozone,
-  FUSE, chunked, bounded teardown and restart-fencing updates with the full
-  locked workspace test suite (exit 0) and strict workspace Clippy with
-  `-D warnings` (exit 0). The four W08 rollout/evidence policy commands also
-  passed with 36 functional items, 9 open production gates, 7 rollout tests
-  and 11 evidence tests; the packet remains NO-GO with zero evidence records.
-  Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained
-  explicit opt-in skips. This is source-health and tracking-control evidence
-  only and does not close W08-P01–P09.
+  Source base `eeb628da9deed5ad0b9670756b406556a659f9b8` was freshly reverified
+  after concurrent FUSE, N-API, S3-test, WebDAV, lockfile, NFS, 9P and provider
+  updates with the full locked workspace test suite (exit 0) and strict
+  workspace Clippy with `-D warnings` (exit 0). The four W08 rollout/evidence
+  policy commands also passed with 36 functional items, 9 open production
+  gates, 7 rollout tests and 11 evidence tests; the packet remains NO-GO with
+  zero evidence records. A subsequent unrelated documentation-only merge is
+  source-equivalent to this tested tree. Provider/native rows requiring TiDB,
+  RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
+  source-health and tracking-control evidence only and does not close
+  W08-P01–P09.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
@@ -3489,6 +3496,11 @@ reproducible in a production-like environment.
   fetched mainline. The last successful release observation remains the 08:38
   AEST preview-only result. This is still an external hosted boundary, not a
   W08 implementation pass.
+  A further read-only audit at 10:38 AEST returned HTTP 404 for both W08
+  workflow-list queries, the `w08-production` environment and release surface;
+  no candidate tag was found, while both protected workflow files remained
+  present in the fetched mainline. The latest known release remains the
+  preview-only observation above. This does not close P09.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*

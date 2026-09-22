@@ -30,6 +30,7 @@ export interface FsDriver {
     utimens?(path: string, atimeNs: bigint, mtimeNs: bigint, options?: { followSymlinks?: boolean }): Promise<void>
     mknod?(path: string, mode: number, dev: number): Promise<void>
   }
+  syncfs?(): Promise<void>
   stat(path: string): Promise<JsStats>
   readdir(path: string, options: { withFileTypes: true }): Promise<DirentLike[]>
   open(path: string, flags?: string | number, mode?: number): Promise<FileHandleLike>

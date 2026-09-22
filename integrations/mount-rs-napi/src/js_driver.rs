@@ -1367,6 +1367,7 @@ impl JsFileHandle {
 }
 
 struct DriverCallbacks {
+    syncfs: Option<Arc<CallbackSlot<NoArgs>>>,
     stat: Arc<CallbackSlot<PathArgs>>,
     readdir: Arc<CallbackSlot<ReaddirArgs>>,
     open: Arc<CallbackSlot<OpenArgs>>,
@@ -1662,6 +1663,31 @@ impl JsDriver {
 impl FsDriver for JsDriver {
     fn capabilities(&self) -> Capabilities {
         self.capabilities
+    }
+
+    fn syncfs<'a, 'async_trait>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        Self: 'async_trait,
+    {
+        let Some(callback) = self.callbacks.syncfs.clone() else {
+            return Box::pin(async { Err(FsError::enosys("syncfs")) });
+        };
+        let lifecycle = Arc::clone(&self.lifecycle);
+        Box::pin(async move {
+            invoke(
+                callback,
+                lifecycle.clone(),
+                &lifecycle.waiters,
+                (),
+                "syncfs",
+                Arc::new(parse_unit),
+            )
+            .await
+            .map_err(|error| error.into_fs_error("syncfs", None, None))
+        })
     }
 
     fn stat<'a, 'b, 'async_trait>(
@@ -2274,6 +2300,7 @@ pub fn create_driver(driver: Object<'_>) -> napi::Result<super::Filesystem> {
     let readdir = build_callback(driver, "readdir", &lifecycle, true)?.expect("required callback");
     let open = build_callback(driver, "open", &lifecycle, true)?.expect("required callback");
     let callbacks = DriverCallbacks {
+        syncfs: object_method(driver, "syncfs", &lifecycle)?,
         stat,
         readdir,
         open,

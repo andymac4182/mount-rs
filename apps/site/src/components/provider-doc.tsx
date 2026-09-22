@@ -317,6 +317,7 @@ SQL`,
       { label: 'Provider matrix and Node CLI', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/cli.mjs' },
       { label: 'PGlite progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w04-progress-ledger.md' },
       { label: 'Hosted W04 qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635114595' },
+      { label: 'Current W04 exact-tip qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673738166' },
       { label: 'PGlite production rollout', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W04-production-rollout.md' },
     ],
   },
@@ -425,7 +426,12 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         with fixed 64 KiB chunks and verified cleanup. Hosted CI does not
         receive the dedicated R2 credentials, so those results remain a
         separately authenticated acceptance boundary. The repository now also
-        wires a budget-gated <code>Live Cloudflare R2</code> workflow with
+        records an exact-current local packet at <code>db431f4</code> with
+        Rust SDK <code>6/3/0</code>, Node SDK <code>5/3/0</code>, CLI
+        <code>12/2</code>, upstream <code>1200 passed / 82 skipped</code>, and
+        all 40 five-seed/eight-backend traces at 621 operations; provider rows
+        without credentials remain explicit skips.
+        It wires a budget-gated <code>Live Cloudflare R2</code> workflow with
         pinned Rust/Node tooling, a pinned mountx checkout, AWS CLI cleanup,
         the full Rust/Node/CLI/PGlite/trace packet, and an uploaded benchmark
         artifact. Hosted run <code>35579174675</code> on revision
@@ -437,6 +443,11 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
         operations, and the benchmark artifact was uploaded. This supersedes
         the earlier <code>35575940720</code> ESTALE failure for hosted
         acceptance while preserving that failure as historical evidence.
+        The newer workflow admission run <code>35670469503</code> at
+        <code>d570ab4</code> passed trigger coverage but stopped at the hosted
+        monthly budget guard with <code>count=243 limit=20</code>; it provides
+        no new live-R2 pass. Local process-restart evidence in the S3 tracker
+        is deliberately not promoted to live R2 durability.
       </>
     ),
     sources: [
@@ -448,6 +459,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
+      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670469503' },
     ],
   },
   rustfs: {
@@ -838,6 +850,18 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35666991514-1</code> with
         SHA-256
         <code>7313f7ce6f7fb188d84d79a5c5d98df01a1319f071208f1058c5ab87a72acb12</code>.
+        The newer hosted run <code>35671492720</code> at revision
+        <code>9460a62</code> passed the same guarded-authority packet with a
+        base marker of <code>p50_us=3846</code>, <code>p95_us=38409</code>,
+        <code>p99_us=38409</code>, and
+        <code>throughput_ops_per_sec=155.90</code>; five-round soak throughput
+        ranged from 199.39 to 214.47 ops/s. Its retained artifact is
+        <code>foundationdb-production-qualification-35671492720-1</code> with
+        SHA-256
+        <code>815dfecadab366a9fca9a7501c4a36d771324d8f71b521e0e8082261cbe431c3</code>.
+        The repository has since added a fixed 400-iteration, 64-way,
+        4 KiB-payload, 1,000-IOPS profile; that newer profile still needs a
+        fresh terminal hosted requalification.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -849,7 +873,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666991514' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671492720' },
     ],
   },
   'aws-s3': {
@@ -998,14 +1022,21 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         changes. The latest qualification-bucket audit repeated the account,
         region, public-access, ownership, encryption, versioning, lifecycle,
         and multipart-abort controls without mutating AWS. These are useful
-        rollout controls, not production resource or identity approval.
+        rollout controls, not production resource or identity approval. The
+        newer provider-workflow admission run <code>35669918721</code> at
+        <code>c2df980</code> passed trigger coverage and static contracts but
+        failed closed before AWS authentication at
+        <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code>. The local
+        <code>process.abort()</code> multipart restart check is
+        native-filesystem evidence only; neither result changes the live AWS
+        or power-loss acceptance boundary.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 preflight', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635498647' },
+      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35669918721' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
@@ -1019,7 +1050,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
     name: 'Apache Ozone',
     eyebrow: 'Provider / S3-compatible gateway',
     maturity: 'Experimental',
-    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, and replacement run 35641941218 also failed the hard 1,000-IOPS gate after its first concurrency remediation. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
+    maturityNote: 'Pinned 2.2.1 gateway and arm64 block/restart/CAS/range evidence exist; the historical W26 packet remains the last accepted scoped result, while the publication-barrier optimization is locally qualified and the latest hosted rerun remains pending against the unchanged 1,000-IOPS gate. Customer topology, backup/DR, secure tenancy, and release gates remain external.',
     summary: (
       <>
         Apache Ozone is exercised through its S3 gateway rather than a new
@@ -1148,6 +1179,14 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         local overlap/read/shutdown regression suite is green, but this first
         remediation is insufficient; secure customer topology, backup/DR,
         measured SLO/capacity, and release/canary/rollback remain open.
+        The current publication-barrier implementation adds a conservative
+        provider capability that skips only the redundant post-publish flush
+        probe while retaining explicit <code>syncfs</code>; the focused
+        ChunkedFs suite passes 20/20 and the full locked workspace/Clippy
+        checks are green. Fresh hosted run <code>35672928117</code> targets
+        exact SHA <code>fbc8346d</code>, but its Ozone producers were queued or
+        in progress and no aggregate existed at the recorded snapshot, so it
+        is not acceptance evidence.
       </>
     ),
     sources: [
@@ -1159,6 +1198,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
       { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
+      { label: 'Current publication-barrier qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35672928117' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

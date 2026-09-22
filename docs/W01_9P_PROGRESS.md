@@ -126,6 +126,11 @@ upstream stream/attach contract or hosted native mount behavior.
   `undefined` on both the table and session lock client. The native binding's
   internal `null` results are not exposed at this supported JavaScript
   boundary.
+- `P9Session.stats.messages` now follows the oracle's `Map<string, number>`
+  shape at the JavaScript boundary instead of exposing the native binding's
+  object/hash-map representation. The attached-session observability test and
+  the direct hosted mount test both assert the `Tversion` count through
+  `Map#get`; the generated declaration and typecheck cover the same shape.
 - Graceful server close, external unmount, and retryable unmount are in scope;
   the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
@@ -143,6 +148,15 @@ four ignored lifecycle tests. The local pinned oracle check at that same
 packet passed `124 constants; 274 barrel exports`. The direct native check is
 opt-in outside that job and deliberately preserves its mountpoint and driver
 root when teardown is not proven safe.
+
+The current hosted packet at exact SHA
+`e8c6043827e6cd0232a28f94b8fc665e25985f76` passed [Native 9P run
+`35673543701`](https://github.com/andymac4182/mount-rs/actions/runs/35673543701):
+Rust job `106575123716` passed all four ignored native tests, and N-API job
+`106575123928` passed the Linux probe, addon build, automatic/direct/structural
+mounted-I/O and cleanup checks. The direct test includes the `stats.messages`
+`Map` assertion; hosted success qualifies the native facade at this revision,
+not the local synthetic platform-override branch.
 
 ## Evidence ledger
 
@@ -181,6 +195,8 @@ root when teardown is not proven safe.
 | 2026-09-22 | N-API P9 mount-created server policy | Direct and automatic 9P mount options now map scalar `P9ServerOptions` policy to a private mount-created listener, including remote admission, socket mode/shared-directory policy, frame/in-flight bounds, negotiated `msize`, inode/read-only/ownership/debug policy, and an injected `P9LockTable`; Rust and N-API mapping tests passed, generated declarations/typecheck, focused P9/N-API tests, host-enabled server integration, formatting, and strict Clippy passed | Direct session `onError`/`onAssertion` callback injection, process signals, and hosted N-API native-mount lifecycle evidence remain open; production remains NO-GO |
 | 2026-09-22 | N-API P9 mount-created session callbacks | Direct and automatic 9P mount options now carry `onError` and `onAssertion` into the private listener's existing Rust `P9SessionHooks`; shared-server mounts retain the configured server's hooks. The debug N-API build, generated typecheck, observability/mount-helper/session/fid/lock runtime regressions, host-enabled server integration, N-API/Rust tests, formatting, syntax, diff checks, and strict Clippy passed | Process signals, remaining mount controls, and hosted N-API native-mount lifecycle evidence remain open; production remains NO-GO |
 | 2026-09-22 | N-API P9 direct-facade signal teardown | The direct `./9p` mount helper now supports `signals` (default `true`) with one process-wide `SIGINT`/`SIGTERM` pair, unmount-all dispatch, handler removal after opted-in mounts close, and default-signal re-raise when no other listener remains; the signal lifecycle regression, mount-helper regression, syntax and diff checks passed | Automatic cross-transport signal ownership, remaining mount controls, and hosted N-API native-mount lifecycle evidence remain open; the release build was not completed because the isolated target exhausted `/private/tmp`; production remains NO-GO |
+
+| 2026-09-22 | N-API 9P session message-statistics shape parity | The N-API postlude now converts the native `P9Session.stats.messages` object to the oracle's `Map<string, number>` shape, with generated declarations plus local attached-session observability, session-metadata, typecheck, syntax, and diff checks passing. The direct native test also asserts `Map#get("Tversion")`; `node test/p9-native.mjs` is an expected host-gated skip locally. Exact SHA `e8c6043827e6cd0232a28f94b8fc665e25985f76` passed [Native 9P run `35673543701`](https://github.com/andymac4182/mount-rs/actions/runs/35673543701): N-API job `106575123928` passed automatic/direct/structural mounted I/O and cleanup, and Rust job `106575123716` passed all four ignored native tests | Automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and W01 acceptance remain open; production remains NO-GO |
 
 ## Completion rule
 
