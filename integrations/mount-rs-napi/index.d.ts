@@ -750,6 +750,13 @@ export declare class S3Session {
   get buckets(): Record<string, Filesystem>
   get options(): S3SessionOptionsView
   get assertions(): Array<string>
+  /**
+   * Sweep the session-owned multipart staging roots without requiring a
+   * listening server. This mirrors the upstream session lifecycle; the
+   * server close path remains idempotent when it calls the same transport
+   * operation afterwards.
+   */
+  close(): Promise<void>
   /** Read a coherent snapshot of the transport-owned session metrics. */
   stats(): Promise<S3SessionStats>
 }

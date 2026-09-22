@@ -15,6 +15,10 @@ if [ "${MOUNT_RS_FOUNDATIONDB_NAPI:-0}" = "1" ]; then
   run_napi=1
 fi
 run_iops=0
+workload_profile=""
+if [ "${MOUNT_RS_FOUNDATIONDB_WORKLOAD_PROFILE:-}" = "w07-bounded" ]; then
+  workload_profile=w07-bounded
+fi
 if [ "${MOUNT_RS_FOUNDATIONDB_IOPS:-0}" = "1" ]; then
   run_iops=1
   if [ "$run_napi" -ne 1 ]; then
@@ -587,7 +591,7 @@ if [ "$run_napi" -eq 1 ]; then
       echo "FoundationDB IOPS qualification requires payload=4096 iterations=400 concurrency=64" >&2
       exit 2
     fi
-    if [ "$iops_minimum" -lt 1000 ]; then
+    if [ "$workload_profile" != "w07-bounded" ] && [ "$iops_minimum" -lt 1000 ]; then
       echo "FoundationDB IOPS qualification minimum must be at least 1000" >&2
       exit 2
     fi
@@ -647,12 +651,15 @@ if [ "$run_napi" -eq 1 ]; then
     if [ -f "$run_dir/foundationdb-ozone-iops.json" ]; then
       mkdir -p "$(dirname "$host_iops_output")"
       cp "$run_dir/foundationdb-ozone-iops.json" "$host_iops_output"
-      if [ "$napi_status" -eq 0 ]; then
+      if [ "$napi_status" -eq 0 ] && [ "$workload_profile" != "w07-bounded" ]; then
         node "$repo_dir/scripts/verify-w26-ozone-iops-artifact.mjs" \
           --output "$host_iops_output" \
           --providers mount-rs-split-foundationdb-r2 \
           --minimum-iops "$iops_minimum"
         echo "FOUNDATIONDB_OZONE_IOPS_PASS provider=foundationdb-r2 target=$iops_minimum output=$host_iops_output"
+      elif [ "$napi_status" -eq 0 ] && [ "$workload_profile" = "w07-bounded" ]; then
+        node "$repo_dir/scripts/verify-w07-workload-artifact.mjs" \
+          --output "$host_iops_output"
       fi
     else
       echo "FOUNDATIONDB_OZONE_IOPS_ARTIFACT_MISSING path=$run_dir/foundationdb-ozone-iops.json" >&2

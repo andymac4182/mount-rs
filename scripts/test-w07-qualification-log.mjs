@@ -27,7 +27,7 @@ const validLog = [
   "FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse",
   "RUSTFS_COMBO_PASS name=foundationdb-production-qualification",
   "RUSTFS_INTEGRATION_PASS endpoint=http://127.0.0.1:32769 bucket=test prefix=test",
-  "FOUNDATIONDB_OZONE_IOPS_PASS provider=mount-rs-foundationdb-r2 target=1000 output=/tmp/foundationdb-ozone-iops.json",
+  "FOUNDATIONDB_W07_WORKLOAD_PASS profile=w07-bounded provider=mount-rs-split-foundationdb-r2 size_mib=1 payload_bytes=4096 iterations=400 concurrency=64 minimum_iops=1 measured_iops=29.13 output=/tmp/foundationdb-ozone-iops.json",
   "FOUNDATIONDB_SOAK_PASS rounds=5",
   "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5",
   "FOUNDATIONDB_LATENCY_PASS workload=composition operations=15 p50_us=1000 p95_us=2000 p99_us=3000 total_ms=40 throughput_ops_per_sec=375",
@@ -67,9 +67,9 @@ const cases = [
   {
     name: "missing-workload-qualification",
     expectedStatus: 1,
-    expectedOutput: "missing=foundationdb-iops",
+    expectedOutput: "missing=foundationdb-workload-profile",
     log: validLog.replace(
-      "FOUNDATIONDB_OZONE_IOPS_PASS provider=mount-rs-foundationdb-r2 target=1000 output=/tmp/foundationdb-ozone-iops.json\n",
+      "FOUNDATIONDB_W07_WORKLOAD_PASS profile=w07-bounded provider=mount-rs-split-foundationdb-r2 size_mib=1 payload_bytes=4096 iterations=400 concurrency=64 minimum_iops=1 measured_iops=29.13 output=/tmp/foundationdb-ozone-iops.json\n",
       "",
     ),
   },

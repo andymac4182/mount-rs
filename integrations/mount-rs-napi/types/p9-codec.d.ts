@@ -10,6 +10,7 @@ import type {
   P9LockTable,
   P9Server,
   NativeP9Header,
+  P9FidOffset,
 } from "../index.js"
 
 // The 9P entrypoint retains the existing package exports (including the P9
@@ -57,7 +58,7 @@ export interface FidOpenState {
 
 export interface DirCursor<TDirent = string> {
   readonly entries: readonly TDirent[]
-  readonly offsets: ReadonlyMap<bigint, number>
+  readonly offsets: Array<P9FidOffset>
 }
 
 export interface DirResume<TDirent = string> {
@@ -69,8 +70,8 @@ export interface Fid<TDirent = string> {
   readonly fid: number
   path: string
   open: FidOpenState | undefined
-  readonly iounit: number
-  readonly cursor: DirCursor<TDirent> | undefined
+  iounit: number
+  cursor: DirCursor<TDirent> | undefined
 }
 
 export interface FidTableOptions {
