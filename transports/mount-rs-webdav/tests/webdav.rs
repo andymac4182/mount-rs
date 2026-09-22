@@ -1534,6 +1534,10 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         parse_lock_token(Some("<urn:uuid:token>")),
         Some("urn:uuid:token".to_owned())
     );
+    assert_eq!(
+        parse_lock_token(Some(" <urn:uuid:é> ")),
+        Some("urn:uuid:é".to_owned())
+    );
     assert_eq!(parse_lock_token(Some("<a><b>")), None);
     let lock_info = parse_lock_info(
         br#"<D:lockinfo xmlns:D="DAV:"><D:lockscope><D:exclusive/></D:lockscope><D:locktype><D:write/></D:locktype><D:owner><Z:name xmlns:Z="urn:test">A&amp;B&#x21;</Z:name></D:owner></D:lockinfo>"#,

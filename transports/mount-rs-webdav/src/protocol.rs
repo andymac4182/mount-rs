@@ -437,11 +437,8 @@ pub enum LockTimeout {
 
 pub fn parse_lock_token(value: Option<&str>) -> Option<String> {
     let value = value?.trim();
-    (value.starts_with('<')
-        && value.ends_with('>')
-        && value.len() > 2
-        && !value[1..value.len() - 1].contains(['<', '>']))
-    .then(|| value[1..value.len() - 1].to_owned())
+    let token = value.strip_prefix('<')?.strip_suffix('>')?;
+    (!token.is_empty() && !token.contains(['<', '>'])).then(|| token.to_owned())
 }
 
 pub fn format_lock_token(token: &str) -> String {

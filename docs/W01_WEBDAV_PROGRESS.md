@@ -77,6 +77,10 @@ as `ENOSYS`.
   preserve grant order for lockdiscovery, locked-member multistatus, and the
   first conflict selected for a 423 response; a hash-map iteration order must
   not leak into the supported protocol or public table behavior.
+- Keep public `Lock-Token` parsing UTF-8-safe: delimiter handling must accept
+  the pinned oracle's Unicode token payloads without slicing through a code
+  point or panicking, while still rejecting empty and nested-angle tokens. The
+  focused `<urn:uuid:é>` regression protects this public parser boundary.
 - Keep lock-root cleanup fail-closed across provider recovery faults: after a
   DELETE or MOVE, remove a lock only when `stat` confirms `ENOENT`; retain it
   when the provider returns an I/O error and the namespace cannot be resolved.
@@ -270,6 +274,7 @@ as `ENOSYS`.
 | 2026-09-22 | Package integration boundaries | `node test/webdav-codec.mjs`: explicit SKIP because `MOUNTX_SOURCE` is unset; package-wide `node test/servers.mjs` reached the unrelated NFS lane first and hit its host-permission prerequisite | Do not promote the package-wide NFS failure or the skipped oracle row into WebDAV PASS evidence |
 | 2026-09-22 | WebDAV declared-length preflight observability | The Rust HTTP adapter now routes a declared Content-Length overflow through session rejection bookkeeping before adding Connection: close, so request/reply/error stats and the request-level onError hook remain exact-once; the real-loopback regression verifies the 413 status, original PUT head, and counters, including bodyless HEAD handling in the shared helper. The full WebDAV target passed 36/36, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case S3+WebDAV differential passed | This closes a local HTTP preflight observability boundary only; authentication-ordering policy, hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV lock coverage ordering | Public covering and within lookups now iterate the grant-order index instead of HashMap values, making lock-discovery lists, locked-member results, and first-conflict selection deterministic like the pinned Map; the focused regression covers ancestor/direct coverage, subtree roots, and the selected 423 conflict, while the full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case differential passed | This closes a local public/session lock-order boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV Unicode lock-token parser safety | `parse_lock_token` now uses UTF-8-safe delimiter handling instead of byte-offset slicing: the pinned-oracle-compatible `<urn:uuid:é>` token is accepted without panic and `<a><b>` remains rejected. The focused protocol fixture and full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential passed | This closes a local public parser safety/parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 
 ## Completion rule
 
