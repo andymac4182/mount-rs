@@ -532,6 +532,11 @@ function checkServerAndKvSubpaths(): void {
     new P9Reader(Uint8Array.of(1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 2, 3)),
     3,
   )
+  const p9TypedBoundedRread = new P9Reader(p9BoundedBlob).readRread(3)
+  const p9TypedBoundedRreaddir = new P9Reader(p9BoundedBlob).readRreaddir(3)
+  const p9TypedBoundedTwrite = new P9Reader(
+    Uint8Array.of(1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 2, 3),
+  ).readTwrite(3)
   void p9DefaultPort
   void p9DefaultSocketMode
   void p9DefaultMaxInFlight
@@ -544,6 +549,9 @@ function checkServerAndKvSubpaths(): void {
   void p9BoundedRread
   void p9BoundedRreaddir
   void p9BoundedTwrite
+  void p9TypedBoundedRread
+  void p9TypedBoundedRreaddir
+  void p9TypedBoundedTwrite
   const p9FidOptions: FidTableOptions = { useDriverIno: true }
   const p9FidTable: FidTable = new FidTable(p9FidOptions)
   const p9Fid = p9FidTable.create(1, "/")

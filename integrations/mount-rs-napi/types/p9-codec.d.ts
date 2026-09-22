@@ -326,8 +326,8 @@ export declare class P9Reader {
   readTwalk(): Twalk
   readRwalk(): Rwalk
   readTread(): Tread
-  readRread(): Rread
-  readTwrite(): Twrite
+  readRread(max?: number): Rread
+  readTwrite(max?: number): Twrite
   readRwrite(): Rwrite
   readFidRequest(): FidRequest
   readRstatfs(): Rstatfs
@@ -350,7 +350,7 @@ export declare class P9Reader {
   readRxattrwalk(): Rxattrwalk
   readTxattrcreate(): Txattrcreate
   readTreaddir(): Treaddir
-  readRreaddir(): Rreaddir
+  readRreaddir(max?: number): Rreaddir
   readDirent(): P9Dirent
   readDirents(): P9Dirent[]
   readTfsync(): Tfsync
