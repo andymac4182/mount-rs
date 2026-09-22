@@ -199,6 +199,14 @@ pub enum LeaseAuthorityKind {
 pub trait LeaseOracle: Send + Sync {
     async fn now_ms(&self) -> Result<u64>;
 
+    /// Read provider time inside an already-open metadata transaction when the
+    /// authority can share that transaction's read version. The default keeps
+    /// custom clocks and legacy authorities compatible by using their normal
+    /// asynchronous read path.
+    async fn now_ms_in_transaction(&self, _transaction: &Transaction) -> Result<u64> {
+        self.now_ms().await
+    }
+
     /// Declare the authority boundary of this time source.
     ///
     /// Implementations must override this only when an application-owned
@@ -830,30 +838,40 @@ impl LeaseOracle for FoundationDbSharedLeaseOracle {
         let limits = self.limits;
         let result = db
             .transact_boxed(
-            (),
-            move |trx, _| {
-                let key = key.clone();
-                Box::pin(async move {
-                    configure_transaction(trx, limits)?;
-                    let published = get_owned(trx, &key)
-                        .await?
-                        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
-                        .transpose()?
-                        .ok_or_else(|| {
-                            TxnError::Fs(
-                                FsError::enotsup("FoundationDB shared lease authority")
-                                    .with_message(
-                                        "the shared lease authority has not published a time sample",
-                                    ),
-                            )
-                        })?;
-                    Ok(published)
-                })
-            },
-            transaction_options(limits, TransactionPolicy::Idempotent),
-        )
-        .await
-        .map_err(TxnError::into_fs);
+                (),
+                move |trx, _| {
+                    let key = key.clone();
+                    Box::pin(async move {
+                        configure_transaction(trx, limits)?;
+                        let published = read_shared_authority_time(trx, &key).await?;
+                        Ok(published)
+                    })
+                },
+                transaction_options(limits, TransactionPolicy::Idempotent),
+            )
+            .await
+            .map_err(TxnError::into_fs);
+        match result {
+            Ok(observed) => {
+                self.stats.record_success(observed);
+                let stats = self.stats.snapshot();
+                emit_lease_oracle_telemetry("ok", &stats);
+                Ok(observed)
+            }
+            Err(error) => {
+                self.stats.record_failure();
+                let stats = self.stats.snapshot();
+                emit_lease_oracle_telemetry("error", &stats);
+                Err(error)
+            }
+        }
+    }
+
+    async fn now_ms_in_transaction(&self, transaction: &Transaction) -> Result<u64> {
+        self.stats.record_attempt();
+        let result = read_shared_authority_time(transaction, &self.key)
+            .await
+            .map_err(TxnError::into_fs);
         match result {
             Ok(observed) => {
                 self.stats.record_success(observed);
@@ -1303,6 +1321,19 @@ fn ambiguous_commit_error(code: i32, message: impl std::fmt::Display) -> FsError
 
 async fn get_owned(trx: &Transaction, key: &[u8]) -> TxnResult<Option<Vec<u8>>> {
     Ok(trx.get(key, false).await?.map(|value| value.to_vec()))
+}
+
+async fn read_shared_authority_time(trx: &Transaction, key: &[u8]) -> TxnResult<u64> {
+    get_owned(trx, key)
+        .await?
+        .map(|bytes| decode_oracle_time(&bytes).map_err(TxnError::Fs))
+        .transpose()?
+        .ok_or_else(|| {
+            TxnError::Fs(
+                FsError::enotsup("FoundationDB shared lease authority")
+                    .with_message("the shared lease authority has not published a time sample"),
+            )
+        })
 }
 
 #[derive(Debug, Clone)]
@@ -1862,7 +1893,10 @@ impl MetadataStore for FoundationDbMetadataStore {
                         .await?
                         .map(|bytes| decode_last_fence(&bytes).map_err(TxnError::Fs))
                         .transpose()?;
-                    let now_ms = oracle.now_ms().await.map_err(TxnError::Fs)?;
+                    let now_ms = oracle
+                        .now_ms_in_transaction(trx)
+                        .await
+                        .map_err(TxnError::Fs)?;
                     if let Some(current) = &current
                         && current.expires_at_ms > now_ms
                     {
@@ -1918,7 +1952,10 @@ impl MetadataStore for FoundationDbMetadataStore {
                         .await?
                         .ok_or_else(|| TxnError::Fs(stale()))
                         .and_then(|bytes| decode_lease(&bytes).map_err(TxnError::Fs))?;
-                    let now_ms = oracle.now_ms().await.map_err(TxnError::Fs)?;
+                    let now_ms = oracle
+                        .now_ms_in_transaction(trx)
+                        .await
+                        .map_err(TxnError::Fs)?;
                     if !lease_matches(&current, &requested, now_ms) {
                         return Err(TxnError::Fs(stale()));
                     }
@@ -1958,7 +1995,10 @@ impl MetadataStore for FoundationDbMetadataStore {
                         .await?
                         .ok_or_else(|| TxnError::Fs(stale()))
                         .and_then(|bytes| decode_lease(&bytes).map_err(TxnError::Fs))?;
-                    let now_ms = oracle.now_ms().await.map_err(TxnError::Fs)?;
+                    let now_ms = oracle
+                        .now_ms_in_transaction(trx)
+                        .await
+                        .map_err(TxnError::Fs)?;
                     if !lease_matches(&current, &requested, now_ms) {
                         return Err(TxnError::Fs(stale()));
                     }
@@ -2030,7 +2070,10 @@ impl MetadataStore for FoundationDbMetadataStore {
                         .await?
                         .map(|bytes| decode_manifest(&bytes).map_err(TxnError::Fs))
                         .transpose()?;
-                    let now_ms = oracle.now_ms().await.map_err(TxnError::Fs)?;
+                    let now_ms = oracle
+                        .now_ms_in_transaction(trx)
+                        .await
+                        .map_err(TxnError::Fs)?;
                     if !lease_matches(&current_lease, &requested, now_ms) {
                         return Err(TxnError::Fs(stale()));
                     }

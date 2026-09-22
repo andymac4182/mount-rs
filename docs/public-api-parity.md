@@ -384,6 +384,19 @@ Current focused behavior:
   `35691732267`](https://github.com/andymac4182/mount-rs/actions/runs/35691732267),
   N-API job `106629973640`, with Rust job `106629973787` also green. Broader
   upstream session parity remains separate.
+- The direct session state machine now has focused evidence for the applicable
+  cancellation boundary: `Tflush` waits for and wakes an in-flight request,
+  `Tversion` reset clears negotiated state/fids/users and returns stale `EIO`,
+  and `destroy()` clears state and returns stale `ENODEV`. Generation
+  invalidation takes precedence over a late adapter/provider error, while a
+  caller-owned structural source remains alive. Exact SHA
+  `c627761721b982f78fd33942f7287753fad972f8` passed [Native 9P run
+  `35693518562`](https://github.com/andymac4182/mount-rs/actions/runs/35693518562),
+  N-API job `106635345169`, with the Rust job `106635344863` also green;
+  local direct-session, full `mount-rs-9p`, strict Clippy, typecheck, syntax,
+  formatting, and diff checks passed. This qualifies the supported reset/
+  destroy semantics only; process-crash/arbitrary-kernel-reset recovery and
+  broader upstream session parity remain separate.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
