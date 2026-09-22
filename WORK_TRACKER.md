@@ -2061,6 +2061,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   green. This is bounded same-process overlap, not canceled-operation
   recovery, crash-durable replay/lease/handles, native-client ordering,
   power-loss durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
+- [x] A canceled NFSv4.1 `REMOVE` now fences its session when the backend has
+  deleted a file but the request is aborted before COMPOUND completion and
+  reply caching. The controlled real-TCP test closes that connection after
+  backend deletion;
+  before the fix a changed-target retry returned `NFS4ERR_SEQ_MISORDERED`,
+  while now it receives `NFS4ERR_BADSESSION` and cannot delete the second
+  file. The same client creates a replacement session with request sequence 2;
+  the corrected `CREATE_SESSION` response echoes 2, and a fresh `REMOVE`
+  succeeds. The complete locked NFS target passes (41 unit, 1 mountpoint
+  claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency,
+  4 errors, 5 lifecycle, 1 v4 barrier, 12 v4 wire), with strict Clippy green.
+  This is fail-closed replacement-session progress, not the canceled request's
+  exact reply, uncached completed-reply handling, durable replay/lease/handle
+  state, all partial-mutation outcomes, native-client ordering, power-loss
+  durability, or exact-tip hosted
+  acceptance; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.
