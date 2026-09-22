@@ -70,10 +70,11 @@ function DownloadsPage() {
             <code>b93450472c0ed1d2bd9c5e06998e60d65071e4ac1af3050ebd07d8b650130db4</code>{' '}
             (Linux) and{' '}
             <code>a6fab3b9374ebcc5e150d71c6493f2005dec60cb7ee90892045dee68c6dda67b</code>{' '}
-            (macOS). Attestations remain queued, and the approved tag-triggered
-            publication flow still has not produced additional public release
-            assets, so this page continues to link only the verified GitHub
-            release archive and <code>SHA256SUMS</code> below.
+            (macOS). The Linux and macOS attestation jobs also completed
+            successfully, but the approved tag-triggered publication flow
+            still has not produced additional public release assets, so this
+            page continues to link only the verified GitHub release archive and
+            <code>SHA256SUMS</code> below.
           </p>
         </div>
 
