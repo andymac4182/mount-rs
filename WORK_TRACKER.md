@@ -2279,9 +2279,10 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `106658534921` passed both exact `Verify fragmented request early rejection`
   and `Verify PGlite integration and restart recovery` steps, with
   `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration PASS, and
-  `providersFailed: 0`. Windows Node and macOS-15-intel were in progress at
-  the latest inspection; macOS-latest, Ubuntu, native FUSE, package, provider,
-  and W26 gates are not terminal. This is partial current-tip evidence only;
+  `providersFailed: 0`. macOS-15-intel Node `106658534854` also passed both
+  exact steps. Ubuntu Node `106658535160` and native FUSE `106658535119` are
+  now active; macOS-latest, package, provider, and W26 gates are not terminal.
+  This is partial current-tip evidence only;
   W04 and production rollout remain open/NO-GO until the full matrix is
   inspected and the seven production gates close.
 - The same run then recorded a Windows Node timing failure and a provider
