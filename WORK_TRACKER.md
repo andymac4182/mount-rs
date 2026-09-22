@@ -1501,6 +1501,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   process-crash data recovery, not power-loss or durable v4 lease/replay/handle recovery;
   native-client ordering, exact-tip hosted qualification, and W01-NFS
   production acceptance remain open.
+- [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
+  `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
+  target. The exact old COMPOUND body returns without removing the second
+  file; a fresh sequence removes it. The focused test passed 20 reruns, the
+  complete locked NFS target passed (40 unit, 1 mountpoint claim with 1
+  native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 8 v4 wire), and strict Clippy, formatting, and
+  diff checks passed. This is completed-request replay in one live process,
+  not in-flight same-slot ordering, crash-durable replay, native-client
+  ordering, or production acceptance; W01-NFS remains NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

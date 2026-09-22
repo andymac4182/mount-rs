@@ -67,6 +67,12 @@ power-loss durability or persistent lease/replay/handle recovery. The corrected
 native-mountpoint packet remains unpublished, so the newer failed Ubuntu job
 does not close the exact-tip hosted gate; W01 remains **NO-GO**.
 
+W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
+orderly TCP reconnect: the same cached slot/sequence returns the original
+mutating `REMOVE` reply without removing a changed target, and the next
+sequence advances normally. In-flight same-slot ordering, crash-durable
+replay, native-client ordering, and exact-tip hosted acceptance remain open.
+
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
 the prefix already written at the destination. The focused Rust regression and

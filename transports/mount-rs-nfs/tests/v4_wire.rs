@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use mount_rs_core::MemoryFs;
+use mount_rs_core::{FsDriver, MemoryFs};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
     NFS4ERR_BADSESSION, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED,
@@ -1270,6 +1270,121 @@ fn nfs_v4_session_survives_transport_reconnect() {
         .expect("spawn v4 reconnect test thread")
         .join()
         .expect("v4 reconnect test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
+    std::thread::Builder::new()
+        .name("nfs-v4-replay-reconnect-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 replay test runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/replay-first", b"first").await.unwrap();
+                    driver
+                        .write_file("/replay-second", b"second")
+                        .await
+                        .unwrap();
+                    let server = NfsServer::new(driver.clone(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen replay NFS server");
+                    let (mut first, mut client) =
+                        connect_v4_client(address, 601, b"replay-reconnect-client").await;
+
+                    let mut response = rpc(
+                        &mut first,
+                        604,
+                        compound(
+                            "remove-first",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-first")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let first_body = response.rest();
+                    let mut parsed = XdrReader::new(&first_body);
+                    parse_compound_header(&mut parsed, 3);
+                    consume_sequence_result(&mut parsed, "initial remove");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    parsed.end("initial remove response").unwrap();
+                    assert!(driver.stat("/replay-first").await.is_err());
+                    assert!(driver.stat("/replay-second").await.is_ok());
+
+                    first
+                        .shutdown()
+                        .await
+                        .expect("close first replay transport");
+                    timeout(Duration::from_secs(2), async {
+                        while server.connections() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("first replay transport closes");
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect replacement replay transport");
+                    // A changed target is intentional: the same slot/sequence
+                    // must replay the old body, never execute the new REMOVE.
+                    let mut replay = rpc(
+                        &mut second,
+                        605,
+                        compound(
+                            "altered-retry",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(replay.rest(), first_body);
+                    assert!(driver.stat("/replay-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut second,
+                        606,
+                        compound(
+                            "fresh-remove",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("replay-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "fresh remove");
+                    parse_result_header(&mut response, OP_PUTROOTFH);
+                    parse_result_header(&mut response, OP_REMOVE);
+                    let _ = response.bool("fresh remove change atomic").unwrap();
+                    let _ = response.u64("fresh remove change before").unwrap();
+                    let _ = response.u64("fresh remove change after").unwrap();
+                    response.end("fresh remove response").unwrap();
+                    assert!(driver.stat("/replay-second").await.is_err());
+
+                    second.shutdown().await.expect("close replay transport");
+                    server.close().await.expect("close replay NFS server");
+                });
+        })
+        .expect("spawn v4 replay test thread")
+        .join()
+        .expect("v4 replay test thread panicked");
 }
 
 #[test]

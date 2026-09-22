@@ -179,7 +179,11 @@ there is no cross-process session, lease, replay, or handle arbitration. File
 handles and
 exclusive-create verifiers are process-local unless the caller supplies a
 stable handle verifier. A caller can reconnect to a still-running server and
-reuse the tested session, but `NfsConnection` close/wait state does not provide
+reuse the tested session. A completed, cached v4.1 `REMOVE` reply also survives
+that TCP reconnect: retrying its slot/sequence returns the original body
+without re-executing the operation. This does not qualify in-flight same-slot
+ordering or persistence after a server-process crash. `NfsConnection`
+close/wait state does not provide
 automatic reconnect, lease recovery, or crash-durable session/reply state;
 the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. A host-backed forced-process-restart test now proves that one
