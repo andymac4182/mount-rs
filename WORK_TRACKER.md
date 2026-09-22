@@ -1732,6 +1732,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   formatting pass; the native mount test remains explicitly ignored.
   Provider/native/hosted qualification, power-loss durability, durable locks,
   and broader ordering remain open.
+- [x] The exact published-tip WebDAV audit remains externally gated: CI run
+  `35685409287` for `baf19664` was cancelled with no jobs, while protected
+  Live Cloudflare R2 run `35685409328` failed usage admission at
+  `R2 CI monthly run cap already exceeded: count=297 limit=20` and skipped
+  its integration job. No hosted WebDAV PASS is promoted; the R2 usage
+  envelope, live provider configuration, power-loss durability, durable
+  locks, and broader ordering remain open.
 - [x] The WebDAV Basic parser now requires the oracle/RFC `Basic +<base64>`
   separator instead of accepting a scheme concatenated directly with the
   payload. The live authenticated HTTP regression rejects `Basic<base64>` and
