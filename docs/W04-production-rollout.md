@@ -97,6 +97,12 @@ composition job failed closed on the failing row, and its queued W26 evidence
 job [106652855215](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106652855215)
 is not evidence. Provider capacity therefore remains an open production gate.
 
+The dependent W26 evidence job [106652855215](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106652855215)
+downloaded the base, composition, TiDB, and FoundationDB artifacts but failed
+closed with `W26_OZONE_EVIDENCE_PACKET_FAIL` because the compositions log lacked
+`OZONE_IOPS_PASS` for the SQLite/R2 and PGlite/R2 scope. The packet is not a
+provider or production acceptance record.
+
 Ubuntu Node [106641134421](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134421)
 also completed successfully with the exact early-rejection and PGlite/restart
 steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API/package/consumer smoke, and

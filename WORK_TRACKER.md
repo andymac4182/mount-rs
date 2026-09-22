@@ -2224,6 +2224,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   lifecycle IOPS `1287.12` (passed); cleanup passed, but the job is terminal
   failure. Its W26 evidence job `106652855215` is still queued and is not
   evidence, so provider capacity and production rollout remain **NO-GO**.
+- W26 evidence job `106652855215` later downloaded the base, composition,
+  TiDB, and FoundationDB artifacts but failed closed with
+  `W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-log-missing-marker=OZONE_IOPS_PASS`
+  for the SQLite/R2 and PGlite/R2 composition scope. No W26 acceptance or
+  production provider approval is promoted.
 - Ubuntu Node `106641134421` has now completed successfully in the retained
   run: fragmented early rejection, exact PGlite/restart recovery,
   `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration, package/consumer
