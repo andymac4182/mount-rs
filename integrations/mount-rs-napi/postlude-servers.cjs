@@ -483,8 +483,38 @@ function wrapP9Server(P9Server) {
     state.attachments ??= new Set()
     state.attachedStreams ??= new Map()
     state.nativeConnections ??= new Map()
+    state.clientOrder ??= []
     state.nextAttachedId ??= 1_000_000_000_000
     return state
+  }
+
+  function observeNativeClients(server, state) {
+    const clients = typeof nativeClientsGetter === "function"
+      ? nativeClientsGetter.call(server)
+      : nativeClients.call(server)
+    const live = new Set()
+    const known = new Set(
+      state.clientOrder
+        .filter((entry) => entry.type === "native")
+        .map((entry) => entry.id),
+    )
+    for (const client of clients) {
+      const id = client.id
+      live.add(id)
+      if (!state.nativeConnections.has(id)) {
+        state.nativeConnections.set(id, client)
+      }
+      if (!known.has(id)) {
+        state.clientOrder.push({ type: "native", id })
+        known.add(id)
+      }
+    }
+    for (const id of state.nativeConnections.keys()) {
+      if (!live.has(id)) state.nativeConnections.delete(id)
+    }
+    state.clientOrder = state.clientOrder.filter((entry) =>
+      entry.type !== "native" || live.has(entry.id),
+    )
   }
 
   Object.defineProperty(prototype, "attach", {
@@ -500,6 +530,10 @@ function wrapP9Server(P9Server) {
       if (state.attachedStreams.has(stream)) {
         throw new Error("mount-rs: that stream is already attached to this 9P server")
       }
+      // Observe accepted native clients before appending this attached stream.
+      // Otherwise a native connection accepted before attach() would be
+      // reported after it merely because the facade has two backing stores.
+      observeNativeClients(this, state)
       const sessionFactory = this._createAttachedSession
       if (typeof sessionFactory !== "function") {
         throw new Error("mount-rs: 9P attached streams are unavailable in this native build")
@@ -514,6 +548,7 @@ function wrapP9Server(P9Server) {
       )
       state.attachedStreams.set(stream, connection)
       state.attachments.add(connection)
+      state.clientOrder.push({ type: "attached", connection })
       return connection
     },
   })
@@ -523,22 +558,14 @@ function wrapP9Server(P9Server) {
     enumerable: false,
     get() {
       const state = stateFor(this)
-      const clients = typeof nativeClientsGetter === "function"
-        ? nativeClientsGetter.call(this)
-        : nativeClients.call(this)
-      const live = new Set()
-      const stable = clients.map((client) => {
-        const id = client.id
-        live.add(id)
-        const cached = state.nativeConnections.get(id)
-        if (cached !== undefined) return cached
-        state.nativeConnections.set(id, client)
-        return client
+      observeNativeClients(this, state)
+      return state.clientOrder.flatMap((entry) => {
+        if (entry.type === "native") {
+          const connection = state.nativeConnections.get(entry.id)
+          return connection === undefined ? [] : [connection]
+        }
+        return state.attachments.has(entry.connection) ? [entry.connection] : []
       })
-      for (const id of state.nativeConnections.keys()) {
-        if (!live.has(id)) state.nativeConnections.delete(id)
-      }
-      return [...stable, ...state.attachments]
     },
   })
 
