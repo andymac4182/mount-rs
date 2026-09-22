@@ -535,7 +535,10 @@ fn parse_if_list(value: &str, start: usize) -> Option<(Vec<IfCondition>, usize)>
         if byte == b')' {
             return (!conditions.is_empty()).then_some((conditions, at + 1));
         }
-        if value[at..].len() >= 3 && value[at..at + 3].eq_ignore_ascii_case("Not") {
+        if value
+            .get(at..at.saturating_add(3))
+            .is_some_and(|value| value.eq_ignore_ascii_case("Not"))
+        {
             negated = true;
             at += 3;
             continue;

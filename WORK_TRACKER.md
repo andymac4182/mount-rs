@@ -1270,6 +1270,14 @@ matches the pinned parser's `invalid-character` refusal; the full 38/38 WebDAV
 target, warning-denied workspace Clippy, formatting, diff checks, and 40-case
 TypeScript/Rust differential pass. Hosted/provider, power-loss, durable-lock,
 crash/restart, and stronger same-resource ordering remain open.
+The public `If` parser now probes the `Not` keyword with UTF-8-safe string
+access rather than byte-offset slicing. Malformed non-ASCII grammar such as
+`(éé)` now returns the ordinary invalid-header result instead of panicking at a
+code-point boundary; the regression reproduced the prior panic before the fix.
+The full 39/39 WebDAV target, warning-denied workspace Clippy, formatting, diff
+checks, and 40-case TypeScript/Rust differential pass. Hosted/provider,
+power-loss, durable-lock, crash/restart, and stronger same-resource ordering
+remain open.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
@@ -6588,6 +6596,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV If-parser UTF-8 boundary safety | Probe the public `Not` grammar with UTF-8-safe access so malformed non-ASCII input such as `(éé)` returns `None` instead of panicking at a code-point boundary | Focused regression reproduced the pre-fix panic and now passes; full WebDAV target 39/39, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV XML parser character validation | Reject invalid UTF-8 and raw XML-invalid characters before tree construction, matching the pinned `invalid-character` refusal instead of preserving controls in `XmlNode` text | Focused raw-NUL parser regression and full WebDAV target 38/38, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV XML serializer safety/parity | Escape CR as `&#13;` and replace XML-invalid controls with U+FFFD in text and namespace values, matching the pinned XML codec while retaining markup escaping | Focused serializer fixture and full WebDAV target 37/37, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV Unicode lock-token parser safety | Replace byte-offset `Lock-Token` parsing with UTF-8-safe delimiter handling; accept the pinned oracle's Unicode token payloads without panic while retaining malformed-angle rejection | Focused protocol fixture and full WebDAV target 37/37, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |

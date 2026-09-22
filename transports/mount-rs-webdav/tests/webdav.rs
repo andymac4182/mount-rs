@@ -1590,6 +1590,16 @@ fn xml_parser_rejects_raw_invalid_characters() {
     );
 }
 
+#[test]
+fn if_parser_rejects_non_ascii_grammar_without_panicking() {
+    let result = std::panic::catch_unwind(|| parse_if("(éé)", None));
+    assert!(
+        result.is_ok(),
+        "invalid UTF-8 boundary must not panic the parser"
+    );
+    assert_eq!(result.expect("parser did not panic"), None);
+}
+
 #[tokio::test]
 async fn http_round_trip_covers_class_one_methods_and_properties() {
     let server = server().await;
