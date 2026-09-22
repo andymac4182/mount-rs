@@ -95,7 +95,9 @@ lost-wakeup interval around `wait_closed()`.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch, and a blocked NFSv3 RPC does not
-hold a later fast RPC on the same connection behind it. The forced-crash boundary tests
+hold a later fast RPC on the same connection behind it. A `max_in_flight=1`
+wire test also proves the second call waits for the blocked first and both
+replies complete. The forced-crash boundary tests
 now reject a pre-crash NFSv3 file handle with `NFS3ERR_STALE`, a pre-crash v4
 session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
 `NFS4ERR_STALE`; the v4 session identity folds both write-verifier halves to
@@ -1464,6 +1466,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFS target passed 40 unit tests and all applicable integration targets, with
   warning-denied NFS Clippy, formatting, and diff checks green. Native-client
   ordering, cross-process concurrency, and crash/durability remain open.
+- [x] The real-TCP NFSv3 flow-control test now holds one `GETATTR` in the
+  backend with `max_in_flight=1`, observes the second call remains undispatched,
+  then verifies both XIDs return exactly once after release. The focused
+  concurrency target passed 3/3; the complete locked NFS target passed 40 unit
+  tests and all applicable integration targets, with strict Clippy, formatting,
+  and diff checks green. Socket write backpressure and native-client ordering
+  remain separate gates.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
