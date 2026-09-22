@@ -381,8 +381,10 @@ the native extractor, with real server isolation coverage. It now also performs
 the oracle's construction-time source and bucket-name validation, including
 oracle-compatible `TypeError` messages, empty maps, single-bucket options, and
 the UTF-16 bucket-name boundary. The pinned structural-factory differential
-covers those cases; close/restart, native/hosted lifecycle, and complete S3
-session parity remain open.
+covers those cases. The pinned S3 session/member differential now also covers
+server/session prototype and symbol members, `S3Session.close()`, bucket maps,
+and the safe N-API option projection; full oracle option/callback parity,
+native/hosted lifecycle, and provider acceptance remain open.
 
 ### P2 — S3 low-level and streaming parity: PARTIAL
 
@@ -408,12 +410,15 @@ and a native gateway test do not establish complete oracle parity or a live AWS
 service result. The current Rust gateway packet also verifies bounded drain
 timeout, accepted-connection cleanup, loopback-only credentialed binding,
 assertion cleanliness, and one peer-aware reset-on-close transport event
-across the 23 gateway cases. The generated package build and N-API integration
+across all 28 gateway cases. The generated package build and N-API integration
 verify connection/transport-error member parity and direct Node peer-fault
-injection; live AWS/R2 and native/hosted lifecycle evidence remain open. The
-oracle-only pure codec/helper members are explicitly outside the supported Node
-scope, and the standalone TypeScript fixture check passes against the
-checked-in declarations.
+injection, while `S3Session.close()` and the supported server/session member
+boundary are differentially checked by
+[`test/s3-session-parity.mjs`](../integrations/mount-rs-napi/test/s3-session-parity.mjs);
+live AWS/R2 and native/hosted lifecycle evidence remain open. The oracle-only
+pure codec/helper members are explicitly outside the supported Node scope, and
+the standalone TypeScript fixture check passes against the checked-in
+declarations.
 
 The supported-scope decision is pinned by
 [`test/s3-barrel-scope.mjs`](../integrations/mount-rs-napi/test/s3-barrel-scope.mjs):
@@ -421,10 +426,12 @@ with `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921`, the package
 `./s3` export is compared to the oracle's runtime export set and the exact 153
 oracle-only codec/helper names are asserted as Rust-owned and out of the Node
 subpath. The supported N-API `S3Server`, `S3Session`, streaming body classes,
-and `createS3Server` identity are asserted against the root package. This is
-an explicit Node-scope boundary, not a claim that the oracle's pure codec
-barrel is available from JavaScript; the Rust `mount-rs-s3` public API and its
-codec tests remain the low-level implementation boundary.
+and `createS3Server` identity are asserted against the root package, while the
+session differential records the intentional native streaming addition and the
+safe effective-options boundary. This is an explicit Node-scope boundary, not
+a claim that the oracle's pure codec barrel is available from JavaScript; the
+Rust `mount-rs-s3` public API and its codec tests remain the low-level
+implementation boundary.
 
 ### P2 — WebDAV public barrel, session, and streaming: PARTIAL
 
