@@ -1241,15 +1241,25 @@ async function exerciseP9ServerBoundary() {
     const taken = createP9Server(memoryFilesystem(), { host: "127.0.0.1", port: 0 });
     let listening;
     let clash;
+    let clashListening = false;
+    let clashListen;
     try {
       ({ listening } = await listenLifecycle(taken, "9P port conflict owner"));
       clash = createP9Server(memoryFilesystem(), {
         host: "127.0.0.1",
         port: taken.port,
       });
-      await assert.rejects(clash.listen(), (error) => error?.code === "EADDRINUSE");
+      clashListen = clash.listen();
+      try {
+        await clashListen;
+        clashListening = true;
+        assert.fail("the occupied 9P port must reject a second listener");
+      } catch (error) {
+        if (clashListening) throw error;
+        assert.equal(error?.code, "EADDRINUSE");
+      }
     } finally {
-      if (clash) await clash.close();
+      if (clashListening) await closeLifecycle(clash, "9P port conflict loser", clashListen);
       await closeLifecycle(taken, "9P port conflict owner", listening);
     }
   }
