@@ -2012,13 +2012,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   from this exact published tip is required; this local test hardening does not
   close the hosted or production gates.
 
-- Current exact-tip qualification: full CI run `35678123095` was dispatched
+- Previous exact-tip qualification: full CI run `35678123095` was dispatched
   from published `0b6e8c4f01ebdd9254c7d6c61595628e0ce4a824` after the cleanup
-  chunk and ledger publication. Its Node jobs are queued across Ubuntu, ARM,
-  macOS-latest, macOS-15-intel, and Windows, with Ubuntu Rust and native FUSE
-  also queued. Queue state is not evidence; the exact recovery steps, native
-  behavior, package/artifact provenance, provider gates, and production-owner
-  approvals remain open and the rollout stays **NO-GO**.
+  chunk and ledger publication, then completed with all four Node exact
+  recovery steps green but native-FUSE and provider/composition failures. Its
+  aggregate-native job later passed, while the run remained mixed and is
+  retained as the diagnostic predecessor to current qualification
+  `35680363083`; no queued, skipped, or partial state was promoted.
 
 - Current failed-publication shutdown recovery: hosted native-FUSE job
   `106588864049` in run `35678123095` exposed a pending-atime flush attempting
@@ -2032,6 +2032,23 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `35679778373` targets `3de49e33` but is pending with no jobs materialized;
   current hosted Node/native/package/provider evidence is still required and
   production remains **NO-GO**.
+
+- Current integrated-main qualification: non-cancelling manual run
+  `35680363083` at exact head `7cba89a5a1b4c03e7d52a2507ad8fa1deee71d0e`
+  completed all four Node exact `Verify PGlite integration and restart
+  recovery` steps, fragmented early-rejection checks, PGlite
+  backup/restore/rollback markers, and `providersFailed: 0`. Native FUSE
+  `106595824274`, native WebDAV/NFS/9P, Rust, observability, aggregate-native
+  `106602050007`, all five native package validations, and clean-consumer smoke
+  passed. The overall run remains terminal failure only on Ozone provider
+  performance: Ozone/TiDB `132.07`, Ozone/FoundationDB `355.87`, and Ozone
+  compositions `801.05` and `621.06` IOPS versus the hard `1000` target;
+  dependent W26 evidence `106598856424` failed closed without
+  `OZONE_IOPS_PASS`. The current `origin/main` tip later advanced to
+  `8e23ca06`, so exact-tip requalification remains a release action. Production
+  remains **NO-GO** pending provider scope/performance, deployment
+  persistence/backup/rollback, observability/runbook, ownership, and release
+  approval.
 
 ## W05 — Cloudflare R2
 
