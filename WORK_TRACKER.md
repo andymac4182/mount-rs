@@ -4,6 +4,28 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+Current W26 implementation/qualification boundary (2026-09-22): published
+exactly at `origin/main=116e9ed405cdc1eb37634a2fa381ce387be036db` after the
+atomic-write wrapper fix `116e9ed4` (`perf(w26): preserve atomic write path
+through wrappers`). The N-API `DriverSlot`, `MountDriver`, observability and
+persistence wrappers now forward the optimized `FsDriver::write_file` path;
+the focused regression proves one atomic write produces one metadata
+publication. Full locked Rust tests, strict workspace Clippy, the shared-target
+debug N-API build, and the complete pinned-oracle N-API suite passed. Security
+diff scan `2582d7c0-130a-454e-beb3-ffba77169e3e` completed with complete
+changed-file coverage and zero reportable findings. The fresh retained manual
+qualification is GitHub Actions run
+`35698854392 <https://github.com/andymac4182/mount-rs/actions/runs/35698854392>`
+on this exact tip; at dispatch capture its four W26 producers were queued and
+the aggregate was not yet acceptance evidence. Prior targeted rows remained
+below the hard `>=1,000` IOPS-per-drive target for SQLite/R2 `580.6091135`,
+PGlite/R2 `963.6041014`, TiDB/R2 `385.2624172` and FoundationDB/R2
+`337.4773006`, so production is **NO-GO** until the new exact-SHA packet is
+terminal and all providers, end-to-end markers, security, Tier-1 SLO and
+customer-owned backup/DR gates are separately evidenced. W26 tracks
+compatibility and qualification for customer-deployed Ozone; it does not
+deploy Ozone, own backup/DR or own releases.
+
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
 retain detailed results. A passing component test is not end-to-end acceptance.
