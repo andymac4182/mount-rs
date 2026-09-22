@@ -2594,6 +2594,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFS/N-API Clippy, and formatting pass locally. Native v4 ordering,
   cross-process recovery, crash/power-loss durability, exact-tip hosted
   acceptance, and production readiness remain open.
+- [x] W01-NFS requalified rename-over-open with `HostFs`: a real backing
+  rename replaces destination bytes, the old v4 OPEN reads its original bytes,
+  CLOSE retires the pathless old handle, and the replacement handle remains
+  valid. The focused wire case passed ten reruns, full locked NFS passed 43
+  unit/25 v4 wire, strict NFS Clippy and formatting passed, and local opt-in
+  macOS native NFSv3 passed 1/1. The previous exact-tip hosted CI run was
+  cancelled without jobs; native v4.1 ordering, cross-process recovery,
+  crash/power-loss durability, exact-tip hosted acceptance, and production
+  readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -7999,3 +8008,4 @@ cross-drive isolation.
 | `35716364566` / `35716566393` | W01-FUSE hosted CI cancellation/queue refresh | Published-tip run `35716364566` at `4e9260ead4925d3140a758374da886f985242f47` was cancelled before any job was created by a newer mainline push; the next run `35716566393` at `924009af061d119404b2ee1f59e86506f7b1cbd2` is pending. No hosted `/dev/fuse` result is claimable; exact-current-tip terminal native-FUSE evidence remains required and W01 stays NO-GO. |
 | `32b8596` | W01-FUSE Lima real CLI smoke | On Ubuntu 26.04 arm64, the published CLI mounted the memory driver through native FUSE; strict fixed-payload readback before/after rename, alpha absence/beta presence, SIGINT shutdown, and mount cleanup all passed (`CLI_FUSE_STRICT_SMOKE=PASS`). This closes local shipped-CLI usability; hosted terminal native-FUSE evidence and wider W01 gates remain open. |
 | `0687c3d` | W01-FUSE local-scope release decision | Verified Lima Linux native-FUSE, PGlite/restart/fault, and strict real CLI evidence is accepted as sufficient for the requested local Linux/FUSE deployment scope; implementation and trackers are merged into current `origin/main`. Hosted CI remains explicitly pending/non-blocking by user acceptance; broader W01 transport/provider gates remain separate. |
+| `pending` | W01-FUSE native blocked-read teardown fix and Lima requalification | Current `origin/main` reproduced rootless `fusermount3` `EBUSY` in the blocked-read unmount. The forced path now drains the serving task before lazy detach and recognizes a successful lazy-detach handoff; native/automatic test mountpoints now have atomic unique suffixes. Lima at `65776be`: native 3/3, automatic concurrent 2/2, CLI 3/3, SQLite restart 2/2, fault 1/1, native PGlite reopen 1/1, PGlite compositions 1/1; workspace tests/Clippy passed and no stale FUSE mounts/processes remained. |
