@@ -5368,6 +5368,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   rollback, provider compatibility or production approval.
   *(Implementation/static qualification; provider and production evidence
   remain external.)*
+- [x] W08.41 **External observability, SLO and alerting policy:** added
+  `scripts/verify-w08-production-observability.mjs` and its eight-case
+  `scripts/test-w08-production-observability.mjs` control over
+  `tests/tidb/production-observability-policy.json`. The credential-free
+  contract requires private managed metrics, structured redacted logs and
+  redacted tail-sampled traces, retention floors, 99.9% availability and
+  0.1% write-error SLO bounds, a 30-day error-budget window, primary and
+  secondary on-call routes, paging, a test alert, 15-minute acknowledgement,
+  runbook linkage and no secret-bearing alert payloads. It also preserves the
+  `/healthz` and `/readyz` no-store/no-sniff contract. Missing redaction,
+  weak SLOs, absent paging, slow acknowledgement and invalid health paths fail
+  closed. The checks are wired into both W08 release workflows. This is a P05
+  implementation/control boundary only; it does not prove a live collector,
+  dashboard, pager delivery, alert acknowledgement or production approval.
+  *(Implementation/static qualification; provider and production evidence
+  remain external.)*
 
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV

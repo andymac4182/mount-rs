@@ -34,7 +34,7 @@ planning result.
 | P02 — secrets, IAM, rotation and audit | Open — 20% | Secret-manager injection, least-privilege metadata/block identities, rotation and revocation without data loss, break-glass procedure, audit and redaction evidence; the checked-in P02 policy now requires an external secret manager, workload/managed identity, exactly the three production references, bounded rotation with overlap/revocation, redacted access auditing and a two-person break-glass procedure reference. This is shape control only; the existing production-config gate rejects inline secret strings and requires external env references. |
 | P03 — backup, restore and disaster recovery | Open — 10% | Defined RPO/RTO and retention, encrypted backups/versioning, clean-environment restore, metadata/block consistency, corruption/partial-object handling and recovery sign-off; the checked-in `verify-w08-production-backup.mjs` policy now requires transactionally consistent TiDB metadata snapshots, immutable/versioned encrypted blocks, isolated restore with no production-writer access, corruption/partial-object/region-loss cases, bounded 60-minute RPO and 240-minute RTO, a second region and data-owner/release-owner sign-off references. This is repository shape control only. |
 | P04 — upgrade, compatibility and rollback | Open — 10% | Rehearsed TiDB/RustFS/client version matrix, schema/config migration, rolling upgrade, interrupted-upgrade recovery, retained-data rollback and compatibility sign-off; the checked-in `verify-w08-production-upgrade.mjs` policy now requires pinned current/previous versions, all five consumer surfaces, expand-contract/versioned migration, forward/backward compatibility, interrupted recovery, rolling quorum preservation, retained rollback artifacts/config/data checks, writer fencing and fresh-client readback. This is repository shape control only. |
-| P05 — observability, SLOs and alerting | Open — 15% gate weight; local/hosted HTTP contract passed | The HTTP transport's unauthenticated `/healthz` and `/readyz` contract, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` are locally tested and passed in terminal hosted job `106340034907`; exit still requires provider-aware checks where applicable, production collector, dashboards, SLO/error-budget thresholds, paging, retention/redaction and an exercised alert route |
+| P05 — observability, SLOs and alerting | Open — 15% gate weight; local/hosted HTTP contract passed | The HTTP transport's unauthenticated `/healthz` and `/readyz` contract, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` are locally tested and passed in terminal hosted job `106340034907`; the checked-in `verify-w08-production-observability.mjs` policy now requires private managed metrics, structured redacted logs, redacted traces, retention floors, 99.9% availability and 0.1% write-error SLO bounds, dual on-call routes, paging, test alert, 15-minute acknowledgement and no secret-bearing alert payloads. Exit still requires provider-aware checks where applicable, production collector, dashboards, live SLO/error-budget observation, paging, retention/redaction and an exercised alert route. |
 | P06 — capacity, load and soak | Open — 20% | The bounded TiDB/RustFS soak harness is configured in hosted composition CI and passed its current seed/reopen qualification at 64 operations, concurrency 8 and 65,536-byte payloads; exit still requires representative workload baseline/peak/saturation/failover/soak results with p50/p95/p99 latency, throughput, errors, resource growth, headroom, scaling and cost limits |
 | P07 — security, transport and hardening | Open — 20% | TLS and certificate rotation, network segmentation, authz/tenant isolation, dependency/image/SBOM review, threat-model findings, audit checks and a credentialed TLS handshake; local policy validation requires HTTPS blocks and TLS-required TiDB input |
 | P08 — failure drills, runbooks and on-call | Open — 25% | The operator runbook and D01–D09 drill definitions are now implemented; exit still requires timed client/provider/lease/partition/partial-write/restart/restore drills, operator diagnosis and rollback steps, integrity checks, on-call tabletop and acknowledgement |
@@ -241,6 +241,20 @@ reconciled public merge `66164b78e03309bf9c36ae01ab7e98fc61925373`; shared-
 wrapper Cargo check and strict Clippy passed on that merge. Push-triggered
 hosted run `35718296219` ended cancelled with `jobs=[]`; the queued dispatched
 run predates W08.40, so no terminal hosted P04 evidence is claimed.
+
+W08.41 adds the credential-free P05 observability, SLO and alerting contract in
+`tests/tidb/production-observability-policy.json`, enforced by
+`scripts/verify-w08-production-observability.mjs` and its eight-case regression
+suite. The policy requires private managed metrics, structured redacted logs,
+redacted tail-sampled traces, retention floors, 99.9% availability and 0.1%
+write-error SLO bounds, a 30-day error-budget window, primary and secondary
+on-call routes, paging, a test alert, 15-minute acknowledgement, runbook
+linkage, no secret-bearing alert payloads and the `/healthz`/`/readyz`
+no-store/no-sniff contract. Missing redaction, weak SLOs, absent paging, slow
+acknowledgement and invalid health paths fail closed. The checks are wired
+into both W08 release workflows. This is a repository implementation/control
+slice of P05 only; it does not prove a live collector, dashboard, pager
+delivery, alert acknowledgement or production approval. P05 remains open.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

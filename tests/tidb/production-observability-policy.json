@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "environment_class": "production-like-staging",
+  "telemetry": {
+    "metrics": {
+      "enabled": true,
+      "collector": "external-managed",
+      "endpoint_class": "private",
+      "retention_days": 90,
+      "redaction_required": true
+    },
+    "logs": {
+      "enabled": true,
+      "structured": true,
+      "retention_days": 90,
+      "redaction_required": true
+    },
+    "traces": {
+      "enabled": true,
+      "sampling": "tail-based",
+      "retention_days": 14,
+      "redaction_required": true
+    }
+  },
+  "slo": {
+    "availability_percent": 99.9,
+    "write_error_rate_percent": 0.1,
+    "read_p95_latency_ms": 500,
+    "error_budget_window_days": 30
+  },
+  "alerts": {
+    "routes": ["primary-on-call", "secondary-on-call"],
+    "paging_enabled": true,
+    "test_alert_required": true,
+    "acknowledgement_minutes": 15,
+    "runbook_ref": "docs/W08-operations-runbook.md#immediate-incident-actions",
+    "no_secrets_in_payloads": true
+  },
+  "health": {
+    "liveness_path": "/healthz",
+    "readiness_path": "/readyz",
+    "no_store": true,
+    "no_sniff": true
+  }
+}
