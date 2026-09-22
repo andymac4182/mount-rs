@@ -162,11 +162,12 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Merged source base `a09984141bcb04875dbfadf180d2ca8bfbb8824c` was freshly
-reverified locally after concurrent N-API declaration and P9 normalization, 9P
-codec, S3-session-concurrency, session-parity, chunked durability, FUSE,
-S3-test, WebDAV, lockfile, NFS and provider updates: the full locked workspace
-test suite exited 0 and strict workspace Clippy with `-D warnings` exited 0.
+Merged source base `a26f4b8677ca49ca5dea020d5d80b22f0d37a7f1` was freshly
+reverified locally after concurrent R2 upload coalescing, N-API declaration and
+P9 normalization, 9P codec, S3-session-concurrency, session-parity, chunked
+durability, FUSE, S3-test, WebDAV, lockfile, NFS and provider updates: the full
+locked workspace test suite exited 0 and strict workspace Clippy with
+`-D warnings` exited 0.
 The four W08 rollout/evidence policy commands also passed with 36 functional
 items, 9 open production gates, 7 rollout tests and 11 evidence tests; the
 packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
