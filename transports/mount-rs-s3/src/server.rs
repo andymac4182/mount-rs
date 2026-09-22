@@ -6,6 +6,7 @@
 //! put a reviewed TLS/mTLS proxy in front of the loopback listener when remote
 //! access is required.
 
+use std::future::poll_fn;
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
@@ -474,7 +475,7 @@ async fn handle_http(State(state): State<HttpState>, request: Request<Body>) -> 
         .map(|(name, value)| HeaderEntry::new(name.as_str(), value.to_str().unwrap_or_default()))
         .collect::<Vec<_>>();
     let body: S3RequestBody = Box::pin(RequestBodyStream {
-        inner: request.into_body().into_data_stream(),
+        inner: Some(Box::pin(request.into_body().into_data_stream())),
     });
     let response = state
         .session
@@ -491,19 +492,40 @@ async fn handle_http(State(state): State<HttpState>, request: Request<Body>) -> 
 }
 
 struct RequestBodyStream {
-    inner: BodyDataStream,
+    inner: Option<Pin<Box<BodyDataStream>>>,
 }
 
 impl Stream for RequestBodyStream {
     type Item = Result<Vec<u8>, String>;
 
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.inner).poll_next(context) {
+        let Some(inner) = self.inner.as_mut() else {
+            return Poll::Ready(None);
+        };
+        match inner.as_mut().poll_next(context) {
             Poll::Ready(Some(Ok(bytes))) => Poll::Ready(Some(Ok(bytes.to_vec()))),
             Poll::Ready(Some(Err(error))) => Poll::Ready(Some(Err(error.to_string()))),
             Poll::Ready(None) => Poll::Ready(None),
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+
+impl Drop for RequestBodyStream {
+    fn drop(&mut self) {
+        let Some(mut inner) = self.inner.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            while let Some(result) = poll_fn(|context| inner.as_mut().poll_next(context)).await {
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
     }
 }
 
