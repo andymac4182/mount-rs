@@ -1156,6 +1156,14 @@ formatting, and diff checks all passed. Manual exact-tip CI run
 overall run remains in progress, so no full hosted PASS is claimable from this
 requalification. Hosted session/lifecycle/concurrency, live-provider behavior,
 power-loss ordering, durable locks, and wider ordering remain open.
+At current checkout `d761deb23513ec78b61d7b627f67b46606ee4956`, the refreshed
+NodeFs/SQLite orderly-reopen and crash probes, 128-pair provider direct-session
+matrix, 64-pair provider loopback network matrix, in-flight streamed-`PUT`
+prefix recovery, pinned WebDAV barrel/session-member differentials, and the
+40-case TypeScript/Rust S3+WebDAV HTTP differential all passed. This remains
+local provider/crash, pinned-oracle, and loopback evidence only; hosted
+session/lifecycle/concurrency, live remote-provider behavior, power-loss
+ordering, durable locks, and wider ordering remain open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no

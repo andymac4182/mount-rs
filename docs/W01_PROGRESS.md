@@ -113,6 +113,15 @@ only; the overall run remains in progress, and hosted/provider lifecycle,
 hosted concurrency, power-loss/live-provider durability, durable-lock, and
 wider ordering gates remain open.
 
+At current checkout `d761deb23513ec78b61d7b627f67b46606ee4956`, the refreshed
+NodeFs/SQLite orderly-reopen and crash probes, 128-pair provider direct-session
+matrix, 64-pair provider loopback network matrix, in-flight streamed-`PUT`
+prefix recovery, pinned WebDAV barrel/session-member differentials, and the
+40-case TypeScript/Rust S3+WebDAV HTTP differential all pass. This remains
+local provider/crash, pinned-oracle, and loopback evidence only; hosted
+session/lifecycle/concurrency, live remote-provider behavior, power-loss
+ordering, durable locks, and wider ordering remain open.
+
 The current shell has no AWS/R2/Cloudflare credential names available, so live
 provider acceptance remains an explicit external blocker; no credential values
 were read or persisted.
@@ -607,7 +616,8 @@ spent waiting for a hosted job or credential approval.
 
 | Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
 | --- | --- | --- | ---: | ---: | --- |
-| 2026-09-22 | W01-WebDAV | Requalified exact current tip `e5ae05d07bbc73184952def0437e58be9efef790`: locked WebDAV Rust tests passed 20 with the native probe explicitly ignored; N-API warning-denied Clippy, host-enabled release build, generated typecheck, structural durable-driver success/500-error/501-missing-callback, lifecycle, 64-pair direct-session, 64-pair network/auth/streaming, formatting, and diff checks passed | — | 77% planning view | Manual exact-tip CI `35674823787` is still queued; no hosted PASS is claimable, and hosted/provider lifecycle, power-loss/live-provider durability, durable locks, and wider ordering remain open |
+| 2026-09-22 | W01-WebDAV | Refreshed current checkout `d761deb23513ec78b61d7b627f67b46606ee4956`: NodeFs/SQLite reopen and crash recovery, 128-pair provider direct-session, 64-pair provider loopback network, in-flight streamed-`PUT` recovery, pinned barrel/session-member differentials, and the 40-case TypeScript/Rust S3+WebDAV HTTP differential passed | — | 77% planning view | Local provider/crash, pinned-oracle, and loopback evidence only; hosted lifecycle/concurrency, live-provider, power-loss, durable-lock, and wider ordering gates remain open |
+| 2026-09-22 | W01-WebDAV | Requalified exact current tip `e5ae05d07bbc73184952def0437e58be9efef790`: locked WebDAV Rust tests passed 20 with the native probe explicitly ignored; N-API warning-denied Clippy, host-enabled release build, generated typecheck, structural durable-driver success/500-error/501-missing-callback, lifecycle, 64-pair direct-session, 64-pair network/auth/streaming, formatting, and diff checks passed | — | 77% planning view | The manual run was queued at this evidence snapshot; its subsequent successful native jobs are recorded below. No hosted PASS is claimable, and hosted/provider lifecycle, power-loss/live-provider durability, durable locks, and wider ordering remain open |
 | 2026-09-22 | W01-WebDAV | Added structural N-API `FsDriver.syncfs()` forwarding, its public declaration, and a WebDAV `createWebdavServer` success/500-error/501-missing-callback regression; host-enabled release build, generated typecheck, adjacent WebDAV lifecycle/direct-session/network checks, N-API warning-denied Clippy, and locked WebDAV Rust tests passed 20/20 | — | 77% planning view | Local structural-driver/transport evidence only; hosted lifecycle/concurrency, live-provider, power-loss, durable-lock, and wider ordering gates remain open |
 | 2026-09-22 | W01-FUSE | Added public Rust `FuseSessionOptions`/`FuseFlushMechanism`, configured inode identity, INIT preferences, cache/timeout policy, error readback, handle counts and destroy-state observability; the complete locked FUSE target (14 unit, 6 INIT, 6 notify/record, 11 protocol, 18 session, 3 sync-barrier tests), strict scoped Clippy, formatting and diff checks passed | — | 66% planning view | Native Linux/FSKit, callbacks, hosted platform, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-22 | W01-FUSE | Added the Rust-backed N-API `FuseSession` and public `./fuse` facade with typed options/defaults, negotiated state, inode views, request/reply/error counters, assertion/error callbacks, notification encoders, destroy-state readback, generated declarations, and raw INIT/LOOKUP/READLINK coverage; locked N-API check/Clippy, debug addon build, focused session/codec/typecheck tests, FUSE tests, formatting and diff checks passed | — | 68% planning view | `MOUNTX_SOURCE`-backed full package suite, native Linux FUSE/callback events, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |
