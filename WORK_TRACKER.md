@@ -87,7 +87,8 @@ Current W01-NFS packet (2026-09-22): NFSv3/v4 direct routing now exposes
 shared BigInt handle snapshots, live accepted-socket counts, and stable live
 client objects with peer/shared-session views plus abort-safe close/wait state,
 including cancellation while a queued request waits for an in-flight slot and
-serialized concurrent listen/close lifecycle calls.
+serialized concurrent listen/close lifecycle calls. Rust server close is
+terminal, and a later `listen()` rejects rather than returning a stale address.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch, and a blocked NFSv3 RPC does not
@@ -1429,6 +1430,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   lifecycle 4, v4 barrier 1, and v4 wire 7; strict Clippy, formatting, and diff
   checks pass. Native-client ordering, cross-process concurrency, and crash/
   durability remain open.
+- [x] The NFS server close boundary is terminal in Rust: the lifecycle lock
+  orders close against listen, and subsequent `listen()` returns `NotConnected`
+  instead of the stale former address. The focused lifecycle target passed
+  5/5; the complete locked NFS target passed 39 unit tests, process restart 2,
+  rootless wire 1, transport concurrency 2, transport errors 4, lifecycle 5,
+  v4 barrier 1, and v4 wire 7; strict Clippy, formatting, and diff checks pass.
+  Native-client ordering, cross-process concurrency, and crash/durability
+  qualification remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
