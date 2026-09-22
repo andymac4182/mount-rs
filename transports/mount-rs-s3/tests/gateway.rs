@@ -3080,6 +3080,45 @@ async fn http_server_carries_head_length_without_a_body() {
     server.close().await.expect("clean shutdown");
 }
 
+#[tokio::test]
+async fn http_server_drains_rejected_body_before_reusing_connection() {
+    let memory = MemoryFs::empty();
+    let payload = b"the next reply";
+    let handle = memory
+        .open("/after-rejected-body.txt", "w", 0o666)
+        .await
+        .expect("open object");
+    handle.write(payload, Some(0)).await.expect("write object");
+    handle.close().await.expect("close object");
+    let server = S3Server::start(Arc::new(S3Session::new(memory)), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "PUT /mountx HTTP/1.1\r\nHost: {}\r\nContent-Length: 4\r\n\r\njunkGET /mountx/after-rejected-body.txt HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address(),
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write rejected request and follow-up");
+    let mut raw = Vec::new();
+    timeout(Duration::from_secs(2), stream.read_to_end(&mut raw))
+        .await
+        .expect("bounded response drain")
+        .expect("read rejected request responses");
+    let raw = String::from_utf8_lossy(&raw);
+    let rejected = raw.find("HTTP/1.1 501").expect("rejected response");
+    let follow_up = raw.find("HTTP/1.1 200").expect("follow-up response");
+    assert!(rejected < follow_up, "follow-up response was reordered");
+    assert!(raw[follow_up..].contains("the next reply"));
+    server.close().await.expect("clean shutdown");
+}
+
 #[derive(Debug)]
 struct WireResponse {
     status: u16,

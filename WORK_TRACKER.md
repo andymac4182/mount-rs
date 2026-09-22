@@ -4677,6 +4677,14 @@ reproducible in a production-like environment.
   admission. No service PASS is claimable; protected AWS configuration, the R2
   budget reset, physical power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The current mainline rejected-request-body fix is now directly covered:
+  `http_server_drains_rejected_body_before_reusing_connection` sends a
+  body-bearing rejected PUT followed immediately by a GET and proves the
+  second `200` response remains ordered and readable. The complete current
+  Rust 5/6/38/5 packet, strict Clippy, formatting, and diff checks passed; this
+  is bounded local keep-alive recovery only, so live providers, power-loss
+  durability, broader workload bounds, and native/hosted acceptance remain
+  open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `4f9120a2` were
   refreshed: AWS run `35690334807` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35690334795`
