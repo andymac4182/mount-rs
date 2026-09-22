@@ -2088,6 +2088,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
   required and production remains **NO-GO**.
 
+- Active current-tip qualification checkpoint: non-cancelling run
+  `35684808019` was dispatched from exact published head `4cd57723` before
+  concurrent mainline advanced to `87d5eb27`. At the 14:06 AEST snapshot,
+  Windows Node, RustFS, native WebDAV/NFS/9P, observability, Ozone base,
+  TiDB/RustFS, and TiDB had completed successfully; ARM Node `106609248954`,
+  Ubuntu Node `106609249118`, macOS-latest Node `106609248932`, Ubuntu Rust
+  `106609249086`, Ozone/TiDB `106609249034`, and Ozone compositions
+  `106609249144` had failed; macOS-15-intel Node `106609248961`, native FUSE
+  `106609249088`, FoundationDB/RustFS `106609249058`, and
+  Ozone/FoundationDB `106609249069` remained non-terminal. GitHub had not
+  exposed terminal logs while the workflow was still running, so no failure
+  cause, exact PGlite/restart PASS, or W04 acceptance is claimed. Production
+  remains **NO-GO** pending terminal diagnosis and all deployment/provider/
+  operational gates.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
