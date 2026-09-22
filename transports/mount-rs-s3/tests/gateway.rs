@@ -2245,6 +2245,155 @@ impl FsDriver for ProbeFs {
     }
 }
 
+#[derive(Clone)]
+struct ConditionalPutRaceSignals {
+    armed: Arc<AtomicBool>,
+    target_stats: Arc<AtomicUsize>,
+    target_opens: Arc<AtomicUsize>,
+    first_stat: Arc<Notify>,
+    release_first_stat: Arc<Notify>,
+    second_stat: Arc<Notify>,
+    first_open: Arc<Notify>,
+    release_first_open: Arc<Notify>,
+}
+
+impl ConditionalPutRaceSignals {
+    fn new() -> Self {
+        Self {
+            armed: Arc::new(AtomicBool::new(false)),
+            target_stats: Arc::new(AtomicUsize::new(0)),
+            target_opens: Arc::new(AtomicUsize::new(0)),
+            first_stat: Arc::new(Notify::new()),
+            release_first_stat: Arc::new(Notify::new()),
+            second_stat: Arc::new(Notify::new()),
+            first_open: Arc::new(Notify::new()),
+            release_first_open: Arc::new(Notify::new()),
+        }
+    }
+
+    fn arm(&self) {
+        self.target_stats.store(0, Ordering::SeqCst);
+        self.target_opens.store(0, Ordering::SeqCst);
+        self.armed.store(true, Ordering::SeqCst);
+    }
+}
+
+#[derive(Clone)]
+struct ConditionalPutRaceFs {
+    inner: MemoryFs,
+    target: String,
+    signals: ConditionalPutRaceSignals,
+}
+
+#[async_trait]
+impl FsDriver for ConditionalPutRaceFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<mount_rs_core::Stats> {
+        if self.signals.armed.load(Ordering::SeqCst) && path == self.target {
+            let call = self.signals.target_stats.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                self.signals.first_stat.notify_one();
+                self.signals.release_first_stat.notified().await;
+            } else if call == 1 {
+                self.signals.second_stat.notify_one();
+            }
+        }
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<mount_rs_core::DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        if self.signals.armed.load(Ordering::SeqCst)
+            && path == self.target
+            && flags.contains('w')
+            && self.signals.target_opens.fetch_add(1, Ordering::SeqCst) == 0
+        {
+            self.signals.first_open.notify_one();
+            self.signals.release_first_open.notified().await;
+        }
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        self.inner.rename(old_path, new_path).await
+    }
+}
+
+#[tokio::test]
+async fn conditional_puts_serialize_compare_and_swap_checks() {
+    let signals = ConditionalPutRaceSignals::new();
+    let driver = ConditionalPutRaceFs {
+        inner: MemoryFs::empty(),
+        target: "/cas-race.txt".to_owned(),
+        signals: signals.clone(),
+    };
+    let session = Arc::new(S3Session::new(driver));
+    let seeded = session
+        .handle(request("PUT", "/mountx/cas-race.txt", b"seed", &[]))
+        .await;
+    assert_eq!(seeded.status, 200);
+    let etag = header(&seeded, "etag").expect("seed ETag");
+    signals.arm();
+
+    let first_session = Arc::clone(&session);
+    let first_etag = etag.clone();
+    let first = tokio::spawn(async move {
+        first_session
+            .handle(request(
+                "PUT",
+                "/mountx/cas-race.txt",
+                b"first conditional body",
+                &[("if-match", first_etag.as_str())],
+            ))
+            .await
+    });
+    let second_session = Arc::clone(&session);
+    let second_etag = etag;
+    let second = tokio::spawn(async move {
+        second_session
+            .handle(request(
+                "PUT",
+                "/mountx/cas-race.txt",
+                b"second conditional body",
+                &[("if-match", second_etag.as_str())],
+            ))
+            .await
+    });
+
+    timeout(Duration::from_secs(1), signals.first_stat.notified())
+        .await
+        .expect("first conditional stat");
+    signals.release_first_stat.notify_one();
+    timeout(Duration::from_secs(1), signals.first_open.notified())
+        .await
+        .expect("first conditional write open");
+    assert!(
+        timeout(Duration::from_millis(100), signals.second_stat.notified())
+            .await
+            .is_err(),
+        "a second conditional precondition must not observe the old ETag while the first write is pending"
+    );
+    signals.release_first_open.notify_one();
+
+    let first = timeout(Duration::from_secs(1), first)
+        .await
+        .expect("first conditional PUT completion")
+        .expect("first conditional PUT task");
+    let second = timeout(Duration::from_secs(1), second)
+        .await
+        .expect("second conditional PUT completion")
+        .expect("second conditional PUT task");
+    let mut statuses = [first.status, second.status];
+    statuses.sort_unstable();
+    assert_eq!(statuses, [200, 412]);
+}
+
 #[tokio::test]
 async fn real_http_fragmented_upload_reaches_driver_before_body_end() {
     let signals = ProbeSignals::new();
