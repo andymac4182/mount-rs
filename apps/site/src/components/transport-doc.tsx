@@ -437,6 +437,16 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         unsupported-version assertion pass locally. This qualifies local
         addon loading and runtime reachability only, not hosted ordering,
         crash durability, or production readiness.
+        The current shared-target CLI also passes a local macOS host-backed NFS
+        smoke at source <code>be382691</code>: a fresh source directory mounted
+        through <code>--transport nfs</code>, the kernel reported
+        <code>127.0.0.1:/</code>, and create, append, read, stat, and list
+        through the mounted folder matched the 34-byte backing file. Ctrl-C
+        exited 0 with <code>unmounted</code>, the mount-table entry disappeared,
+        the mount folder was empty, and the backing bytes persisted. This is
+        local macOS CLI-to-folder and lifecycle evidence only; the negotiated
+        NFS version was not captured, and Linux/v4.1 ordering, durable state,
+        power-loss, hosted acceptance, and production readiness remain open.
         The latest NFS source at commit <code>ff4b091c</code> now validates
         complete <code>AUTH_SYS</code> bodies before shared-router or v3/v4
         dispatch. Its real-TCP regression denies five malformed credential
@@ -464,6 +474,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'NFSv4 process-restart rename qualification', href: 'https://github.com/andymac4182/mount-rs/commit/6d520dd2903a03230e673840b47934e7374959f3' },
       { label: 'macOS N-API loader repair', href: 'https://github.com/andymac4182/mount-rs/commit/b7ba3806e5a36f9732b1976e100c5d0e3004dd1e' },
       { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
+      { label: 'macOS CLI host-backed NFS smoke', href: 'https://github.com/andymac4182/mount-rs/commit/be382691822327b41bffb9823cd3b235630698b2' },
       { label: 'Latest hosted NFS status check', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670416469' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
