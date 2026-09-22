@@ -34,6 +34,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tracing::Level;
 
 /// FoundationDB's hard key limit.
 pub const FOUNDATIONDB_MAX_KEY_BYTES: usize = 10_000;
@@ -378,6 +379,52 @@ fn non_zero(value: u64) -> Option<u64> {
     (value != 0).then_some(value)
 }
 
+/// Emit a bounded authority-health event for an application-owned collector.
+///
+/// The event intentionally contains only counters, timestamps and a fixed
+/// outcome label. It never includes the FoundationDB cluster path, key prefix,
+/// credentials or provider error text. A configured tracing/OpenTelemetry
+/// subscriber may route this event to the application's logs/collector; the
+/// provider itself does not install a subscriber or claim alert ownership.
+fn emit_lease_authority_telemetry(outcome: &'static str, stats: &LeaseAuthorityStats) {
+    tracing::event!(
+        target: "mount_rs.foundationdb.authority",
+        Level::INFO,
+        telemetry_schema = "mount-rs.telemetry.v1",
+        event_name = "mount_rs.foundationdb.lease_authority",
+        boundary = "provider.foundationdb.lease_authority",
+        operation = "publish",
+        outcome = outcome,
+        publication_attempts = stats.publication_attempts,
+        publication_successes = stats.publication_successes,
+        publication_failures = stats.publication_failures,
+        last_published_time_ms = stats.last_published_time_ms.unwrap_or(0),
+        last_success_at_ms = stats.last_success_at_ms.unwrap_or(0),
+        last_failure_at_ms = stats.last_failure_at_ms.unwrap_or(0),
+    );
+}
+
+/// Emit a bounded shared-reader health event for an application-owned
+/// collector. Zero timestamps mean that the corresponding observation has not
+/// occurred in this process yet.
+fn emit_lease_oracle_telemetry(outcome: &'static str, stats: &LeaseOracleStats) {
+    tracing::event!(
+        target: "mount_rs.foundationdb.authority",
+        Level::INFO,
+        telemetry_schema = "mount-rs.telemetry.v1",
+        event_name = "mount_rs.foundationdb.lease_oracle",
+        boundary = "provider.foundationdb.lease_authority",
+        operation = "read",
+        outcome = outcome,
+        reader_attempts = stats.read_attempts,
+        reader_successes = stats.read_successes,
+        reader_failures = stats.read_failures,
+        last_observed_time_ms = stats.last_observed_time_ms.unwrap_or(0),
+        last_success_at_ms = stats.last_success_at_ms.unwrap_or(0),
+        last_failure_at_ms = stats.last_failure_at_ms.unwrap_or(0),
+    );
+}
+
 /// Safety policy for publishing the shared lease authority.
 ///
 /// The authority service still owns the scheduling loop, but constructing a
@@ -629,6 +676,8 @@ impl FoundationDbLeaseAuthority {
         self.stats.record_attempt();
         if now_ms == 0 {
             self.stats.record_failure();
+            let stats = self.stats.snapshot();
+            emit_lease_authority_telemetry("error", &stats);
             return Err(FsError::new(ErrorCode::Einval)
                 .with_message("FoundationDB lease authority time must be non-zero"));
         }
@@ -659,10 +708,14 @@ impl FoundationDbLeaseAuthority {
         match result {
             Ok(published) => {
                 self.stats.record_success(published);
+                let stats = self.stats.snapshot();
+                emit_lease_authority_telemetry("ok", &stats);
                 Ok(published)
             }
             Err(error) => {
                 self.stats.record_failure();
+                let stats = self.stats.snapshot();
+                emit_lease_authority_telemetry("error", &stats);
                 Err(error)
             }
         }
@@ -804,10 +857,14 @@ impl LeaseOracle for FoundationDbSharedLeaseOracle {
         match result {
             Ok(observed) => {
                 self.stats.record_success(observed);
+                let stats = self.stats.snapshot();
+                emit_lease_oracle_telemetry("ok", &stats);
                 Ok(observed)
             }
             Err(error) => {
                 self.stats.record_failure();
+                let stats = self.stats.snapshot();
+                emit_lease_oracle_telemetry("error", &stats);
                 Err(error)
             }
         }
@@ -2094,7 +2151,85 @@ impl BlockStore for FoundationDbBlockStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Write};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct EventWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for EventWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_| io::Error::other("event writer mutex poisoned"))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured_event(render: impl FnOnce()) -> String {
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer({
+                let output = Arc::clone(&output);
+                move || EventWriter(Arc::clone(&output))
+            })
+            .finish();
+        tracing::subscriber::with_default(subscriber, render);
+        String::from_utf8(output.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn authority_telemetry_event_has_stable_bounded_fields() {
+        let rendered = captured_event(|| {
+            emit_lease_authority_telemetry(
+                "error",
+                &LeaseAuthorityStats {
+                    publication_attempts: 2,
+                    publication_successes: 1,
+                    publication_failures: 1,
+                    last_published_time_ms: Some(2_000_000),
+                    last_success_at_ms: Some(3_000_000),
+                    last_failure_at_ms: Some(3_000_001),
+                },
+            );
+        });
+        assert!(rendered.contains("mount_rs.foundationdb.lease_authority"));
+        assert!(rendered.contains("publication_attempts=2"));
+        assert!(rendered.contains("publication_failures=1"));
+        assert!(rendered.contains("outcome=error"));
+        assert!(!rendered.contains("cluster_file"));
+        assert!(!rendered.contains("credentials"));
+    }
+
+    #[test]
+    fn reader_telemetry_event_has_stable_bounded_fields() {
+        let rendered = captured_event(|| {
+            emit_lease_oracle_telemetry(
+                "ok",
+                &LeaseOracleStats {
+                    read_attempts: 5,
+                    read_successes: 4,
+                    read_failures: 1,
+                    last_observed_time_ms: Some(2_000_001),
+                    last_success_at_ms: Some(3_000_000),
+                    last_failure_at_ms: Some(3_000_001),
+                },
+            );
+        });
+        assert!(rendered.contains("mount_rs.foundationdb.lease_oracle"));
+        assert!(rendered.contains("reader_attempts=5"));
+        assert!(rendered.contains("reader_failures=1"));
+        assert!(rendered.contains("outcome=ok"));
+        assert!(!rendered.contains("authority_prefix"));
+        assert!(!rendered.contains("provider_error"));
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum InjectedCommitOutcome {

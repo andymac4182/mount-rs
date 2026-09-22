@@ -3275,8 +3275,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     The FoundationDB authority and shared-reader handles now expose bounded
     process-local `stats()` snapshots for publication/read attempts,
     successes/failures, last provider-time observations and local diagnostic
-    timestamps; the hosted shared-authority path asserts the success/failure
-    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
+    timestamps, and each publication/read attempt emits a bounded structured
+    `tracing` event with fixed event names and no cluster paths, prefixes,
+    credentials or provider error text; the hosted shared-authority path
+    asserts the success/failure accounting and emits
+    `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
     qualification-log verifier now fails closed unless the bounded heartbeat
     and stats markers are present and their counters/policy values reconcile.
     Map these snapshots into the approved collector and pager, publish dashboards,
