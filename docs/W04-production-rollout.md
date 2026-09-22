@@ -73,6 +73,16 @@ password, invalid TTL, and missing production TTL. This validates configuration
 shape only; it does not validate a real volume, backup, provider, collector,
 operator, or release decision.
 
+The retained non-cancelling manual qualification
+[35695427227](https://github.com/andymac4182/mount-rs/actions/runs/35695427227)
+targets exact SHA `e7850fb41775351503e5aa685484906b3a3cbbe4`. Its ARM and
+macOS-15-intel Node jobs passed the exact early-rejection and PGlite/restart
+steps, but Ozone/FoundationDB failed its lifecycle capacity gate at `396.44`
+IOPS versus `1000`, and both TiDB lanes failed their ambiguous-commit functional
+boundary. The macOS-latest and Ubuntu Node jobs were still queued at the latest
+ledger refresh. This is qualification evidence only; production remains
+**NO-GO**.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 

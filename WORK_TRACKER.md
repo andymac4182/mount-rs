@@ -2172,6 +2172,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   This is terminal repository-control evidence only; the later queued
   current-head run `35696590337` is not promoted, and production remains
   **NO-GO**.
+- Retained manual qualification run
+  [35695427227](https://github.com/andymac4182/mount-rs/actions/runs/35695427227)
+  targets exact SHA `e7850fb4`. ARM Node `106641134434` and macOS-15-intel
+  Node `106641134367` passed the exact early-rejection and PGlite/restart
+  steps. TiDB `106641134137` and TiDB/RustFS `106641134060` failed their
+  ambiguous-commit functional boundary, while Ozone/FoundationDB
+  `106641134132` failed at `396.44` lifecycle IOPS versus the hard `1000`
+  target. macOS-latest and Ubuntu Node remain queued at this snapshot, so no
+  current-tip full qualification or production approval is promoted; rollout
+  remains **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
