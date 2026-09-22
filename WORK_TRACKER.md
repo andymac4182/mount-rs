@@ -2410,7 +2410,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  The current pushed tip `2278f32b` is documentation-only over the
+  The current pushed tip `b72d02f4` is a W05 documentation successor rebased
+  over concurrent `d4f43b28` S3 test coverage and `cf0ed708` W04 documentation,
+  and remains documentation-only over the
   rejected-request-body drain fix `d870f900` and the direct-9P, PGlite
   autocommit, S3 pipelining, structural-driver, and HTTP framing-boundary
   changes:
@@ -2421,9 +2423,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   sessions pass, the rebuilt Node artifact passes its complete integration
   suite, and the S3 gateway has `37/37` passing tests, including
   Expect/Continue, transfer-encoding refusal, HEAD framing, and pipelined
-  response ordering. No terminal
-  hosted release acceptance is claimed for this moving tip; R2 remains
-  fail-closed at the monthly cap. Remaining production actions are to select
+  response ordering. For exact `b72d02f4`, W04 policy run `35692639780`
+  succeeded, while fault `35692639786`, W08 policy `35692639797`, CI
+  `35692639806`, and W08 targets `35692639831` completed cancelled; no
+  terminal hosted release acceptance is claimed for this moving tip. R2
+  remains fail-closed at the monthly cap. Remaining production actions are to select
   a settled final SHA, obtain terminal same-SHA hosted CI/fault/W04/W07/W08
   and package/provenance evidence, request security to provision AWS protected
   inputs and immutable OIDC trust through the approved path, rotate R2

@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 15:52 AEST (2026-09-22 05:52 UTC)
+Last updated: 2026-09-22 15:57 AEST (2026-09-22 05:57 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,26 +10,25 @@ hosted or native gate.
 ## Overall position
 
 Current moving boundary: fetched `origin/main` is now
-`2278f32b57809d8a224023636ba045683955898e` (`2278f32b`), documentation-only
-successors over the rejected-request-body drain fix `d870f900` and the
-structural-driver N-API, PGlite autocommit, S3 pipelining, and HTTP
-framing-boundary changes. The exact current runtime surface was requalified
-locally: the
-direct-9P structural-driver and pipelined-response regressions passed, the full
-locked Rust workspace passed, strict workspace Clippy passed, formatting and
-`git diff --check` passed, the optimized N-API build passed, the complete Node
-SDK/CLI suite passed, and the real PGlite/provider/CLI/oracle matrix passed.
-The packet reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream
-`1200/82`, all 40 five-seed/eight-backend traces at 621 operations, and 37/37
-S3 gateway tests after the request-body drain change. The rebuilt Node artifact
-and direct N-API 9P session and structural `FsDriver`
-constructor paths pass. R2/TiDB/RustFS credentials or services and privileged
-native mounts remain explicit skips. No terminal hosted release acceptance is
-claimed for this moving tip; the latest same-SHA hosted set was
-superseded/cancelled during mainline movement, and no current R2 run was
-admitted because the monthly cap remains closed. Native mounts, live external
-providers, package/provenance, scope, and the final audit remain open.
-Production remains **NO-GO**.
+`b72d02f4ed9b91b14149a621deb68daab2af8957` (`b72d02f4`), the W05 ledger
+successor rebased over concurrent S3 test coverage `d4f43b28` and W04
+documentation `cf0ed708`. The underlying W05 runtime surface is the
+rejected-request-body drain fix `d870f900` plus the structural-driver N-API,
+PGlite autocommit, S3 pipelining, and HTTP framing-boundary changes. Its
+changed-surface qualification passed the direct-9P structural-driver and
+pipelined-response regressions, 37/37 S3 gateway tests, the optimized N-API
+build, and the complete rebuilt Node SDK/CLI suite. The immediately preceding
+full local packet reports a passing locked Rust workspace, strict workspace
+Clippy, formatting and `git diff --check`, the real PGlite/provider/CLI/oracle
+matrix, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
+and all 40 five-seed/eight-backend traces at 621 operations. R2/TiDB/RustFS
+credentials or services and privileged native mounts remain explicit skips.
+For exact `b72d02f4`, hosted W04 policy `35692639780` succeeded, while Fault
+injection `35692639786`, W08 release policy `35692639797`, CI `35692639806`,
+and W08 release targets `35692639831` were cancelled; this is not terminal
+release acceptance. No current R2 run was admitted because the monthly cap
+remains closed. Native mounts, live external providers, package/provenance,
+scope, and the final audit remain open. Production remains **NO-GO**.
 
 **W05 functional completion: 100%; production-readiness completion: 60%
 provisional.** The scoped CI credentials, fail-closed cost admission guard,
@@ -267,6 +266,7 @@ gates therefore remain actionable work in this session.
 | W05.37 Requalify the pushed HTTP framing-boundary test successor | S3 integration test coverage + current-tip release qualification | Complete locally; hosted/provider/native/package closure open | 100% local / 0% current-tip hosted closure | Exact pushed `7440a68a81d3464ded01f914aa8469fa1410b8d5` includes the current W05 ledger over the S3 framing-boundary successor `a861032f`. The full current S3 gateway suite passed `37/37`, including pipelined response ordering, `Expect: 100-continue`, transfer-encoding refusal without content length, HEAD length without a body, short streamed-response abort, multipart/CAS, interop, and lifecycle cases. The direct/structural 9P N-API, full Rust/Clippy/N-API/Node/PGlite/SDK/CLI packet remains green from the immediately preceding runtime qualification. | Select one final settled SHA; obtain terminal same-SHA hosted CI, fault, W04/W07/W08, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence. Keep live R2 blocked until the UTC-month reset and security-approved token rotation. | 0 h additional implementation; 1–3 h evidence reconciliation plus hosted/provider/platform wait | This delta is test coverage only; hosted cancellation/mainline movement, R2 cap/reset, AWS security/OIDC, native platforms, signing, registries, providers, scope, and final audit remain external gates. |
 
 | W05.38 Requalify the S3 rejected-request-body drain runtime fix | S3 transport implementation + current-tip integration qualification | Complete on changed surface; hosted/provider/native/package closure open | 100% changed-surface local / 0% current-tip hosted closure | Runtime fix `d870f900` drains a rejected HTTP request body after the S3 session refuses it, preventing unread-body connection contamination. Exact pushed `2278f32b57809d8a224023636ba045683955898e` is documentation-only over that runtime; the full S3 gateway suite passed `37/37` after the fix, the optimized N-API artifact was rebuilt, and the complete Node/N-API SDK/CLI suite passed with only documented provider/native opt-in skips. The immediately preceding exact packet remains green for Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces. | Select one final settled SHA; retain terminal same-SHA hosted CI, fault, W04/W07/W08, AWS, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence. Keep live R2 blocked until the UTC-month reset and security-approved token rotation. | 0 h additional implementation; 1–3 h changed-surface reconciliation plus hosted/provider/platform wait | This runtime delta is locally green but hosted concurrency/cancellation, R2 cap/reset, AWS security/OIDC, native platforms, signing, registries, providers, scope, and final audit remain external gates. |
+| W05.39 Record terminal hosted status for the published W05 release candidate | Hosted evidence / release control | Open; external gate | 0% terminal hosted closure | Exact published `b72d02f4` has W04 policy run `35692639780` successful. Fault injection `35692639786`, W08 release policy `35692639797`, CI `35692639806`, and W08 release targets `35692639831` all completed `cancelled`; no same-SHA terminal full release packet is therefore promoted. | Select a settled release SHA and obtain non-cancelled same-SHA CI, fault, W04/W07/W08, AWS/OIDC, provider, Native 9P/FUSE/Windows/FSKit, package/provenance, scope, and final-audit evidence; preserve the R2 cap and wait for security-approved credential rotation before any live R2 retry. | 0.25–1 h evidence reconciliation; hosted/provider/platform wait separate | Mainline supersession/cancellation is an external hosted gate. R2 monthly admission is closed; security provisioning, provider services, native runners/signing, registries, scope ownership, and W20.6 remain external. |
 
 ### W05.36 current-tip evidence (2026-09-22 15:43 AEST)
 
@@ -877,6 +877,7 @@ shown separately from active engineering time.
 | 2026-09-22 15:26–15:43 | Reconciled direct-9P, PGlite autocommit, S3 pipelining, and structural-driver successors; reran the exact current full Rust/Clippy/N-API/Node/PGlite/SDK/CLI packet through `496ed42b` | Local production qualification / release engineering | Exact current `496ed42b` passed format/diff, full locked Rust workspace, strict Clippy, optimized N-API build, direct and structural 9P session tests, complete Node/N-API suite, PGlite matrix, Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, all 40×621 traces, and 34/34 S3 gateway tests. R2/provider/native/package/scope/final-audit gates remain explicit; production remains NO-GO. |
 | 2026-09-22 15:43–15:48 | Rebased/pushed the W05 structural-9P ledger over the S3 HTTP-framing successor and ran the full current gateway suite | Local release qualification / release engineering | Pushed tip `7440a68` is exactly synchronized with `origin/main`. The current S3 gateway suite passed `37/37`, including Expect/Continue, transfer-encoding refusal, HEAD framing, pipelined responses, short-response framing, multipart/CAS, interop, and lifecycle coverage. Production remains NO-GO; hosted/provider/native/package/scope/final-audit gates remain open. |
 | 2026-09-22 15:48–15:52 | Reconciled the rejected-request-body drain fix, rebased over concurrent W07/9P documentation, rebuilt the N-API artifact, and reran the complete Node/N-API suite plus 37-test S3 gateway packet | Changed-surface integration qualification / release engineering | Runtime `d870f900` and current docs tip `2278f32b` passed the S3 gateway packet and rebuilt Node suite. The direct/structural 9P, WebDAV, S3, FUSE/NFS, differential, distribution, and artifact phases passed; provider/native opt-ins remained explicit skips. Production remains NO-GO. |
+| 2026-09-22 15:52–15:57 | Committed and pushed the W05 ledger/tracker successor as `b72d02f4` after rebasing over concurrent `d4f43b28` and `cf0ed708`; refreshed exact-SHA hosted Actions and waited for the fault run to terminate | Release engineering / hosted evidence | `HEAD == origin/main == b72d02f4`. W04 policy `35692639780` succeeded; fault `35692639786`, W08 policy `35692639797`, CI `35692639806`, and W08 targets `35692639831` completed cancelled. No hosted release acceptance is promoted; production remains NO-GO. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program plus the current qualification checkpoints: **about
