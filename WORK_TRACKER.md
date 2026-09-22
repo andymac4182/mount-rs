@@ -5416,6 +5416,40 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ### W26 current authoritative status — 2026-09-22
 
+#### Latest W26 authority override — published SQLite chunk
+
+The latest shared build-on tip is `origin/main` at
+`1e7e75716349f1eff09fd9b77bdeb652c8d0c1b2`. It includes the tested
+`1e7e7571` SQLite autocommit fenced-CAS publication optimization: successful
+publication is one parameterized conditional UPDATE, while only zero-row
+classification opens the `Immediate` transaction. Full locked workspace tests,
+strict workspace Clippy, formatting and diff checks passed. SQLite has 11/11
+focused package tests passing. Security diff scan
+`1b6c1c72-1e6c-4d85-a008-5a8fced9e7c6` completed with complete changed-file
+coverage and zero reportable findings. Production remains **NO-GO**.
+
+The latest complete hosted packet is run `35688061634`, selected SHA
+`06fc70612b9387a281ab050f711fc878713177ea` before `1e7e7571`, and is therefore
+diagnostic rather than qualification of the current tip. Base Ozone job
+`106619031921` passed; compositions `106619031684`, TiDB `106619031746`,
+FoundationDB `106619031804` and aggregate `106621589545` failed. Provider rows
+completed 1,200/1,200 lifecycle operations with zero timeouts and zero cleanup
+failures, but measured SQLite/R2 `940.817629`, PGlite/R2 `1,004.326920`,
+TiDB/R2 `332.247378` and FoundationDB/R2 `399.594055` IOPS against the hard
+1,000 target. The aggregate failed closed on the missing composition
+`OZONE_IOPS_PASS` marker. The next matrix must select the exact newly published
+tip (or a later exact descendant), and no provider may be skipped or averaged.
+
+| Current W26 work item | Status / completion | Evidence | Remaining action | Provisional estimate | External blocker / gate |
+| --- | --- | --- | --- | ---: | --- |
+| W26.1–W26.2 / Ozone gateway and block contract | PASS / 100% | Base job `106619031921` passed readiness, policy, block, failure-window, restart/reopen and cleanup markers | Preserve on the next exact-SHA packet | 0–1 h review | Hosted runner, pinned Ozone image and customer topology |
+| W26.3a / SQLite and PGlite compositions | Functional pass; performance **open** / 55% hosted qualification | SQLite/R2 `940.817629` IOPS; PGlite/R2 `1,004.326920`; each 1,200/1,200, timeouts 0, cleanup failures 0 | Re-run on `1e7e7571` and close SQLite >=1,000 plus composition/aggregate markers | 1.5–4 d per cycle | Ozone capacity, runner variability, PGlite/R2 latency and W26 SQLite path |
+| W26.3c / FoundationDB composition | Functional markers pass; performance **open** / 44% | FoundationDB/R2 `399.594055` IOPS; 1,200/1,200, timeouts 0, cleanup failures 0; bounded-listing/reopen markers passed | Requalify exact current SHA with strict lockfile, durability, cleanup and IOPS gates | 0.5–1.5 d | Hosted FoundationDB image/client and customer topology |
+| W26.3d / TiDB composition | Functional markers pass; performance **open** / 44% | TiDB/R2 `332.247378` IOPS; 1,200/1,200, timeouts 0, cleanup failures 0; durable/bounded/reopen markers passed | Requalify after the SQLite chunk; continue provider-specific optimization if still below target | 1–3 d | Hosted TiDB/PD/TiKV, Ozone topology and provider latency |
+| W26.4–W26.14 / evidence, security and end-to-end controls | Implemented / 100% W26-owned implementation | Exact-profile/no-skip/artifact-retention/marker/one-revision verifier remains fail closed; aggregate `106621589545` rejected missing `OZONE_IOPS_PASS`; security scan zero findings | Preserve every control and obtain a terminal all-provider aggregate pass on one SHA | 0.5–1.5 d review | CI scheduling, artifact service and hosted fixtures |
+| W26.15 / P8 1,000 IOPS per drive | **OPEN / NO-GO** / 95% implementation, 44% hosted qualification | Terminal run is diagnostic: SQLite, TiDB and FoundationDB below target; PGlite just above; no accepted all-provider packet | Dispatch fresh exact-SHA matrix after this push; do not lower target or convert failure to skip | 1.5–4 d per cycle plus external queue | Ozone/provider capacity and hosted CI |
+| P14 integration-readiness review | **NO-GO** / 40% | Aggregate failed closed; current code/local/security evidence is not production acceptance | Re-audit terminal end-to-end packet, then state explicit readiness decision | 1–2 d after W26.15 | Customer secure Ozone topology, 99.99%/5-minute RPO/RTO, DR and release stream |
+
 The current W26 source of truth is the detailed [progress ledger](docs/w26-progress-ledger.md).
 `origin/main` is `1626d5381625d81696fa28624342f07087593760`, including the
 published W26 publication-barrier implementation `c7f0e6d0`, bounded mutation

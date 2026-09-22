@@ -5,6 +5,48 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, latest published chunk
+
+This block supersedes earlier current-status blocks below. Historical rows are
+retained for auditability, but the following is the status other worktrees must
+use as their build-on and production-readiness boundary.
+
+| Field | Current value |
+| --- | --- |
+| Shared implementation tip | `origin/main` = `1e7e75716349f1eff09fd9b77bdeb652c8d0c1b2`; this published tip includes the SQLite autocommit fenced-CAS publication chunk, the earlier PGlite/TiDB publication optimization, TiDB session setup/isolation optimization, FoundationDB lockfile correction, bounded mutation window, R2 upload coalescing/cache and the W26 evidence-packet controls. |
+| Current implementation chunk | `1e7e7571` (`perf(w26): use sqlite autocommit publication fast path`). The successful SQLite publication is now one parameterized fenced conditional UPDATE under SQLite autocommit; only a zero-row result opens the `Immediate` classification transaction. The lease/revision/fail-closed semantics are unchanged. |
+| Local verification | `./scripts/cargo-shared test --workspace --all-targets --locked` passed; `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` passed; `cargo fmt --all -- --check` and `git diff --check` passed. The focused SQLite package has 11/11 tests; the complete workspace run remains the strongest local regression evidence. |
+| Security evidence | Diff scan `1b6c1c72-1e6c-4d85-a008-5a8fced9e7c6` completed and sealed with complete changed-file coverage, three reviewed surfaces and zero reportable findings. Measured scan usage: 1,336,729 total tokens, 1,331,116 input, 1,268,480 cached input. Hosted/customer TLS, IAM, tenancy, provider-native allocation, 99.99% availability, five-minute RPO/RTO, backup/DR, native and release controls remain explicit external gates. |
+| Current hosted packet | Run `35688061634` selected exact SHA `06fc70612b9387a281ab050f711fc878713177ea`, which predates `1e7e7571` and therefore does not test the new SQLite autocommit fast path. All W26 jobs are terminal: base Ozone `106619031921` passed; compositions `106619031684` failed; TiDB `106619031746` failed; FoundationDB `106619031804` failed; aggregate `106621589545` failed closed. |
+| Current production decision | **NO-GO**. The current packet is complete diagnostic evidence, not acceptance: the hard 1,000-IOPS-per-drive target remains unmet, and the next packet must run on a fresh exact SHA after this published chunk. No customer deployment, backup/DR, or release claim is made. |
+
+### Current hosted packet — run `35688061634`
+
+All four provider artifacts are terminal and retained. Each provider completed
+400 writes, 400 full-byte reads/verifications and 400 deletes: 1,200/1,200
+successful lifecycle operations, zero timeouts and zero cleanup failures. The
+rows below are diagnostic because the hard threshold is per provider and the
+aggregate correctly failed closed when the composition pass marker was absent.
+
+| Work item / producer | Status and evidence | Completion | Remaining action | Provisional engineering estimate | External blocker / gate |
+| --- | --- | ---: | --- | ---: | --- |
+| W26.1–W26.2 / base Ozone `106619031921` | **PASS**: Ozone readiness, gateway policy, immutable block contract, fault window, restart/reopen and cleanup markers passed on the run SHA | 100% | Preserve the exact base artifact and markers in the next one-revision packet | 0–1 h review | Hosted runner, pinned Ozone image and customer topology |
+| W26.3a / compositions `106619031684` | **FAIL / diagnostic**: SQLite/R2 `940.817629` IOPS, elapsed `1,275.486304 ms`, p95 write/read/delete `187.646450/75.215778/56.631260 ms`; PGlite/R2 `1,004.326920` IOPS, elapsed `1,194.830066 ms`, p95 `221.108790/71.009336/32.646368 ms`; SQLite missed the target, PGlite met it; both rows completed 1,200/1,200 with zero timeout/cleanup failures | 100% functional / 55% performance qualification | Rerun the composition matrix on a SHA containing `1e7e7571`; require SQLite >=1,000 and the composition/aggregate markers | 1.5–4 d per remediation/review cycle | Ozone capacity, runner variability and PGlite/R2 latency are external inputs; SQLite publication cost remains W26-owned |
+| W26.3d / TiDB `106619031746` | **FAIL / diagnostic**: TiDB/R2 `332.247378` IOPS, elapsed `3,611.766651 ms`, p95 write/read/delete `642.112097/150.210998/33.677281 ms`; 1,200/1,200 lifecycle operations, zero timeout/cleanup failures; direct Ozone/TiDB bounded/reopen markers passed before the hard benchmark failure | 100% functional / 44% performance qualification | Requalify after the SQLite chunk and compare TiDB's remaining metadata/remote latency; preserve durable restart, fencing and ambiguous-commit markers | 1–3 d hosted review plus further provider work if still below target | Hosted TiDB/PD/TiKV, Ozone topology and provider-native latency |
+| W26.3c / FoundationDB `106619031804` | **FAIL / diagnostic**: FoundationDB/R2 `399.594055` IOPS, elapsed `3,003.047681 ms`, p95 write/read/delete `477.856604/42.458388/68.789782 ms`; 1,200/1,200 lifecycle operations, zero timeout/cleanup failures; bounded-listing, composition and reopen markers passed before the hard benchmark failure | 100% functional / 44% performance qualification | Requalify on the next exact SHA; preserve the `--locked`, durable restart and cleanup evidence; do not infer production capacity from this pass | 0.5–1.5 d hosted review/startup | Hosted FoundationDB image/client, Ozone topology and customer durability |
+| W26.4–W26.14 / evidence controls | **IMPLEMENTED / locally green**: strict provider selection, exact profile, artifact integrity/retention, no-skip, marker and one-revision aggregation controls remain in force; aggregate `106621589545` failed closed on missing composition `OZONE_IOPS_PASS` | 100% implementation / hosted packet open | Keep fail-closed verification and require all producer plus aggregate markers on one exact current SHA | 0.5–1.5 d review | CI scheduling, artifact service and hosted provider fixtures |
+| W26.15 / P8 per-drive target | **OPEN / NO-GO**: the packet is terminal but not qualifying because SQLite, TiDB and FoundationDB missed 1,000; PGlite was just above it. No row may be converted to skip or averaged across providers | 95% W26-owned implementation / 44% hosted qualification | Run a fresh matrix against `1e7e7571` or its later exact published descendant; close every provider and aggregate marker without lowering the target | 1.5–4 d per remediation cycle plus external queue | Ozone fixture capacity/topology, provider latency, hosted runners and artifact retention |
+| P14 integration-readiness review | **NO-GO** | 40% | Re-audit a terminal all-provider, end-to-end and aggregate pass, then issue an explicit readiness decision; no deployment or release claim | 1–2 d after W26.15 | Customer secure Ozone topology, 99.99% evidence, five-minute RPO/RTO, DR and release stream |
+
+The current run's aggregate log recorded
+`W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-log-missing-marker=OZONE_IOPS_PASS`.
+That is the expected fail-closed outcome for a hard provider miss. The next
+hosted matrix must select the newly published `origin/main` exact SHA (or a
+later exact descendant after reconciliation), and must requalify all four
+configured metadata-provider paths end to end. CI is the available environment;
+customers own Ozone deployment, backup/DR and operations, and another stream
+owns releases.
+
 ## Current authority override — 2026-09-22
 
 This block is the current reconciliation point for readers arriving from other
@@ -1403,3 +1445,36 @@ The required current code includes SQLite CAS `ba4e89d0`, TiDB isolation
 producer result until its job and the aggregate are terminal, and the
 production decision remains **NO-GO** while this run is queued or any hard gate
 fails.
+
+## Latest terminal qualification correction — run `35688061634`
+
+The dispatch above is now terminal and supersedes its queued/in-progress state.
+GitHub selected SHA `06fc70612b9387a281ab050f711fc878713177ea`, before the
+published SQLite autocommit chunk `1e7e7571`, so this run remains diagnostic and
+does not qualify the current shared tip.
+
+| Producer | Job | Terminal result | Evidence |
+| --- | ---: | --- | --- |
+| Ozone base | `106619031921` | **PASS** | Gateway policy, block contract, failure window, restart/reopen and cleanup markers passed |
+| Ozone compositions | `106619031684` | **FAIL** | SQLite/R2 `940.817629` IOPS; PGlite/R2 `1,004.326920`; both 1,200/1,200, timeout 0, cleanup failures 0; SQLite emitted `IOPS_TARGET_NOT_MET` |
+| Ozone TiDB | `106619031746` | **FAIL** | TiDB/R2 `332.247378` IOPS, 1,200/1,200, timeout 0, cleanup failures 0; emitted `IOPS_TARGET_NOT_MET` |
+| Ozone FoundationDB | `106619031804` | **FAIL** | FoundationDB/R2 `399.594055` IOPS, 1,200/1,200, timeout 0, cleanup failures 0; emitted `IOPS_TARGET_NOT_MET` |
+| W26 aggregate | `106621589545` | **FAIL / fail closed** | `W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-log-missing-marker=OZONE_IOPS_PASS`; no provider failure was promoted to pass |
+
+The full local gates for the published `1e7e7571` chunk passed after the
+hosted dispatch. The next action is a fresh exact-SHA W26 matrix; production is
+still **NO-GO** until all configured providers meet 1,000 lifecycle IOPS and
+the complete one-revision end-to-end aggregate passes.
+
+## Latest session time log continuation — 2026-09-22
+
+All estimates remain provisional. Hosted runner, provider startup, CI queue and
+artifact retrieval time are external gate time, not implementation effort.
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — SQLite autocommit publication chunk | Changed the successful SQLite metadata publication path to a single autocommit fenced CAS UPDATE while retaining locked zero-row classification and fail-closed lease/revision semantics. | ~1–2 h | ~0.25–0.5 h shared-target lock wait | Focused SQLite tests 11/11, full locked workspace tests, strict workspace Clippy, formatting and diff checks passed. |
+| 2026-09-22 — SQLite security review | Completed diff scan `1b6c1c72-1e6c-4d85-a008-5a8fced9e7c6` over the changed provider file and supporting publication path. | ~0.5–0.75 h | 0 h hosted | Complete coverage, three reviewed surfaces, zero reportable findings; sealed report retained in the security scan directory. |
+| 2026-09-22 — Code publication/reconciliation | Committed, fetched concurrent mainline work, replayed the code commit after two non-fast-forward races and pushed the tested chunk to `origin/main`. | ~0.5–0.75 h | ~0.5–1 h remote reconciliation | `1e7e75716349f1eff09fd9b77bdeb652c8d0c1b2` verified on `origin/main`; no force push used. |
+| 2026-09-22 — Hosted packet review | Downloaded and parsed composition, TiDB and FoundationDB artifacts; inspected the aggregate fail-closed log. | ~0.75–1.25 h evidence review | ~0.5–1 h hosted provider startup/artifact service | Terminal diagnostic packet recorded above; base passed, three provider rows missed the target, PGlite alone exceeded it. |
+| 2026-09-22 — Ledger/tracker refresh | Added the current published tip, every W26 item’s status/evidence/remaining action/estimate/external gate, current production decision and the terminal packet to this ledger and `WORK_TRACKER.md`. | ~0.5–0.75 h | ~0.25–0.5 h current-tip verification | Documentation is the next push chunk; the next hosted matrix must use the exact current published SHA. |
