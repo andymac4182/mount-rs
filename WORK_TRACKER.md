@@ -53,7 +53,10 @@ queued from `main` at workflow head
 `af7e73dfb7f54a31c1a91be829238571950a48e1`; source
 `fba61979f1f6c9858026cd5ebc4c5d3d357f366b` is an ancestor and therefore
 included. Its SQLite, PGlite, TiDB, FoundationDB and aggregate jobs have no
-terminal result yet, so no performance or end-to-end result is promoted.
+terminal result yet, so no performance or end-to-end result is promoted. At
+the 20:41 AEST poll the four provider jobs were still queued; this is a
+CI-capacity blocker, not provider evidence. The manual run remains the
+authoritative non-canceling exact-head gate despite newer unrelated push runs.
 
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
