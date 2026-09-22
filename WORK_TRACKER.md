@@ -948,6 +948,9 @@ and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
 The current-tip Rust WebDAV target passes 19/19 with the shared Cargo wrapper,
 and warning-denied WebDAV Clippy passes; this does not close external hosted,
 provider-lifecycle, or durability gates.
+The current shell has no AWS/R2/Cloudflare credential names available; live
+provider acceptance remains externally gated and no credential values were
+read or persisted.
 The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no

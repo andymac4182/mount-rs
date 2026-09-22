@@ -91,6 +91,10 @@ The current-tip Rust WebDAV target passes 19/19 with the shared Cargo wrapper,
 and warning-denied WebDAV Clippy passes; this does not close the external
 hosted/provider lifecycle or durability gates.
 
+The current shell has no AWS/R2/Cloudflare credential names available, so live
+provider acceptance remains an explicit external blocker; no credential values
+were read or persisted.
+
 For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
 exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and an unrelated Native 9P workflow was
