@@ -4764,6 +4764,14 @@ reproducible in a production-like environment.
   admission. No service PASS is claimable; protected AWS configuration, the R2
   budget reset, physical power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 lifecycle packet adds the oracle-derived positive
+  `S3Server.close()` drain regression `http_server_close_allows_inflight_response_to_finish`:
+  a parked 2 MiB response resumes and returns every byte while bounded close
+  completes; the timeout-abort case remains separately covered. The complete
+  current Rust 5/6/40/5 packet, strict Clippy, formatting, and diff checks
+  passed; this is bounded local graceful-close evidence only, so live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `d4f43b28` were
   refreshed: AWS run `35692509801` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35692509869`
