@@ -2086,6 +2086,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Prior run `35694245181` was cancelled before any job materialized during
   concurrent mainline pushes and is non-evidence. Queue state does not change
   the production NO-GO decision.
+- Terminal W04 production-policy run
+  [35694307118](https://github.com/andymac4182/mount-rs/actions/runs/35694307118),
+  job `106637712246`, passed on shared head `25e275ab` with the explicit
+  PGlite-only/durable/external-secret/bounded-TTL marker and four expected
+  fail-closed negative markers. This closes the credential-free configuration
+  shape check only; it does not close persistent deployment, backup/restore,
+  provider, observability, ownership, or release approval gates.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and

@@ -44,6 +44,17 @@ consumer install/smoke. The run itself is terminal `failure` because provider
 capacity/W26 lanes failed, so this is not a production release record or GO
 decision.
 
+The credential-free production-shape workflow also passed on shared head
+`25e275ab`: run
+[35694307118](https://github.com/andymac4182/mount-rs/actions/runs/35694307118),
+job
+[106637712246](https://github.com/andymac4182/mount-rs/actions/runs/35694307118/job/106637712246),
+emitted the required `W04_PGLITE_PRODUCTION_CONFIG_POLICY_PASS` marker and
+four expected fail-closed negative markers for non-durable storage, inline
+password, invalid TTL, and missing production TTL. This validates configuration
+shape only; it does not validate a real volume, backup, provider, collector,
+operator, or release decision.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
