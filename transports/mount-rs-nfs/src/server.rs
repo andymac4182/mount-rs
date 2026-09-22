@@ -131,8 +131,16 @@ impl NfsConnectionControl {
     }
 
     async fn wait(&self) {
-        while !self.done.load(Ordering::Acquire) {
-            self.closed.notified().await;
+        loop {
+            let notified = self.closed.notified();
+            tokio::pin!(notified);
+            // Register before observing done: notify_waiters does not retain
+            // a permit for a waiter that has not been registered yet.
+            notified.as_mut().enable();
+            if self.done.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -780,6 +788,29 @@ mod tests {
     use tokio::io::{AsyncRead, AsyncWrite, ReadBuf, ReadHalf, WriteHalf};
     use tokio::sync::Notify;
     use tokio::time::timeout;
+
+    #[tokio::test]
+    async fn connection_close_wakes_all_waiters_and_late_waiters() {
+        let control = Arc::new(NfsConnectionControl::new());
+        let waiters = (0..32)
+            .map(|_| {
+                let control = Arc::clone(&control);
+                tokio::spawn(async move { control.wait().await })
+            })
+            .collect::<Vec<_>>();
+        tokio::task::yield_now().await;
+        control.finish();
+
+        for waiter in waiters {
+            timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("registered NFS close waiter wakes")
+                .expect("NFS close waiter task succeeds");
+        }
+        timeout(Duration::from_secs(1), control.wait())
+            .await
+            .expect("late NFS close waiter sees completion");
+    }
 
     #[tokio::test]
     async fn loopback_tcp_server_handles_rpc_without_native_mount() {
