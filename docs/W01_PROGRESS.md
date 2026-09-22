@@ -327,6 +327,15 @@ N-API job `106590841909` and Rust job `106590841982` both passed their Linux
 probes and supported lifecycle gates. The native typed-reader maximums are
 recorded in the detailed W01-9P ledger; broader W01 acceptance remains NO-GO.
 
+The W01-NFS forced-process-restart lane also passes host-backed NFSv4.1
+`FILE_SYNC4` write/reopen/readback: a replacement process rejects the old
+session and both old root/file handles, then a fresh session recovers the
+exact bytes by path. This is one-host process-crash data evidence, not
+power-loss durability or persistent lease/replay/handle recovery. The manual
+hosted NFS run `35670927787` passed macOS but failed Ubuntu before its v3
+mount on a parallel-test mountpoint collision; the local correction does
+not turn that failed job into acceptance evidence.
+
 W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
 orderly TCP reconnect: the same cached slot/sequence returns the original
 mutating `REMOVE` reply without removing a changed target, and the next
