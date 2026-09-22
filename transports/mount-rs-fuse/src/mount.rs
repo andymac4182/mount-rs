@@ -2039,9 +2039,17 @@ mod tests {
     fn defaults_are_safe_for_a_single_mount() {
         let options = MountOptions::default();
         assert_eq!(options.mode, MountMode::Auto);
+        assert_eq!(options.fsname, "mount-rs");
+        assert!(options.subtype.is_none());
         assert!(options.default_permissions);
         assert!(!options.allow_other);
+        assert!(!options.read_only);
+        assert!(options.max_read.is_none());
+        assert!(options.mount_options.is_empty());
         assert_eq!(options.device, Path::new("/dev/fuse"));
+        assert_eq!(options.max_frame, DEFAULT_MAX_FRAME);
+        assert_eq!(options.init_timeout, Duration::from_secs(10));
+        assert_eq!(options.unmount_timeout, Duration::from_secs(10));
     }
 
     #[test]
