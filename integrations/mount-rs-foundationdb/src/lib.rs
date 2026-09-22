@@ -1512,6 +1512,13 @@ impl MetadataStore for FoundationDbMetadataStore {
         self.0.durable
     }
 
+    fn publish_includes_flush_barrier(&self) -> bool {
+        // FoundationDB publish awaits the transaction commit future. The
+        // current flush transaction is an explicit post-commit barrier and
+        // remains available through syncfs.
+        true
+    }
+
     async fn load(&self) -> Result<LoadedMetadata> {
         let inner = Arc::clone(&self.0);
         let keyspace = Keyspace::new(&inner.prefix);

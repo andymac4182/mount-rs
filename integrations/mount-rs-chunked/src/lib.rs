@@ -688,7 +688,9 @@ where
                 return Err(self.fail_closed(with_context(error, "metadata-publish", None)));
             }
         };
-        if let Err(error) = self.inner.metadata.flush().await {
+        if !self.inner.metadata.publish_includes_flush_barrier()
+            && let Err(error) = self.inner.metadata.flush().await
+        {
             return Err(self.fail_closed(with_context(error, "metadata-flush", None)));
         }
         let mut state = self.lock_state()?;
@@ -3219,12 +3221,17 @@ mod tests {
         loaded: Option<LoadedMetadata>,
         fail_publish: Arc<AtomicBool>,
         fail_flush: Arc<AtomicBool>,
+        publish_includes_flush_barrier: bool,
     }
 
     #[async_trait]
     impl MetadataStore for TestMetadataStore {
         fn durable(&self) -> bool {
             self.inner.durable()
+        }
+
+        fn publish_includes_flush_barrier(&self) -> bool {
+            self.publish_includes_flush_barrier
         }
 
         async fn load(&self) -> Result<LoadedMetadata> {
@@ -3698,6 +3705,7 @@ mod tests {
             loaded: None,
             fail_publish: Arc::new(AtomicBool::new(false)),
             fail_flush: Arc::new(AtomicBool::new(false)),
+            publish_includes_flush_barrier: false,
         };
         let filesystem = block_on(ChunkedFs::open(
             metadata.clone(),
@@ -3733,6 +3741,7 @@ mod tests {
             loaded: None,
             fail_publish: Arc::new(AtomicBool::new(false)),
             fail_flush: Arc::new(AtomicBool::new(false)),
+            publish_includes_flush_barrier: false,
         };
         let filesystem = block_on(ChunkedFs::open(
             metadata.clone(),
@@ -3760,6 +3769,37 @@ mod tests {
         assert_eq!(inode.stats.size, 4);
         loaded.validate().unwrap();
         block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
+    fn publish_barrier_capability_skips_redundant_flush_but_syncfs_still_checks_it() {
+        let metadata = TestMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            loaded: None,
+            fail_publish: Arc::new(AtomicBool::new(false)),
+            fail_flush: Arc::new(AtomicBool::new(false)),
+            publish_includes_flush_barrier: true,
+        };
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("publish-barrier-capability"),
+        ))
+        .unwrap();
+        let before = block_on(metadata.inner.load()).unwrap().revision;
+        metadata.fail_flush.store(true, Ordering::SeqCst);
+
+        block_on(filesystem.write_file("/file", b"data")).unwrap();
+        assert!(!filesystem.failed());
+        assert_eq!(
+            block_on(metadata.inner.load()).unwrap().revision,
+            before + 1
+        );
+
+        let error = block_on(filesystem.syncfs()).unwrap_err();
+        assert_eq!(error.code, ErrorCode::Eio);
+        assert!(filesystem.failed());
+        let _ = block_on(filesystem.shutdown());
     }
 
     #[test]
@@ -3854,6 +3894,7 @@ mod tests {
             }),
             fail_publish: Arc::new(AtomicBool::new(false)),
             fail_flush: Arc::new(AtomicBool::new(false)),
+            publish_includes_flush_barrier: false,
         };
         let result = block_on(ChunkedFs::open(
             invalid.clone(),
@@ -3877,6 +3918,7 @@ mod tests {
             loaded: None,
             fail_publish: Arc::new(AtomicBool::new(false)),
             fail_flush: Arc::new(AtomicBool::new(true)),
+            publish_includes_flush_barrier: false,
         };
         let result = block_on(ChunkedFs::open(
             flush_failure.clone(),

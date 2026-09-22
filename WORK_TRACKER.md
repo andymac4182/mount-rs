@@ -1117,6 +1117,12 @@ state. The focused 20-test Rust target exercises this contract across the
 mutation methods and an injected failure/retry path; provider-specific
 power-loss ordering, live remote-provider behavior, hosted lifecycle, and
 durable-lock acceptance remain open.
+At exact published packet `4e19f22648dc8f6fa622b70e76f70ca4540a3483`, the
+read-only hosted snapshot found CI `35672738319` and W08 release targets/policy
+`35672738309`/`35672738333` pending, Fault injection `35672738370` and Live AWS
+S3 `35672738306` in progress, and Live Cloudflare R2 `35672738332` failed; W04
+policy `35672738331` succeeded and unrelated Native 9P `35672738401` was in
+progress. No hosted WebDAV PASS is claimable from that snapshot.
 
 For the published 256-request packet `efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6`,
 the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
