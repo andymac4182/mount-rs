@@ -2197,6 +2197,44 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn all_wait_closed_observers_wake_on_terminal_cleanup() {
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-wait-closed-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks::default(),
+        ));
+        let mountpoint = PathBuf::from("/tmp/mount-rs-fuse-wait-closed-test");
+        let first_mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: mountpoint.clone(),
+        };
+        let second_mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint,
+        };
+
+        let first = tokio::spawn(async move { first_mount.wait_closed().await });
+        let second = tokio::spawn(async move { second_mount.wait_closed().await });
+        tokio::task::yield_now().await;
+        assert!(!state.closed.load(Ordering::Acquire));
+
+        state.mark_closed();
+        tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first wait_closed observer should wake")
+            .expect("first wait_closed task should finish");
+        tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second wait_closed observer should wake")
+            .expect("second wait_closed task should finish");
+
+        state.mounted.store(false, Ordering::Release);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn source_reports_the_configured_fsname() {
         let state = Arc::new(MountState::new(
