@@ -2741,13 +2741,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
   complete-GO states; these cases validate the tracking control only.
   The hosted workflow also runs `scripts/test-w07-qualification-log.mjs` with
-  four credential-free verifier cases. The qualification log verifier now
+  five credential-free verifier cases. The qualification log verifier now
   requires the exact accepted configuration shape, both expected negative
   fixtures and a parsed lease-publication policy whose cadence is shorter
   than the TTL, whose forward-jump bound is no larger than the TTL and whose
   TTL is at most 24 hours. These checks harden evidence integrity only; they
   do not close any production identity, failover, recovery, capacity,
   observability, native-platform or release-owner gate.
+  The dedicated hosted lane now also requests a fixed bounded workload profile
+  through the live FoundationDB/RustFS Node consumer (400 iterations, 64-way
+  concurrency, 4 KiB payloads and a 1,000 IOPS floor), independently validates
+  and retains `foundationdb-ozone-iops.json`, and requires the corresponding
+  `FOUNDATIONDB_OZONE_IOPS_PASS` marker. This improves repeatable qualification
+  evidence only; the latest retained run above predates the profile addition,
+  and production-like duration, capacity, cost and error-budget acceptance
+  remain open until a fresh terminal run and owner review.
   The hosted workflow also validates the machine-readable
   `docs/W07-production-evidence.json` packet with
   `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
@@ -2784,9 +2792,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     `operations=15 p50_us=3846 p95_us=38409 p99_us=38409 total_ms=96
     throughput_ops_per_sec=155.90` at revision `9460a62`; its five soak-round
     p95/p99 values ranged from 13,005µs to 14,243µs and throughput ranged
-    from 199.39 to 214.47 ops/s. This remains bounded
-    qualification evidence and does not convert the five-round result into
-    production capacity evidence.
+    from 199.39 to 214.47 ops/s. The dedicated lane now also runs the fixed
+    400-iteration, 64-concurrency, 4 KiB, 1,000-IOPS profile and retains its
+    validated machine-readable artifact; that profile has not yet been
+    requalified at a hosted revision. This remains bounded qualification
+    evidence and does not convert either profile into production capacity
+    evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
