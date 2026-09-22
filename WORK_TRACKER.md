@@ -2232,6 +2232,27 @@ Evidence landed without closing the remaining W01 acceptance gates:
   classify exact PGlite/restart, native/package/provider/W26, and production
   gates only from terminal evidence. Production remains **NO-GO**.
 
+- Pre-fix exact-tip qualification outcome: run `35688367152` later failed all
+  four Unix Node jobs before PGlite/restart. macOS-latest `106619929119` and
+  macOS-15-intel `106619929088` both failed `webdav/propfind-links mismatch`
+  with TypeScript HTTP 207 XML versus Rust HTTP 501 and an empty body; ARM
+  `106619929058` and Ubuntu `106619929260` failed the same parity boundary.
+  Windows `106619929057` failed only because the correct WSAEADDRINUSE text
+  was exposed as `GenericFailure`. Native FUSE `106619929163` failed rootless
+  kernel operations and left its `Complete job` hook in progress; aggregate
+  `106623776726` was skipped, provider composition jobs failed, and W26
+  `106622558875` failed closed without `OZONE_IOPS_PASS`. This run is excluded
+  as pre-fix evidence and production remains **NO-GO**.
+
+- Published follow-up correction `140ede42` adds the missing bounded-directory
+  delegation to `examples/http_oracle.rs` and normalizes Windows socket-bind
+  wording in the N-API server facade to the public `EADDRINUSE` contract.
+  Shared-target Rust compilation, 40-case local HTTP parity, N-API release
+  build, JS syntax, and the 9P port-conflict boundary passed locally. The
+  correction is included in current `origin/main` `7946979c`; dispatch a new
+  non-cancelling exact-tip qualification from that revision before promoting
+  any current-tip recovery or production evidence.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
