@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 17:53 AEST (2026-09-22 07:53 UTC)
+Last updated: 2026-09-22 17:59 AEST (2026-09-22 07:59 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -397,6 +397,7 @@ gates therefore remain actionable work in this session.
 
 | W05.42 Repair and rerun the production candidate after terminal CI failures | Implementation + hosted CI/native/provider qualification | Implementation repair pushed; immutable hosted rerun pending | 35% | Shared `origin/main` `f94b53d8` contains the TiDB ambiguous-publication proxy fix and the W26 out-of-tree N-API build with a source-clean assertion. Local `./scripts/cargo-shared test -p mount-rs-tidb --tests --locked` passed 8 unit tests; the two real-service tests remain correctly ignored without TiDB. `node benchmarks/storage/test.mjs`, workflow YAML parsing, formatting, and `git diff --check` passed. No R2 credential was read or used. | Create a new stable candidate branch from the repaired mainline; run exact-SHA local full Rust/Clippy/N-API/Node SDK/CLI/PGlite/packaging qualification; dispatch CI, Fault, W04, W07, W08, Native 9P, and attestation workflows; classify every terminal result; close hard Ozone IOPS and native-FUSE gates or record explicit support-scope exclusions; then run W20.6. | 2–6 h active engineering/release work; 4–16 h hosted/provider/platform wait | Live TiDB/Ozone/FoundationDB services, runner/kernel privileges, AWS protected OIDC inputs, R2 UTC-month reset and token rotation, package registries/signing, product support scope, and final-audit approval are external/provider gates. |
 | W05.43 Qualify the repaired immutable candidate across Rust, Node, SDK, CLI, N-API, PGlite, and oracle paths | Local release qualification + release control | Complete locally; same-SHA hosted/provider/native/package closure open | 100% local / 68% overall closure | Exact candidate branch `andymac4182/c/w05-production-candidate-20260922b` at `87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d` passed format/diff checks, the full locked Rust workspace, strict workspace Clippy, optimized release N-API build, the complete pinned-oracle Node/N-API suite, and `scripts/test-pglite.sh`. Node coverage passed SDK/CLI, WebDAV, S3 restart/scope, FUSE/NFS/9P differential paths, Rust-backed sessions, host restart, distribution, and artifact aggregation. The PGlite packet reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 seeded traces; real PGlite reconnect/versioning/VFS/lifecycle/split-store/FUSE and backup/restore rollback passed. R2, AWS, TiDB/RustFS, FoundationDB opt-in, and privileged native mount rows remained explicit skips or security/platform gates; no secret or Keychain value was read. | Dispatch the immutable candidate through CI, Fault, W04, W07, W08, Native 9P, release-target attestation, and package/provenance workflows; retain terminal same-SHA results; rerun live R2 only after the UTC reset and security-approved token rotation; provision AWS through security/OIDC; close Ozone IOPS, native-FUSE, advertised-platform/package, support-scope, and W20.6 gates. | 0 h active implementation; 1–3 h release coordination plus 4–16 h hosted/provider/native/platform wait | Local qualification does not close hosted runner/kernel behavior, live provider services, R2 budget/reset, AWS protected inputs, registries/signing, native privileges, product scope, or final-audit ownership. |
+| W05.44 Dispatch and track the same-SHA hosted release-gate packet | Hosted CI/native/provider/release evidence | In progress; runs queued | 45% provisional | On immutable `87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`, dispatched CI `35702348089`, Native 9P `35702349894`, Fault injection `35702350927`, W04 policy `35702351026`, W07 FoundationDB qualification `35702352395`, W08 release targets with `attest=true` `35702352896`, and W08 release policy `35702353241`. The dispatch set intentionally excludes Live Cloudflare R2 while its monthly cap is closed, Live AWS while security issue [#3](https://github.com/andymac4182/mount-rs/issues/3) lacks protected inputs, and the production-release publisher. | Poll every run to terminal; inspect redacted logs/artifacts; classify implementation versus provider/runner/native failures; repair any actionable implementation failure on a new immutable candidate; retain terminal same-SHA package/provenance/attestation evidence; then close AWS, post-reset R2, support-scope, and W20.6 gates. | 0.5–1 h active tracking; 2–16 h hosted/provider/native wait | GitHub runner capacity, Linux/macOS kernel privileges, TiDB/Ozone/FoundationDB services, AWS security administration, R2 UTC reset/token rotation, signing/registries, and product release-scope ownership are external gates. |
 
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
@@ -486,6 +487,30 @@ The hosted candidate rerun, AWS security/OIDC inputs, post-reset live R2,
 Ozone hard IOPS, native FUSE, platform/package publication, support scope,
 and W20.6 decision remain open and are tracked as separate hosted/native/
 provider/release gates.
+
+### W05.44 hosted dispatch boundary (2026-09-22 17:59 AEST)
+
+The locally complete candidate `87f3cdf0` is now being held immutable while
+the non-R2 release packet runs. The primary dispatch IDs are:
+
+| Workflow | Run | Initial state | Scope |
+| --- | ---: | --- | --- |
+| CI | `35702348089` | queued | Rust/Node/provider-composition and W26 evidence packet |
+| Native 9P | `35702349894` | queued | Linux native 9P probe, addon, Rust and mounted-I/O lifecycle |
+| Fault injection | `35702350927` | queued | Cross-platform failure and cleanup matrix |
+| W04 production policy | `35702351026` | queued | PGlite policy and release-control checks |
+| W07 FoundationDB production qualification | `35702352395` | queued | FoundationDB/RustFS durable provider and platform packet |
+| W08 release targets (`attest=true`) | `35702352896` | queued | Linux/macOS CLI artifacts, SBOM, provenance and attestation |
+| W08 release policy | `35702353241` | queued | Release manifest, SBOM, rollout and policy checks |
+
+The separate push-triggered CI run `35700818889` and successful push-triggered
+Fault/W04 runs are retained as same-SHA secondary observations; the manual
+dispatches above are the primary release-control records because their
+concurrency groups are isolated from later mainline movement. Live R2 was not
+dispatched, AWS was not dispatched while security issue #3 remains unprovisioned,
+and the production-release publisher was deliberately held until the required
+acceptance packet is green. No hosted result is promoted until its run is
+terminal and its artifacts/logs are reviewed.
 
 
 ### W05.36 current-tip evidence (2026-09-22 15:43 AEST)
@@ -1000,6 +1025,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 07:53–07:59 UTC (17:53–17:59 AEST) | Verified the immutable candidate ref, inspected workflow dispatch contracts, dispatched the non-R2 same-SHA hosted packet, and captured run IDs | Hosted release-control coordination | Seven primary runs queued on `87f3cdf0`; Live R2, Live AWS, and production-release publication intentionally held behind their explicit gates. |
 | 2026-09-22 07:35–07:53 UTC (17:35–17:53 AEST) | Built the optimized N-API artifact and ran the complete pinned-oracle Node/N-API suite plus `scripts/test-pglite.sh` on immutable candidate `87f3cdf0` | Local production qualification / SDK-CLI-package gate | Full local packet passed: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces. Provider credentials, live R2, TiDB/RustFS, FoundationDB opt-in, and privileged native mounts remained explicit skips or external gates. |
 | 2026-09-22 11:46–11:59 | Completed the exact integrated `6797a2d8` current-tip packet after the 9P/WebDAV successor: full Rust workspace, strict Clippy, optimized N-API, complete Node suite, real PGlite/SDK/CLI/upstream/oracle matrix | Local production qualification | Full packet passed with Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and 40×621 traces. The isolated pinned oracle required a frozen no-lifecycle install before the clean rerun; no repository credentials or Keychain access were used. |
 | 2026-09-22 11:59–12:02 | Refreshed same-SHA hosted Actions and reconciled moving shared mainline | Hosted evidence / concurrent-main reconciliation | On `6797a2d8`, W04 `35677127007`, fault `35677126925`, W08 policy `35677126941`, and W08 targets `35677126934` succeeded; R2 `35677126924` failed and CI `35677127048` was cancelled, so no hosted release packet was promoted. Origin advanced to `819c663e`, which is the next qualification target. |
