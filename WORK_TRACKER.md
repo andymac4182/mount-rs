@@ -4,6 +4,20 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 exact-head queue recheck after publication (2026-09-22)
+
+At 22:22 AEST, manual run
+[`35726132846`](https://github.com/andymac4182/mount-rs/actions/runs/35726132846)
+still reports exact workflow head `a7e459e6`, status `queued`, and no
+conclusion. Its seven W26 jobs (`ozone-tidb`, `ozone-foundationdb`,
+`foundationdb-rustfs`, `ozone`, `tidb`, `ozone-compositions` and `tidb-rustfs`)
+remain queued. The current shared docs tip is `a82800c1`, a docs-only descendant
+that does not alter the tested source. This is hosted runner capacity, not a
+provider result. W26.15 remains at the prior terminal 1/4 provider acceptance,
+and production remains **NO-GO** until all four providers pass 1,000 IOPS/drive
+with the complete end-to-end packet and customer/Ozone security, SLO, RPO/RTO
+and backup/DR gates closed.
+
 ## Current W26 serialized lease-renewal test boundary (2026-09-22)
 
 Test commit
@@ -3015,6 +3029,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
   NO-GO until artifact/package, persistence/rollback, provider, and
   operational gates also close.
+- [ ] Current-main hosted qualification follow-up remains in progress.
+  Non-cancelling manual run [35723080355](https://github.com/andymac4182/mount-rs/actions/runs/35723080355)
+  at exact source `d096930a` now has terminal-success ARM and macOS-15-intel
+  Node recovery lanes, plus successful Windows Node/Rust support lanes. The
+  Intel job [106730233208](https://github.com/andymac4182/mount-rs/actions/runs/35723080355/job/106730233208)
+  passed the exact fragmented-request and PGlite/restart steps and retained
+  rollback/N-API/`providersFailed: 0` markers; its diagnosed WebDAV NodeFs and
+  SQLite phases stayed below the unchanged 10-second request timeout. This is
+  2/4 Unix Node recovery for that run, not full W04/current-tip or production
+  acceptance. The remaining macOS-latest/Ubuntu/native FUSE/Rust/package/
+  provider/W26 lanes are still queued or non-terminal; production remains
+  NO-GO.
 - [x] W04.2 current-tip revalidation: replacement qualification run
   [35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
   ran from exact published `d870f900`. macOS-latest

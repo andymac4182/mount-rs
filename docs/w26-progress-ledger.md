@@ -5,12 +5,39 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, exact-head queue recheck after publication
+
+At 22:22 AEST, manual run
+[`35726132846`](https://github.com/andymac4182/mount-rs/actions/runs/35726132846)
+still reports exact workflow head `a7e459e6a9749384d409e4f53d6938df9a4414b9`,
+overall status `queued`, and no conclusion. A direct live query confirmed the
+seven W26 jobs remain queued: `ozone-tidb` `106740105296`,
+`ozone-foundationdb` `106740105378`, `foundationdb-rustfs` `106740105428`,
+`ozone` `106740105441`, `tidb` `106740105479`, `ozone-compositions`
+`106740105510` and `tidb-rustfs` `106740105719`. The docs-only mainline tip is
+now `a82800c1`; it does not alter the exact tested source. This is an external
+runner-capacity wait, not provider, performance or acceptance evidence.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Exact-head hosted qualification | **PENDING / unchanged** | Run `35726132846` remains active and queued on exact source `a7e459e6`; all seven W26 jobs are still queued. | Leave the non-canceling manual run active and retrieve artifacts only after terminal completion. |
+| W26 completion percentages | **UNCHANGED** | No terminal provider metric, functional marker or aggregate packet exists. | Do not advance W26.15/W26.14/P14 or promote queued state. |
+| Production readiness | **NO-GO / unchanged** | Hard 1,000 IOPS/drive, complete end-to-end packet, Tier-1 99.99%, five-minute RPO/RTO and customer/Ozone security evidence remain open; backup/DR and releases remain external. | Keep the goal active; continue bounded rechecks or implementation when state changes. |
+
+### Session time log — exact-head queue recheck after publication
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — live recheck (22:22 AEST) | Queried run `35726132846` after publishing docs tip `a82800c1`; verified exact source head and all seven W26 job states. | ~0.1 h | ~0.1 h hosted capacity wait | No hosted state change; evidence remains pending and production stays **NO-GO**. |
+| 2026-09-22 — next gate | Poll the same manual run with bounded waits and inspect exact artifacts only once terminal. | ~0.1–0.25 h per recheck | External runner/provider capacity | Do not dispatch a replacement while this exact-head run remains the authoritative active boundary. |
+
 ## Current authority override — 2026-09-22, serialized lease-renewal test chunk
 
 The newest W26 source/test boundary is published as
 [`a7e459e6a9749384d409e4f53d6938df9a4414b9`](https://github.com/andymac4182/mount-rs/commit/a7e459e6a9749384d409e4f53d6938df9a4414b9)
 (`test(w26): cover serialized lease renewals`) at both the detached checkout
-and `origin/main`. The test-only chunk adds a metadata-store wrapper that
+and the `origin/main` history; docs commit `625bd0f1` is the current
+docs-only descendant at `HEAD == origin/main`. The test-only chunk adds a metadata-store wrapper that
 counts in-flight provider renewals and a 16-way regression proving concurrent
 operation-lease checks make one provider renewal and never overlap. It does
 not change the production runtime; the preceding runtime scan remains the
@@ -18,7 +45,7 @@ production-code security boundary.
 
 | Gate / item | Current result | Evidence | Remaining action / ownership |
 | --- | --- | --- | --- |
-| Source/test chunk | **PUBLISHED / 100% for this chunk** | `a7e459e6` is at `HEAD == origin/main`; `cargo fmt --all -- --check` and `git diff --check` pass. | Keep the exact published tip as the hosted qualification input. |
+| Source/test chunk | **PUBLISHED / 100% for this chunk** | `a7e459e6` is an ancestor of current `HEAD == origin/main` `625bd0f1`; `cargo fmt --all -- --check` and `git diff --check` pass. | Keep the exact source tip `a7e459e6` as the hosted qualification input. |
 | Lease serialization regression | **PASS** | Focused test passed; the complete `mount-rs-chunked` library suite is 23 passed, 0 failed, 0 ignored. The test asserts exactly one renewal and maximum in-flight renewal depth of one across 16 concurrent callers. | Hosted provider execution remains separate. |
 | Full local Rust gates | **PASS** | `./scripts/cargo-shared test --workspace --all-targets --locked` and strict workspace Clippy with `-D warnings` both exited 0. Explicitly opt-in native/live provider tests remain ignored where services or host privileges are unavailable. | Do not promote local passes or ignored tests to Ozone acceptance. |
 | Security diff for this chunk | **PASS — 0 findings / complete coverage** | Scan `ce953fbe-71f3-44a0-8090-11d4dd502e08` reviewed the one changed test surface with complete coverage and zero findings; report `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-7kSFBv/mount-rs/a7e459e6a9749384d409e4f53d6938df9a4414b9_20260922T121622Z_jpxtatob/report.md`. The prior production-runtime scan `86a4e46e-caef-4d9b-8ab7-aeba21571d80` is also complete with zero findings. | Customer certificate/IAM, secret rotation, tenant isolation and provider-native security remain production gates. |
@@ -49,7 +76,7 @@ it does not change provider acceptance or production percentages.
 | 2026-09-22 — regression design | Added a test-only counting metadata provider with cooperative yielding to make overlapping renewals observable, then added the 16-way lease-gate regression. | ~0.25–0.5 h | 0 h | The test fails open if lease renewal serialization is removed and passes with exactly one renewal. |
 | 2026-09-22 — local verification | Ran focused test, 23-test chunked suite, formatting/diff checks, full locked workspace tests and full strict Clippy. | ~0.75–1 h | ~0.1–0.25 h shared Cargo target wait | All executed local gates passed; opt-in provider/native tests remain external. |
 | 2026-09-22 — security review | Completed preflight, threat model, changed-file review and scan `ce953fbe-71f3-44a0-8090-11d4dd502e08`; complete coverage and zero findings. | ~0.25–0.5 h | ~0.1–0.25 h security workbench finalization | Test-only security surface is clean; customer/provider controls remain separate. |
-| 2026-09-22 — source publication | Rebased over concurrent mainline commits and pushed `a7e459e6`; verified `HEAD == origin/main` clean. | ~0.25–0.5 h | ~0.25–0.5 h mainline reconciliation | Other threads can build from the published test evidence. |
+| 2026-09-22 — source publication | Rebased over concurrent mainline commits and pushed `a7e459e6`; a later docs-only commit `625bd0f1` is now the current `HEAD == origin/main`. | ~0.25–0.5 h | ~0.25–0.5 h mainline reconciliation | Other threads can build from the published test evidence. |
 | 2026-09-22 — hosted dispatch (22:15 AEST) | Dispatched manual `ci.yml` run `35726132846` from `main` and verified exact head plus all seven W26 jobs queued. | ~0.1 h | External runner/provider capacity pending | The run is the authoritative hosted boundary for `a7e459e6`. |
 | 2026-09-22 — next gate | Poll `35726132846` with bounded waits; retrieve exact artifacts after terminal completion, classify all provider rows against 1,000 IOPS/drive, and update W26.15/W26.14/P14. | ~0.5–1.5 d provisional | ~0.5–2 h provisional hosted wait | Keep production **NO-GO** until the complete packet and customer gates close. |
 
