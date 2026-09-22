@@ -322,6 +322,14 @@ Current focused behavior:
   `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed [Native 9P run `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733),
   N-API job `106610049913`, with Rust job `106610049705` also green; process
   crash and arbitrary kernel-reset recovery remain supervisor-owned.
+- The real TCP listener also has hosted evidence for per-connection session/fid
+  isolation and completion-order concurrency: two native connections can use
+  the same fid number for different files, closing one leaves the other live,
+  and a slow open does not delay a quick getattr in the same delivery. Exact
+  SHA `9870d58cfbed5bcea90972c4b9caaf5db3075cef` passed [Native 9P run `35685807744`](https://github.com/andymac4182/mount-rs/actions/runs/35685807744),
+  N-API job `106612633937`, with Rust job `106612633771` also green. Shared
+  lock-table network behavior and the remaining server-boundary cases are
+  still separate gates.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
