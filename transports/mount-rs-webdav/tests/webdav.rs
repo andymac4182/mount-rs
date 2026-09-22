@@ -1234,6 +1234,37 @@ async fn ranges_conditionals_auth_and_request_limits_are_real_http() {
 }
 
 #[tokio::test]
+async fn duplicate_if_headers_are_preserved_at_the_http_boundary() {
+    let server = server().await;
+    let client = reqwest::Client::new();
+    assert_eq!(
+        client
+            .put(format!("{}/if", server.url()))
+            .body("body")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        201
+    );
+
+    let mut stream = TcpStream::connect(("127.0.0.1", server.port()))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            b"GET /if HTTP/1.1\r\nHost: 127.0.0.1\r\nIf: (Not <urn:uuid:missing>)\r\nIf: (<urn:uuid:missing>)\r\nConnection: close\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let (status, body) = read_http_response(&mut stream).await;
+    assert_eq!(status, 200);
+    assert_eq!(body, b"body");
+
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn basic_auth_is_required_when_configured() {
     let fs = Arc::new(MemoryFs::empty());
     let options = WebdavServerOptions::default().with_credentials("ada", "secret");

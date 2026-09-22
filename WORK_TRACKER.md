@@ -1739,6 +1739,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   regressions cover finished and pending handles; deterministic socket-level
   accept-failure injection and hosted/provider/power-loss qualification remain
   open.
+- [x] The WebDAV HTTP and N-API request-head adapters now preserve repeated
+  header fields instead of silently taking the last value. Duplicate `If`
+  fields join with grammar-safe whitespace, and a raw loopback regression proves
+  one true plus one false state list still authorizes the request; hosted and
+  provider qualification remain open.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav

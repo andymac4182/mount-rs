@@ -488,10 +488,17 @@ async fn handle_request(
     max_request_bytes: usize,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
     let (parts, body) = request.into_parts();
-    let mut headers = BTreeMap::new();
+    let mut headers: BTreeMap<String, String> = BTreeMap::new();
     for (name, value) in &parts.headers {
         if let Ok(value) = value.to_str() {
-            headers.insert(name.as_str().to_owned(), value.to_owned());
+            let name = name.as_str().to_owned();
+            if let Some(existing) = headers.get_mut(&name) {
+                let separator = if name == "if" { " " } else { "," };
+                existing.push_str(separator);
+                existing.push_str(value);
+            } else {
+                headers.insert(name, value.to_owned());
+            }
         }
     }
     if headers

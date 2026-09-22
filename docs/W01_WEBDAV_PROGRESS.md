@@ -56,6 +56,9 @@ advertising durable writes without that callback still fails closed as
   finished listener task is not a running server, so the next serialized
   `listen()` can bind again instead of returning a false success. The focused
   regression covers both finished and pending Tokio listener-task handles.
+- Preserve repeated request fields at every WebDAV boundary: duplicate `If`
+  lines are combined with grammar-safe whitespace, while other repeated fields
+  are retained for strict downstream parsing rather than silently overwritten.
 - Keep the durable-driver mutation-barrier regression green: successful PUT,
   MKCOL, PROPPATCH, COPY, MOVE, DELETE, and resource creation by LOCK await
   `syncfs`, while injected barrier failure is surfaced and retry remains
@@ -107,6 +110,7 @@ advertising durable writes without that callback still fails closed as
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | WebDAV duplicate-header preservation | The Rust HTTP listener and N-API request-head adapter now retain repeated field values instead of silently taking the last one; `If` fields use whitespace joining so multiple state lists remain valid RFC 4918 syntax. A raw loopback request with one true and one false duplicate `If` list returns `200` and the exact body | Live-provider qualification, hosted lifecycle/concurrency, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV listener-task lifecycle recovery | `listen()` now treats a finished accept-loop task as stopped, allowing a subsequent serialized bind after an accept failure instead of falsely reporting an existing server; focused task-state regressions cover finished and pending handles, and the full WebDAV target remains green | A deterministic socket-level accept-failure injection is not exposed by the portable listener; hosted lifecycle, live-provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | Current exact-tip hosted WebDAV queue audit | Exact-tip CI run `35682524510` at published packet `8e23ca06` was cancelled before GitHub materialized any jobs, so it supplies no hosted WebDAV result; prior terminal hosted native runs remain the latest accepted hosted evidence | No hosted result is claimable from this cancelled run; live-provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV Basic authentication grammar hardening | Basic credentials now require the oracle/RFC `Basic +<base64>` separator; the live authenticated HTTP test rejects `Basic<base64>` and still accepts the configured pair. Focused WebDAV tests, all package targets, warning-denied Clippy, formatting, and `git diff --check` remain green | Live-provider qualification, current hosted queue, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
