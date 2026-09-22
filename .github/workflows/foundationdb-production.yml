@@ -104,10 +104,29 @@ jobs:
           MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS: '5'
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
           MOUNT_RS_FOUNDATIONDB_NATIVE_CLI: '1'
+          # Fixed, bounded workload qualification: 400 iterations at 64
+          # concurrent clients with 4 KiB payloads and a 1,000 IOPS floor.
+          # This is a repeatable load signal, not a production capacity SLO.
+          MOUNT_RS_FOUNDATIONDB_IOPS: '1'
+          MOUNT_RS_FOUNDATIONDB_IOPS_OUTPUT: artifacts/foundationdb-ozone-iops.json
+          MOUNT_RS_FOUNDATIONDB_IOPS_MIN: '1000'
+          MOUNT_RS_FOUNDATIONDB_IOPS_ITERATIONS: '400'
+          MOUNT_RS_FOUNDATIONDB_IOPS_CONCURRENCY: '64'
+          MOUNT_RS_FOUNDATIONDB_IOPS_PAYLOAD_BYTES: '4096'
         run: |
           set -o pipefail
           mkdir -p artifacts
           ./scripts/test-rustfs.sh 2>&1 | tee -a artifacts/foundationdb-production-qualification.log
+
+      - name: Validate W07 bounded workload artifact
+        if: success()
+        run: |
+          set -o pipefail
+          node scripts/verify-w26-ozone-iops-artifact.mjs \
+            --output artifacts/foundationdb-ozone-iops.json \
+            --providers mount-rs-foundationdb-r2 \
+            --minimum-iops 1000 \
+            2>&1 | tee -a artifacts/foundationdb-production-qualification.log
 
       - name: Validate W07 qualification evidence markers
         if: success()
@@ -136,5 +155,6 @@ jobs:
           path: |
             artifacts/foundationdb-production-qualification.log
             artifacts/foundationdb-production-qualification-summary.json
+            artifacts/foundationdb-ozone-iops.json
             docs/W07-production-evidence.json
           if-no-files-found: warn
