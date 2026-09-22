@@ -3065,7 +3065,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   SQLite phases stayed below the unchanged 10-second request timeout. This is
   2/4 Unix Node recovery for that run, not full W04/current-tip or production
   acceptance. The remaining macOS-latest/Ubuntu/native FUSE/Rust/package/
-  provider/W26 lanes are still queued or non-terminal; production remains
+  provider/W26 lanes are still queued or non-terminal. Investigation found six
+  older manual CI runs holding stale unassigned Rust jobs after 25/26 jobs had
+  completed; those exact stale runs were cancelled without cancelling
+  `35723080355`, after which macOS observability job `106730232595` started and
+  completed successfully with its locked tests and strict Clippy. Twenty-one
+  jobs in the active run remain queued or non-terminal; production remains
   NO-GO.
 - [x] W04.2 current-tip revalidation: replacement qualification run
   [35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
