@@ -469,8 +469,12 @@ Current focused behavior:
   run `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984):
   N-API job `106639369581` passed, but Rust job `106639369868` failed because
   `native_linux_external_umount_finishes_server_lifecycle` reported external
-  `umount` exit status 32. The overall run is not hosted PASS evidence.
-  Broader protocol/session behavior remains a separate gate.
+  `umount` exit status 32. The current published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` reran this direct session/member
+  path in N-API job `106667799214` and passed it, while Rust job `106667799016`
+  passed all four ignored native lifecycle tests; the historical failure is
+  superseded for the current supported slice. Broader protocol/session behavior
+  remains a separate gate.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations (TCP
   `host:port`, or the configured Unix socket path; TCP is `null` before binding

@@ -2367,7 +2367,18 @@ async fn staging_usage_bytes(driver: &Arc<dyn FsDriver>) -> S3Result<u64> {
             continue;
         }
         let path = format!("/{}", entry.name);
-        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        let stats = match driver.stat(&path).await {
+            Ok(stats) => stats,
+            Err(error)
+                if matches!(
+                    error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(S3Failure::Fs(error)),
+        };
         total = total
             .checked_add(stats.size)
             .ok_or_else(|| S3Failure::s3("SlowDown"))?;
@@ -2401,7 +2412,18 @@ async fn reap_staging(driver: &Arc<dyn FsDriver>, ttl_ms: i64, now: i64) -> S3Re
             continue;
         }
         let path = format!("{multipart_root}/{}", entry.name);
-        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        let stats = match driver.stat(&path).await {
+            Ok(stats) => stats,
+            Err(error)
+                if matches!(
+                    error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(S3Failure::Fs(error)),
+        };
         if expired(stats.mtime_ms) {
             remove_tree(driver, &path).await?;
         }
@@ -2424,7 +2446,18 @@ async fn reap_staging(driver: &Arc<dyn FsDriver>, ttl_ms: i64, now: i64) -> S3Re
             continue;
         }
         let path = format!("/{}", entry.name);
-        let stats = driver.stat(&path).await.map_err(S3Failure::Fs)?;
+        let stats = match driver.stat(&path).await {
+            Ok(stats) => stats,
+            Err(error)
+                if matches!(
+                    error.code,
+                    mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(S3Failure::Fs(error)),
+        };
         if expired(stats.mtime_ms) {
             match driver.unlink(&path).await {
                 Ok(()) => {}
@@ -2500,7 +2533,18 @@ fn sum_staging_tree<'a>(
             let size = if entry.is_directory() {
                 sum_staging_tree(driver, &child).await?
             } else {
-                driver.stat(&child).await.map_err(S3Failure::Fs)?.size
+                match driver.stat(&child).await {
+                    Ok(stats) => stats.size,
+                    Err(error)
+                        if matches!(
+                            error.code,
+                            mount_rs_core::ErrorCode::Enoent | mount_rs_core::ErrorCode::Enotdir
+                        ) =>
+                    {
+                        continue;
+                    }
+                    Err(error) => return Err(S3Failure::Fs(error)),
+                }
             };
             total = total
                 .checked_add(size)
