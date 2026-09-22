@@ -5493,6 +5493,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   dashboard, pager delivery, alert acknowledgement or production approval.
   *(Implementation/static qualification; provider and production evidence
   remain external.)*
+- [x] W08.42 **External capacity, load and soak policy:** added
+  `scripts/verify-w08-production-capacity.mjs` and its eight-case
+  `scripts/test-w08-production-capacity.mjs` control over
+  `tests/tidb/production-capacity-policy.json`. The credential-free contract
+  requires baseline, peak, saturation, failover and soak profiles; write/read/
+  truncate/reopen operations; representative concurrency and duration;
+  p95/p99 latency, error-rate and throughput limits; external resource
+  collection for CPU, memory, disk, network and IOPS; utilization/headroom and
+  growth limits; SQL frontend/TiKV/PD/RustFS failover with fresh-client
+  readback and integrity checks; a four-hour soak with reopen cycles and owned
+  cleanup; and named workload, performance, cost and operations owners. Weak
+  workload coverage, unsafe thresholds, missing resource telemetry, absent
+  failover or cleanup and missing ownership fail closed. The checks are wired
+  into both W08 release workflows. This is a P06 implementation/control
+  boundary only; it does not execute a production-sized workload or prove
+  capacity, cost, failover or production approval. *(Implementation/static
+  qualification; provider and production evidence remain external.)*
 
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
@@ -5738,6 +5755,14 @@ reproducible in a production-like environment.
   `648.69/815.50/816.83 ms` and `12.15 ops/s`. This is bounded hosted
   qualification only; workload representativeness, resource telemetry,
   failover, multi-hour duration and production-sized capacity remain open.
+  The checked-in `verify-w08-production-capacity.mjs` policy now also requires
+  those five profiles, explicit operation coverage, p95/p99/error/throughput
+  thresholds, external CPU/memory/disk/network/IOPS collection, utilization
+  and headroom limits, four failover scenarios, fresh-client integrity checks,
+  four-hour soak/reopen/cleanup controls and named workload/performance/cost/
+  operations owners. This remains repository shape control only; it does not
+  close P06 or turn bounded composition results into production capacity
+  evidence.
   *(Hosted/provider + implementation; production gate remains unchecked.)*
 - [ ] **W08-P07 (20%) — security/hardening:** enforce TLS/certificate
   rotation, network segmentation, authz/tenant isolation; complete dependency,

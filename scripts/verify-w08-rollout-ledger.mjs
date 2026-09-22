@@ -60,7 +60,7 @@ if (requireGo && decision !== "GO") {
   fail("production-admission-requires-go");
 }
 
-const functionalItems = 41;
+const functionalItems = 42;
 for (let item = 1; item <= functionalItems; item += 1) {
   requireMatch(
     tracker,

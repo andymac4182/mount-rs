@@ -42,6 +42,8 @@ jobs:
             tests/tidb/production-upgrade-policy.json
           node scripts/verify-w08-production-observability.mjs \
             tests/tidb/production-observability-policy.json
+          node scripts/verify-w08-production-capacity.mjs \
+            tests/tidb/production-capacity-policy.json
 
   build:
     name: Build ${{ matrix.label }} production candidate

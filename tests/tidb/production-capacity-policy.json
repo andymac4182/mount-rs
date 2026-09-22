@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "environment_class": "production-like-staging",
+  "workload": {
+    "profiles": ["baseline", "peak", "saturation", "failover", "soak"],
+    "operations": ["write", "read", "truncate", "reopen"],
+    "payload_bytes": 65536,
+    "baseline_concurrency": 8,
+    "peak_concurrency": 32,
+    "saturation_concurrency": 64,
+    "duration_minutes": 60,
+    "repetitions": 3
+  },
+  "thresholds": {
+    "p95_latency_ms": 1000,
+    "p99_latency_ms": 2000,
+    "max_error_rate_percent": 0.1,
+    "min_throughput_ops_per_second": 50,
+    "max_resource_utilization_percent": 75,
+    "min_headroom_percent": 25,
+    "max_growth_percent": 10,
+    "max_cost_per_hour": 25
+  },
+  "resources": {
+    "collector": "external-managed",
+    "metrics": ["cpu", "memory", "disk", "network", "iops"],
+    "interval_seconds": 30,
+    "retention_days": 30,
+    "headroom_required": true
+  },
+  "failover": {
+    "required": true,
+    "scenarios": ["sql-frontend-restart", "tikv-restart", "pd-restart", "rustfs-reopen"],
+    "recovery_slo_seconds": 300,
+    "fresh_client_readback_required": true,
+    "integrity_check_required": true
+  },
+  "soak": {
+    "duration_hours": 4,
+    "reopen_cycles": 2,
+    "resource_growth_limit_percent": 10,
+    "cleanup_required": true
+  },
+  "ownership": {
+    "workload_owner": "team/workload",
+    "performance_owner": "team/performance",
+    "cost_owner": "team/cost",
+    "operations_owner": "team/operations"
+  }
+}
