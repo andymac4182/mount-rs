@@ -276,8 +276,8 @@ export declare class NativeP9Reader {
   readTwalk(): NativeP9Twalk
   readRwalk(): NativeP9Rwalk
   readTread(): NativeP9Tread
-  readRread(): NativeP9Rread
-  readTwrite(): NativeP9Twrite
+  readRread(max?: number | undefined | null): NativeP9Rread
+  readTwrite(max?: number | undefined | null): NativeP9Twrite
   readRwrite(): NativeP9Rwrite
   readFidRequest(): NativeP9FidRequest
   readRstatfs(): NativeP9Rstatfs
@@ -300,7 +300,7 @@ export declare class NativeP9Reader {
   readRxattrwalk(): NativeP9Rxattrwalk
   readTxattrcreate(): NativeP9Txattrcreate
   readTreaddir(): NativeP9Treaddir
-  readRreaddir(): NativeP9Rreaddir
+  readRreaddir(max?: number | undefined | null): NativeP9Rreaddir
   readDirent(): NativeP9Dirent
   readDirents(): Array<NativeP9Dirent>
   readTfsync(): NativeP9Tfsync

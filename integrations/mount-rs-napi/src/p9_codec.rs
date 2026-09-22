@@ -14,19 +14,19 @@ use mount_rs_9p::{
     Trenameat, Tsetattr, Tsymlink, Tunlinkat, Tversion, Twalk, Twrite, Txattrcreate, Txattrwalk,
     decode_message, dirent_size, encode_message, read_dirent, read_dirents, read_fid_request,
     read_header, read_qid_reply, read_rattach, read_rauth, read_rgetattr, read_rgetlock,
-    read_rlerror, read_rlock, read_rlopen, read_rread, read_rreaddir, read_rreadlink, read_rstatfs,
-    read_rversion, read_rwalk, read_rwrite, read_rxattrwalk, read_tattach, read_tauth, read_tflush,
-    read_tfsync, read_tgetattr, read_tgetlock, read_tlcreate, read_tlink, read_tlock, read_tlopen,
-    read_tmkdir, read_tmknod, read_tread, read_treaddir, read_trename, read_trenameat,
-    read_tsetattr, read_tsymlink, read_tunlinkat, read_tversion, read_twalk, read_twrite,
-    read_txattrcreate, read_txattrwalk, write_dirent, write_fid_request, write_header,
-    write_qid_reply, write_rattach, write_rauth, write_rgetattr, write_rgetlock, write_rlerror,
-    write_rlock, write_rlopen, write_rread, write_rreaddir, write_rreadlink, write_rstatfs,
-    write_rversion, write_rwalk, write_rwrite, write_rxattrwalk, write_tattach, write_tauth,
-    write_tflush, write_tfsync, write_tgetattr, write_tgetlock, write_tlcreate, write_tlink,
-    write_tlock, write_tlopen, write_tmkdir, write_tmknod, write_tread, write_treaddir,
-    write_trename, write_trenameat, write_tsetattr, write_tsymlink, write_tunlinkat,
-    write_tversion, write_twalk, write_twrite, write_txattrcreate, write_txattrwalk,
+    read_rlerror, read_rlock, read_rlopen, read_rreadlink, read_rstatfs, read_rversion, read_rwalk,
+    read_rwrite, read_rxattrwalk, read_tattach, read_tauth, read_tflush, read_tfsync,
+    read_tgetattr, read_tgetlock, read_tlcreate, read_tlink, read_tlock, read_tlopen, read_tmkdir,
+    read_tmknod, read_tread, read_treaddir, read_trename, read_trenameat, read_tsetattr,
+    read_tsymlink, read_tunlinkat, read_tversion, read_twalk, read_txattrcreate, read_txattrwalk,
+    write_dirent, write_fid_request, write_header, write_qid_reply, write_rattach, write_rauth,
+    write_rgetattr, write_rgetlock, write_rlerror, write_rlock, write_rlopen, write_rread,
+    write_rreaddir, write_rreadlink, write_rstatfs, write_rversion, write_rwalk, write_rwrite,
+    write_rxattrwalk, write_tattach, write_tauth, write_tflush, write_tfsync, write_tgetattr,
+    write_tgetlock, write_tlcreate, write_tlink, write_tlock, write_tlopen, write_tmkdir,
+    write_tmknod, write_tread, write_treaddir, write_trename, write_trenameat, write_tsetattr,
+    write_tsymlink, write_tunlinkat, write_tversion, write_twalk, write_twrite, write_txattrcreate,
+    write_txattrwalk,
 };
 use napi::bindgen_prelude::{BigInt, Buffer};
 use napi::{Error, Status};
@@ -1286,13 +1286,27 @@ impl NativeP9Reader {
     }
 
     #[napi(js_name = "readRread")]
-    pub fn read_rread(&mut self) -> napi::Result<NativeP9Rread> {
-        self.with_reader(read_rread).map(rread_to_native)
+    pub fn read_rread(&mut self, max: Option<u32>) -> napi::Result<NativeP9Rread> {
+        let max = max.unwrap_or(P9_MAX_ITEM as u32) as usize;
+        self.with_reader(|reader| {
+            Ok(Rread {
+                data: reader.blob_max(max, "read data")?,
+            })
+        })
+        .map(rread_to_native)
     }
 
     #[napi(js_name = "readTwrite")]
-    pub fn read_twrite(&mut self) -> napi::Result<NativeP9Twrite> {
-        self.with_reader(read_twrite).map(twrite_to_native)
+    pub fn read_twrite(&mut self, max: Option<u32>) -> napi::Result<NativeP9Twrite> {
+        let max = max.unwrap_or(P9_MAX_ITEM as u32) as usize;
+        self.with_reader(|reader| {
+            Ok(Twrite {
+                fid: reader.u32("fid")?,
+                offset: reader.u64("offset")?,
+                data: reader.blob_max(max, "write data")?,
+            })
+        })
+        .map(twrite_to_native)
     }
 
     #[napi(js_name = "readRwrite")]
@@ -1407,8 +1421,14 @@ impl NativeP9Reader {
     }
 
     #[napi(js_name = "readRreaddir")]
-    pub fn read_rreaddir(&mut self) -> napi::Result<NativeP9Rreaddir> {
-        self.with_reader(read_rreaddir).map(rreaddir_to_native)
+    pub fn read_rreaddir(&mut self, max: Option<u32>) -> napi::Result<NativeP9Rreaddir> {
+        let max = max.unwrap_or(P9_MAX_ITEM as u32) as usize;
+        self.with_reader(|reader| {
+            Ok(Rreaddir {
+                data: reader.blob_max(max, "readdir data")?,
+            })
+        })
+        .map(rreaddir_to_native)
     }
 
     #[napi(js_name = "readDirent")]
