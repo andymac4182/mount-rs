@@ -4,6 +4,25 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+Current W26 CI-reproducibility boundary (2026-09-22): lockfile fix commit
+`1ceaa96486a96ed4288c079dcde2b3b2d18900bb`
+(`fix(w26): sync Ozone test lockfile`) is published and verified on
+`origin/main`. The PGlite dependency addition had left the standalone
+`tests/ozone/Cargo.lock` missing its already-resolved `md-5 0.10.6` edge;
+exact-head TiDB job `106676248986` and FoundationDB job `106676249267` in run
+`35706390612` consequently failed under `--locked` before provider tests.
+The bounded correction is security-scanned by
+`f2ba64e6-373d-4741-b27f-60bdcec6d7e6` with complete lockfile coverage and zero
+reportable findings. Locked standalone Ozone metadata and
+`./scripts/cargo-shared check --manifest-path tests/ozone/Cargo.toml
+--all-targets --locked` now pass. Replacement run
+`35707725455 <https://github.com/andymac4182/mount-rs/actions/runs/35707725455>`
+targets exact SHA `1ceaa964`; its base `106680595638`, compositions
+`106680595812`, FoundationDB `106680595831` and TiDB `106680595912` jobs were
+queued at capture. Production remains **NO-GO** until that packet is terminal
+and all provider, end-to-end, security, 99.99% SLO, five-minute RPO/RTO and
+customer-owned backup/DR gates are separately satisfied.
+
 Current W26 PGlite implementation boundary (2026-09-22): commit
 `c791ab318af4c5253dbe3e9e4d1d2f7a2026fa4c`
 (`perf(w26): compute PGlite block IDs locally`) is published and verified on
