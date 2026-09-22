@@ -4,6 +4,29 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+Current W26 TiDB implementation boundary (2026-09-22): commit
+`2ce6f753a588628593baf1000ae75330780dabd3`
+(`perf(w26): skip TiDB block readback on confirmed insert`) is published on
+`origin/main`. The TiDB block store now returns immediately after an
+unambiguous one-row insert acknowledgement, while duplicate/no-op and
+provider-ambiguous results still drain the statement and read back bytes for
+the existing collision/disappearance checks. Formatting, diff checks,
+compile-only all-targets validation and strict TiDB Clippy passed, and the
+focused library suite passed 8/8. A fresh all-targets test attempt was blocked
+at macOS linking because the Xcode license is not accepted; this is a native
+host gate, not a suppressed test failure. Security scan
+`b2761b0b-aa05-4f49-a52a-3c5b7f09cad9` completed with complete TiDB-surface
+coverage and zero reportable findings; its pre-publication snapshot report
+remains evidence until a matching exact-head packet is sealed. The prior
+terminal W26 result remains 1/4 providers above the 1,000-IOPS/drive target,
+and run `35702188498` is stale/nonterminal for this chunk (FoundationDB job
+`106662583211` failed; base `106662583505`, compositions `106662583710` and
+TiDB `106662583344` were queued at the latest capture). The next action is a
+fresh exact-head four-provider run and terminal aggregate. Production remains
+**NO-GO**: W26 owns Ozone compatibility/qualification, while customer
+deployment, backup/DR, Tier-1 SLO evidence and the separate release stream
+remain explicit external gates.
+
 Current W26 implementation/qualification boundary (2026-09-22): the latest
 shared build-on tip before this tracker update is
 `origin/main=2dab2386ac86df1256299e0052f81319d1164130`, which contains the

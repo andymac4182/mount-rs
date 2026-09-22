@@ -5,6 +5,46 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, TiDB confirmed-insert acknowledgement fast path
+
+This is the newest W26 implementation chunk. TiDB block creation now uses the
+affected-row acknowledgement from the existing insert statement to avoid a
+second read when the row was definitely inserted by this request. Duplicate,
+provider-specific no-op and ambiguous acknowledgement cases still finish the
+result and perform the existing byte-for-byte read-back collision check. The
+change therefore reduces one round trip on the hot unique-block path without
+changing immutable block semantics, fencing, collision handling or fail-closed
+disappearance handling.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `2ce6f753a588628593baf1000ae75330780dabd3` (`perf(w26): skip TiDB block readback on confirmed insert`) is verified on `origin/main`. The ledger update below is a separate docs publication and will advance the shared tip again. |
+| Current implementation chunk | `2ce6f753` changes `integrations/mount-rs-tidb/src/storage.rs` from unconditional `INSERT` plus `SELECT` to `exec_iter`, `affected_rows() == 1`, explicit result draining, and read-back only for duplicate/ambiguous cases. |
+| Local implementation evidence | `cargo fmt --all -- --check`, `git diff --check`, `./scripts/cargo-shared check -p mount-rs-tidb --all-targets --locked`, and strict TiDB Clippy with `-D warnings` passed. The focused locked TiDB library suite passed 8/8 before publication. A fresh all-targets test attempt could not link because this Mac has not accepted the Xcode license (`xcrun --sdk macosx --show-sdk-path`); this is recorded as a native-host gate, not a code pass or a suppressed failure. |
+| Security evidence | Diff scan `b2761b0b-aa05-4f49-a52a-3c5b7f09cad9` reviewed the TiDB storage surface with complete coverage and 0 reportable findings. Report: `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/42e1025781d4bd620f687b0927dddfc2c9fc15c0_20260922T081459Z_f4z43kvw/report.md`; snapshot digest: `codex-security-snapshot/v1:sha256:543c7a6f7d6f3dd9135034f2e37940dd273523ac6a3b1b9f223f47019e63f6e9`. The result is pre-publication snapshot evidence; a matching terminal exact-head security packet remains required for production acceptance. |
+| Hosted qualification | Existing run `35702188498 <https://github.com/andymac4182/mount-rs/actions/runs/35702188498>` targeted old head `245258d9`, not this chunk. At the latest live capture, FoundationDB job `106662583211` had failed, while Ozone base `106662583505`, compositions `106662583710` and TiDB `106662583344` were queued; the run and aggregate were nonterminal, so no result is promoted. A new exact-head packet is required after this ledger publication. |
+| Production decision | **NO-GO / 1 of 4 provider rows passed the last terminal packet; current exact-head qualification pending.** The 1,000 IOPS/drive target, Tier-1 99.99% reliability, five-minute RPO/RTO, secure customer Ozone topology, and end-to-end provider markers remain acceptance gates. Customer backup/DR, deployment and the separate release stream remain external ownership boundaries. |
+| Next action | Publish this ledger, dispatch a fresh exact-head W26 packet, and compare TiDB plus all other providers without lowering, averaging or skipping the per-drive target. Retrieve terminal artifacts, exact SHA evidence, security result and aggregate marker before any readiness change. |
+
+### TiDB chunk production-readiness delta
+
+| Work-item impact | Status / completion | Evidence and remaining action | Provisional estimate / external gate |
+| --- | --- | --- | --- |
+| W26.3c TiDB/R2 composition and W26.15 hard IOPS gate | **OPEN / 100% implementation chunk; hosted qualification pending** | The unique-insert path now avoids a confirmed redundant read; duplicate and ambiguous cases retain the collision check. The last terminal packet measured TiDB/R2 at `463.080116` IOPS with 400/400 lifecycles, zero timeouts and zero cleanup failures, below the hard target. Re-run the exact current head and keep any miss fail-closed. | ~0.5–1 d for the exact-head run and review; TiDB/Ozone fixtures, runner capacity and artifact retention are external. |
+| W26.4 end-to-end Rust/Node/CLI/HTTP/N-API path | **PASS locally for this provider change / hosted packet pending** | Compile-only all-targets check, strict Clippy and 8/8 focused TiDB tests pass. The all-targets test linker is blocked by the unaccepted local Xcode license; hosted Rust/Node/Ozone markers remain authoritative for end-to-end acceptance. | ~0.25–0.75 d review; native macOS toolchain and hosted Ozone/provider fixtures are gates. |
+| W26.7/W26.13 security and customer rollout contract | **OPEN for production / local TiDB scan zero findings** | Scan `b2761b0b-aa05-4f49-a52a-3c5b7f09cad9` is complete with zero reportable findings over the changed TiDB surface. Rebind security evidence to the final exact-head packet; customer IAM, certificates, secret rotation, tenant isolation and measured SLO/RPO/RTO evidence remain outside this local change. | ~0.5–1 d exact-head review; customer security and Ozone topology are external. |
+| W26.9–W26.12 verifier/retention/aggregate | **IMPLEMENTED / current packet pending** | Existing verifier remains fail-closed on missing markers, incomplete metrics and target misses. The stale run has no terminal aggregate; a new exact-head run must emit one complete all-provider marker. | ~0.25–0.5 d review; GitHub scheduling/artifact services are external. |
+| P14 final integration-readiness review | **NO-GO / 49% provisional** | This chunk improves one provider hot path and is published with local evidence, but it does not change the hosted 1/4 terminal acceptance result. | ~1–2 d after the four-provider packet; customer deployment, backup/DR and release ownership remain external. |
+
+### Session time log — TiDB confirmed-insert chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — provider-path inspection | Compared TiDB, PGlite, FoundationDB and R2 block-write acknowledgement paths and identified the TiDB unique-insert readback as a correctness-preserving round-trip candidate. | ~0.5–0.75 h | ~0.25 h code inspection | Selected only the unambiguous affected-row fast path; retained duplicate collision checks. |
+| 2026-09-22 — implementation and local verification | Implemented `exec_iter`/affected-row handling, drained the result, ran formatting/diff checks, 8/8 focused library tests, all-targets compile check and strict Clippy. | ~0.75–1.25 h | ~0.25–0.5 h shared-target build wait | Local code gates passed; all-targets test linking is blocked by the unaccepted Xcode license. |
+| 2026-09-22 — security and publication | Sealed the complete zero-finding TiDB diff scan, rebased onto concurrent mainline work, committed and pushed `2ce6f753` to `origin/main`. | ~0.5–0.75 h | ~0.5–1 h publication race/reconciliation | Implementation is visible to other threads; hosted exact-head qualification is still pending. |
+| 2026-09-22 — next hosted gate | Update both ledgers, dispatch the exact-head W26 packet and retrieve terminal provider/aggregate artifacts. | ~0.5–1 h provisional | ~1–3 h provisional CI/provider queue | No production promotion until every provider, marker, security and reliability gate passes. |
+
 ## Current authority override — 2026-09-22, adaptive concurrent mutation batching
 
 This is the newest W26 implementation boundary. The shared chunked coordinator
