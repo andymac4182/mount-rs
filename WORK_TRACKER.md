@@ -3497,13 +3497,14 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `45f7fd1954f9946eebf7d21106bb01a5c3c8bafe` was freshly
-  reverified after concurrent N-API provider-network cleanup, RustFS/Ozone
-  lockfile refreshes, 9P bounded-reader, 9P frame-assembler and WebDAV
-  native-concurrency, R2 upload coalescing, N-API declaration/P9 normalization,
-  9P codec, S3-session-concurrency, session-parity, chunked durability, FUSE,
-  S3-test and WebDAV updates with the full locked workspace test suite (exit 0)
-  and strict workspace Clippy with `-D warnings` (exit 0).
+  Merged source base `ef5cd2ca28a6b9084b50d60788f0a022afc9224f` was freshly
+  reverified after concurrent WebDAV mounted-restart qualification, N-API
+  provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P bounded-reader,
+  9P frame-assembler and WebDAV native-concurrency, R2 upload coalescing, N-API
+  declaration/P9 normalization, 9P codec, S3-session-concurrency,
+  session-parity, chunked durability, FUSE, S3-test and WebDAV updates with
+  the full locked workspace test suite (exit 0) and strict workspace Clippy
+  with `-D warnings` (exit 0).
   The four W08 rollout/evidence policy commands also passed with 36 functional
   items, 9 open production gates, 7 rollout tests and 11 evidence tests; the
   packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
