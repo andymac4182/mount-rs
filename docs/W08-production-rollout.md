@@ -343,6 +343,18 @@ implementation/static evidence only; no provider credentials, production
 deployment, candidate tag, canary, rollback or owner approval exists. P01–P09
 remain open and the decision remains NO-GO.
 
+The subsequent public S3 abandoned-download test source `09eca17b` was
+reconciled with the W08 ledger in exact merge
+`0a28ecef0152c4cc2c80ca27b19bde16faf5f05e`. The full locked workspace test and
+strict Clippy exited 0; all runnable tests passed, changed N-API/package checks,
+five workflow YAML parses, W07/W08 tracking validators/tests and
+`git diff --check` passed, while provider/native rows remained explicit
+capability-gated skips. The post-publication hosted W08 policy retest is still
+pending for this merge; the last terminal hosted policy result is
+`35692664144` / job `106632773424` for source `5a6d6507`. No provider
+credentials, production deployment, candidate tag, canary, rollback or owner
+approval exists. P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
