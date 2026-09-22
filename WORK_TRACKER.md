@@ -908,8 +908,9 @@ complete.
 > below, which records `origin/main=5e368011` and the post-publication ledger.
 
 Current W26 authority override (2026-09-22, FoundationDB transaction-sharing
-chunk): the verified shared code tip is
-`origin/main=5e3680117c26f5b7bb1b9280eec65a350b3dd2f7`. Commit `5e368011`
+chunk): the current shared mainline tip is
+`origin/main=9c44d2a4210bcc98d752319aae9b06f65d370337`, containing implementation
+commit `5e3680117c26f5b7bb1b9280eec65a350b3dd2f7`. Commit `5e368011`
 (`perf(w26): share fdb lease authority transaction`) adds the
 source-compatible `LeaseOracle::now_ms_in_transaction` hook, makes the shared
 FoundationDB oracle read its protected authority key inside the already-open
