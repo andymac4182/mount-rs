@@ -1134,6 +1134,36 @@ async fn locks_and_proppatch_use_rfc_statuses_and_multistatus() {
 }
 
 #[tokio::test]
+async fn concurrent_writes_without_a_submitted_lock_token_are_rejected() {
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), WebdavSessionOptions::default());
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/concurrent-locked".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(lock.status, 201);
+
+    let first = WebdavRequestHead {
+        method: "PUT".to_owned(),
+        target: "/concurrent-locked".to_owned(),
+        headers: Default::default(),
+    };
+    let second = first.clone();
+    let (first_response, second_response) = tokio::join!(
+        session.handle_request(first, b"first".as_slice()),
+        session.handle_request(second, b"second".as_slice()),
+    );
+    assert_eq!(first_response.status, 423);
+    assert_eq!(second_response.status, 423);
+    assert_eq!(session.lock_count(), 1);
+}
+
+#[tokio::test]
 async fn recursive_delete_honors_submitted_member_lock_tokens() {
     let server = server().await;
     let client = reqwest::Client::new();
