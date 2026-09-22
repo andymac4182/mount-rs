@@ -239,6 +239,19 @@ N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent
 lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
 four ignored native lifecycle tests. Production remains NO-GO.
 
+The current W01-9P supported-scope audit is explicit: the implemented
+codec/constants/barrel, direct native-or-structural session, server/connection
+and attached-stream contracts, mounted identity, and Linux native lifecycle
+are qualified for the advertised slice. Deliberate boundaries are the
+documented legacy/auth/xattr protocol families, unadvertised upstream object
+members, native-listener `stream: undefined`, root automatic cross-transport
+signal ownership, supervisor-owned crash/reset recovery, and non-Linux native
+kernel mounts. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986`
+passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373),
+N-API job `106667799214`, and Rust job `106667799016`; the detailed decision
+is recorded in [`W01_9P_PROGRESS.md`](./W01_9P_PROGRESS.md). This narrows the
+9P claim without changing the overall W01/release **NO-GO** decision.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
