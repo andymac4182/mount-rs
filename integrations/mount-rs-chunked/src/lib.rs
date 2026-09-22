@@ -23,7 +23,7 @@ use mount_rs_core::types::{
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -197,6 +197,30 @@ struct MutationRunnerGuard<'a> {
     active: bool,
 }
 
+/// Marks a whole-file operation whose immutable block work is still being
+/// prepared. The mutation runner uses this as a scheduling hint only: the
+/// fenced metadata publication remains the sole commit boundary, and the
+/// guard is released before the prepared request waits for its response.
+struct MutationPreparationGuard {
+    active: bool,
+    counter: Arc<AtomicUsize>,
+}
+
+impl MutationPreparationGuard {
+    fn release(mut self) {
+        self.active = false;
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl Drop for MutationPreparationGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.counter.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
 impl<'a> MutationRunnerGuard<'a> {
     fn new(queue: &'a Mutex<MutationQueue>) -> Self {
         Self {
@@ -267,6 +291,7 @@ where
     state: Mutex<RuntimeState>,
     lease: Mutex<Option<WriterLease>>,
     lease_renewed: AtomicBool,
+    preparing_mutations: Arc<AtomicUsize>,
     mutations: Mutex<MutationQueue>,
 }
 
@@ -365,6 +390,7 @@ where
                 }),
                 lease: Mutex::new(Some(lease.clone())),
                 lease_renewed: AtomicBool::new(false),
+                preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
             }),
         };
@@ -767,6 +793,16 @@ where
         }
     }
 
+    fn begin_mutation_preparation(&self) -> MutationPreparationGuard {
+        self.inner
+            .preparing_mutations
+            .fetch_add(1, Ordering::AcqRel);
+        MutationPreparationGuard {
+            active: true,
+            counter: Arc::clone(&self.inner.preparing_mutations),
+        }
+    }
+
     async fn enqueue_mutation(&self, request: MutationRequest) -> Result<()> {
         let run = {
             let mut queue = self.inner.mutations.lock().map_err(|_| {
@@ -818,6 +854,7 @@ where
                 previous_pending = pending;
                 if round + 1 >= MUTATION_BATCH_INITIAL_YIELD_ROUNDS
                     && idle_rounds >= MUTATION_BATCH_IDLE_YIELD_ROUNDS
+                    && self.inner.preparing_mutations.load(Ordering::Acquire) == 0
                 {
                     break;
                 }
@@ -1188,6 +1225,7 @@ where
     async fn write_file_atomic(&self, path: &str, data: &[u8]) -> Result<()> {
         let normalized = normalize_path(path);
         let _lifecycle = self.inner.lifecycle.read().await;
+        let preparation = self.begin_mutation_preparation();
         let (layout, original, inode, expected_revision, new_inode) = {
             let _gate = self.inner.gate.lock().await;
             self.ensure_operation_lease().await?;
@@ -1262,18 +1300,22 @@ where
                 .map_err(|error| with_context(error, "block-flush", Some(&normalized)))?;
         }
 
-        let committed = self
-            .submit_whole_file_mutation(WholeFileMutation {
-                path: normalized.clone(),
-                inode,
-                expected_revision,
-                new_inode,
-                original,
-                layout: new_layout,
-                data_length: u64::try_from(data.len())
-                    .map_err(|_| error_with_path(ErrorCode::Efbig, "write", &normalized))?,
-            })
-            .await?;
+        let mutation = WholeFileMutation {
+            path: normalized.clone(),
+            inode,
+            expected_revision,
+            new_inode,
+            original,
+            layout: new_layout,
+            data_length: u64::try_from(data.len())
+                .map_err(|_| error_with_path(ErrorCode::Efbig, "write", &normalized))?,
+        };
+        // The request is fully prepared now. Let the batch runner observe
+        // other whole-file operations still doing immutable remote work, but
+        // do not count this request while it waits for the shared publication
+        // response; otherwise the first runner would wait on itself.
+        preparation.release();
+        let committed = self.submit_whole_file_mutation(mutation).await?;
         if matches!(committed, WholeFileMutationResult::Committed) {
             return Ok(());
         }

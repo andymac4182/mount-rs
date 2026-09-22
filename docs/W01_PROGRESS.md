@@ -638,6 +638,15 @@ WebDAV Clippy, formatting, `git diff --check`, and the no-worktree-`target/`
 check also passed. This is current local transport evidence only and does
 not promote the queued Ubuntu native job or the live-provider and durability
 gates.
+check also passed. This is current local transport evidence only and does
+not promote the queued Ubuntu native job or the live-provider and durability
+gates.
+
+A relevance audit found no changes between hosted SHA
+`92a6539e6a91d67a811b77cf688fc4ad2177f858` and current published tip
+`ebac1450e806afdb2cc1f17d3698c17bea0391d2` in the WebDAV transport, N-API
+binding, CI workflow, or native build wrapper, so the hosted macOS result
+covers the current implementation and workflow.
 
 The preserved non-canceling run remained in the same queue state on the next
 bounded poll: macOS arm64, macOS Intel, and Ubuntu arm64 Node jobs are
