@@ -12,19 +12,19 @@ for engineering planning, not a commitment.
 | Workstream | W26 — Apache Ozone S3 backend |
 | Ledger snapshot | 2026-09-22, Australia/Brisbane |
 | Repository | `mount-rs` |
-| Snapshot base | `ca13a33f` (`origin/main`, including W26 implementation commits `c7f0e6d0`, `183660a4` and `d05548e8`, the published R2 content-addressing/cache, metadata mutation batching, queue-cancellation hardening, concurrent whole-file-create inode rebasing, corrected Ozone content-addressed block-contract test, deduplicated content-addressed cleanup, the Ozone test lockfile fix `0cef5d44`, the FoundationDB test lockfile fix `8428a5ef` and the latest concurrent-mainline reconciliation; the exact W26 commits and concurrent-mainline merges are recorded below) |
+| Snapshot base | `7389be4d` (`origin/main`, including W26 implementation commits `c7f0e6d0`, `183660a4` and `d05548e8`, the published R2 content-addressing/cache, metadata mutation batching, queue-cancellation hardening, concurrent whole-file-create inode rebasing, corrected Ozone content-addressed block-contract test, deduplicated content-addressed cleanup, the Ozone test lockfile fix `0cef5d44`, the FoundationDB test lockfile fix `8428a5ef` and the latest concurrent-mainline reconciliation; the exact W26 commits and concurrent-mainline merges are recorded below) |
 | Checklist completion | 11 of 12 W26 tracker rows checked: shipped implementation rows are complete, while W26.15 (the terminal 1,000-IOPS remediation/qualification gate) remains open; hosted/provider production gates remain open |
 | Provisional execution completion | W26 implementation scope: 100% for the 11 shipped tracker rows; current terminal qualification packet: **FAILED / NO-GO** because W26.15's hard performance gate is open; production-rollout readiness: 58% (scope, benchmark matrix, lifecycle safety, bounded remote enumeration, provider-bounded KV/N-API contract, durable-provider bounded-listing tests, strict provider-specific hard-threshold IOPS wiring, fail-closed artifact/profile/metric verification and retention, all-provider credential-free production-config policy, one-revision CI evidence-packet aggregation, complete end-to-end surface marker enforcement, the credential-free customer rollout contract, content-addressed R2 caching, single-flight R2 upload coalescing, metadata mutation batching, concurrent-create inode rebasing, queue cancellation safety, lease-renewal caching with forced validation at explicit durability/destructive boundaries, and the provider publication-barrier capability are implemented and locally tested; no terminal production gates yet). Customer deployment, native, provider-durability, capacity/SLO, backup/DR and release-stream gates remain separately bounded |
 | Current acceptance state | The retained W26 packet on `9c098e5` remains the last accepted hosted result within its documented provider/platform boundaries. The published W26 code now includes optimistic read/write paths, atomic whole-file `FsDriver::write_file`, lazy atime/EOF handling, content-addressed R2 blocks with a bounded process-local cache, single-flight coalescing for concurrent identical block uploads with cancellation-safe follower release, fenced metadata mutation batching, a bounded pending queue, cancellation-safe runner cleanup, same-revision rebasing for concurrent new-file creates, cached provider lease renewal with forced validation at explicit metadata/destructive boundaries, the opt-in provider publication-barrier capability that skips only a redundant post-publish probe while retaining explicit `syncfs` flushes, and an eight-round bounded cooperative mutation collection window. Local full locked-workspace tests and strict Clippy pass; the focused R2 suite has 19 unit tests plus 2 HTTP interop tests, and the focused ChunkedFs suite has 20 passing tests. The latest terminal W26 packet is diagnostic run `35674425514` on exact SHA `a81a0827`: all four provider rows completed their 1,200-operation lifecycle with zero timeout/cleanup failures but missed the hard 1,000-IOPS target, and aggregate `106579811902` failed closed. Security scans `e44de27d-96d8-4330-a831-b995d6458a6c`, `47641152-6539-48e1-96b6-bf2201033486` and `739f4f5b-8cc4-4154-93f7-9e486745eab1` are complete with zero reportable findings and complete coverage within their local scopes; hosted/provider/customer controls remain explicit external boundaries. No Live Cloudflare R2 or Live AWS S3 result is recorded. |
-| Latest hosted workflow | Fresh run `35678993571` selected exact published SHA `4b4fe43ab08a7e5446bccb2198517d4847159b6b`; W26 producers `ozone` `106591586312`, `ozone-compositions` `106591586421`, `ozone-tidb` `106591586086` and `ozone-foundationdb` `106591586325` are queued at this snapshot, with no aggregate job yet. This packet is pending and is not acceptance evidence. The prior diagnostic run `35677828440` is recorded in the addendum below. |
+| Latest hosted workflow | Run `35678993571` selected exact SHA `4b4fe43ab08a7e5446bccb2198517d4847159b6b`; base Ozone job `106591586312` passed, composition `106591586421`, TiDB `106591586086`, FoundationDB `106591586325` and aggregate `106595737360` failed closed. All four provider rows completed their lifecycle with zero timeout/cleanup failures but missed 1,000 IOPS. This packet is diagnostic only; the exact metrics and retained artifacts are recorded in the addendum below. |
 | Last terminal hosted W26 packet | Run `35674425514` on exact revision `a81a08272aac9085d6f2c2c31a7f1c9392a4bed6`: base Ozone passed; SQLite/R2 measured 637.01 IOPS, PGlite/R2 457.65, TiDB/R2 147.31 and FoundationDB/R2 126.50. Every row completed 400 writes, 400 reads, 400 verified reads and 400 deletes (1,200/1,200 operations), with zero timeouts, zero cleanup failures and success rate 1. The producer rows failed solely `IOPS_TARGET_NOT_MET`; aggregate `106579811902` failed closed on missing hard pass markers. This is a diagnostic failure, not acceptance evidence. |
-| Next hosted qualification | Run `35678993571` is now dispatched on exact SHA `4b4fe43ab08a7e5446bccb2198517d4847159b6b` | Await terminal provider JSON/log artifacts and the aggregate. Accept W26.15 only if every configured provider, FoundationDB preflight, the complete end-to-end packet and the aggregate emit terminal pass markers on this exact revision. The strict 1,000-IOPS target is unchanged. | GitHub-hosted runners, Ozone/provider startup, provider latency and artifact retention are external gates; queued, in-progress, canceled, failed or skipped jobs are not evidence |
+| Next hosted qualification | Dispatch after the next correctness-preserving performance chunk, on a fresh exact published SHA | Re-run the complete Ozone/provider matrix. Accept W26.15 only if every configured provider, FoundationDB preflight, the complete end-to-end packet and the aggregate emit terminal pass markers on one exact revision. The strict 1,000-IOPS target is unchanged. | GitHub-hosted runners, Ozone/provider startup, provider latency and artifact retention are external gates; queued, in-progress, canceled, failed or skipped jobs are not evidence |
 | Local Docker boundary | Docker Desktop capacity was about 5 CPUs and 8.2 GiB; this is sufficient for the durable FoundationDB proof but below the TiDB harness's 10 GiB durable-topology minimum |
 | Production rollout track | Open, currently **NO-GO**; 0 of 15 production gates are terminally accepted. The 58% figure reflects scope decisions, local hardening, provider-boundary implementation, strict provider-configuration and artifact-integrity/metric/retention qualification, expanded credential-free security policy, one-revision evidence-packet aggregation, complete end-to-end packet surface enforcement, the credential-free customer rollout contract, content-addressed block caching, single-flight upload coalescing, metadata batching, cancellation safety, lease-renewal optimization and publication-barrier capability, not deployable readiness |
 | W26 production target | Customer-deployed Ozone integration; W26 owns provider/client correctness and CI qualification, not customer deployment, backup/DR or release promotion |
 | Required service envelope | Target 1,000 IOPS per drive; Tier 1 99.99% reliability; 5-minute RPO and 5-minute RTO. RPO/RTO and availability remain dependent on the customer's Ozone topology and operations |
 | Available qualification environment | CI only; no staging environment is available. Production-like evidence must therefore be achieved through controlled hosted CI/provider fixtures and clearly labeled customer-owned prerequisites |
-| Release/acceptance decision | W26 implementation and local qualification controls remain accepted within their documented scope; production rollout remains **NO-GO** because the last complete terminal packet `35674425514` failed every hard 1,000-IOPS provider row, and diagnostic run `35677828440` still failed PGlite/R2 and TiDB/R2 while FoundationDB was blocked by a pre-fix lockfile gate. The lockfile corrections are published through merged tip `ca13a33f` and fresh run `35678993571` is pending on exact SHA `4b4fe43a`. Security scan `739f4f5b-8cc4-4154-93f7-9e486745eab1` is sealed with zero reportable findings and complete changed-file coverage. No failed, queued or pending packet is promoted, and no broader native, customer secure-runtime, Ozone backup/DR or release claim is made |
+| Release/acceptance decision | W26 implementation and local qualification controls remain accepted within their documented scope; production rollout remains **NO-GO** because terminal run `35678993571` failed every hard 1,000-IOPS provider row: SQLite/R2 802.37, PGlite/R2 614.90, TiDB/R2 86.53 and FoundationDB/R2 360.14. Aggregate `106595737360` failed closed. The lockfile corrections are published in the shared tree, and the next performance chunk must be qualified on a fresh exact SHA. Security scan `739f4f5b-8cc4-4154-93f7-9e486745eab1` is sealed with zero reportable findings and complete changed-file coverage. No failed, queued or pending packet is promoted, and no broader native, customer secure-runtime, Ozone backup/DR or release claim is made |
 
 ## Terminal hosted Ozone qualification diagnosis
 
@@ -816,9 +816,10 @@ separately because they are elapsed wall-clock, not implementation effort.
 | 2026-09-22 — Fresh hosted packet and FoundationDB lockfile diagnosis | Retrieved the current run `35677828440` artifacts and reviewed exact producer boundaries on SHA `91866234`: SQLite/R2 passed 1,220.33 IOPS, PGlite/R2 failed 522.34, TiDB/R2 failed 145.74, and FoundationDB stopped before benchmark because its test lockfile lacked `tokio`. | ~0.75–1.25 h evidence review | ~1–1.5 h hosted queue/provider startup and artifact download | The packet remains diagnostic; no aggregate or all-provider acceptance is promoted, and production remains **NO-GO**. |
 | 2026-09-22 — FoundationDB test lockfile correction | Regenerated `tests/foundationdb/Cargo.lock`, verified the one-entry diff and reran the manifest with `--locked`. | ~0.25–0.5 h implementation/verification | ~0.25 h shared Cargo check | Commit `8428a5ef` is published through merged `origin/main` tip `ca13a33f`; the next hosted run must verify the preflight reaches the durable FoundationDB benchmark. |
 | 2026-09-22 — Lockfile publication and build-on handoff | Reconciled the lockfile commit with concurrent mainline changes after a non-fast-forward push race, then pushed the merged result for other threads. | ~0.25–0.5 h publication/reconciliation | ~0.5 h fetch/merge/push; concurrent origin movement is external elapsed time | `origin/main` contains the Ozone lockfile fix `0cef5d44`, FoundationDB lockfile fix `8428a5ef` and merged tip `ca13a33f`; a new exact-SHA qualification is still required. |
-| 2026-09-22 — Lockfile-verified hosted qualification dispatch | Dispatched the full hosted Ozone/provider matrix after publishing the FoundationDB lockfile correction and ledger. | ~0.1–0.25 h dispatch/status capture | Hosted queue, provider startup and artifact retention are external elapsed time | Run `35678993571` selected exact SHA `4b4fe43a`; W26 producer jobs `106591586312`, `106591586421`, `106591586086` and `106591586325` were queued, with no aggregate yet. Production remains **NO-GO** pending a terminal all-provider packet. |
+| 2026-09-22 — Lockfile-verified hosted qualification dispatch | Dispatched the full hosted Ozone/provider matrix after publishing the FoundationDB lockfile correction and ledger. | ~0.1–0.25 h dispatch/status capture | Hosted queue, provider startup and artifact retention are external elapsed time | Run `35678993571` selected exact SHA `4b4fe43a`; W26 producer jobs `106591586312`, `106591586421`, `106591586086` and `106591586325` were queued initially. Production remained **NO-GO** pending a terminal all-provider packet. |
+| 2026-09-22 — Lockfile-verified terminal W26 packet review | Retrieved the exact artifacts for run `35678993571` and reconciled the base, four producer jobs and aggregate. | ~0.75–1.25 h evidence review | ~1.5–2.5 h hosted queue, durable provider startup and artifact retrieval | Base Ozone passed; SQLite/R2 `802.37`, PGlite/R2 `614.90`, TiDB/R2 `86.53` and FoundationDB/R2 `360.14` IOPS all failed the hard target with 1,200/1,200 lifecycle operations and zero timeout/cleanup failures; aggregate `106595737360` failed closed. W26.15 remains open and production remains **NO-GO**. |
 
-## Current status addendum — hosted run `35677828440` and lockfile-gate correction
+## Current status addendum — hosted runs `35677828440` / `35678993571` and lockfile-gate correction
 
 This addendum supersedes older paragraphs that describe run `35676336466` as
 pending. Historical rows remain unchanged for auditability; the tables above
@@ -831,13 +832,13 @@ lockfile correction. It is diagnostic evidence only:
 | Work item / job | Status and evidence | Completion interpretation | Remaining action | Provisional engineering estimate | External blocker / gate |
 | --- | --- | --- | --- | --- | --- |
 | W26.1–W26.2 / `ozone` `106587969438` | **PASS**: gateway policy, real Ozone block contract, restart/reopen and cleanup completed | 100% implementation and current hosted base gate | Preserve exact marker and artifact in the next packet | 0–1 h review | Hosted Ozone image, runner and customer topology remain external |
-| W26.3a / `ozone-compositions` `106587969430` | **FAIL / diagnostic**: SQLite/R2 `1,220.33` IOPS, elapsed `983.34 ms`; PGlite/R2 `522.34` IOPS, elapsed `2,297.34 ms`; each completed 400 writes, 400 reads, 400 verified reads and 400 deletes (1,200/1,200), with zero timeouts and zero cleanup failures. Artifact `w26-ozone-compositions-evidence`, ID `10673983034` | SQLite/R2 hard row passed this attempt; PGlite/R2 remains below the 1,000-IOPS gate, so the composition packet cannot pass | Re-run after the published FoundationDB lockfile fix; investigate the PGlite/provider publication latency if it remains below target | ~1–4 d performance/design; 0.5–1.5 d hosted review | Ozone capacity/topology and PGlite runtime/provider latency are external inputs, but the shared publication path remains W26-owned |
-| W26.3d / `ozone-tidb` `106587969980` | **FAIL / diagnostic**: TiDB/R2 `145.74` IOPS, elapsed `8,233.95 ms`; 1,200/1,200 lifecycle operations, zero timeouts and zero cleanup failures. Artifact `w26-ozone-tidb-evidence`, ID `10673463926` | Durable TiDB/restart setup reached the benchmark, but the hard throughput gate remains open | Preserve durable restart/fencing markers and continue correctness-preserving metadata/publication performance work | ~1–4 d shared performance/design; 0.75–1.5 d hosted review | Hosted TiDB/PD/TiKV, Ozone capacity/topology and customer secure durability remain external |
-| W26.3c / `ozone-foundationdb` `106587968903` | **BLOCKED before benchmark**: hosted log failed `--locked` because `tests/foundationdb/Cargo.lock` lacked `tokio`; no IOPS JSON was emitted. Log artifact `w26-ozone-foundationdb-evidence`, ID `10672999481` | Provider functionality and performance are unmeasured for this revision; this is a CI dependency gate, not a runtime result | Re-run on a revision containing `8428a5ef`; require the durable benchmark and restart/fencing/cleanup markers | ~0.25 h local fix/recheck; 0.75–1.5 h hosted review | Hosted FoundationDB image/client and Ozone topology are external; the lockfile correction is W26-owned and now published |
-| W26.4b / aggregate `106590078024` | **Queued at ledger capture** after failed producer rows; no aggregate acceptance marker | One-revision evidence packet remains open | Retrieve terminal aggregate result; require all producer markers plus the end-to-end marker on one exact SHA | ~0.5–1.5 h review | Workflow scheduling and concurrent jobs are external; queued/failed aggregate is never acceptance |
+| W26.3a / `ozone-compositions` `106591586421` | **FAIL / diagnostic**: SQLite/R2 `802.37` IOPS, elapsed `1,495.56 ms`; PGlite/R2 `614.90` IOPS, elapsed `1,951.55 ms`; each completed 400 writes, 400 reads, 400 verified reads and 400 deletes (1,200/1,200), with zero timeouts and zero cleanup failures. Artifact `w26-ozone-compositions-evidence`, ID `10674341635` | Both composition providers remain below the 1,000-IOPS gate on the lockfile-verified revision; no composition acceptance marker was emitted | Continue correctness-preserving metadata/publication performance work; retain the fixed target and rerun on the next published exact SHA | ~1–4 d performance/design; 0.5–1.5 d hosted review | Ozone capacity/topology and PGlite runtime/provider latency are external inputs, but the shared publication path remains W26-owned |
+| W26.3d / `ozone-tidb` `106591586086` | **FAIL / diagnostic**: TiDB/R2 `86.53` IOPS, elapsed `13,868.08 ms`; 1,200/1,200 lifecycle operations, zero timeouts and zero cleanup failures. Artifact `w26-ozone-tidb-evidence`, ID `10674350992` | Durable TiDB/restart setup reached the benchmark, but the hard throughput gate remains open by a wide margin | Preserve durable restart/fencing markers and continue correctness-preserving metadata/publication performance work | ~1–4 d shared performance/design; 0.75–1.5 d hosted review | Hosted TiDB/PD/TiKV, Ozone capacity/topology and customer secure durability remain external |
+| W26.3c / `ozone-foundationdb` `106591586325` | **FAIL / diagnostic**: FoundationDB/R2 `360.14` IOPS, elapsed `3,332.00 ms`; 1,200/1,200 lifecycle operations, zero timeouts and zero cleanup failures. Artifact `w26-ozone-foundationdb-evidence`, ID `10674436409` | The FoundationDB lockfile correction allowed the durable benchmark to run, but the hard throughput gate remains open | Preserve durable restart/fencing/bounded-listing/cleanup markers and continue correctness-preserving metadata/publication performance work | ~1–4 d shared performance/design; 0.75–1.5 h hosted review | Hosted FoundationDB image/client and Ozone topology remain external; the preflight lockfile gate is fixed |
+| W26.4b / aggregate `106595737360` | **FAIL / diagnostic** after all four producer rows completed; aggregate rejected the absent provider pass markers | One-revision evidence packet remains open; no terminal acceptance result exists | Preserve fail-closed aggregation and rerun only after the next performance chunk | ~0.5–1.5 h review | Workflow scheduling and concurrent jobs are external; queued/failed aggregate is never acceptance |
 | W26.7–W26.10 | Implementation and verifier controls remain green; the run exercised strict configuration and retained diagnostic artifacts | 100% implementation; hosted qualification remains open | Keep no-skip, exact-profile, artifact-integrity and retention checks unchanged | ~0.5–1.5 d review | Hosted artifact service, provider credentials/topology and customer TLS/IAM are external |
 | W26.14 | Evidence-surface implementation remains complete, but the current packet is not terminally accepted | 100% implementation; hosted end-to-end qualification open | Require gateway, composition, TiDB, FoundationDB, native/end-to-end and aggregate markers on one revision | ~0.75–1.5 d hosted review | Native runners, provider fixtures, secure customer runtime and CI orchestration remain external |
-| W26.15 | **OPEN / NO-GO**: one provider passed this attempt, two failed the hard threshold and one was preflight-blocked; no complete packet passed | 92% W26-owned implementation / 40% hosted qualification | Re-run at the fully lockfile-verified tip, then continue metadata/publication optimization if PGlite/TiDB remain below 1,000; never lower the target | ~1.5–4 d implementation/design plus 0.75–1.5 d review per rerun | Ozone/customer capacity, provider latency, hosted runner stability and artifact retention are external gates |
+| W26.15 | **OPEN / NO-GO**: terminal run `35678993571` measured SQLite/R2 `802.37`, PGlite/R2 `614.90`, TiDB/R2 `86.53` and FoundationDB/R2 `360.14` IOPS; all four completed 1,200/1,200 operations with zero timeout/cleanup failures, but aggregate `106595737360` failed closed | 92% W26-owned implementation / 42% hosted qualification | Continue metadata/publication performance design with unchanged fencing/CAS/durability semantics, then dispatch a fresh exact-SHA packet; never lower the target | ~1.5–4 d implementation/design plus 0.75–1.5 d review per rerun | Ozone/customer capacity, provider latency, hosted runner stability and artifact retention are external gates |
 
 The separate lockfile correction chunk is published as commit `8428a5ef`
 (`fix(w26): refresh foundationdb test lockfile`) and adds only the missing
@@ -845,29 +846,30 @@ The separate lockfile correction chunk is published as commit `8428a5ef`
 `./scripts/cargo-shared check --manifest-path tests/foundationdb/Cargo.toml
 --locked` passed. The earlier Ozone test lockfile correction is `0cef5d44`.
 The fixes were reconciled with concurrent mainline changes and pushed to
-`origin/main` at merged tip `ca13a33f`; the next hosted packet must select
-that fully lockfile-verified revision (or its subsequent documentation tip).
+`origin/main`; the lockfile-verified run below confirms FoundationDB reached
+its benchmark. The next hosted packet must select the next performance-change
+revision.
 
 The hard production decision remains **NO-GO**. The fresh run demonstrates
-that the SQLite/R2 path can exceed 1,000 IOPS under one hosted sample, but it
-does not close the all-provider gate: PGlite/R2 and TiDB/R2 remain below target,
-FoundationDB did not run, and no aggregate acceptance packet passed. The
+that the SQLite/R2 path has exceeded 1,000 IOPS in an earlier sample, but it
+does not close the all-provider gate: terminal run `35678993571` measured
+802.37/614.90/86.53/360.14 IOPS for SQLite/PGlite/TiDB/FoundationDB and the
+aggregate failed closed. The
 1,000-IOPS threshold, 99.99% reliability objective, five-minute RPO/RTO
 boundary, security requirements, CI-only qualification boundary and
 customer-owned Ozone backup/DR and release boundaries are unchanged.
 
-The next qualification is dispatched and tracked separately: run
-`35678993571` selected exact SHA
-`4b4fe43ab08a7e5446bccb2198517d4847159b6b`, with W26 producer jobs `106591586312`
-(`ozone`), `106591586421` (`ozone-compositions`), `106591586086`
-(`ozone-tidb`) and `106591586325` (`ozone-foundationdb`) queued at capture;
-the aggregate job is not yet present. This is an external hosted wait, not an
-acceptance result.
+The latest qualification is terminally diagnostic: run `35678993571` selected
+exact SHA `4b4fe43ab08a7e5446bccb2198517d4847159b6b`, with W26 producer jobs
+`106591586312` (`ozone`), `106591586421` (`ozone-compositions`), `106591586086`
+(`ozone-tidb`) and `106591586325` (`ozone-foundationdb`) complete, and aggregate
+`106595737360` failed closed. This is not an acceptance result; the next run
+must follow a correctness-preserving performance chunk.
 
 ## Publication record
 
 Authoritative current update (2026-09-22): `origin/main` is
-`412c422e2485a5c7ce2caf55892ec6475faab8d8`, and this checkout is being
+`7389be4d5ea4930075cf5278032614e931054620`, and this checkout is being
 updated from that shared tip before the next documentation push.
 The W26 metadata batching commit `c4e9a253` is included through the published
 reconciliation tip `a1cb4ca92bd0c1b619c56231002ee182852b01a8`; queue hardening
@@ -887,11 +889,11 @@ Security scans
 `739f4f5b-8cc4-4154-93f7-9e486745eab1` are complete with zero reportable
 findings within their local scopes. The latest R2 single-flight scan covered
 both changed files with complete coverage. Terminal W26 producer/aggregate
-packet `35674425514` on `a81a0827` failed the strict IOPS gate; it is terminal
-for every W26 producer and aggregate `106579811902`. Fresh run `35676336466`
-is selected on exact SHA `503f3f75` with all four W26 producers queued and no
-aggregate yet. No queued, in-progress, canceled or failed job is production
-acceptance evidence.
+packet `35678993571` on `4b4fe43a` failed the strict IOPS gate; it is terminal
+for every W26 producer and aggregate `106595737360`. All four rows completed
+their 1,200-operation lifecycle with zero timeout/cleanup failures, but no
+provider emitted `OZONE_IOPS_PASS`. No failed, queued, in-progress or canceled
+job is production acceptance evidence.
 
 This document is intentionally updated alongside `WORK_TRACKER.md`. The
 ledger's percentages and estimates are snapshots; the tracker checkbox and
@@ -902,12 +904,12 @@ Current-status override: historical session rows below preserve what was known
 at the time they were written. The authoritative current state is the snapshot
 and terminal diagnoses above: runs `35635486040`, `35641941218`,
 `35649202405`, `35655276021`, `35669685204`, `35672928117` and `35674425514`
-are failed diagnostic packets, W26.15 is open, and fresh run `35676336466` is
-pending on exact SHA `503f3f75` with no aggregate yet. The last terminal packet
-has base Ozone passed, all four provider rows failed only the hard IOPS target,
-and aggregate `106579811902` failed closed. No queued, in-progress, canceled or
-failed job is promoted to acceptance. Aggregate `106522172018` is an earlier
-failed diagnostic packet. Current shared tip `412c422e` contains the
+are failed diagnostic packets, W26.15 is open, and run `35678993571` is now the
+latest terminal diagnostic packet on exact SHA `4b4fe43a`. Base Ozone passed,
+all four provider rows failed only the hard IOPS target, and aggregate
+`106595737360` failed closed. No queued, in-progress, canceled or failed job is
+promoted to acceptance. Aggregate `106522172018` is an earlier failed
+diagnostic packet. Current shared tip `7389be4d` contains the
 publication-barrier implementation (`c7f0e6d0`), bounded mutation collection
 (`183660a4`), single-flight R2 upload coalescing (`d05548e8`) plus the
 lazy-atime/EOF, batching/cache, queue-safety, concurrent-create and
@@ -924,6 +926,21 @@ lockfile gate. The FoundationDB correction is commit `8428a5ef`, published
 with the earlier Ozone correction `0cef5d44` at merged `origin/main` tip
 `ca13a33f`. A new exact-SHA run on the fully lockfile-verified documentation
 tip is required; no result from `35677828440` closes W26.15.
+
+Terminal-packet override (2026-09-22): run `35678993571` selected exact SHA
+`4b4fe43ab08a7e5446bccb2198517d4847159b6b`. Base Ozone job `106591586312`
+passed. Composition job `106591586421` retained artifact `10674341635` and
+measured SQLite/R2 `802.37` and PGlite/R2 `614.90` IOPS. TiDB job
+`106591586086` retained artifact `10674350992` and measured `86.53` IOPS.
+FoundationDB job `106591586325` retained artifact `10674436409` and measured
+`360.14` IOPS after the lockfile correction. Every benchmark row completed
+400 writes, 400 reads, 400 verified reads and 400 deletes, for 1,200/1,200
+successful operations, with zero timeout and cleanup failures. Aggregate
+`106595737360` failed closed because no provider emitted the hard pass marker.
+This is the current terminal diagnostic packet, not acceptance evidence; the
+next code/qualification chunk must address the shared metadata-publication
+latency without weakening fencing, durability ordering, security checks or the
+1,000-IOPS threshold.
 
 The authoritative W26 hosted packet is run `35585066458` on tested revision
 `9c098e5`; the documentation closeout was subsequently rebased and pushed as
