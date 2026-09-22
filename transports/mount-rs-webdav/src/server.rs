@@ -151,6 +151,14 @@ struct ServerState {
     task: Option<tokio::task::JoinHandle<()>>,
 }
 
+#[derive(Clone)]
+struct StreamControl {
+    background_tasks: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
+    shutdown: Arc<Notify>,
+    closing: Arc<AtomicUsize>,
+}
+
 struct ConnectionRegistry {
     active: AtomicUsize,
     next_id: AtomicUsize,
@@ -215,6 +223,7 @@ pub struct WebdavServer {
     shutdown: Arc<Notify>,
     closing: Arc<AtomicUsize>,
     drained: Arc<Notify>,
+    background_tasks: Arc<AtomicUsize>,
     lifecycle: tokio::sync::Mutex<()>,
     state: Mutex<ServerState>,
     connections: Arc<ConnectionRegistry>,
@@ -252,6 +261,7 @@ impl WebdavServer {
             shutdown: Arc::new(Notify::new()),
             closing: Arc::new(AtomicUsize::new(0)),
             drained: Arc::new(Notify::new()),
+            background_tasks: Arc::new(AtomicUsize::new(0)),
             lifecycle: tokio::sync::Mutex::new(()),
             state: Mutex::new(ServerState { task: None }),
             connections: Arc::new(ConnectionRegistry::default()),
@@ -313,6 +323,12 @@ impl WebdavServer {
         let counter_for_task = Arc::clone(&self.connections);
         let drained_for_task = Arc::clone(&self.drained);
         let closing_for_task = Arc::clone(&self.closing);
+        let stream_control_for_task = StreamControl {
+            background_tasks: Arc::clone(&self.background_tasks),
+            drained: Arc::clone(&self.drained),
+            shutdown: Arc::clone(&self.shutdown),
+            closing: Arc::clone(&self.closing),
+        };
         let hooks_for_task = self.hooks.clone();
         let task = tokio::spawn(async move {
             loop {
@@ -342,6 +358,7 @@ impl WebdavServer {
                         let shutdown = Arc::clone(&shutdown);
                         let closing = Arc::clone(&closing_for_task);
                         let hooks = hooks_for_task.clone();
+                        let stream_control = stream_control_for_task.clone();
                         let peer = peer.to_string();
                         let connection_id = connections.next_id();
                         connections.active.fetch_add(1, Ordering::AcqRel);
@@ -353,7 +370,12 @@ impl WebdavServer {
                         connections.spawn(connection_id, async move {
                             let _guard = guard;
                             let service = service_fn(move |request| {
-                                handle_request(request, Arc::clone(&session), max_request_bytes)
+                                handle_request(
+                                    request,
+                                    Arc::clone(&session),
+                                    max_request_bytes,
+                                    stream_control.clone(),
+                                )
                             });
                             let io = TokioIo::new(stream);
                             let connection = hyper::server::conn::http1::Builder::new()
@@ -412,6 +434,7 @@ impl WebdavServer {
         self.shutdown.notify_waiters();
         let connections = Arc::clone(&self.connections);
         let drained = Arc::clone(&self.drained);
+        let background_tasks = Arc::clone(&self.background_tasks);
         let mut task = task;
         let result = tokio::time::timeout(self.drain_timeout, async {
             if let Some(task_handle) = task.as_mut() {
@@ -419,11 +442,11 @@ impl WebdavServer {
                 task = None;
                 join_result.map_err(WebdavServerError::Join)?;
             }
-            while connections.active() != 0 {
+            while connections.active() != 0 || background_tasks.load(Ordering::Acquire) != 0 {
                 let notified = drained.notified();
                 tokio::pin!(notified);
                 notified.as_mut().enable();
-                if connections.active() == 0 {
+                if connections.active() == 0 && background_tasks.load(Ordering::Acquire) == 0 {
                     break;
                 }
                 notified.await;
@@ -486,6 +509,7 @@ async fn handle_request(
     request: Request<Incoming>,
     session: Arc<WebdavSession>,
     max_request_bytes: usize,
+    stream_control: StreamControl,
 ) -> Result<Response<HttpBody>, std::convert::Infallible> {
     let (parts, body) = request.into_parts();
     let mut headers: BTreeMap<String, String> = BTreeMap::new();
@@ -513,7 +537,7 @@ async fn handle_request(
         response
             .headers
             .insert("connection".to_owned(), "close".to_owned());
-        return Ok(to_http_response(response, false));
+        return Ok(to_http_response(response, false, &stream_control));
     }
     let head = WebdavRequestHead {
         method: parts.method.as_str().to_owned(),
@@ -528,7 +552,7 @@ async fn handle_request(
         exceeded: false,
     };
     let response = session.handle_request_stream(head, body).await;
-    Ok(to_http_response(response, is_head))
+    Ok(to_http_response(response, is_head, &stream_control))
 }
 
 struct IncomingRequestBody {
@@ -602,7 +626,11 @@ where
     }
 }
 
-fn to_http_response(response: WebdavResponse, head: bool) -> Response<HttpBody> {
+fn to_http_response(
+    response: WebdavResponse,
+    head: bool,
+    stream_control: &StreamControl,
+) -> Response<HttpBody> {
     let status = StatusCode::from_u16(response.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let headers = response.headers;
     let body = if head {
@@ -611,7 +639,9 @@ fn to_http_response(response: WebdavResponse, head: bool) -> Response<HttpBody> 
         match response.body {
             None => full_body(Bytes::new()),
             Some(crate::protocol::WebdavBody::Bytes(bytes)) => full_body(Bytes::from(bytes)),
-            Some(crate::protocol::WebdavBody::File(file)) => stream_file(file),
+            Some(crate::protocol::WebdavBody::File(file)) => {
+                stream_file(file, stream_control.clone())
+            }
         }
     };
     let mut builder = Response::builder().status(status);
@@ -629,9 +659,11 @@ fn full_body(bytes: Bytes) -> HttpBody {
         .boxed_unsync()
 }
 
-fn stream_file(file: crate::protocol::FileBody) -> HttpBody {
+fn stream_file(file: crate::protocol::FileBody, control: StreamControl) -> HttpBody {
     let (mut sender, body) = Channel::<Bytes, BoxError>::new(2);
+    let task = StreamTaskGuard::new(&control);
     tokio::spawn(async move {
+        let _task = task;
         let crate::protocol::FileBody {
             handle,
             start,
@@ -643,9 +675,25 @@ fn stream_file(file: crate::protocol::FileBody) -> HttpBody {
         let mut buffer = vec![0_u8; chunk_size.max(1)];
         let mut failure: Option<BoxError> = None;
 
+        let mut close_guard = ResponseFileCloseGuard::new(handle, &control);
+        let handle = close_guard.handle();
+
         while position < end {
             let wanted = (end - position).min(buffer.len() as u64) as usize;
-            match handle.read(&mut buffer[..wanted], Some(position)).await {
+            if control.closing.load(Ordering::Acquire) != 0 {
+                break;
+            }
+            let notified = control.shutdown.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if control.closing.load(Ordering::Acquire) != 0 {
+                break;
+            }
+            let read_result = tokio::select! {
+                _ = notified => break,
+                result = handle.read(&mut buffer[..wanted], Some(position)) => result,
+            };
+            match read_result {
                 Ok(0) => {
                     failure = Some(Box::new(
                         mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio)
@@ -655,11 +703,17 @@ fn stream_file(file: crate::protocol::FileBody) -> HttpBody {
                     break;
                 }
                 Ok(count) if count <= wanted => {
-                    if sender
-                        .send_data(Bytes::copy_from_slice(&buffer[..count]))
-                        .await
-                        .is_err()
-                    {
+                    let notified = control.shutdown.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if control.closing.load(Ordering::Acquire) != 0 {
+                        break;
+                    }
+                    let send_result = tokio::select! {
+                        _ = notified => break,
+                        result = sender.send_data(Bytes::copy_from_slice(&buffer[..count])) => result,
+                    };
+                    if send_result.is_err() {
                         break;
                     }
                     position += count as u64;
@@ -679,18 +733,99 @@ fn stream_file(file: crate::protocol::FileBody) -> HttpBody {
             }
         }
 
-        if failure.is_none() {
-            if let Err(error) = handle.close().await {
-                failure = Some(Box::new(error));
-            }
-        } else {
-            let _ = handle.close().await;
+        if let Err(error) = close_guard.close().await
+            && failure.is_none()
+        {
+            failure = Some(Box::new(error));
         }
         if let Some(error) = failure {
             sender.abort(error);
         }
     });
     body.boxed_unsync()
+}
+
+struct StreamTaskGuard {
+    counter: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
+}
+
+impl StreamTaskGuard {
+    fn new(control: &StreamControl) -> Self {
+        control.background_tasks.fetch_add(1, Ordering::AcqRel);
+        Self::from_parts(
+            Arc::clone(&control.background_tasks),
+            Arc::clone(&control.drained),
+        )
+    }
+
+    fn from_parts(counter: Arc<AtomicUsize>, drained: Arc<Notify>) -> Self {
+        Self { counter, drained }
+    }
+}
+
+impl Drop for StreamTaskGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+        self.drained.notify_waiters();
+    }
+}
+
+/// Ensures that a provider file handle is closed when a streamed response is
+/// cancelled by a client disconnect or server shutdown.  A fallback close is
+/// tracked separately so the server drain cannot race the cleanup task.
+struct ResponseFileCloseGuard {
+    handle: Option<Arc<dyn mount_rs_core::FileHandle>>,
+    background_tasks: Arc<AtomicUsize>,
+    drained: Arc<Notify>,
+}
+
+impl ResponseFileCloseGuard {
+    fn new(handle: Arc<dyn mount_rs_core::FileHandle>, control: &StreamControl) -> Self {
+        Self {
+            handle: Some(handle),
+            background_tasks: Arc::clone(&control.background_tasks),
+            drained: Arc::clone(&control.drained),
+        }
+    }
+
+    fn handle(&self) -> Arc<dyn mount_rs_core::FileHandle> {
+        Arc::clone(
+            self.handle
+                .as_ref()
+                .expect("response file close guard handle"),
+        )
+    }
+
+    async fn close(&mut self) -> mount_rs_core::Result<()> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        let result = handle.close().await;
+        if result.is_ok() {
+            self.handle = None;
+        }
+        result
+    }
+}
+
+impl Drop for ResponseFileCloseGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let background_tasks = Arc::clone(&self.background_tasks);
+        let drained = Arc::clone(&self.drained);
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        background_tasks.fetch_add(1, Ordering::AcqRel);
+        let task = StreamTaskGuard::from_parts(background_tasks, drained);
+        runtime.spawn(async move {
+            let _task = task;
+            let _ = handle.close().await;
+        });
+    }
 }
 
 async fn socket_address(host: &str, port: u16) -> Result<SocketAddr, std::io::Error> {

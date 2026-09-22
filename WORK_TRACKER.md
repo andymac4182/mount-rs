@@ -1201,6 +1201,13 @@ provider I/O error during DELETE/MOVE cleanup retains the lock rather than
 collapsing unknown namespace state into absence. The fault-injected regression
 and full 31/31 WebDAV target pass with strict Clippy, formatting, and diff
 checks green.
+Native streamed file responses now observe the shared shutdown signal during
+provider reads and channel sends, count as background work during server drain,
+and use a cancellation-safe close guard with a tracked fallback close. The
+stalled provider-read loopback regression passed, the full WebDAV target passed
+32/32, warning-denied Clippy passed, and formatting/diff checks passed. This is
+local response-task lifecycle evidence; hosted/provider, power-loss,
+durable-lock, crash/restart, and stronger same-resource ordering remain open.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
@@ -6519,6 +6526,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 WebDAV streamed-response shutdown lifecycle` | Make streamed file response tasks observe server shutdown, participate in bounded drain, and close provider handles after stalled-read cancellation | Full WebDAV target 32/32, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV streamed-response fault evidence` | Prove that a short driver read fails an HTTP response body and reaches the peer-qualified transport-error hook | Focused WebDAV target 28/28, warning-denied Clippy and formatting pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV body-stream contract clarification` | Align the public Rust request-body documentation with the published fail-closed drain behavior | Documentation-only clarification; the 28/28 WebDAV, warning-denied Clippy and formatting evidence remains the governing local result, while hosted/provider and durability gates remain open |
 | `2026-09-22 WebDAV unread-body fault packet` | Preserve framing after drainable 413 limits, but report non-recoverable unread-body faults once and close the HTTP connection | Focused WebDAV target 27/27, warning-denied Clippy, formatting, rebuilt N-API addon, generated typecheck, WebDAV-only host-enabled integration, and structural WebDAV regression pass; hosted/provider, power-loss, durable-lock, crash/restart, and same-resource ordering remain open |

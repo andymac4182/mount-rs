@@ -194,6 +194,86 @@ impl FsDriver for ShortSourceFs {
     }
 }
 
+struct StalledResponseFs {
+    inner: MemoryFs,
+    handle: Arc<StalledReadHandle>,
+}
+
+struct StalledReadHandle {
+    started: Arc<AtomicBool>,
+    started_notify: Arc<Notify>,
+    released: Arc<Notify>,
+    closed: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl FileHandle for StalledReadHandle {
+    async fn read(&self, _buffer: &mut [u8], _position: Option<u64>) -> FsResult<usize> {
+        self.started.store(true, Ordering::SeqCst);
+        self.started_notify.notify_waiters();
+        self.released.notified().await;
+        Ok(0)
+    }
+
+    async fn write(&self, buffer: &[u8], _position: Option<u64>) -> FsResult<usize> {
+        Ok(buffer.len())
+    }
+
+    async fn stat(&self) -> FsResult<Stats> {
+        Ok(Stats {
+            dev: 0,
+            ino: 1,
+            mode: mount_rs_core::S_IFREG,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            size: 1,
+            blksize: 1,
+            blocks: 1,
+            atime_ms: 0,
+            mtime_ms: 0,
+            ctime_ms: 0,
+            birthtime_ms: 0,
+        })
+    }
+
+    async fn truncate(&self, _length: u64) -> FsResult<()> {
+        Ok(())
+    }
+
+    async fn close(&self) -> FsResult<()> {
+        self.closed.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl FsDriver for StalledResponseFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        if path == "/stalled" && flags == "r" {
+            return Ok(Arc::clone(&self.handle) as Arc<dyn FileHandle>);
+        }
+        self.inner.open(path, flags, mode).await
+    }
+}
+
 struct FailingChildStatFs {
     inner: MemoryFs,
 }
@@ -1936,6 +2016,53 @@ async fn streaming_get_finishes_when_server_closes() {
     closing.await.unwrap();
     assert_eq!(actual.as_ref(), expected.as_slice());
     assert_eq!(server.connections(), 0);
+}
+
+#[tokio::test]
+async fn server_close_cancels_stalled_response_and_closes_file_handle() {
+    let inner = MemoryFs::empty();
+    inner.write_file("/stalled", b"x").await.unwrap();
+    let started = Arc::new(AtomicBool::new(false));
+    let started_notify = Arc::new(Notify::new());
+    let released = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(StalledResponseFs {
+        inner,
+        handle: Arc::new(StalledReadHandle {
+            started: Arc::clone(&started),
+            started_notify: Arc::clone(&started_notify),
+            released,
+            closed: Arc::clone(&closed),
+        }),
+    });
+    let server = create_webdav_server(
+        fs,
+        WebdavServerOptions {
+            drain_timeout: Duration::from_secs(1),
+            ..WebdavServerOptions::default()
+        },
+    )
+    .unwrap();
+    server.listen().await.unwrap();
+
+    let response = reqwest::get(format!("{}/stalled", server.url()))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            started_notify.notified().await;
+        }
+    })
+    .await
+    .expect("response read did not start");
+
+    timeout(Duration::from_secs(1), server.close())
+        .await
+        .expect("close did not complete")
+        .expect("close");
+    assert!(closed.load(Ordering::SeqCst));
+    drop(response);
 }
 
 #[test]
