@@ -316,6 +316,17 @@ Current focused behavior:
   with N-API job `106587739639` and Rust job `106587739402` successful. This
   closes the identified bounded-reader declaration/forwarding mismatch only;
   broader upstream member parity and production acceptance remain open.
+- The native `P9Reader` convenience methods `readRread`, `readTwrite`, and
+  `readRreaddir` now preserve the same optional maximum-item argument as the
+  public codec helpers. The 44-case differential covers bounded success and
+  oversized-body errors for both helper and typed-reader surfaces, with
+  generated declarations, typecheck, syntax, fid/runtime, diff, formatting,
+  strict Clippy, and 18 focused Rust tests green. Exact SHA
+  `4ecdb63db64711e0fadf77d4612b6394f57f3f4d` passed [Native 9P run
+  `35678757675`](https://github.com/andymac4182/mount-rs/actions/runs/35678757675),
+  with N-API job `106590841909` and Rust job `106590841982` successful. This
+  closes the identified typed-reader forwarding mismatch only; broader
+  upstream member parity and production acceptance remain open.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested

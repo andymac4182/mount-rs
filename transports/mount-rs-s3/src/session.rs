@@ -4,7 +4,7 @@
 //! request to one response, owns no listener, and uses the shared
 //! mount-rs-core::FsDriver contract for all storage.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,7 +23,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, OwnedMutexGuard, mpsc, oneshot};
 
 use crate::protocol::{
     self, ByteRange, ListObjectsXml, ListPartsXml, ListedObject, ListedPart, MAX_PART_SIZE,
@@ -126,6 +126,93 @@ impl Drop for RequestTicketGuard {
         if let Ok(mut inflight) = self.inflight.lock() {
             inflight.remove(&ticket);
         }
+    }
+}
+
+struct ConditionalPutLockRegistry {
+    locks: StdMutex<HashMap<String, Arc<Mutex<()>>>>,
+}
+
+impl ConditionalPutLockRegistry {
+    fn new() -> Self {
+        Self {
+            locks: StdMutex::new(HashMap::new()),
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>, key: String) -> ConditionalPutLockGuard {
+        let registration = {
+            let mut locks = self.locks.lock().expect("conditional PUT lock registry");
+            let lock = locks
+                .entry(key.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone();
+            ConditionalPutLockRegistration {
+                registry: Arc::clone(self),
+                key: key.clone(),
+                lock,
+                active: true,
+            }
+        };
+        let guard = Arc::clone(&registration.lock).lock_owned().await;
+        let registry = Arc::clone(&registration.registry);
+        let guard_key = registration.key.clone();
+        let lock = Arc::clone(&registration.lock);
+        registration.disarm();
+        ConditionalPutLockGuard {
+            registry,
+            key: guard_key,
+            lock,
+            guard: Some(guard),
+        }
+    }
+
+    fn remove_if_unused(&self, key: &str, lock: &Arc<Mutex<()>>) {
+        let Ok(mut locks) = self.locks.lock() else {
+            return;
+        };
+        if Arc::strong_count(lock) == 2
+            && locks
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, lock))
+        {
+            locks.remove(key);
+        }
+    }
+}
+
+struct ConditionalPutLockRegistration {
+    registry: Arc<ConditionalPutLockRegistry>,
+    key: String,
+    lock: Arc<Mutex<()>>,
+    active: bool,
+}
+
+impl ConditionalPutLockRegistration {
+    fn disarm(mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for ConditionalPutLockRegistration {
+    fn drop(&mut self) {
+        if self.active {
+            self.registry.remove_if_unused(&self.key, &self.lock);
+        }
+    }
+}
+
+struct ConditionalPutLockGuard {
+    registry: Arc<ConditionalPutLockRegistry>,
+    key: String,
+    lock: Arc<Mutex<()>>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+impl Drop for ConditionalPutLockGuard {
+    fn drop(&mut self) {
+        drop(self.guard.take());
+        self.registry.remove_if_unused(&self.key, &self.lock);
     }
 }
 
@@ -380,6 +467,7 @@ pub struct S3Session {
     inflight: Arc<StdMutex<HashSet<u64>>>,
     next_ticket: Arc<std::sync::atomic::AtomicU64>,
     next_request_id: Arc<AtomicU64>,
+    conditional_put_locks: Arc<ConditionalPutLockRegistry>,
 }
 
 impl S3Session {
@@ -426,6 +514,7 @@ impl S3Session {
             inflight: Arc::new(StdMutex::new(HashSet::new())),
             next_ticket: Arc::new(AtomicU64::new(1)),
             next_request_id: Arc::new(AtomicU64::new(1)),
+            conditional_put_locks: Arc::new(ConditionalPutLockRegistry::new()),
         }
     }
 
@@ -897,6 +986,18 @@ impl S3Session {
         *stats.operations.entry(operation.to_owned()).or_default() += 1;
     }
 
+    async fn acquire_conditional_put_lock(
+        &self,
+        target: &ObjectTarget,
+        headers: &[HeaderEntry],
+    ) -> Option<ConditionalPutLockGuard> {
+        if !has_put_conditionals(headers) {
+            return None;
+        }
+        let key = format!("{}\0{}", target.bucket, target.path);
+        Some(self.conditional_put_locks.acquire(key).await)
+    }
+
     async fn list_buckets(&self) -> S3Result<S3Response> {
         let mut buckets = Vec::new();
         for name in self.bucket_names() {
@@ -1052,6 +1153,9 @@ impl S3Session {
         if !aws_chunked_body(&head.headers) {
             validate_declared_length(&head.headers, body.len())?;
         }
+        let _conditional_lock = self
+            .acquire_conditional_put_lock(target, &head.headers)
+            .await;
         let existing = driver.stat(&target.path).await.ok();
         check_put_conditionals(existing.as_ref(), &head.headers)?;
         let body = decode_request_body(
@@ -1112,6 +1216,9 @@ impl S3Session {
         body: S3RequestBody,
         verified: Option<&sigv4::VerifiedRequest>,
     ) -> S3Result<S3StreamResponse> {
+        let _conditional_lock = self
+            .acquire_conditional_put_lock(target, &head.headers)
+            .await;
         reap_staging(&driver, self.options.multipart_staging_ttl_ms).await?;
         let existing = driver.stat(&target.path).await.ok();
         check_put_conditionals(existing.as_ref(), &head.headers)?;
@@ -3046,6 +3153,12 @@ fn check_put_conditionals(existing: Option<&Stats>, headers: &[HeaderEntry]) -> 
         return Err(S3Failure::s3("PreconditionFailed"));
     }
     Ok(())
+}
+
+fn has_put_conditionals(headers: &[HeaderEntry]) -> bool {
+    header_value(headers, "if-match").is_some()
+        || header_value(headers, "if-none-match").is_some()
+        || header_value(headers, "if-unmodified-since").is_some()
 }
 
 fn check_create_only(headers: &[HeaderEntry]) -> bool {
