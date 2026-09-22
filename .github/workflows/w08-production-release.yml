@@ -38,6 +38,8 @@ jobs:
             tests/tidb/production-secrets-policy.json
           node scripts/verify-w08-production-backup.mjs \
             tests/tidb/production-backup-policy.json
+          node scripts/verify-w08-production-upgrade.mjs \
+            tests/tidb/production-upgrade-policy.json
 
   build:
     name: Build ${{ matrix.label }} production candidate

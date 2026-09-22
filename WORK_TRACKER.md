@@ -5297,6 +5297,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   second region, provider recovery drill or production approval.
   *(Implementation/static qualification; provider and production evidence
   remain external.)*
+- [x] W08.40 **External upgrade, compatibility and rollback policy:** added
+  `scripts/verify-w08-production-upgrade.mjs` and its eight-case
+  `scripts/test-w08-production-upgrade.mjs` control over
+  `tests/tidb/production-upgrade-policy.json`. The credential-free contract
+  requires pinned current/previous component versions, all five supported
+  consumer surfaces, rehearsed wire/data-read compatibility, expand-contract
+  schema and versioned config migration, forward/backward compatibility,
+  interrupted-upgrade recovery, rolling quorum-preserving upgrade gates and
+  retained artifact/config/data rollback with writer fencing and fresh-client
+  readback. It requires a 30-day retained rollback artifact and service-owner/
+  release-owner sign-off references. Destructive migrations, missing client
+  surfaces, quorum loss, weak retention and incomplete rollback controls fail
+  closed. The checks are wired into both W08 release workflows. This is a P04
+  implementation/control boundary only; it does not prove a live upgrade,
+  rollback, provider compatibility or production approval.
+  *(Implementation/static qualification; provider and production evidence
+  remain external.)*
 
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV

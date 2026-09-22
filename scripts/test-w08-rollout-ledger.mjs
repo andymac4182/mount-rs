@@ -60,12 +60,12 @@ const cases = [
   {
     name: "premature-functional-item",
     expectedStatus: 1,
-    expectedOutput: "reason=w08-39-must-be-checked",
+    expectedOutput: "reason=w08-40-must-be-checked",
     documents: {
       ...source,
       tracker: source.tracker.replace(
-        "- [x] W08.39 **External backup, restore and DR policy:",
-        "- [ ] W08.39 **External backup, restore and DR policy:",
+        "- [x] W08.40 **External upgrade, compatibility and rollback policy:",
+        "- [ ] W08.40 **External upgrade, compatibility and rollback policy:",
       ),
     },
   },

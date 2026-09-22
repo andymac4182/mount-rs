@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "environment_class": "production-like-staging",
+  "identity_mode": "workload-identity",
+  "versions": {
+    "current": "v8.5.7",
+    "previous": "v8.5.6"
+  },
+  "clients": {
+    "surfaces": ["rust-sdk", "cli", "napi", "fuse", "nfs"],
+    "compatibility": "wire-and-data-read",
+    "matrix_rehearsed": true
+  },
+  "migration": {
+    "schema_strategy": "expand-contract",
+    "config_strategy": "versioned",
+    "forward_compatible": true,
+    "backward_compatible": true,
+    "interrupted_recovery": true
+  },
+  "upgrade": {
+    "strategy": "rolling",
+    "quorum_preserved": true,
+    "health_gate_required": true,
+    "maintenance_abort": true
+  },
+  "rollback": {
+    "artifact_retention_days": 30,
+    "config_retained": true,
+    "data_compatibility_check": true,
+    "writer_fencing": true,
+    "fresh_client_readback": true,
+    "rehearsal_required": true
+  },
+  "signoff": {
+    "runbook_ref": "docs/W08-operations-runbook.md#normal-deployment-and-promotion",
+    "roles": ["service-owner", "release-owner"]
+  }
+}
