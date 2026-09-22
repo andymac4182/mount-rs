@@ -2272,6 +2272,27 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/native/provider/W26, persistence/rollback, operations, ownership,
   and release evidence is complete.
 
+- Published S3 streaming-body response fix `d870f900370fe5a7b4235ac7e63f8c3b33efce99`:
+  `transports/mount-rs-s3/src/server.rs` now drains an abandoned request body
+  asynchronously so Hyper can send an early S3 error response without waiting
+  for the full invalid upload. The local 20/20 fragmented early-rejection
+  repetition, all 49 `mount-rs-s3` package tests, `http_oracle` compilation,
+  40-case HTTP differential, formatting, and diff checks passed. This fixes the
+  predecessor run's macOS-15-intel `Verify fragmented request early rejection`
+  failure; it does not itself close hosted acceptance or production gates.
+
+- Replacement exact-tip qualification: manual run `35692153251` targets
+  published head `d870f900` and was fully queued at the 2026-09-22 15:49 AEST
+  snapshot. Node jobs are `106631238012` (macOS-latest), `106631238033`
+  (macOS-15-intel), `106631238088` (Ubuntu), `106631237930` (ARM), and
+  `106631238113` (Windows); native FUSE is `106631238003`, native WebDAV is
+  `106631237991`, native NFS is `106631238051`, native 9P is `106631238070`,
+  Rust Ubuntu is `106631238143`, and observability is `106631238063`. Queue or
+  in-progress state is not evidence; production remains **NO-GO** until the
+  exact early-rejection and PGlite/restart steps, package/native/provider/W26,
+  persistence/rollback, operations, ownership, and release gates are terminal
+  and green.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
