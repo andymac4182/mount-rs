@@ -639,6 +639,12 @@ terminal success, while Ubuntu Node `106702902010` and native WebDAV jobs
 runner-capacity blocker, not a test failure; no current hosted native WebDAV
 result is claimable.
 
+The preserved run then completed macOS native-WebDAV job `106702902262`
+successfully: checkout, toolchain/cache, and the native WebDAV I/O command
+all passed, with only the Linux client-install step skipped by platform. The
+Ubuntu native-WebDAV job `106702902155` remains queued, so the current
+cross-platform hosted native gate is still open.
+
 The same rebuilt package also passed the pinned barrel differential, supported
 session/member differential, and current TypeScript/Rust HTTP differential:
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
