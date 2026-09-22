@@ -74,6 +74,8 @@ try {
     }),
   );
   assert.equal(readHeader(new P9Reader(version)).type, P9_RVERSION);
+  assert.ok(connection.session.stats.messages instanceof Map);
+  assert.equal(connection.session.stats.messages.get("Tversion"), 1);
 
   const response = await connection.session.handleCall(
     encodeMessage(250, 17, () => {}),
