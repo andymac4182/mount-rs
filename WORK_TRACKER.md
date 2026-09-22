@@ -1308,6 +1308,10 @@ members is accepted, while whitespace between `W/` and the quoted value is
 preserved so malformed input cannot become a false weak match. The focused
 regression and full WebDAV target pass 41/41; workspace warning-denied Clippy,
 formatting, diff checks, and the pinned 40-case differential also pass.
+Because the shared Cargo target lost artifacts during a concurrent rebuild, the
+final exact-head focused/full/Clippy proof used the fresh explicit
+`CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through
+`./scripts/cargo-shared`; the shared cache was not cleaned or deleted.
 The public `DavLockTableOptions` finite-timeout path now caps before applying
 the one-second minimum, so even `max_timeout_seconds: 0` cannot reach Rust's
 invalid `clamp(1, 0)` panic; the deterministic regression and the full 29/29
@@ -7176,7 +7180,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
-| 2026-09-22 WebDAV conditional ETag whitespace compatibility | Preserve the pinned entity-tag grammar at the `If-Match`/`If-None-Match` boundary: trim list-member OWS, but do not trim after `W/`, preventing malformed `W/ "etag"` from becoming a weak match | Focused conditional regression and full WebDAV target pass 41/41; workspace warning-denied Clippy, formatting, diff checks, and the pinned 40-case HTTP differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| 2026-09-22 WebDAV conditional ETag whitespace compatibility | Preserve the pinned entity-tag grammar at the `If-Match`/`If-None-Match` boundary: trim list-member OWS, but do not trim after `W/`, preventing malformed `W/ "etag"` from becoming a weak match | Final exact-head focused 1/1 and full 41/41 tests plus workspace warning-denied Clippy used `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through `./scripts/cargo-shared`; formatting, diff checks, and the pinned 40-case HTTP differential also pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV HTTP-date leap-second compatibility | Accept RFC 9110 `:60` seconds by normalizing only the valid seconds field to `:59`, matching the pinned oracle while preserving rejection of invalid minutes and malformed dates | Focused date-form regression and full WebDAV target 40/40, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV If-parser UTF-8 boundary safety | Probe the public `Not` grammar with UTF-8-safe access so malformed non-ASCII input such as `(éé)` returns `None` instead of panicking at a code-point boundary | Focused regression reproduced the pre-fix panic and now passes; full WebDAV target 39/39, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV XML parser character validation | Reject invalid UTF-8 and raw XML-invalid characters before tree construction, matching the pinned `invalid-character` refusal instead of preserving controls in `XmlNode` text | Focused raw-NUL parser regression and full WebDAV target 38/38, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
