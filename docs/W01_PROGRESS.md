@@ -59,7 +59,16 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P direct-facade packet at exact SHA
+The latest W01-9P direct-probe packet at exact SHA
+`7389be4d5ea4930075cf5278032614e931054620` passed [Native 9P run
+`35680542975`](https://github.com/andymac4182/mount-rs/actions/runs/35680542975):
+N-API job `106596362070` and Rust job `106596362200` both passed their Linux
+probes and supported lifecycle gates. The packet restores the oracle-shaped
+own `platform`/`reason` fields on the direct `P9ClientProbe` result while
+leaving the root automatic-probe boundary unchanged; broader W01 acceptance
+remains NO-GO.
+
+The preceding W01-9P direct-facade packet at exact SHA
 `56291e3f9b4274fec2111e4e2f88696e98f3a548` passed [Native 9P run
 `35679754417`](https://github.com/andymac4182/mount-rs/actions/runs/35679754417):
 N-API job `106593941892` and Rust job `106593942012` both passed their Linux
