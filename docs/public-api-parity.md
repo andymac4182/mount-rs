@@ -332,14 +332,14 @@ Current focused behavior:
   N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe
   plus all four ignored native lifecycle tests.
 - The mixed native/attached client-order packet at exact SHA
-  `c2f3b1a1d844eb2971185dfe3d4d72fbf611be91` adds one JS arrival ledger for
+  `d6464519838b1e38613a65910b24d317803cb870` adds one JS arrival ledger for
   `P9Server.clients`, so native-listener and `attach()` connections are returned
   in arrival order rather than by backing-store type. Its real-TCP regression
   covers native-first and attached-first order, stable native wrappers, and
   cleanup. Local focused checks passed; hosted verification is pending
   publication and production remains NO-GO.
 - The native connection close-idempotence packet at exact SHA
-  `296f0ba997260503dc219b71f4eceaaa86a62af7` memoizes the native
+  `48e5f138503ab46fb0b21d1b750b528e4e989c05` memoizes the native
   `P9Connection.close()` promise at the JavaScript boundary, matching the
   attached wrapper's and pinned oracle's idempotent teardown behavior. Its
   real-TCP regression covers concurrent/repeated/post-closure calls,

@@ -202,7 +202,7 @@ N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe plus
 all four ignored native lifecycle tests. Production remains NO-GO.
 
 The mixed native/attached client-order packet at exact SHA
-`c2f3b1a1d844eb2971185dfe3d4d72fbf611be91` adds one JS arrival ledger for the
+`d6464519838b1e38613a65910b24d317803cb870` adds one JS arrival ledger for the
 two `P9Server.clients` backing stores. Its real-TCP regression covers both
 native-first and attached-first order, stable native wrappers, and cleanup.
 Local syntax, focused order/identity/member checks, metadata/session/
@@ -210,7 +210,7 @@ observability/type checks, and the elevated `p9` server selector passed.
 Hosted verification is pending publication, so production remains NO-GO.
 
 The native connection close-idempotence packet at exact SHA
-`296f0ba997260503dc219b71f4eceaaa86a62af7` memoizes the native
+`48e5f138503ab46fb0b21d1b750b528e4e989c05` memoizes the native
 `P9Connection.close()` promise at the JavaScript boundary. Its real-TCP
 regression covers concurrent/repeated/post-closure calls, `closed`/
 `waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local focused
