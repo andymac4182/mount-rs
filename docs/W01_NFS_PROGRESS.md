@@ -67,7 +67,7 @@ semantics.
   session for the same client to make progress. `CREATE_SESSION` now echoes a
   noninitial request sequence in its reply. This is session-fenced recovery,
   not preservation of the canceled operation's exact reply or its prior
-  session; oversized completed-request replay, native-client ordering, and
+  session; cache-required oversized replies, native-client ordering, and
   crash-durable replay remain open.
 - A cached v4.1 reply now retains the effective RPC credentials from its
   original request. A changed-UID `AUTH_SYS` retry of the same slot/sequence
@@ -75,13 +75,22 @@ semantics.
   a second `REMOVE`; the original user can still replay its cached body with
   a changed AUTH_SYS machine name and target, then advance the slot. This
   checks replay-user consistency, not cryptographic authentication of
-  `AUTH_SYS` or recovery of replies too large to cache.
+  `AUTH_SYS` or recovery of cache-required oversized replies.
 - The server now retains a complete reply whenever it fits the negotiated
   reply-cache bound, even if `SEQUENCE.cachethis` is false. A real-TCP test
   removes one file with that hint unset, retries the same slot/sequence with
   a different target, and receives the original reply without deleting the
   second file; a fresh sequence then removes it. This is same-process,
-  bounded-reply replay, not crash-durable or oversized-reply recovery.
+  bounded-reply replay, not crash-durable or cache-required oversized-reply
+  recovery.
+- When `SEQUENCE.cachethis` is false and the completed reply is too large
+  for the negotiated cache bound, the server now caches a compact retry
+  marker: the original successful `SEQUENCE` result followed by
+  `NFS4ERR_RETRY_UNCACHED_REP` on the original second operation. A real-TCP
+  `REMOVE` plus large `READDIR` test proves the marker fits a 128-byte cache,
+  repeats byte-for-byte, never re-executes the mutation, and allows the next
+  sequence to progress. `cachethis=true` oversized replies and cache bounds
+  too small even for the marker remain open.
 - Keep the hosted native result current. Run `35658285441` completed both
   `native-nfs (macos-latest)` and `native-nfs (ubuntu-latest)` successfully:
   macOS covered native NFSv3, CLI persistence/cleanup, and SQLite hosting;
@@ -141,12 +150,13 @@ semantics.
 | 2026-09-22 | canceled mutating v4.1 COMPOUND fail-closed recovery | A real-TCP test starts `REMOVE`, lets the backend delete `/canceled-first`, then closes its connection while the backend future is still blocked and no reply is cached. Before the fix, retrying that slot/sequence on another connection returned `NFS4ERR_SEQ_MISORDERED`; now cancellation before COMPOUND completion invalidates only the affected session, so the retry with a different `REMOVE` target gets `NFS4ERR_BADSESSION` and leaves `/canceled-second` intact. The same client creates a replacement session with sequence 2, receives sequence 2 in the response as required by [RFC 8881 §18.36.3](https://www.rfc-editor.org/rfc/rfc8881.html#section-18.36.3), then successfully removes `/canceled-second`. The complete locked NFS target passed 41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, and 12 v4 wire; strict Clippy passed. | This fences a canceled, unfinished session and allows replacement-session progress; it does not recover the original reply or prove uncached completed-request replay, all partial-mutation outcomes, cross-session in-flight coordination, persistent replay/lease/handles, native-client ordering, power-loss durability, exact-tip hosted acceptance, or production acceptance |
 | 2026-09-22 | cached-reply effective-user false retry | The existing real-TCP cached `REMOVE` replay test now sends the completed request with `AUTH_SYS` UID 1000, reconnects, and retries the same slot/sequence as UID 2000. Before the fix the foreign retry received the cached original 3-result body; it now receives a SEQUENCE-only `NFS4ERR_SEQ_FALSE_RETRY` reply, and the second file remains present. A retry with the original UID/GID but a changed AUTH_SYS machine name and `REMOVE` target still receives the original cached body without re-execution, and a fresh sequence removes the second file. The full locked NFS target passed 41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, and 12 v4 wire; warning-denied Clippy, formatting, and diff checks passed. [RFC 8881 §2.10.6.1.3.1](https://www.rfc-editor.org/rfc/rfc8881.html#section-2.10.6.1.3.1) requires false-retry rejection when the effective users differ while allowing cached replay for the same user. | This compares decoded `AUTH_SYS` effective credentials on completed cached replies; it is not cryptographic identity assurance, uncached completed-request replay, crash-durable reply state, real native-client ordering, hosted acceptance, or production acceptance |
 | 2026-09-22 | bounded reply replay with `cachethis=false` | The new real-TCP case completed a `REMOVE` with `SEQUENCE.cachethis=false`, then retried the same slot/sequence with a different target. Before the fix the retry returned `NFS4ERR_SEQ_MISORDERED`; now the server retains the small original reply within the negotiated cache ceiling, returns it byte-for-byte, and leaves the second file present until a fresh sequence removes it. [RFC 8881 §2.10.6.1.3](https://www.rfc-editor.org/rfc/rfc8881.html#section-2.10.6.1.3) explicitly allows caching the full reply even when the hint is false. The full locked NFS target passed 41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, and 13 v4 wire; the direct v4 wire target passed 13/13, and warning-denied Clippy, formatting, and diff checks passed. | This handles bounded completed replies in one live process; oversized replies, canceled-request exact replies, crash-durable replay/leases/handles, real native-client ordering, power-loss durability, exact-tip hosted acceptance, and production acceptance remain open |
+| 2026-09-22 | oversized `cachethis=false` replay marker | A real-TCP `REMOVE` plus `READDIR` completed with a reply larger than the 128-byte negotiated cache bound. Before the fix a same-slot retry with a changed `REMOVE` target returned `NFS4ERR_SEQ_MISORDERED`; now it receives a cached, at-most-128-byte marker with successful `SEQUENCE` and `NFS4ERR_RETRY_UNCACHED_REP` on the original second operation. Repeated retries return identical bytes without deleting the changed target, and the next sequence removes it. [RFC 8881 §2.10.6.1.3](https://www.rfc-editor.org/rfc/rfc8881.html#section-2.10.6.1.3) describes this compact-cache option. The full locked NFS target passed 41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, and 14 v4 wire; the direct v4 wire target passed 14/14 and warning-denied Clippy, formatting, and diff checks passed. | This handles a completed `cachethis=false` reply whose marker fits the limit in one live process; `cachethis=true` oversized replies, limits below the marker size, crash-durable replay/leases/handles, real native-client ordering, power-loss durability, exact-tip hosted acceptance, and production acceptance remain open |
 
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
   41 unit tests, process restart 2, rootless wire 1, transport concurrency 3,
-  transport errors 4, lifecycle 5, v4 commit barrier 1, and v4 wire 12; the
+  transport errors 4, lifecycle 5, v4 commit barrier 1, and v4 wire 14; the
   native mount target passes its 32-way mountpoint claim test and retains 1
   explicitly ignored native test. The reconnect and pipelining rows are
   rootless userspace evidence, not native or hosted-client acceptance.
@@ -168,12 +178,12 @@ semantics.
   against `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, including
   `NfsConnection`.
 - `./scripts/cargo-shared clippy -p mount-rs-nfs -p mount-rs-napi --all-targets --locked -- -D warnings` — PASS.
-- `./scripts/cargo-shared clippy -p mount-rs-nfs --all-targets --locked -- -D warnings` — PASS for the current bounded-reply replay chunk.
+- `./scripts/cargo-shared clippy -p mount-rs-nfs --all-targets --locked -- -D warnings` — PASS for the current oversized-uncached-reply marker chunk.
 - `MOUNT_RS_NFS_NATIVE_TEST=1 ./scripts/cargo-shared test -p mount-rs-nfs --test native_mount -- --ignored --exact native_loopback_mount_round_trip --nocapture` — PASS: macOS native NFSv3 loopback mount, filesystem round trips, unmount, and bounded cleanup; 1 passed, 0 failed, 0.11s on the exact pushed tip.
 - `./scripts/cargo-shared test -p mount-rs-nfs --test transport_lifecycle --locked` — PASS: 5/5 bounded real-TCP lifecycle tests covering connection-level and server-level close over a blocked backend request, connection close while a queued request waits for the configured in-flight slot, concurrent idempotent `listen()` calls, and terminal rejection of `listen()` after `close()`.
 - `./scripts/cargo-shared test -p mount-rs-nfs --test process_restart --locked -- --exact nfs_v3_host_backend_survives_process_crash_and_restart --nocapture` — PASS: a forced child-process termination caused the replacement server to reject the old file handle with `NFS3ERR_STALE`, then replacement-server MOUNT/LOOKUP/READ recovered the `FILE_SYNC` payload from the same `HostFs` root; 1 passed.
 - `./scripts/cargo-shared test -p mount-rs-nfs --test process_restart --locked` — PASS: 2/2 forced process-restart tests. The v4.1 case rejects the old session with `NFS4ERR_BADSESSION` and both old root/file handles with `NFS4ERR_STALE`, then reopens and reads the exact `FILE_SYNC4` payload through a replacement session backed by the same `HostFs` root; the v3 case recovers its `FILE_SYNC` payload by path and rejects its old handle.
-- `./scripts/cargo-shared test -p mount-rs-nfs --test v4_wire --locked` — PASS directly and within the full locked target: 13 rootless NFSv4.1 wire cases, including two independent sessions completing distinct-file OPEN/WRITE/READ round trips, cached mutating-reply replay after TCP reconnect with cross-user false-retry rejection, bounded replay despite `cachethis=false`, a prompt busy-slot delay, independent-slot overlap under a blocked backend, expired-lease sweeping ordered behind that blocked call, and canceled-mutation session fencing with replacement-session progress; 0 failed.
+- `./scripts/cargo-shared test -p mount-rs-nfs --test v4_wire --locked` — PASS directly and within the full locked target: 14 rootless NFSv4.1 wire cases, including two independent sessions completing distinct-file OPEN/WRITE/READ round trips, cached mutating-reply replay after TCP reconnect with cross-user false-retry rejection, bounded and oversized `cachethis=false` retry paths, a prompt busy-slot delay, independent-slot overlap under a blocked backend, expired-lease sweeping ordered behind that blocked call, and canceled-mutation session fencing with replacement-session progress; 0 failed.
 - Hosted run [`35658285441`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441) — PASS for both named NFS jobs: [`macOS job 106528418544`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441/job/106528418544) passed native NFSv3, CLI persistence/cleanup, and SQLite-over-NFS; [`Ubuntu job 106528418983`](https://github.com/andymac4182/mount-rs/actions/runs/35658285441/job/106528418983) passed the privileged native NFSv3/NFSv4.1 lane and SQLite-over-NFS. The overall workflow remains non-green because unrelated jobs failed, so this is job-scoped NFS evidence rather than a whole-workflow release pass.
 
 ## Completion rule

@@ -583,7 +583,7 @@ enum Op {
         sequence: u32,
         slot: u32,
         highest: u32,
-        _cachethis: bool,
+        cachethis: bool,
     },
     ReclaimComplete(bool),
     TestStateid(Vec<Stateid4>),
@@ -1285,7 +1285,7 @@ fn parse_op(reader: &mut XdrReader<'_>) -> Result<Op, XdrError> {
             sequence: reader.u32("SEQUENCE.sequence")?,
             slot: reader.u32("SEQUENCE.slot")?,
             highest: reader.u32("SEQUENCE.highest")?,
-            _cachethis: reader.bool("SEQUENCE.cachethis")?,
+            cachethis: reader.bool("SEQUENCE.cachethis")?,
         },
         OP_RECLAIM_COMPLETE => Op::ReclaimComplete(reader.bool("RECLAIM_COMPLETE.one_fs")?),
         OP_TEST_STATEID => Op::TestStateid(reader.array(
@@ -2144,7 +2144,7 @@ impl Nfs4Session {
             sequence,
             slot,
             highest,
-            _cachethis: _,
+            cachethis,
         } = &operations[0]
         else {
             unreachable!("sequence was checked above")
@@ -2280,14 +2280,37 @@ impl Nfs4Session {
         // RFC 8881 permits caching the full reply even when sa_cachethis is
         // false. Keep bounded completed replies so a retry cannot re-execute
         // a mutation whose caller omitted the caching hint.
-        if body.len() <= session.max_cached {
+        let cached_body = if body.len() <= session.max_cached {
+            Some(body.clone())
+        } else if !*cachethis {
+            // If the full uncached reply is too large, retain SEQUENCE plus
+            // RETRY_UNCACHED_REP on the original second operation. Never
+            // execute any operation from a retry of this slot/sequence.
+            operations
+                .get(1)
+                .filter(|operation| !matches!(operation, Op::Unsupported(_)))
+                .map(|operation| {
+                    compound_body(
+                        NFS4ERR_RETRY_UNCACHED_REP,
+                        &tag,
+                        &[
+                            results[0].clone(),
+                            V4OpResult::new(operation.opnum(), NFS4ERR_RETRY_UNCACHED_REP),
+                        ],
+                    )
+                })
+                .filter(|reply| reply.len() <= session.max_cached)
+        } else {
+            None
+        };
+        if let Some(cached_body) = cached_body {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             if let Some(session) = state.sessions.get_mut(sessionid) {
                 let slot_index = *slot as usize;
                 if slot_index < session.cached.len() {
                     session.cached[slot_index] = Some(CachedReply {
                         sequence: *sequence,
-                        body: body.clone(),
+                        body: cached_body,
                         credentials: credentials.clone(),
                     });
                 }
