@@ -2759,6 +2759,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   timeout/test boundaries. Dispatch a fresh run from current `origin/main`
   after this ledger chunk; W04.2 remains historically closed, current-tip
   acceptance is pending, and production rollout remains **NO-GO**.
+- [x] W04.2 current-main qualification evidence is in progress in run
+  [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406)
+  at exact published head `c87adf7b`: ARM, macOS-latest, and macOS-15-intel
+  Node jobs are terminal success with both exact recovery steps green and
+  rollback/N-API/`providersFailed: 0` markers; Ubuntu Node `106699957273` is
+  still queued. This is 3/4 current-tip Unix evidence only and does not change
+  the historical W04.2 closure or production **NO-GO**. Inspect the Ubuntu,
+  native/package/provider/W26, and Rust lanes before promoting current-main
+  qualification.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer

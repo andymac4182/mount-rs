@@ -186,6 +186,16 @@ Production remains **NO-GO**; the next qualification must use the latest
 published mainline and close the artifact/package, persistence/rollback,
 provider-scope, observability/runbook, ownership, and release-approval gates.
 
+The next manual qualification,
+[35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406),
+targets exact published head `c87adf7b`. ARM, macOS-latest, and macOS-15-intel
+Node jobs are terminal success with both exact recovery steps green and direct
+rollback/N-API/zero-provider-failure markers; Ubuntu Node
+[106699957273](https://github.com/andymac4182/mount-rs/actions/runs/35713659406/job/106699957273)
+is still queued. This is partial current-tip evidence only, not a W04 or
+production pass. The run must finish its Ubuntu, native/package, provider/W26,
+and Rust lanes before the ledger can promote current-main qualification.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
