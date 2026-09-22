@@ -2727,6 +2727,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   27 v4 wire), strict NFS/N-API Clippy, and local macOS native NFSv3 passed.
   Hosted native v4.1, cross-process state recovery, power-loss durability,
   and production readiness remain open; W01-NFS stays NO-GO.
+- [x] W01-NFS Linux kernel NFSv4.1 native workload passed locally in the
+  existing Ubuntu 26.04 arm64 Lima VM at published `a31f072c`: exact ignored
+  test 1/1 plus three timed reruns after guest-only `nfs-common` installation.
+  No NFS mount or test mountpoint remained; the VM was returned to Stopped.
+  Commands, kernel/client prerequisites, and workload scope are in
+  `docs/W01_NFS_PROGRESS.md`. Lima evidence is not hosted CI, durable v4
+  session/replay/handle recovery, power-loss durability, or production
+  acceptance; W01-NFS remains NO-GO.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
