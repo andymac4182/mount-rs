@@ -19,7 +19,7 @@ const { ERRNO_CODES } = await upstream('src/errors.ts');
 const { P9_GETATTR_BASIC, P9_TGETATTR } = await upstream('src/9p/constants.ts');
 const { O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY } = await upstream('src/fuse/constants.ts');
 
-const build = execFileSync('cargo', [
+const build = execFileSync(`${root}/scripts/cargo-shared`, [
   'build', '--locked', '--example', 'p9_oracle', '--message-format=json',
 ], {
   cwd: root,
