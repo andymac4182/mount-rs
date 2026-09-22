@@ -424,15 +424,18 @@ cancelled before job creation with `jobs=[]`. Shared main then advanced
 through W04/W26/site documentation tips to public merge `09b554a1`, then
 through the 9P/N-API audit tip `75c149f8` and reconciled public merge
 `20330a36`. Its W08 run `35697338233` reached terminal success in
-`w08-release-policy` job `106647435583` in 2m43s; this is hosted
+`w08-release-policy` job `106647435583` in 2m43s, and later exact public run
+`35697637897` reached success in job `106648176391` in 2m41s; these are hosted
 implementation/static evidence only. Shared main then advanced through 9P
 audit documentation tip `a3305079` and reconciled public merge `ce984ad0`;
-the exact current public run `35697911432` is pending and is not evidence.
-The current exact public tip is
-`ce984ad09a422871ad6990d9aeb26fd96107f742`. These scheduling boundaries and
+run `35697911432` reached success in job `106648941097` in 2m40s. Shared main
+then advanced through 9P hosted-gate documentation tip `cc4c65d1` and
+reconciled public merge `a73197b6`; the exact current public run
+`35698296320` is pending and is not evidence. The current exact public tip is
+`a73197b6819714791aa45065ec026fd09025c823`. These scheduling boundaries and
 source-equivalent mainline changes add no provider/native or production
 qualification. The latest retained terminal hosted W08 policy pass is
-`35697338233` / job `106647435583` for source `75c149f8`. No provider
+`35697911432` / job `106648941097` for source `ce984ad0`. No provider
 credentials, production deployment, candidate tag, canary, rollback or owner
 approval exists. P01–P09 remain open and the decision remains NO-GO.
 
