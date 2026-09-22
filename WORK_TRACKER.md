@@ -929,6 +929,17 @@ terminal all-provider/end-to-end aggregate pass. Customer Ozone deployment,
 secure topology, 99.99% availability, five-minute RPO/RTO, backup/DR and the
 release stream remain external ownership boundaries.
 
+Current W26 hosted dispatch override: targeted run `35693778762` selected the
+exact ledger revision `b3fb7988bce1edaafbd44f2adf22bb217ca99671`, containing
+TiDB code `4098c7df`. Its W26 producer jobs are base `106636116163`,
+compositions `106636116105`, TiDB `106636116197`, and FoundationDB
+`106636116201`; the aggregate was not created at capture. These jobs are
+queued/in progress state only and are not acceptance evidence. Concurrent
+mainline activity later advanced `origin/main` to `8e76aa44` and queued broad
+run `35693835337`; that newer run is recorded as a separate pending boundary.
+Poll the targeted run, retain all exact-SHA artifacts and logs, and keep W26
+**NO-GO** until every configured provider and the one-revision aggregate pass.
+
 Historical W26 TiDB session-setup chunk (published 2026-09-22): the TiDB provider now configures and
 verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
 session, disables redundant pool-reset round trips, and retains the

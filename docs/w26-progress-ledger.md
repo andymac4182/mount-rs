@@ -61,6 +61,36 @@ customer/Ozone gates are not implementation time.
 | 2026-09-22 — Code publication/reconciliation | Fetched concurrent mainline work, rebased the TiDB commit and pushed the code chunk without force-pushing. | ~0.25–0.5 h | ~0.5–1 h remote reconciliation | `4098c7df04a03f65269ef932cb921b96d6368297` verified on `origin/main`; worktree clean. |
 | 2026-09-22 — Next hosted gate | Prepare this ledger/tracker publication, dispatch the exact resulting SHA, and retrieve terminal W26 artifacts before updating acceptance. | ~0.5–1 h documentation/evidence | ~1–3 h provisional CI queue/provider startup | No production promotion; the next packet must remain fail-closed until all providers and the aggregate pass. |
 
+## Current hosted dispatch override — run `35693778762`
+
+The targeted W26 qualification was dispatched after the TiDB code and ledger
+publication. It selected the exact ledger SHA below, so it is the preferred
+packet for qualifying `4098c7df`. A concurrent mainline push later advanced the
+shared branch and queued a separate run; that newer run is recorded as pending
+only and does not replace this exact-SHA evidence boundary.
+
+| Producer | Job ID | Capture state | Acceptance rule |
+| --- | ---: | --- | --- |
+| Ozone base | `106636116163` | queued | Must pass gateway policy, block contract, failure/restart/reopen and cleanup markers |
+| Ozone compositions | `106636116105` | queued | SQLite/R2 and PGlite/R2 must each complete the fixed lifecycle and meet >=1,000 IOPS with all composition markers |
+| Ozone TiDB | `106636116197` | queued | Must pass TiDB durable/restart/bounded-listing markers and >=1,000 IOPS |
+| Ozone FoundationDB | `106636116201` | queued | Must pass strict lockfile/preflight, durable restart, bounded-listing, cleanup and >=1,000 IOPS |
+| W26 aggregate | not created at capture | pending | Must verify exact-SHA artifacts and emit the complete all-provider/end-to-end aggregate pass marker |
+
+| Field | Current value |
+| --- | --- |
+| Selected revision | `b3fb7988bce1edaafbd44f2adf22bb217ca99671` (`origin/main` when dispatched); it contains code `4098c7df` and the published W26 ledger/tracker. |
+| Run | [GitHub Actions run `35693778762`](https://github.com/andymac4182/mount-rs/actions/runs/35693778762) — status was `queued` at capture; producer jobs are not acceptance evidence until terminal. |
+| Concurrent shared tip | `origin/main` later advanced to `8e76aa4449aa7685b0c169cef809eb82bb5f4b3f`, with another broad CI dispatch `35693835337` still queued and no jobs created at capture. This is a separate newer build boundary; the exact target run above remains the code-chunk qualification record unless CI concurrency cancels it. |
+| Acceptance state | **NO-GO / pending**. Any failed, skipped, canceled, incomplete, missing-artifact or missing-marker producer/aggregate result remains fail-closed. |
+| Next action | Poll run `35693778762`, retrieve every retained W26 artifact/log and update the ledger only after the provider jobs and aggregate are terminal. |
+
+### Session time log — hosted dispatch
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — Exact-SHA W26 dispatch | Dispatched `ci.yml` from the published ledger SHA, recorded the four W26 producer job IDs, and reconciled a concurrent newer mainline dispatch. | ~0.25–0.5 h evidence coordination | ~1–3 h provisional CI queue/provider startup | Run `35693778762` is the preferred qualification packet for the TiDB chunk; production remains **NO-GO** until terminal all-provider/end-to-end evidence passes. |
+
 ## Current authority override — 2026-09-22, terminal run `35691451007`
 
 This is the newest hosted evidence boundary. The run exercised the published
