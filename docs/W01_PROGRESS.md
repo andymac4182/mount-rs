@@ -627,6 +627,12 @@ formatting, and diff checks all passed. Manual current-package CI run
 `35714570430` at `92a6539e` remains queued, so this refresh is local evidence
 only and does not change the production **NO-GO** decision.
 
+The same rebuilt package also passed the pinned barrel differential, supported
+session/member differential, and current TypeScript/Rust HTTP differential:
+`MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
+S3+WebDAV cases, including the WebDAV slice. These remain local oracle and
+loopback results; hosted current-package qualification is still queued.
+
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session.
 The fresh concurrent lock regression passes with two simultaneous writes
 without the submitted token both returning `423`; the refreshed 256-pair
