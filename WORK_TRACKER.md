@@ -3237,7 +3237,7 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source base `baaaad442bcc20fc60b75cf0f85636930e53f41e` was freshly reverified
+  Source base `f4f672dd9a722addad87b5c7af6e1bff22db1a49` was freshly reverified
   after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider, Ozone,
   FUSE, chunked, bounded teardown and restart-fencing updates with the full
   locked workspace test suite (exit 0) and strict workspace Clippy with
