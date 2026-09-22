@@ -695,6 +695,28 @@ function wrapP9Connection(P9Connection) {
   const prototype = P9Connection.prototype
   if (typeof prototype.waitClosed !== "function") return
 
+  const nativeClose = prototype.close
+  if (typeof nativeClose === "function") {
+    Object.defineProperty(prototype, "close", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value() {
+        const state = connectionState(this)
+        if (state.close === undefined) {
+          state.close = cachedPromise(
+            () => nativeClose.call(this),
+            () => undefined,
+          ).catch((error) => {
+            state.close = undefined
+            throw error
+          })
+        }
+        return state.close
+      },
+    })
+  }
+
   const nativeSession = Object.getOwnPropertyDescriptor(prototype, "session")
   if (nativeSession && typeof nativeSession.get === "function") {
     Object.defineProperty(prototype, "session", {

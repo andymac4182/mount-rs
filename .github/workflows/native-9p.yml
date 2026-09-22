@@ -85,6 +85,8 @@ jobs:
         run: node integrations/mount-rs-napi/test/p9-server-identity.mjs
       - name: Verify N-API 9P mixed client arrival order
         run: node integrations/mount-rs-napi/test/p9-server-order.mjs
+      - name: Verify N-API 9P native connection close idempotence
+        run: node integrations/mount-rs-napi/test/p9-server-connection-lifecycle.mjs
       - name: Verify automatic N-API 9P mounted I/O and cleanup
         run: |
           node_path=$(command -v node)
