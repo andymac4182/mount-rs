@@ -81,6 +81,12 @@ handle entry so the cap cannot silently break share reservations or locks.
 When every candidate is pinned the table may exceed the cap until state is
 released; with no value, the table remains uncapped for compatibility.
 
+A real-TCP cross-version regression checks both directions of this shared
+table: v3 MOUNT/CREATE handles match v4.1 PUTFH/LOOKUP/GETFH results, v4.1
+REMOVE makes the old v3 file handle stale, and v4.1 OPEN/CREATE produces the
+same handle that v3 LOOKUP returns. This is one-server userspace evidence,
+not cross-process handle persistence or native-client ordering.
+
 NFSv4.1 channel and state ceilings are available through
 `NfsSessionOptions.nfs4` and the nested N-API `nfs4`/`Nfs4StateKnobs` option:
 `idmap`, `leaseSeconds`, `maxSessions`, `maxForeSlots`, `maxOperations`,

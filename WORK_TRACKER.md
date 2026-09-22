@@ -25,6 +25,36 @@ W26 continues to own Ozone compatibility and qualification only; customers
 deploy Ozone, backup/DR remains with Ozone/customer ownership, and releases
 remain with the separate stream.
 
+Current W26 FoundationDB publication read-overlap boundary (2026-09-22):
+source commit `fba61979f1f6c9858026cd5ebc4c5d3d357f366b`
+(`perf(w26): overlap FoundationDB publication reads`) is now on `origin/main`.
+The hot metadata publication still uses one
+transaction/read version, lease/fence predicate, revision CAS, shared
+authority time and fail-closed ambiguous-commit handling; the lease,
+manifest and authority reads are only polled concurrently. The direct
+`futures-util` dependency and root lockfile entry are included in that source
+chunk. Formatting, diff checks, FoundationDB feature lib/test-target checks,
+strict Clippy and portable feature-off tests pass; focused native tests reach
+only the missing `fdb_c` linker gate. Security scan
+`26c525f1-03bc-4a3a-9c91-b7577eab8316` has complete changed-file coverage
+and zero findings. The prior run `35712159705` tested the ancestor
+`ff0ccfdd`, not `fba61979`, so a fresh exact-head Ozone run is required before
+promoting any performance result. Production remains **NO-GO** until the new
+source passes all feasible provider rows at the hard 1,000-IOPS/drive target,
+the aggregate contains every end-to-end marker, and customer/Ozone security,
+Tier-1 99.99% SLO, five-minute RPO/RTO and backup/DR evidence are closed.
+W26 continues to own compatibility and qualification only; customers deploy
+Ozone, backup/DR remains Ozone/customer owned, and releases remain with the
+separate stream.
+
+Fresh exact-head qualification run `35715790619
+<https://github.com/andymac4182/mount-rs/actions/runs/35715790619>` is now
+queued from `main` at workflow head
+`af7e73dfb7f54a31c1a91be829238571950a48e1`; source
+`fba61979f1f6c9858026cd5ebc4c5d3d357f366b` is an ancestor and therefore
+included. Its SQLite, PGlite, TiDB, FoundationDB and aggregate jobs have no
+terminal result yet, so no performance or end-to-end result is promoted.
+
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
 (`perf(w26): avoid redundant FoundationDB chunk clears`) is now on
@@ -1061,7 +1091,7 @@ complete.
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
 | W05 | Cloudflare R2 | Immutable candidate `7efded54` is locally green through the current Rust workspace/NFS/S3/Clippy suite, dyld-safe macOS N-API package load, full Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths. Same-SHA CI `35714144497`, Fault `35714146067`, W04 `35714141926`, W07 `35714147247`, W08 policy `35714144646`, W08 targets `35714146811`, and Native 9P `35714145176` are queued on the candidate branch; the prior candidate failure remains classified in the ledger. Live R2/AWS are intentionally held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest exact-tip terminal cross-platform qualification packet is green at [run `35709640688`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688) / exact source `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`, Linux job `106686845348`, macOS job `106686845149`, aggregate job `106690432291`; the RustFS lockfile refresh removed the hosted `--locked` metadata blocker; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, 30-second/120-second heartbeat, reconciled stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the repaired aggregate verifier emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 3,075µs, p95/p99 317,846µs and 39.06 ops/s, ten-round soak p95/p99 was 15,203–576,001µs at 7.51–254.49 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 338.55 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10686686017`, macOS artifact ID `10685929115` and aggregate artifact ID `10686210962` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. This is exact-tip hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest current-public-main exact-tip terminal cross-platform qualification packet is green at [run `35712676265`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265) / exact source `ff5cc58188d9783a80de96698a187e1f6416b83e`, Linux job `106696766067`, macOS job `106696766203`, aggregate job `106702286990`; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, authority heartbeat/stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,311µs, p95/p99 37,919µs and 164.77 ops/s, ten-round soak p95/p99 was 9,841–17,582µs at 269.41–330.32 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 716.30 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10688222438`, macOS artifact ID `10688396103` and aggregate artifact ID `10688622703` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. This is current-public-main hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -2378,6 +2408,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   and diff checks pass locally. `AUTH_SYS` remains client-asserted identity;
   native-client ordering, crash/power-loss durability, exact-tip hosted
   acceptance, and W01-NFS production readiness remain open.
+- [x] W01-NFS now has bidirectional real-TCP shared-handle lifetime evidence:
+  v3 MOUNT/CREATE handles match v4.1 PUTFH/LOOKUP/GETFH; v4.1 REMOVE makes
+  the old v3 handle stale; and v4.1 OPEN/CREATE matches v3 LOOKUP. The full
+  locked NFS target passes 42 unit and all applicable integrations including
+  21 v4 wire; pinned upstream parity passes 266 with 18 explicit skips, and
+  strict NFS Clippy plus formatting/diff checks pass. The opt-in native macOS
+  NFSv3 round trip passed on refreshed base `4376c07d`. Cross-process handle
+  persistence, native-client ordering, crash/power-loss durability, exact-tip
+  hosted acceptance, and W01-NFS production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -3745,6 +3784,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   only; live macOS FoundationDB service/cluster, native mount, clean install,
   signing and package acceptance remain W07.5 gates.
 
+  The current-public-main follow-up is green in
+  [35712676265](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265)
+  at exact revision `ff5cc58188d9783a80de96698a187e1f6416b83e`, with Linux job
+  `106696766067`, macOS job `106696766203` and aggregate job `106702286990`.
+  Linux passed the complete durable FoundationDB/RustFS, Node/N-API,
+  Linux CLI/FUSE, service-restart, authority-heartbeat/stats, ten-round soak
+  and bounded-workload lane; macOS passed the FoundationDB provider/test,
+  native CLI lifecycle, N-API feature compile and bound-provenance lane; the
+  aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS provenance=bound`.
+  Independent provenance, workload, summary-replay, platform,
+  production-packet and rollout-ledger validators passed. This refresh
+  strengthens current-head qualification evidence only; live macOS
+  service/cluster, native mount, clean install, signing and package
+  acceptance remain W07.5 gates.
+
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
@@ -3768,6 +3822,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   latency spread is qualification telemetry rather than production capacity
   evidence; live production identity, recovery, observability, owner and
   release gates remain open.
+
+  The current-public-main refresh is green in
+  [35712676265](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265)
+  at exact revision `ff5cc58188d9783a80de96698a187e1f6416b83e`, with Linux job
+  `106696766067`, macOS job `106696766203` and aggregate job `106702286990`.
+  Linux passed durable FoundationDB/RustFS metadata and chunk composition,
+  service restart and authority republish, fresh-client reopen, RustFS
+  integration, heartbeat/stats, ten-round soak and the 400-iteration,
+  64-concurrency, 4 KiB workload; all 1,200 lifecycle operations succeeded
+  at 716.30 IOPS with zero timeouts or cleanup failures. Independent
+  provenance, workload, summary-replay, platform, packet and ledger
+  validators passed. This remains hosted qualification telemetry, not
+  production identity, recovery, observability, capacity, owner or release
+  evidence.
 
   The local arm64 durable qualification run on 2026-09-21 used the
   `foundationdb-soak-durable` composition name, three pinned FoundationDB
@@ -4633,13 +4701,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     production evidence records.
 
     The latest W07.7 qualification checkpoint is hosted run
-    [35709640688](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688)
-    at exact revision `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`. All three
-    hosted jobs were terminally green and the independent production-packet
-    and rollout-ledger validators passed, but the retained packet still has
-    seven open production gates and zero evidence records. This is a stronger
-    cross-platform qualification result, not a production PASS; W07.3, W07.5
-    and W07.7 remain open pending live credentials, platform/deployment,
+    [35712676265](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265)
+    at exact revision `ff5cc58188d9783a80de96698a187e1f6416b83e`, with Linux
+    job `106696766067`, macOS job `106696766203` and aggregate job
+    `106702286990` all terminally green. The independent provenance,
+    workload, summary-replay, platform, production-packet and rollout-ledger
+    validators passed, but the retained packet still has seven open
+    production gates and zero evidence records. This is current-public-main
+    cross-platform qualification, not a production PASS; W07.3, W07.5 and
+    W07.7 remain open pending live credentials, platform/deployment,
     recovery, observability, capacity and named-owner evidence.
 
   The previous current-main source gate on 2026-09-22 tested revision `3cd4377` and
@@ -7461,8 +7531,10 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV current rebuilt oracle parity refresh | Current rebuilt package passed the pinned barrel and supported session/member differentials with `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921`; `scripts/check-http-parity.mjs` passed 40 paired S3+WebDAV cases | Local pinned-oracle and loopback parity only; hosted current-package qualification remains queued and live-provider, power-loss/crash durability, durable locks, and stronger same-resource ordering remain open |
+| 2026-09-22 WebDAV current N-API package/build refresh | Current release addon built with `CI=true CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-current-napi pnpm --dir integrations/mount-rs-napi build`; WebDAV-only N-API phase, typecheck, lifecycle, 64-pair session/network concurrency, NodeFs/SQLite provider/reopen/crash/in-flight recovery, structural durability, Rust 41/41, strict Clippy, formatting, and diff checks passed at `c57e2ea3` | Local current-package evidence only; manual current-package run `35714570430` at `92a6539e` is queued, and live-provider, power-loss/crash durability, durable locks, and stronger same-resource ordering remain open |
 | 2026-09-22 WebDAV live-provider admission refresh | Latest completed protected AWS run `35712627727` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`; latest completed R2 run `35713249887` stopped at `R2 CI monthly run cap already exceeded: count=362 limit=20` and skipped live integration, while newer R2 run `35713639700` remained queued | No live AWS/R2 service PASS is claimable; protected configuration, R2 budget reset, power-loss/crash durability, durable locks, and stronger same-resource ordering remain open |
-| 2026-09-22 WebDAV manual hosted native qualification | The non-canceling manual CI run `35711153805` at exact SHA `232443e133abf7c8f20f6ffec5a2a22a747270e0` passed native WebDAV on macOS and Ubuntu (jobs `106691801834` and `106691802073`); no WebDAV files changed through current `91ce4233ad324323284c3b5240e97aa8cea4ed22` | Hosted native mounted-I/O is closed for this slice only; the aggregate run is nonterminal on unrelated jobs, and live-provider, power-loss/crash durability, durable-lock, and stronger same-resource-ordering gates remain open |
+| 2026-09-22 WebDAV manual hosted native qualification | The non-canceling manual CI run `35711153805` at exact SHA `232443e133abf7c8f20f6ffec5a2a22a747270e0` passed native WebDAV on macOS and Ubuntu (jobs `106691801834` and `106691802073`); no WebDAV files changed through current `fba61979f1f6c9858026cd5ebc4c5d3d357f366b` | Hosted native mounted-I/O is closed for this slice only; the aggregate run is nonterminal on unrelated jobs, and live-provider, power-loss/crash durability, durable-lock, and stronger same-resource-ordering gates remain open |
 | 2026-09-22 WebDAV current mainline workspace baseline | Current mainline has no WebDAV changes after the tested `515bdc00792a62403b0ee7b94e904434d067f43b` base; `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-workspace-515 ./scripts/cargo-shared test --workspace --all-targets --locked` completed successfully, including WebDAV 41/41 with the privileged native mount target explicitly ignored | Fresh local workspace evidence only; it does not promote local tests to hosted, live-provider, power-loss, durable-lock, crash/restart, or stronger same-resource-ordering acceptance |
 | 2026-09-22 WebDAV conditional ETag whitespace compatibility | Preserve the pinned entity-tag grammar at the `If-Match`/`If-None-Match` boundary: trim list-member OWS, but do not trim after `W/`, preventing malformed `W/ "etag"` from becoming a weak match | Final exact-head focused 1/1 and full 41/41 tests plus workspace warning-denied Clippy used `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through `./scripts/cargo-shared`; formatting, diff checks, and the pinned 40-case HTTP differential also pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV HTTP-date leap-second compatibility | Accept RFC 9110 `:60` seconds by normalizing only the valid seconds field to `:59`, matching the pinned oracle while preserving rejection of invalid minutes and malformed dates | Focused date-form regression and full WebDAV target 40/40, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |

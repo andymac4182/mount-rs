@@ -603,7 +603,7 @@ at exact SHA `232443e133abf7c8f20f6ffec5a2a22a747270e0` also passed the
 [macOS native-WebDAV job `106691801834`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805/job/106691801834)
 and [Ubuntu native-WebDAV job `106691802073`](https://github.com/andymac4182/mount-rs/actions/runs/35711153805/job/106691802073).
 No WebDAV files changed between that tested SHA and current mainline
-`91ce4233ad324323284c3b5240e97aa8cea4ed22`; this qualifies the hosted native
+`fba61979f1f6c9858026cd5ebc4c5d3d357f366b`; this qualifies the hosted native
 mounted-I/O slice only. A fresh full locked workspace suite also passed locally
 with `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-workspace-515`; live providers,
 power-loss/crash durability, durable locks, and stronger same-resource ordering
@@ -616,6 +616,22 @@ stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while [Cloudflare R2 run
 stopped at `R2 CI monthly run cap already exceeded: count=362 limit=20` and
 skipped live integration; newer R2 run `35713639700` at `c87adf7` remained
 queued. No live AWS/R2 service PASS is claimable.
+
+At tested checkout `c57e2ea36f3f30e36a3f26a4ca2ecf88893c7ba5`, the fresh
+release N-API build using `scripts/build-native.mjs` passed in
+`/private/tmp/mount-rs-w01-webdav-current-napi`. The WebDAV-only N-API phase,
+typecheck, lifecycle, 64-pair direct-session/network concurrency, NodeFs/SQLite
+provider and network matrices, orderly reopen, process-crash and in-flight PUT
+recovery, structural-driver durability, Rust WebDAV 41/41, strict Clippy,
+formatting, and diff checks all passed. Manual current-package CI run
+`35714570430` at `92a6539e` remains queued, so this refresh is local evidence
+only and does not change the production **NO-GO** decision.
+
+The same rebuilt package also passed the pinned barrel differential, supported
+session/member differential, and current TypeScript/Rust HTTP differential:
+`MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
+S3+WebDAV cases, including the WebDAV slice. These remain local oracle and
+loopback results; hosted current-package qualification is still queued.
 
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session.
 The fresh concurrent lock regression passes with two simultaneous writes
@@ -1395,6 +1411,8 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-NFS | Corrected the shared RPC router's unsupported NFS version response from v3-only `3..3` to the actual v3..v4 range. The pre-fix real-TCP regression failed, then passed 1/1 with MOUNT, program, RPC-version, auth, valid v3/v4, and shared-stat boundaries; full locked NFS passed 41 unit and all applicable integrations including 20 v4 wire, pinned upstream parity passed 266 with 18 explicit skips, affected strict Clippy, N-API release compilation/typecheck, formatting, and diff checks passed | — | 75% W01.4 planning view | Direct N-API runtime assertion remains unqualified locally because the built macOS addon fails `dlopen` with mis-aligned LINKEDIT; native/hosted ordering, crash/power-loss durability, exact-tip hosted acceptance, and W01 production acceptance remain NO-GO |
 | 2026-09-22 | W01-NFS | Added a bounded stalled-reply close regression: two pipelined MOUNT NULL calls with `max_in_flight=1` and an unread 16-byte reply buffer leave only the first call dispatched; stopping the connection cancels its blocked writer and the queued call without a spurious transport callback. The focused test and full locked NFS target passed (42 unit tests and all applicable integrations), with strict Clippy, formatting, and diff checks green | — | 75% W01.4 planning view | This is local userspace backpressure/close evidence, not native-client ordering, cross-process concurrency, crash/power-loss durability, exact-tip hosted acceptance, or production readiness; W01 remains NO-GO |
 | 2026-09-22 | W01-NFS | The shared router and direct v3/v4 paths now reject malformed `AUTH_SYS` bodies as RPC `AUTH_BADCRED` before dispatch. The pre-fix-failing real-TCP regression covers five malformed and three valid controls, including nonempty `AUTH_NONE` as RFC 5531 permits; the rebuilt release addon passes direct unified/v3/v4 assertions. Full locked NFS (42 unit plus integrations), pinned upstream parity (266 pass, 18 explicit skips), full N-API server integration, generated typecheck, strict affected Clippy, formatting, and diff checks pass | — | 75% W01.4 planning view | `AUTH_SYS` is client-asserted, not cryptographic identity; native-client ordering, crash/power-loss durability, exact-tip hosted acceptance, and production acceptance remain open. W01 stays NO-GO |
+
+| 2026-09-22 | W01-NFS | A real-TCP cross-version regression proves shared handle identity and lifetime in both directions: v3 MOUNT/CREATE handles work through v4.1 PUTFH/LOOKUP/GETFH, v4.1 REMOVE stales the old v3 handle, and v4.1 OPEN/CREATE matches v3 LOOKUP. Full locked NFS passes 42 unit and all applicable integrations including 21 v4 wire; pinned parity passes 266 with 18 explicit skips; strict NFS Clippy, formatting, and diff checks pass. The opt-in macOS kernel NFSv3 round trip passed on refreshed base `4376c07d` | — | 75% W01.4 planning view | Same-server userspace handle behavior is not cross-process handle persistence, native-client ordering, crash/power-loss durability, exact-tip hosted acceptance, or production readiness; W01 remains NO-GO |
 
 ## Definition of W01 complete
 

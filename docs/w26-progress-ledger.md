@@ -5,6 +5,48 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, FoundationDB publication read-overlap chunk
+
+This is the newest implementation boundary. Source commit
+[`fba61979f1f6c9858026cd5ebc4c5d3d357f366b`](https://github.com/andymac4182/mount-rs/commit/fba61979f1f6c9858026cd5ebc4c5d3d357f366b)
+(`perf(w26): overlap FoundationDB publication reads`) is on `origin/main`.
+The FoundationDB metadata publication still uses one transaction, read
+version, lease/fence predicate, revision CAS, shared authority time, retry
+policy and fail-closed ambiguous-commit handling; only the three independent
+read futures are polled together. The direct `futures-util` dependency and
+root lockfile entry are part of the same chunk.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Source implementation | **PUBLISHED / 100% for this chunk** | `fba61979` is verified at the detached checkout and `origin/main`; `cargo fmt --all -- --check` and `git diff --check` pass. | Requalify the real Ozone/provider path on this exact source. |
+| FoundationDB Rust compile/test targets | **PASS** | `./scripts/cargo-shared check -p mount-rs-foundationdb --features foundationdb --lib`; the same with `--tests --locked`; strict feature Clippy with `-D warnings`; and portable feature-off package tests pass. | Hosted/native runtime evidence remains required. |
+| FoundationDB native unit execution | **BLOCKED — native gate** | Focused feature tests compile through the new futures dependency and reach only the linker failure `ld: library 'fdb_c' not found`; no Rust diagnostic or test assertion failure was produced. | Supply/install the FoundationDB client library on the native runner or rely on the hosted FoundationDB job; do not convert this to a provider pass. |
+| Security diff scan | **PASS — 0 findings** | Scan `26c525f1-03bc-4a3a-9c91-b7577eab8316` has complete changed-file coverage for `Cargo.toml` and `src/lib.rs`, snapshot `codex-security-snapshot/v1:sha256:cc4d0d02c1e8b528faa28ec9a7b44d7b5265e1e1e6980aab03c4bdd4f4d34e90`, findings SHA `0f77c368b78a180616894b3742f133a9ece9fff3b2215c6a736579185e6b636b`, coverage SHA `16970263a466a591c8b21afb371132472800dcbda67499c8b90d6951561f4bb1`. | Customer certificate/IAM, secret rotation, tenant isolation and provider-native controls remain separate production gates. |
+| Fresh exact-head Ozone qualification | **PENDING — run `35715790619`** | Manual CI run [`35715790619`](https://github.com/andymac4182/mount-rs/actions/runs/35715790619) has workflow head `af7e73dfb7f54a31c1a91be829238571950a48e1`; `fba61979f1f6c9858026cd5ebc4c5d3d357f366b` is an ancestor, so the published optimization is included. All four provider jobs are queued and no result is promoted. | Wait for terminal SQLite, PGlite, TiDB, FoundationDB and aggregate jobs; retain exact artifacts and classify provider/native/customer gates separately. |
+| Prior hosted producer checkpoint | **PARTIAL / not this source** | Run `35712159705` workflow head `844f4032c857bc5033ab04fd0f853b3f66a25ab2` contains the prior `ff0ccfdd` source, not `fba61979`; its retained FoundationDB/TiDB rows are recorded in the next authority section below and remain useful diagnosis only. | Keep prior metrics as diagnosis only; accept no performance result for this chunk until run `35715790619` is terminal. |
+| Production readiness | **NO-GO** | The previous provider rows missed `1000` IOPS/drive, and this new source has no hosted evidence yet. Tier-1 `99.99%` reliability, five-minute RPO/RTO, customer-deployed Ozone security and customer/Ozone-owned backup/DR remain open. | Continue W26-owned implementation/qualification until all feasible providers and the end-to-end packet pass; releases remain with the separate stream. |
+
+### Work-item delta and provisional estimates
+
+| Work item | Status / completion after this chunk | Evidence and remaining action | Provisional engineering time / external blocker |
+| --- | --- | --- | --- |
+| W26.3c — FoundationDB/R2 composition | **OPEN / 100% implementation; hosted requalification in flight** | The publication read window is now overlapped without weakening the metadata transaction boundary. Run `35715790619` includes `fba61979` as an ancestor and must show functional markers and `>=1000` IOPS. | 0.5–1.5 d per qualification/remediation cycle; hosted FoundationDB image/client, Ozone/R2 latency and runner capacity are external. |
+| W26.7 — security/configuration policy | **OPEN for production / 100% source-diff security gate for this chunk** | Scan `26c525f1-03bc-4a3a-9c91-b7577eab8316` is complete and zero-finding across both changed files; customer/provider security evidence remains open. | 0.5–1.5 d review; customer/Ozone security controls are external. |
+| W26.8 — requested-provider/no-skip qualification | **OPEN / 100% verifier; run `35715790619` in flight** | `fba61979` is published and included in workflow head `af7e73df`; all four provider jobs were queued at capture, so no provider or aggregate result is accepted yet. | 0.25–0.75 d review; CI scheduling/provider startup are external. |
+| W26.11/W26.14 — aggregate and end-to-end packet | **OPEN / 100% fail-closed verifier; new packet pending** | The previous aggregate boundary remains fail-closed; only a terminal all-surface, all-provider packet on `fba61979` can advance these rows. | 0.5–1.5 d review; GitHub artifacts, native runners and Ozone topology are external. |
+| W26.15 — per-drive hard IOPS gate | **OPEN / 100% verifier; prior terminal acceptance 25% (1/4)** | Do not lower, average or skip `1000`; the new source must produce four terminal finite rows at or above target. | 1.5–4 d per cycle plus queue; provider/Ozone performance and CI artifact retention are external. |
+| P14 — final integration-readiness review | **NO-GO / 50% provisional** | Source and diff-security evidence are positive, but exact-head hosted performance, aggregate, customer SLO/RPO/RTO and production security gates remain open. | 1–2 d after W26.15; customer SLO/RPO/RTO, security, backup/DR and release-stream gates remain external. |
+
+### Session time log — FoundationDB publication read-overlap chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — diagnosis/implementation | Traced the hosted FoundationDB row's publication latency and changed only the independent lease, manifest and authority reads to overlap inside the existing transaction. | ~0.5–1 h | ~0.25 h hosted artifact inspection | Transactional validation and fail-closed outcome semantics are unchanged. |
+| 2026-09-22 — local verification | Ran formatting, diff checks, feature lib/test-target checks, strict Clippy, portable tests and the focused native test; the latter remains blocked only by missing `fdb_c`. | ~0.5–0.75 h | ~0.25 h shared Cargo target wait | Compile/test-target gates pass; native runtime is explicitly not promoted. |
+| 2026-09-22 — security/publication | Completed scan `26c525f1-03bc-4a3a-9c91-b7577eab8316` with two changed surfaces and zero findings, rebased the source commit onto concurrent mainline, and pushed `fba61979`. | ~0.5–0.75 h | ~0.25–0.75 h GitHub/mainline wait | Other threads can build from `origin/main`; production remains NO-GO pending exact-head hosted evidence. |
+| 2026-09-22 — dispatch | Dispatched fresh exact-head CI run `35715790619`; workflow head `af7e73df` contains `fba61979` as an ancestor. | ~0.25 h | CI queue/execution pending | The run is bound to the published source; queued jobs are not acceptance. |
+| 2026-09-22 — next gate | Retrieve all provider and aggregate artifacts from run `35715790619`, classify performance versus functional/provider gates, and select the next safe chunk if any row remains below target. | ~0.5–1.5 d provisional | ~0.5–2 h provisional CI/provider wait | Never close W26.15/P14 on queued, skipped, partial, canceled or ancestor-only evidence. |
+
 ## Current authority override — 2026-09-22, FoundationDB chunk-clear hosted checkpoint
 
 This is the newest implementation checkpoint and hosted-qualification
