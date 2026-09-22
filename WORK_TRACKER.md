@@ -3400,6 +3400,11 @@ reproducible in a production-like environment.
   fetched mainline. The last successful release observation remains the 08:38
   AEST preview-only result. This is still an external hosted boundary, not a
   W08 implementation pass.
+  A further read-only audit at 10:38 AEST returned HTTP 404 for both W08
+  workflow-list queries, the `w08-production` environment and release surface;
+  no candidate tag was found, while both protected workflow files remained
+  present in the fetched mainline. The latest known release remains the
+  preview-only observation above. This does not close P09.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
