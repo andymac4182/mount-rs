@@ -933,6 +933,25 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
+        The newer W07 candidate at exact source
+        <code>87f3cdf0</code> passed hosted run <code>35702352395</code> across
+        the durable FoundationDB/RustFS/Node/CLI/restart job, the macOS
+        FoundationDB feature-compile job, and the evidence assembly job. Its
+        bounded workload recorded <code>466.18</code> lifecycle IOPS over
+        400 iterations with 64-way concurrency and the explicit
+        <code>minimum_iops=1</code> floor; the aggregate emitted
+        <code>W07_PLATFORM_QUALIFICATION_PASS</code> with
+        <code>macos=feature-compile-only</code>. Retained Linux and macOS
+        evidence digests are
+        <code>2229862b90ca978f9a9d205ab59bb8414a4396e2d381f35380ad9df22543d5fd</code>
+        and
+        <code>84185d564272f3a360f9d20606b0c99af31162d685a9fb26b103843c4b13ceeb</code>;
+        the aggregate upload digest is
+        <code>082db52c7760bf8cad5420b0539dbf7f6658c42a6b0f572fbf3181690c9ac8ab</code>.
+        This supersedes the older terminal packet for current candidate
+        tracking, but remains feature-compile-only on macOS and does not prove
+        live macOS service/mount, production capacity, identity/ACL,
+        backup/restore, failover, observability, signing, or release approval.
       </>
     ),
     sources: [
@@ -941,7 +960,8 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698630720' },
+      { label: 'Previous hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698630720' },
+      { label: 'Latest hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35702352395' },
     ],
   },
   'aws-s3': {

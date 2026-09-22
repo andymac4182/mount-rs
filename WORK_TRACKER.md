@@ -958,6 +958,7 @@ patch):
 | Main | W01 N-API 9P native connection close idempotence | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-server-connection-lifecycle.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native `P9Connection.close()` promise at the JavaScript boundary, preserving concurrent/repeated/post-closure idempotence. The real-TCP regression covers concurrent calls, `closed`/`waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local syntax, diff, focused close/order/identity/member checks, metadata/session/observability/type checks, and the elevated `p9` selector passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the native close-idempotence check and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 N-API 9P mounted view identity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `1a18c7b82285ea557956cb35d15f1af189803d4d` caches `Mounted.server` and `Mounted.connection` wrappers and reuses the matching `P9Server.clients` wrapper by stable transport id. The direct native-mount regression covers repeated getter identity, cross-view connection identity, native stream/peer/session views, and cleanup. Local syntax, focused lifecycle checks, metadata/session/observability/type checks, and the elevated 9P selector passed; published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 9P supported-scope closure audit | `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md`, `docs/public-api-parity.md`, `transports/mount-rs-9p/README.md` | Current audit classifies the advertised codec/session/server/connection/attach/mount slice as qualified by local evidence and published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` / [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373), N-API job `106667799214`, and Rust job `106667799016`. Legacy/auth/xattr families, unadvertised upstream members, native-listener Node-stream identity, root automatic cross-transport signals, process-crash/arbitrary kernel-reset recovery, and non-Linux native mounts are explicit scope boundaries; broader oracle parity remains partial by design and overall W01/release remains NO-GO |
+| Main | W01 dedicated hosted upstream 9P conformance gate | `.github/workflows/native-9p.yml`, `tests/upstream/p9-conformance.test.mjs`, `examples/p9_oracle.rs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | Published SHA `a6b3e2aa10cfdb3ee730d41c5886436b02c260de` adds the revision-matched Linux `upstream-9p` job and routes the fixture through `scripts/cargo-shared`. [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973) passed upstream job `106680012604` with `144 passed` and `2 skipped` root-gated ownership cases out of `146`; N-API job `106680012485` and Rust job `106680013203` also passed. Local YAML/syntax, focused oracle/public-surface, and diff checks passed; local full-suite execution is blocked before tests by the Mac's unaccepted Xcode license. The documented legacy/auth/xattr, broader upstream member, supervisor-owned crash/reset, and non-Linux native-mount boundaries remain explicit, so production remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -2723,6 +2724,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   format, strict Clippy, and locked workspace tests. TLS compile/policy
   `106658534528` and Ubuntu native NFS `106658534834` also passed their
   terminal support gates. Production remains **NO-GO**.
+- The same run was cancelled after Ubuntu Rust spent more than an hour in
+  `cargo test --workspace --all-targets --locked` without a terminal result;
+  comparable successful Rust jobs finish in roughly 1.5–3 minutes. W26 job
+  `106670761354` independently failed closed with
+  `W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-artifact-source-checkout-dirty`
+  because the composition tee log was created inside the checkout before
+  provenance capture. The follow-up workflow fix moves the W26 composition
+  log/JSON to `$RUNNER_TEMP` and bounds the Rust matrix at 25 minutes;
+  `benchmarks/storage/test.mjs`, the rollout policy checks, YAML parsing, and
+  diff checks pass locally. A fresh hosted run is required; W04 current-tip
+  acceptance and production remain **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
@@ -4163,9 +4175,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
   production gates or external-drill boundary. This is an internal tracking
   invariant, not production acceptance.
-  `scripts/test-w07-rollout-ledger.mjs` runs six regression cases for the
-  current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
-  complete-GO states; these cases validate the tracking control only.
+  `scripts/test-w07-rollout-ledger.mjs` runs eight regression cases for the
+  current NO-GO, premature-GO, missing-gate, missing-drill, incomplete
+  P0–P14 ledger and synthetic complete-GO states; these cases validate the
+  tracking control only. The verifier also requires exactly one row for every
+  P0–P14 gate, rejects a terminal gate status while the decision is **NO-GO**,
+  and requires every gate to be terminally accepted before a **GO** decision.
   The hosted workflow runs `scripts/test-w07-qualification-log.mjs` with
   eight credential-free verifier cases. The qualification log verifier
   requires the exact accepted configuration shape, both expected negative
@@ -6253,6 +6268,24 @@ listing a source does not mean it has been reviewed or its code can be reused.
   The credential-free template, bucket-policy, CI-config, and CI-environment
   contract fixtures also passed. Explicitly ignored native/service rows and
   all production deployment gates remain separate prerequisites.
+- [x] The current credential-free W25 harness contract chunk added a
+  fail-closed validator and synthetic regression matrix for W25.2/W25.3.
+  `AWS_S3_TEST_CONFIG_TEST_PASS cases=10` passed without invoking AWS, Cargo,
+  or a provider. The matrix covers profile and explicit temporary-credential
+  inputs, role/account binding, missing or mismatched expected accounts,
+  incomplete or ambiguous credential sources, endpoint overrides, unsafe
+  prefixes, and secret-safe output. The local live harness now runs this guard
+  before AWS CLI access and requires `AWS_S3_TEST_EXPECTED_ACCOUNT_ID` whenever
+  an optional role ARN is supplied.
+- [x] The hosted AWS workflow now triggers and hashes the harness validator
+  and its offline test, and runs the 10-case contract preflight before
+  authentication. Existing credential-free rollout fixtures also passed in
+  the same verification set: `AWS_S3_CI_CONFIG_TEST_PASS cases=7`,
+  `AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`,
+  `AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`, and
+  `AWS_S3_TEMPLATE_CONTRACT_PASS statements=5`. These are fail-closed
+  safeguards only; they do not replace live W25.3 service acceptance or
+  production deployment approval.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

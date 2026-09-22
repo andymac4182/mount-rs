@@ -155,9 +155,17 @@ failed its rootless-kernel operation step, and the TiDB, Ozone/TiDB,
 TiDB/RustFS, Ozone/FoundationDB, and W26 lanes are not green acceptance
 evidence. The Ubuntu Rust workspace test was still in progress at the latest
 inspection, while the package aggregate was skipped after the Windows failure.
-The run therefore remains a qualification diagnostic and production remains
-**NO-GO**; terminal job metadata is not promoted to a provider or production
-pass when the run logs are unavailable or a prerequisite is skipped.
+The run later became terminal `cancelled` after the Ubuntu Rust test exceeded
+an hour without a result; this is a hosted hang diagnostic, not a Rust pass.
+The W26 packet job
+[106670761354](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106670761354)
+also failed closed because the composition benchmark's in-checkout tee log
+made its source provenance dirty. The follow-up workflow moves that evidence
+under `$RUNNER_TEMP` and bounds the Rust matrix, but requires a fresh hosted
+run for confirmation. The run therefore remains a qualification diagnostic
+and production remains **NO-GO**; terminal job metadata is not promoted to a
+provider or production pass when a prerequisite is skipped or the evidence
+contract fails.
 
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
