@@ -340,6 +340,35 @@ for (let offset = 0; offset < stream.length; offset += 3) {
 assert.deepEqual(actualFrames.map(bytes), expectedFrames.map(bytes), "9P split/coalesced frames")
 assert.equal(nativeAssembler.failed, false)
 
+async function* splitFrames() {
+  for (let offset = 0; offset < stream.length; offset += 3) {
+    yield stream.subarray(offset, offset + 3)
+  }
+}
+
+const upstreamStreamedFrames = []
+for await (const frame of upstreamProtocol.framesFrom(splitFrames())) {
+  upstreamStreamedFrames.push(frame)
+}
+const nativeStreamedFrames = []
+for await (const frame of native.framesFrom(splitFrames())) {
+  nativeStreamedFrames.push(frame)
+}
+assert.deepEqual(nativeStreamedFrames.map(bytes), upstreamStreamedFrames.map(bytes), "9P async framesFrom")
+
+const upstreamSharedAssembler = new upstreamProtocol.P9FrameAssembler()
+const nativeSharedAssembler = new native.P9FrameAssembler()
+const upstreamSharedFrames = []
+for await (const frame of upstreamProtocol.framesFrom([versionFrame, flushFrame], upstreamSharedAssembler)) {
+  upstreamSharedFrames.push(frame)
+}
+const nativeSharedFrames = []
+for await (const frame of native.framesFrom([versionFrame, flushFrame], nativeSharedAssembler)) {
+  nativeSharedFrames.push(frame)
+}
+assert.deepEqual(nativeSharedFrames.map(bytes), upstreamSharedFrames.map(bytes), "9P sync framesFrom")
+assert.equal(nativeSharedAssembler.pending, upstreamSharedAssembler.pending, "9P shared assembler pending")
+
 for (const operation of [
   (api) => new api.P9FrameAssembler(6),
   (api) => {
