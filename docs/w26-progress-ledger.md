@@ -11,8 +11,9 @@ This is the newest implementation and qualification boundary. Source commit
 [9f6041db2f8aba9301507bad24664015890295f9](https://github.com/andymac4182/mount-rs/commit/9f6041db2f8aba9301507bad24664015890295f9)
 (perf(w26): coalesce remote mutation preparation waves) is verified at both
 the detached checkout and the current origin/main history. Current
-origin/main is a107b382, which contains this source commit plus unrelated
-later work; the authoritative qualification run below is bound to the exact
+At the 21:28 AEST recheck, origin/main was 2bb846247aca02e9ce47a80a808314ca4beeed29,
+which contains this source commit plus the ledger correction and unrelated
+earlier work; the authoritative qualification run below is bound to the exact
 9f6041db source head. It adds a bounded in-flight
 preparation counter for whole-file writes so the mutation runner does not
 declare the queue idle while peer operations are still preparing immutable
@@ -60,6 +61,7 @@ their hosted acceptance percentages.
 | 2026-09-22 — security review | Ran security preflight, one-file discovery, source-backed threat review and final scan 8f4fb7da...; complete coverage and zero findings were sealed before commit. | ~0.5–0.75 h | ~0.25 h workbench finalization | No security candidate survived; customer/provider controls remain separately tracked. |
 | 2026-09-22 — hosted live recheck (21:20 AEST) | Re-polled exact-head run 35720016370: W26 provider/base/aggregate jobs remain queued; unrelated Node jobs are progressing and the workflow still has no terminal conclusion. | ~0.1 h | Hosted capacity pending | No provider, performance or aggregate result is promoted from unrelated job progress. |
 | 2026-09-22 — mainline/CI recheck (21:25 AEST) | Fetched origin/main at a107b382, which contains the W26 source commit plus unrelated W04/W07 documentation; exact-head run 35720016370 remains queued, with all W26 provider/base/aggregate jobs still queued. | ~0.1 h | Hosted capacity pending | Corrected the source ancestry wording; no provider, performance or aggregate result is promoted. |
+| 2026-09-22 — hosted recheck (21:28 AEST) | Fetched origin/main at 2bb846247aca02e9ce47a80a808314ca4beeed29 and re-polled exact-head run 35720016370. `ozone`, `ozone-compositions`, `ozone-tidb`, `ozone-foundationdb`, `tidb`, `tidb-rustfs` and `foundationdb-rustfs` remain queued; unrelated ARM Node and Windows/macOS jobs have started or completed. | ~0.1 h | Hosted capacity pending | Recorded runner progress only; no W26 provider, performance or aggregate result is promoted. |
 | 2026-09-22 — publication | Committed, rebased over concurrent mainline updates, pushed 9f6041db to origin/main, fetched again, and verified local HEAD equals remote. | ~0.25–0.5 h | ~0.25–0.75 h mainline reconciliation | Other threads can build from the exact implementation tip. |
 | 2026-09-22 — dispatch | Dispatched exact-head manual CI run 35720016370; its workflow head is exactly 9f6041db and all listed provider/base/aggregate jobs were queued at capture. | ~0.1–0.25 h | CI queue pending; provisional ~0.5–2 h | The run is the authoritative hosted gate; queued state is not acceptance. |
 | 2026-09-22 — live CI recheck (21:16 AEST) | Re-polled run 35720016370: workflow status remains queued; all four W26 provider jobs, the base Ozone job and ozone-compositions remain queued, while one unrelated ubuntu-24.04-arm Node job has started. | ~0.1 h | Hosted capacity still pending for W26 jobs | This is progress in runner allocation only; no provider, performance or aggregate result is promoted. |
