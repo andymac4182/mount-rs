@@ -900,6 +900,11 @@ complete.
 | W30 | OpenTelemetry traces, metrics and logs | Implementing: opt-in facade, boundary wiring, local collector/failure tests, benchmark and macOS qualification packet landed; external collector/Linux/Windows evidence pending | Main |
 | W31 | Per-drive mounts from one backing datastore | Deferred for future design | Unassigned |
 
+> W26 current-status note: the row above is historical summary text. The
+> authoritative current tip, exact hosted packet, every W26 work-item status
+> and production NO-GO boundary are in the latest W26 authority override
+> below, which records `origin/main=e0180c75` and the post-publication ledger.
+
 Historical W26 TiDB session-setup chunk (published 2026-09-22): the TiDB provider now configures and
 verifies `tidb_txn_mode='pessimistic'` once for each newly created private pool
 session, disables redundant pool-reset round trips, and retains the
@@ -5520,7 +5525,55 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ### W26 current authoritative status — 2026-09-22
 
-#### Latest W26 authority override — published SQLite chunk
+#### Latest W26 authority override — PGlite publication chunk
+
+The current shared build-on tip is `origin/main` at
+`e0180c75a190340f2c0a45265803de9df5605d59`. The published W26 chunk
+`e0180c75` moves successful PGlite metadata publication to one parameterized
+autocommit fenced CAS update and retains the explicit locked classification
+transaction only for zero-row outcomes. Missing rows, stale leases, revision
+conflicts, unexplained zero-row outcomes, rollback handling and fail-closed
+errors remain unchanged. Full locked workspace tests, strict workspace Clippy,
+formatting, diff checks and the focused PGlite compile/test gate passed locally;
+five server-dependent focused tests were ignored because no isolated PGlite
+server was available on this host. Security scan
+`6906585f-77c3-41fa-afe0-06ab4df9e2c6` is sealed with complete changed-file
+coverage and zero reportable findings.
+
+The latest hosted W26 packet is run `35689474986`, which selected exact SHA
+`1891c36375296bc3695a9d71233c624cad46445c` before `e0180c75`, so it is
+diagnostic and cannot qualify this chunk. W26 jobs are terminal: base Ozone
+`106623193674` passed; compositions `106623193668` failed with SQLite/R2
+`1,325.636778` and PGlite/R2 `766.631418` IOPS; TiDB
+`106623193474` failed at `292.606794`; FoundationDB `106623193564` failed at
+`410.703639`; aggregate `106625464560` failed closed on the missing
+`OZONE_IOPS_PASS` marker. Every row completed 1,200/1,200 lifecycle operations
+with zero timeouts and cleanup failures. The parent workflow remains
+`in_progress` only for unrelated jobs. Production remains **NO-GO** until a
+fresh exact-SHA packet closes every configured provider, all end-to-end
+markers and the aggregate on one revision.
+
+The detailed [W26 progress ledger](docs/w26-progress-ledger.md) now records
+every W26.1–W26.15 and P14 work item with status, completion percentage,
+evidence, remaining action, provisional engineering-time estimate, external
+blocker and session time. The current boundary remains: customers deploy and
+operate Ozone; W26 owns provider/client correctness and CI qualification;
+Ozone/customer teams own secure topology, capacity, 99.99% availability,
+five-minute RPO/RTO and backup/DR; another stream owns releases; CI is the
+only available qualification environment.
+
+| Current W26 gate | Status / completion | Evidence and next action |
+| --- | --- | --- |
+| W26.1–W26.2 gateway, immutable blocks, failure/restart/cleanup | **PASS / 100%** | Base job `106623193674` passed; preserve markers on the next exact SHA. |
+| W26.3a SQLite/R2 | **PASS in diagnostic packet / 100% current row** | `1,325.636778` IOPS; rerun on `e0180c75` beside all other providers. |
+| W26.3b PGlite/R2 | **FAIL / 45% performance qualification** | `766.631418` IOPS; fresh post-`e0180c75` packet required, then further safe optimization if still below target. |
+| W26.3c FoundationDB/R2 | **FAIL / 41% performance qualification** | `410.703639` IOPS; preserve durable restart/lockfile/bounded-listing evidence and requalify. |
+| W26.3d TiDB/R2 | **FAIL / 29% performance qualification** | `292.606794` IOPS; requalify and isolate remaining provider latency without changing fencing/commit semantics. |
+| W26.4–W26.14 implementation and packet controls | **IMPLEMENTED / 100%** | Policy, no-skip, fixed-profile, retention, integrity, one-revision and complete-surface controls remain fail closed; current aggregate correctly failed. |
+| W26.15 / P8 1,000 IOPS per drive | **OPEN / 95% implementation, 55% hosted qualification** | All four provider rows and the aggregate must pass on one exact revision; no averaging, skipping or threshold reduction. |
+| P14 integration-readiness review | **NO-GO / 40%** | Re-audit the complete terminal packet, then issue an explicit readiness decision; no deployment or release claim. |
+
+#### Historical W26 authority override — published SQLite chunk
 
 The latest shared build-on tip is `origin/main` at
 `1e7e75716349f1eff09fd9b77bdeb652c8d0c1b2`. It includes the tested
