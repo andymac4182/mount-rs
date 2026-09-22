@@ -303,6 +303,14 @@ Current focused behavior:
   `007e6545d1b25d708abfa10f2120f81fba59a74a` passed the same hosted N-API step
   in [Native 9P run `35682638941`](https://github.com/andymac4182/mount-rs/actions/runs/35682638941),
   job `106602684115`, with the companion Rust job `106602683880` also green.
+- That selector also covers the Unix listener policy: private-directory
+  refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
+  handshake and transport-source peer, socket cleanup, and path/port
+  exclusivity. The local elevated phase passed. The exact test commit
+  `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head
+  `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose [Native 9P run `35683716217`](https://github.com/andymac4182/mount-rs/actions/runs/35683716217)
+  passed N-API job `106606580352` and Rust job `106606580326`; the direct run
+  at the test commit was cancelled before jobs materialized and is not promoted.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

@@ -821,7 +821,7 @@ patch):
 | Main | W01 N-API 9P direct probe absence-shape parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: direct `./9p` `p9ClientProbe()` now always owns `platform` and `reason`, normalizing native `null`/omitted values to `undefined`; the direct declaration requires `platform: "linux" | undefined` and `reason: string | undefined`, while the root automatic `JsP9ClientProbe` boundary remains unchanged. Local addon/generated build, helper, required-field typecheck, syntax, and diff checks passed. Exact SHA `7389be4d5ea4930075cf5278032614e931054620` passed Native 9P run `35680542975`, N-API job `106596362070` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106596362200` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P direct `P9Platform` type export parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: direct `./9p` now exports the oracle's type-only `P9Platform = "linux"` alias and uses it in `P9ClientProbe` and `p9Platform()`; runtime behavior is unchanged. The direct type-import/use check, helper, syntax, and diff checks passed. Exact SHA `2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed Native 9P run `35681127657`, N-API job `106598109004` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106598109187` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P `P9User.uid` object-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/postbuild.mjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/servers.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: the direct/root N-API `P9User` facade preserves the oracle-required own `uid` property, using `undefined` when native identity has no numeric uid; generated direct declarations use `uid: number | undefined`. Local `pnpm build:debug`, session metadata, generated typecheck, syntax, and diff checks passed. Exact SHA `1c43f66ec570be35444055ab6adb0f841628fef6` passed Native 9P run `35681672318`, N-API job `106599754171` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106599753872` with all four ignored native lifecycle tests; the broad `node test/servers.mjs` script remains separately blocked by the Darwin NFS relisten sandbox `Operation not permitted` before 9P, so production remains NO-GO |
-| Main | W01 N-API 9P server and attached-stream lifecycle isolation | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds `MOUNT_RS_SERVER_PHASE=p9`, independently exercising real TCP server/relisten and protocol I/O, native connection metadata, attached socket and non-socket duplex ownership, duplicate attach, direct session calls, backpressure, oversized-frame rejection, write-fault teardown, and server close. Local syntax/diff checks passed; the unprivileged Darwin phase reached 9P but hit only listener relisten `Operation not permitted`, while the same phase passed with required local privileges. Exact SHA `007e6545d1b25d708abfa10f2120f81fba59a74a` passed Native 9P run `35682638941`, N-API job `106602684115` with the isolated lifecycle and automatic/direct/structural mounted I/O/cleanup, and Rust job `106602683880` with all four ignored native lifecycle tests; production remains NO-GO |
+| Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -3798,6 +3798,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider, candidate-release, registry, canary, rollback or owner-approval
   evidence, so P01–P09 remain open and the decision remains NO-GO.
 
+  The public source-equivalent checkpoint
+  `62e86dc092dfe9816ef54ca681872ff9f51d8895` passed hosted W08 release-policy
+  run `35683936652`, job `106607017325`, which completed successfully in
+  approximately 2m47s. Its rollout-ledger and release-identity/provenance steps
+  were green. This is hosted implementation/static evidence only; it does not
+  provide production topology, provider, candidate-release, registry, canary,
+  rollback or owner-approval evidence, so P01–P09 remain open and the decision
+  remains NO-GO.
+
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed
   on the insecure/inline-secret fixture, passed the pending and strict accepted
@@ -4076,6 +4085,15 @@ reproducible in a production-like environment.
   blocked by `missing_bucket` and current R2 by `count=285 limit=20`; physical
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 callback packet forwards per-key driver failures from
+  `DeleteObjects` to `S3SessionHooks.on_error` without changing its 200
+  partial-result response. The focused regression and full Rust 5/6/30/5
+  packet, warning-denied Clippy, release N-API build, callback observability,
+  session differential, 64-way/CAS concurrency, process-restart recovery,
+  typecheck, and distribution checks passed. AWS run `35683716247` remains
+  blocked by `missing_bucket` and R2 run `35683716251` by `count=294 limit=20`;
+  physical power-loss durability, broader workload bounds, and native/hosted
+  acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
