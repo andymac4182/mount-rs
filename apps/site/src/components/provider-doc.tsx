@@ -677,6 +677,15 @@ LIMIT 20;`,
         rows. Authoritative hosted runs include
         <code>35624385556</code>, <code>35627761501</code>, and
         <code>35631063978</code>; each remains revision- and scope-specific.
+        The repository now also enforces a credential-free W08.39 backup,
+        restore, and disaster-recovery policy with an eight-case regression:
+        transactionally consistent TiDB metadata snapshots, revision capture,
+        encrypted immutable/versioned blocks, isolated restore without a
+        production-writer identity, fresh-client readback, corruption,
+        partial-object and region-loss cases, bounded 60-minute RPO and
+        240-minute RTO, a second region, and named owner sign-offs are required
+        by the checked-in control. This is implementation/static qualification,
+        not a backup, restore, second-region drill, or production approval.
         Production is still NO-GO: topology, secret management/IAM, backup and
         restore, upgrade/rollback, SLOs/capacity, security sign-off, on-call,
         canary, and release-owner approval remain open. A green functional
@@ -690,6 +699,7 @@ LIMIT 20;`,
       { label: 'Durable Ozone/TiDB CI gate', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
       { label: 'TiDB progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-progress-ledger.md' },
       { label: 'TiDB production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-production-rollout.md' },
+      { label: 'W08.39 backup and restore policy', href: 'https://github.com/andymac4182/mount-rs/commit/896330a' },
     ],
   },
   foundationdb: {
