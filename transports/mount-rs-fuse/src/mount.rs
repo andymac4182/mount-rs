@@ -3531,6 +3531,37 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn zero_read_limit_and_mount_timeouts_are_rejected() {
+        let options = MountOptions {
+            max_read: Some(0),
+            ..MountOptions::default()
+        };
+        assert!(matches!(
+            validate_options(&options),
+            Err(MountError::InvalidOption(message)) if message.contains("max_read")
+        ));
+
+        let options = MountOptions {
+            init_timeout: Duration::ZERO,
+            ..MountOptions::default()
+        };
+        assert!(matches!(
+            validate_options(&options),
+            Err(MountError::InvalidOption(message)) if message.contains("timeouts")
+        ));
+
+        let options = MountOptions {
+            unmount_timeout: Duration::ZERO,
+            ..MountOptions::default()
+        };
+        assert!(matches!(
+            validate_options(&options),
+            Err(MountError::InvalidOption(message)) if message.contains("timeouts")
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn privileged_mount_data_masks_root_permissions() {
         let data = mount_data(
             &MountOptions::default(),
