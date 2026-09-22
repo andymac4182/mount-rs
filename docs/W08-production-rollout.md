@@ -195,7 +195,13 @@ missing/duplicate references, unsafe rotation and unredacted audit fixtures
 fail closed. The checks are wired into both W08 release workflows. This is a
 repository implementation/control slice of P02 only; it does not prove a
 secret-manager binding, IAM grant, rotation event, audit record or production
-approval. P02 remains open.
+approval. The implementation was published as `911157ee` in reconciled public
+merge `e86c9ccbd394df3b8ec23551691c199e1753ede2`. The local eight-case P02
+suite, shared-wrapper Cargo check, strict Clippy, rollout/evidence controls and
+workflow-shape checks passed on that merge. Hosted W08 release-policy run
+`35713249813`, job `106698749633`, exact head
+`e86c9ccbd394df3b8ec23551691c199e1753ede2`, completed successfully in 2m49s;
+this is hosted implementation/static evidence only. P02 remains open.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
