@@ -106,11 +106,12 @@ explicitly ignored, warning-denied `mount-rs-napi` Clippy passes, and the
 host-enabled release N-API build, generated typecheck, structural durable-
 driver success/500-error/501-missing-callback regression, lifecycle, 64-pair
 direct-session concurrency, and 64-pair live HTTP network/auth/streaming
-concurrency checks pass. Formatting and diff checks also pass. This is fresh
-local current-tip evidence only: manual exact-tip CI run
-`35674823787` remains queued for its macOS/Linux native WebDAV jobs, and the
-hosted/provider lifecycle, power-loss/live-provider durability, durable-lock,
-and wider ordering gates remain open.
+concurrency checks pass. Formatting and diff checks also pass. The same
+exact-tip manual CI run `35674823787` subsequently completed its macOS and
+Ubuntu native-WebDAV jobs successfully, closing that hosted native-I/O slice
+only; the overall run remains in progress, and hosted/provider lifecycle,
+hosted concurrency, power-loss/live-provider durability, durable-lock, and
+wider ordering gates remain open.
 
 The current shell has no AWS/R2/Cloudflare credential names available, so live
 provider acceptance remains an explicit external blocker; no credential values

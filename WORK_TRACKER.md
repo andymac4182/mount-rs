@@ -1151,10 +1151,11 @@ release N-API build, generated typecheck, the structural durable-driver
 success/500-error/501-missing-callback regression, lifecycle, 64-pair direct-
 session concurrency, 64-pair live HTTP network/auth/streaming concurrency,
 formatting, and diff checks all passed. Manual exact-tip CI run
-`35674823787` remains queued, including its macOS and Ubuntu native-WebDAV
-jobs, so no hosted PASS is claimable from this requalification. Hosted
-session/lifecycle/concurrency, live-provider behavior, power-loss ordering,
-durable locks, and wider ordering remain open.
+`35674823787` subsequently completed its macOS native-WebDAV job
+`106579011909` and Ubuntu native-WebDAV job `106579012075` successfully; the
+overall run remains in progress, so no full hosted PASS is claimable from this
+requalification. Hosted session/lifecycle/concurrency, live-provider behavior,
+power-loss ordering, durable locks, and wider ordering remain open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
