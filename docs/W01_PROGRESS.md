@@ -252,6 +252,18 @@ N-API job `106667799214`, and Rust job `106667799016`; the detailed decision
 is recorded in [`W01_9P_PROGRESS.md`](./W01_9P_PROGRESS.md). This narrows the
 9P claim without changing the overall W01/release **NO-GO** decision.
 
+The dedicated hosted upstream 9P conformance packet was published at exact SHA
+`a6b3e2aa10cfdb3ee730d41c5886436b02c260de`. Its `upstream-9p` job checks out
+oracle revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, builds the Rust
+fixture through `scripts/cargo-shared`, and runs the unmodified pinned TCP
+conformance suite. [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973)
+passed upstream job `106680012604` with `144 passed` and `2 skipped` explicit
+non-root ownership cases out of `146`, alongside N-API job `106680012485` and
+Rust job `106680013203`. This strengthens hosted protocol evidence without
+silently converting the documented legacy/auth/xattr, broader-member,
+supervisor-owned crash/reset, or non-Linux native-mount boundaries into claims;
+W01/release remains **NO-GO**.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
