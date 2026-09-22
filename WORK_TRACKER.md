@@ -1656,6 +1656,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   diff checks pass. Other oversized replies, prefixes too large even for
   the error, crash-durable replay, native-client ordering, power-loss
   durability, and exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
+- [x] A fixed-size `GETFH` tail can also exceed a small required reply cache
+  after a successful mutation. The new real-TCP `REMOVE` + `GETFH` test
+  failed before the fix with a response over the 112-byte bound; now it
+  returns a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` on `GETFH` while
+  retaining the successful mutation prefix. A changed-target retry is
+  identical and does not delete the second file; the next sequence succeeds.
+  The full locked NFS target passes (41 unit, 1 mountpoint claim with 1
+  native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 19 v4 wire); direct v4 wire 19/19,
+  warning-denied Clippy, formatting, and diff checks pass. Other oversized
+  replies, prefixes too large even for the error, crash-durable replay,
+  native-client ordering, power-loss durability, and exact-tip hosted
+  acceptance remain open; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

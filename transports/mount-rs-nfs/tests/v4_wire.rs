@@ -1806,6 +1806,109 @@ fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
 }
 
 #[test]
+fn nfs_v4_cache_required_oversized_getfh_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-getfh-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized GETFH runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/fh-first", b"first").await.unwrap();
+                    driver.write_file("/fh-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 112;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1401, b"oversized-getfh-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1404,
+                        compound(
+                            "fh-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("fh-first")),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 112, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 4),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized GETFH sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_GETFH),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized GETFH response").unwrap();
+                    assert!(driver.stat("/fh-first").await.is_err());
+                    assert!(driver.stat("/fh-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1405,
+                        compound(
+                            "changed-fh-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("fh-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/fh-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1406,
+                        compound(
+                            "fresh-fh-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("fh-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh GETFH sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/fh-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized GETFH test thread")
+        .join()
+        .expect("oversized GETFH test thread panicked");
+}
+
+#[test]
 fn nfs_v4_cache_required_oversized_getattr_preserves_mutation_reply() {
     std::thread::Builder::new()
         .name("nfs-v4-cache-required-oversized-getattr-test".into())

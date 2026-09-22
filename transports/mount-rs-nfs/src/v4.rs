@@ -2263,11 +2263,11 @@ impl Nfs4Session {
                 && result.status == NFS4_OK
                 && matches!(
                     operation,
-                    Op::Getattr(_) | Op::Read(..) | Op::Readdir { .. } | Op::Readlink
+                    Op::Getattr(_) | Op::Getfh | Op::Read(..) | Op::Readdir { .. } | Op::Readlink
                 )
             {
                 // These read-only operations have no mutation to replay. If a
-                // variable-length result would overflow a required cache,
+                // result would overflow a required cache,
                 // retain earlier results and cache a bounded error here.
                 let mut candidate = results.clone();
                 candidate.push(result.clone());
