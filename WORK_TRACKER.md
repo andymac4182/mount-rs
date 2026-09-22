@@ -5156,6 +5156,21 @@ reproducible in a production-like environment.
   multipart request-cancellation replacement evidence only; live providers,
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified provider-backed S3 network concurrency and the staging-scan
+  race with `s3-provider-network-concurrency.mjs`: the NodeFs/SQLite matrix
+  initially reproduced transient `NoSuchKey` responses when concurrent
+  streaming PUTs renamed private staging files between `readdir` and `stat`;
+  S3 quota/reaper scans now ignore only vanished `ENOENT`/`ENOTDIR` entries while
+  preserving other errors. The final matrix passed 32 concurrent buffered
+  PUT/GET pairs plus content-length streamed PUT/GET for both providers with
+  zero session errors. The current Rust 5/6/44/5 packet, strict Clippy,
+  formatting/diff checks, release N-API build, pinned S3 session differential,
+  exact barrel scope, 64-way/CAS concurrency, process restart, callback
+  observability, typecheck/distribution, and isolated S3 N-API server
+  integration passed. This closes bounded local NodeFs/SQLite provider
+  concurrency and transient staging-scan race evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
