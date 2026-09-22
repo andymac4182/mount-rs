@@ -58,6 +58,35 @@ function DownloadsPage() {
             this page still lists only the release assets that are actually
             present below.
           </p>
+          <p>
+            A later immutable W08 candidate check in{' '}
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35714146811" {...externalProps()}>
+              run 35714146811
+            </a>{' '}
+            at source <code>7efded54</code> passed the Linux and macOS release
+            builds plus downloaded-asset verification for package version
+            <code>0.1.0</code>. The checks reported 288 CycloneDX components
+            and CI artifact digests{' '}
+            <code>b93450472c0ed1d2bd9c5e06998e60d65071e4ac1af3050ebd07d8b650130db4</code>{' '}
+            (Linux) and{' '}
+            <code>a6fab3b9374ebcc5e150d71c6493f2005dec60cb7ee90892045dee68c6dda67b</code>{' '}
+            (macOS). The Linux and macOS attestation jobs also completed
+            successfully, but the approved tag-triggered publication flow
+            still has not produced additional public release assets, so this
+            page continues to link only the verified GitHub release archive and
+            <code>SHA256SUMS</code> below.
+          </p>
+          <p>
+            The later immutable production candidate at source
+            <code>d1a81ad4</code> dispatched W08 release-target run{' '}
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35721892593" {...externalProps()}>
+              35721892593
+            </a>{' '}
+            with attestations enabled, but that run was cancelled before it
+            produced release assets when the candidate was superseded. No new
+            public binary is claimable from it; the verified preview below
+            remains the only downloadable release asset.
+          </p>
         </div>
 
         <section className="download-release-card" aria-labelledby="download-release-heading">

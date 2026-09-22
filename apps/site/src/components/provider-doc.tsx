@@ -698,6 +698,21 @@ LIMIT 20;`,
         restore, upgrade/rollback, SLOs/capacity, security sign-off, on-call,
         canary, and release-owner approval remain open. A green functional
         packet is not production deployment evidence.
+        W08.40 adds the credential-free upgrade, compatibility, and rollback
+        policy: pinned current/previous versions, wire/data compatibility,
+        expand-contract migration, interrupted recovery, quorum-preserving
+        rolling upgrades, retained rollback artifacts, writer fencing, and
+        fresh-client readback. Its eight-case static policy/test passed at
+        source <code>66164b78</code>; hosted run
+        <code>35718296219</code> was cancelled before job creation, so P04
+        remains an implementation/static qualification rather than a live
+        upgrade rehearsal. W08.41 adds the matching credential-free
+        observability, SLO, and alerting policy with retention, redaction,
+        error-budget, paging, acknowledgement, runbook, and health-contract
+        controls. Its eight-case static policy/test is integrated at source
+        <code>c0782e3c</code>; current-tip hosted run
+        <code>35721851677</code> remains queued, so no live collector,
+        dashboard, pager, or acknowledgement evidence is claimed.
       </>
     ),
     sources: [
@@ -708,6 +723,10 @@ LIMIT 20;`,
       { label: 'TiDB progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-progress-ledger.md' },
       { label: 'TiDB production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-production-rollout.md' },
       { label: 'W08.39 backup and restore policy', href: 'https://github.com/andymac4182/mount-rs/commit/896330a' },
+      { label: 'W08.40 upgrade and rollback policy', href: 'https://github.com/andymac4182/mount-rs/commit/66164b78' },
+      { label: 'W08.40 hosted policy boundary', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35718296219' },
+      { label: 'W08.41 observability and alerting policy', href: 'https://github.com/andymac4182/mount-rs/commit/c0782e3c' },
+      { label: 'Current-tip W08.41 hosted policy', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35721851677' },
     ],
   },
   foundationdb: {
@@ -995,7 +1014,14 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         read version, lease/fence validation, revision CAS, and fail-closed
         ambiguous-commit handling. Feature compile/test-target checks and
         strict Clippy pass, but the focused native tests remain blocked by the
-        missing <code>fdb_c</code> linker library. Exact-head run
+        missing <code>fdb_c</code> linker library.
+        The immutable W05 candidate also completed W07 run
+        <code>35714147247</code> with bound provenance: Linux was terminal while
+        macOS was feature-compile-only and the assembly artifact was retained.
+        This is a candidate sub-gate rather than a current-public-main refresh,
+        and it does not close live macOS service/mount, production capacity,
+        recovery, identity, or release approval.
+        Exact-head run
         <code>35715790619</code> at workflow head <code>af7e73df</code> includes
         this source as an ancestor but remains queued, so no new performance
         or provider qualification is promoted from this optimization yet.
@@ -1013,6 +1039,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'Current-public-main W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35712676265' },
       { label: 'FoundationDB publication read-overlap source', href: 'https://github.com/andymac4182/mount-rs/commit/fba61979f1f6c9858026cd5ebc4c5d3d357f366b' },
       { label: 'Queued exact-head read-overlap qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715790619' },
+      { label: 'Candidate W07 assembly qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714147247' },
     ],
   },
   'aws-s3': {

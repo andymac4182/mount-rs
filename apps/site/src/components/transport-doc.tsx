@@ -253,6 +253,30 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         exact-current-tip terminal evidence remains required. Callback
         delivery, close races, crash/restart, concurrency, locks, and
         durability remain open.
+        The immutable W05 candidate in CI run <code>35714144497</code> also
+        passed its native-FUSE job <code>106701527830</code>: injected
+        read-panic recovery and the exercised mount, SQLite, PGlite, and
+        cleanup tests all passed. This is candidate job-scoped Linux evidence,
+        not current-main hosted acceptance or a release decision; exact-tip
+        hosted native-FUSE and the wider provider/release gates remain open.
+        The follow-up implementation at source <code>85362348</code> hardens
+        the Linux FUSE control plane at the hosted failure boundary: terminal
+        <code>FUSE_DESTROY</code> aborts blocked positional-read workers
+        immediately, the invalid-device regression uses a ready
+        <code>eventfd</code>, and the retryable-unmount fixture exercises a real
+        mounted path. Host FUSE tests passed <code>15/15</code>, Linux-target
+        test compilation and formatting/diff checks passed, but hosted Linux
+        Rust/native-FUSE confirmation remains required; this is local
+        implementation evidence, not a new hosted acceptance claim.
+        The subsequent FUSE fix at source <code>40a9a3d8</code> addresses the
+        rootless <code>fusermount3</code> <code>EBUSY</code> blocked-read path by
+        draining the serving task before lazy detach and recognizing a
+        successful handoff; native and automatic test mountpoints also use
+        unique suffixes. Lima requalification at <code>65776be</code> passed
+        native 3/3, automatic concurrent 2/2, CLI 3/3, SQLite restart 2/2,
+        fault 1/1, native PGlite reopen 1/1, and PGlite compositions 1/1 with
+        no stale mounts or processes. This remains local Linux evidence; no
+        hosted <code>/dev/fuse</code> result is promoted.
       </>
     ),
     sources: [
@@ -270,6 +294,9 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Hosted FUSE cancellation refresh', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716364566' },
       { label: 'Pending current-tip FUSE run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716566393' },
       { label: 'Lima shipped-CLI FUSE smoke', href: 'https://github.com/andymac4182/mount-rs/commit/32b8596' },
+      { label: 'Candidate native FUSE sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },
+      { label: 'FUSE teardown/read control-plane hardening', href: 'https://github.com/andymac4182/mount-rs/commit/85362348e9dd294e0547c3f36268facddc7194c8' },
+      { label: 'FUSE blocked-read unmount and lazy-detach fix', href: 'https://github.com/andymac4182/mount-rs/commit/40a9a3d83d881c28bb1eed2c8e131470c86d907e' },
     ],
   },
   nfs: {
@@ -447,6 +474,22 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         local macOS CLI-to-folder and lifecycle evidence only; the negotiated
         NFS version was not captured, and Linux/v4.1 ordering, durable state,
         power-loss, hosted acceptance, and production readiness remain open.
+        A real-TCP HostFs regression at source <code>512ef958</code> also fixes
+        NFSv4.1 same-owner OPEN access upgrades: a read-only to read/write
+        upgrade now retains a write-capable backend descriptor instead of
+        producing <code>NFS4ERR_IO</code> on WRITE, while write-only to read
+        upgrades and cross-client share denial remain covered. Focused wire
+        coverage passed 1/1, the locked NFS target passed 42 unit and all
+        applicable integrations including 21 v4 cases, and pinned parity
+        passed 266 cases with 18 explicit skips. This repairs a one-server
+        userspace access-upgrade boundary; native v4.1 client ordering,
+        cross-process recovery, power-loss durability, hosted acceptance, and
+        production readiness remain open.
+        The same immutable candidate's native NFS macOS job
+        <code>106701527843</code> in run <code>35714144497</code> also passed.
+        This is a candidate-scoped native NFSv3 result alongside the existing
+        current-main evidence; it does not close Linux/v4.1 ordering,
+        cross-process recovery, power-loss durability, or production readiness.
         The latest NFS source at commit <code>ff4b091c</code> now validates
         complete <code>AUTH_SYS</code> bodies before shared-router or v3/v4
         dispatch. Its real-TCP regression denies five malformed credential
@@ -461,6 +504,32 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         protocol parsing; <code>AUTH_SYS</code> remains client-asserted identity
         rather than cryptographic authentication, and native ordering, crash
         durability, hosted acceptance, and production readiness remain open.
+        The latest symmetric namespace-ordering regression at source
+        <code>3884c194</code> pauses a v3 LOOKUP after backend stat but before
+        handle binding, then proves a v4.1 REMOVE waits until that handle is
+        bound. The v3 handle becomes <code>NFS3ERR_STALE</code>, a fresh name
+        lookup returns <code>NFS3ERR_NOENT</code>, and the focused case passes
+        ten reruns; the locked target passes 42 unit and 24 v4-wire cases with
+        strict Clippy. This is same-server reverse cross-version namespace
+        ordering, not cross-process arbitration, native-client ordering,
+        crash/power-loss durability, hosted acceptance, or production readiness.
+        The follow-up rename-over-open fix at source <code>350c0357</code>
+        preserves a pinned destination handle when v3 RENAME replaces its
+        name: the old v4 handle remains pathless and readable, while a fresh
+        v3 LOOKUP receives a distinct replacement handle. The focused wire case
+        passed ten reruns; the locked target passed 43 unit and 25 v4-wire
+        cases with warning-denied NFS/N-API Clippy and formatting. This covers
+        same-process cross-version handle lifetime, not native v4 ordering,
+        cross-process recovery, crash/power-loss durability, hosted acceptance,
+        or production readiness.
+        The current HostFs requalification at source <code>6aa043b4</code>
+        upgrades that case to a real backing directory: v3 RENAME replaces the
+        destination bytes, the held v4 OPEN still reads the original bytes,
+        CLOSE retires the old pathless handle, and the replacement handle stays
+        valid. The focused case passed ten reruns, the locked target remained
+        green at 43 unit and 25 v4-wire cases, and the opt-in macOS native NFSv3
+        loopback passed 1/1. The preceding exact-tip hosted run was cancelled
+        before jobs, so native v4.1 ordering and hosted acceptance remain open.
       </>
     ),
     sources: [
@@ -474,7 +543,12 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'NFSv4 process-restart rename qualification', href: 'https://github.com/andymac4182/mount-rs/commit/6d520dd2903a03230e673840b47934e7374959f3' },
       { label: 'macOS N-API loader repair', href: 'https://github.com/andymac4182/mount-rs/commit/b7ba3806e5a36f9732b1976e100c5d0e3004dd1e' },
       { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
+      { label: 'NFSv3 LOOKUP/v4 REMOVE ordering qualification', href: 'https://github.com/andymac4182/mount-rs/commit/3884c194e705bf672d3d94a4aab5fc548908c9b3' },
+      { label: 'NFS cross-version rename-over-open lifetime', href: 'https://github.com/andymac4182/mount-rs/commit/350c035783198f5a6ef256717373e6ecdd40d16c' },
+      { label: 'HostFs rename-over-open requalification', href: 'https://github.com/andymac4182/mount-rs/commit/6aa043b4a6e08313e075614689b99e4a5f6002fd' },
       { label: 'macOS CLI host-backed NFS smoke', href: 'https://github.com/andymac4182/mount-rs/commit/be382691822327b41bffb9823cd3b235630698b2' },
+      { label: 'NFSv4.1 OPEN access-upgrade fix', href: 'https://github.com/andymac4182/mount-rs/commit/512ef9588426d4b84b420bc5634bb043e40ac448' },
+      { label: 'Candidate macOS native NFS sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },
       { label: 'Latest hosted NFS status check', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670416469' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
@@ -1045,7 +1119,8 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         checks. The exact-tip hosted queue run <code>35681063238</code> was
         canceled when successor tip <code>2bcd9aa4</code> arrived, and its
         replacement <code>35681127696</code> was later canceled before jobs
-        materialized. No newer hosted WebDAV result is claimable, so
+        materialized. No newer hosted WebDAV result was claimable at that
+        checkpoint, so
         <code>35678488755</code> remains the latest terminal native result and
         the current maturity remains Preview.
         The subsequent exact-tip audit run <code>35687955166</code> was
@@ -1064,9 +1139,26 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         reopen, process-crash and in-flight PUT recovery, structural-driver
         durability, Rust WebDAV 41/41, typecheck, strict Clippy, formatting,
         and diff checks. Manual current-package run
-        <code>35714570430</code> at <code>92a6539e</code> remains queued, so
-        this is local package evidence only; live-provider, physical power-loss,
-        durable-lock, and stronger same-resource-ordering gates remain open.
+        <code>35714570430</code> at exact source
+        <code>92a6539e6a91d67a811b77cf688fc4ad2177f858</code> is live: its
+        Node Ubuntu x64/arm64 and macOS arm64/Intel jobs completed
+        successfully, and the native WebDAV jobs on Ubuntu and macOS also
+        passed. The aggregate remained nonterminal on unrelated jobs, and no
+        WebDAV, N-API, CI-workflow, or native-build files changed through
+        current tip <code>f9e338e6</code>, so this closes the current hosted
+        package/native slices only. A completion audit at source
+        <code>c990cc52</code> records the same supported 4-OS matrix alongside
+        the local protocol/session/provider-crash evidence. Live provider
+        behavior, physical power-loss/crash durability, and external AWS/R2
+        admission remain open; durable-lock persistence and stronger
+        same-resource ordering are explicit supported-scope exclusions.
+        A current published-tip Rust requalification at source
+        <code>ebac1450</code> passed WebDAV 41/41, warning-denied Clippy,
+        formatting, <code>git diff --check</code>, and the no-worktree-target
+        check. A relevance audit found no changes between the hosted SHA and
+        this tip in the WebDAV transport, N-API binding, CI workflow, or native
+        build wrapper, so the hosted package/native matrix covers the current
+        implementation for its supported packet.
       </>
     ),
     sources: [
@@ -1085,7 +1177,10 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'Latest hosted WebDAV queue audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35681127696' },
       { label: 'Latest hosted WebDAV/provider audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955189' },
       { label: 'Current WebDAV N-API package qualification', href: 'https://github.com/andymac4182/mount-rs/commit/c57e2ea3' },
-      { label: 'Queued current-package WebDAV run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714570430' },
+      { label: 'Current-package WebDAV qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714570430' },
+      { label: 'Current WebDAV Rust requalification', href: 'https://github.com/andymac4182/mount-rs/commit/ebac1450' },
+      { label: 'Hosted WebDAV result relevance audit', href: 'https://github.com/andymac4182/mount-rs/commit/f9e338e6' },
+      { label: 'WebDAV completion audit', href: 'https://github.com/andymac4182/mount-rs/commit/c990cc52' },
       { label: 'Current WebDAV oracle parity', href: 'https://github.com/andymac4182/mount-rs/commit/72011a0' },
     ],
   },
