@@ -109,6 +109,8 @@ try {
 
 const probe = p9ClientProbe()
 assert.equal(typeof probe.usable, "boolean")
+assert.equal(Object.hasOwn(probe, "platform"), true)
+assert.equal(Object.hasOwn(probe, "reason"), true)
 assert.equal(typeof probe.kernel, "boolean")
 assert.equal(typeof probe.transport, "boolean")
 assert.equal(typeof probe.modules, "boolean")

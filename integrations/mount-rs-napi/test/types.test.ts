@@ -234,6 +234,11 @@ const p9PlatformLinux: "linux" | undefined = p9Platform("linux")
 const p9PlatformDarwin: "linux" | undefined = p9Platform("darwin")
 declare const p9Mounted: P9Mount
 const p9LiveMounts: Array<P9Mount> = live9pMounts()
+const p9ProbeRequired: {
+  platform: "linux" | undefined
+  reason: string | undefined
+} = p9ClientProbe()
+void p9ProbeRequired
 void mount9p
 void p9LiveMounts
 void p9Probe
