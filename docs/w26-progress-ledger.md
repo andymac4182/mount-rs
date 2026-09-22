@@ -12,7 +12,7 @@ for engineering planning, not a commitment.
 | Workstream | W26 — Apache Ozone S3 backend |
 | Ledger snapshot | 2026-09-22, Australia/Brisbane |
 | Repository | `mount-rs` |
-| Snapshot base | `9293b1f6` (`origin/main`, including W26 implementation commits `c7f0e6d0`, `183660a4`, `d05548e8`, SQL publication fast path `214b9a6b` and TiDB session setup optimization `e41bed05`, the published R2 content-addressing/cache, metadata mutation batching, queue-cancellation hardening, concurrent whole-file-create inode rebasing, corrected Ozone content-addressed block-contract test, deduplicated content-addressed cleanup, the Ozone test lockfile fix `0cef5d44`, the FoundationDB test lockfile fix `8428a5ef` and the latest concurrent-mainline reconciliation; the exact W26 commits and concurrent-mainline merges are recorded below) |
+| Snapshot base | `83e0d3b7` (`origin/main`, including W26 implementation commits `c7f0e6d0`, `183660a4`, `d05548e8`, SQL publication fast path `214b9a6b` and TiDB session setup optimization `e41bed05`, the published R2 content-addressing/cache, metadata mutation batching, queue-cancellation hardening, concurrent whole-file-create inode rebasing, corrected Ozone content-addressed block-contract test, deduplicated content-addressed cleanup, the Ozone test lockfile fix `0cef5d44`, the FoundationDB test lockfile fix `8428a5ef` and the latest concurrent-mainline reconciliation; the exact W26 commits and concurrent-mainline merges are recorded below) |
 | Checklist completion | 11 of 12 W26 tracker rows checked: shipped implementation rows are complete, while W26.15 (the terminal 1,000-IOPS remediation/qualification gate) remains open; hosted/provider production gates remain open |
 | Provisional execution completion | W26 implementation scope: 100% for the 11 shipped tracker rows; current terminal qualification packet: **FAILED / NO-GO** because W26.15's hard performance gate is open; production-rollout readiness: 60% (scope, benchmark matrix, lifecycle safety, bounded remote enumeration, provider-bounded KV/N-API contract, durable-provider bounded-listing tests, strict provider-specific hard-threshold IOPS wiring, fail-closed artifact/profile/metric verification and retention, all-provider credential-free production-config policy, one-revision CI evidence-packet aggregation, complete end-to-end surface marker enforcement, the credential-free customer rollout contract, content-addressed R2 caching, single-flight R2 upload coalescing, metadata mutation batching, concurrent-create inode rebasing, queue cancellation safety, lease-renewal caching with forced validation at explicit durability/destructive boundaries, the provider publication-barrier capability, bounded mutation collection and the PGlite/TiDB conditional metadata-publication fast path are implemented and locally tested; no terminal production gates yet). Customer deployment, native, provider-durability, capacity/SLO, backup/DR and release-stream gates remain separately bounded |
 | Current acceptance state | The retained W26 packet on `9c098e5` remains the last accepted hosted result within its documented provider/platform boundaries. The published W26 code now includes optimistic read/write paths, atomic whole-file `FsDriver::write_file`, lazy atime/EOF handling, content-addressed R2 blocks with a bounded process-local cache, single-flight coalescing for concurrent identical block uploads with cancellation-safe follower release, fenced metadata mutation batching, a bounded pending queue, cancellation-safe runner cleanup, same-revision rebasing for concurrent new-file creates, cached provider lease renewal with forced validation at explicit metadata/destructive boundaries, the opt-in provider publication-barrier capability that skips only a redundant post-publish probe while retaining explicit `syncfs` flushes, an eight-round bounded cooperative mutation collection window, the PGlite/TiDB conditional fenced CAS publication fast path (`214b9a6b`) with locked failure classification, and TiDB session setup/verification once per private pool connection (`e41bed05`) with reset-round-trip avoidance. Local full locked-workspace tests and strict Clippy pass; the focused R2 suite has 19 unit tests plus 2 HTTP interop tests, and the focused ChunkedFs suite has 21 passing tests in the current tree. The latest terminal W26 packet is diagnostic run `35683158821` on exact SHA `14dbf2c6`: SQLite/R2 measured 754.59, PGlite/R2 817.10, TiDB/R2 143.04 and FoundationDB/R2 345.17 IOPS; all four provider rows completed their 1,200-operation lifecycle with zero timeout/cleanup failures, and aggregate `106606577835` failed closed on missing `OZONE_IOPS_PASS`. Security scans `5a8fcd70-71d4-461b-bb2a-dec8461c22bc`, `c4fc0012-b0e2-421c-9db8-ca3edfce730c` plus prior W26 scans are complete with zero reportable findings within their local scopes; hosted/provider/customer controls remain explicit external boundaries. No Live Cloudflare R2 or Live AWS S3 result is recorded. |
@@ -26,11 +26,13 @@ for engineering planning, not a commitment.
 | Available qualification environment | CI only; no staging environment is available. Production-like evidence must therefore be achieved through controlled hosted CI/provider fixtures and clearly labeled customer-owned prerequisites |
 | Release/acceptance decision | W26 implementation and local qualification controls remain accepted within their documented scope; production rollout remains **NO-GO** because terminal run `35683158821` failed every hard 1,000-IOPS provider row: SQLite/R2 754.59, PGlite/R2 817.10, TiDB/R2 143.04 and FoundationDB/R2 345.17. Aggregate `106606577835` failed closed on missing hard pass markers. No failed, queued or partial packet is promoted, and no broader native, customer secure-runtime, Ozone backup/DR or release claim is made |
 
-### Current publication override — exact shared tip `9293b1f6`
+### Current publication override — exact shared tip `83e0d3b7`
 
 The TiDB session-setup optimization was implemented in `e41bed05`, reconciled
 with concurrent mainline changes, and published in merge tip
-`9293b1f630ff3cba34f4eeb679b6e327429b4f23`. It configures and verifies
+`9293b1f630ff3cba34f4eeb679b6e327429b4f23`, and the subsequent unrelated
+mainline reconciliation is now shared at `83e0d3b7e11cf272d71c204fada5ea827d4a9f29`.
+It configures and verifies
 `tidb_txn_mode='pessimistic'` once for every newly created private pool
 connection, disables redundant `COM_RESET_CONNECTION` round trips, and keeps
 the `RepeatableRead` transaction guard, fail-closed effective-mode check,
@@ -42,7 +44,7 @@ formatting and diff checks all passed. The complete security diff scan
 `c4fc0012-b0e2-421c-9db8-ca3edfce730c` covered the changed provider file and
 reported zero findings with no deferred candidates. This is local
 implementation/security evidence only; the next hosted W26 packet must use
-the exact published revision `9293b1f6` or a later exact pushed revision.
+the exact published revision `83e0d3b7` or a later exact pushed revision.
 Production remains **NO-GO** until every configured provider reaches the hard
 1,000-IOPS marker and the complete one-revision Ozone evidence packet passes.
 
@@ -855,6 +857,7 @@ separately because they are elapsed wall-clock, not implementation effort.
 | 2026-09-22 — Post-publication origin/main reconciliation | Committed the terminal evidence ledger, merged concurrent mainline changes and pushed the reconciled documentation chunk for other threads. | ~0.25–0.5 h publication/reconciliation; estimate remains provisional | ~0.25–0.5 h remote fetch/merge/push; concurrent origin movement is external elapsed time | `HEAD` and `origin/main` match at `69c684c70758b26b8600ed5b1131cef23e5e13f3`. The terminal packet remains tied to tested SHA `14dbf2c61b5d86606b165692e0ba1e0e7af545dc`; W26 remains **NO-GO** until the next safe performance chunk and fresh exact-SHA packet. |
 | 2026-09-22 — Concurrent-mainline reconciliation after ledger publication | Merged the next unrelated mainline changes after the W26 ledger push and refreshed the shared build-on boundary. | ~0.25–0.5 h publication/reconciliation; estimate remains provisional | ~0.25–0.5 h remote fetch/merge/push; concurrent origin movement is external elapsed time | `HEAD` and `origin/main` match at `1626d5381625d81696fa28624342f07087593760`. The terminal packet remains tied to tested SHA `14dbf2c61b5d86606b165692e0ba1e0e7af545dc`; W26 remains **NO-GO** until the next safe performance chunk and fresh exact-SHA packet. |
 | 2026-09-22 — TiDB session-setup performance chunk | Moved TiDB pessimistic-mode setup and verification to private-pool connection creation, disabled redundant reset round trips, and retained transaction guards, fail-closed mode validation, parameterized SQL and commit/rollback semantics. | ~1.5–2.5 h implementation/design; estimate remains provisional | ~0.75–1.25 h shared-target builds/tests and remote reconciliation; hosted provider/Ozone latency is external | Commit `e41bed05` passed focused TiDB tests, strict provider Clippy, full locked workspace tests, strict workspace Clippy, formatting and diff checks. Security scan `c4fc0012-b0e2-421c-9db8-ca3edfce730c` covered the changed file with zero reportable findings. It was merged with concurrent mainline work and published at `9293b1f6`; the exact revision still requires a fresh hosted W26 matrix. |
+| 2026-09-22 — Final shared-tip documentation reconciliation | Refreshed current-tip references after unrelated mainline work advanced the remote following the ledger push. | ~0.25–0.5 h documentation/reconciliation; estimate remains provisional | ~0.25–0.5 h fetch/merge/push; concurrent mainline movement is external elapsed time | `HEAD` and `origin/main` match at `83e0d3b7`; W26 code `e41bed05` and ledger evidence remain present. The next hosted matrix must select this exact shared revision or a later exact pushed revision; production remains **NO-GO**. |
 
 ## Current status addendum — hosted runs `35677828440` / `35678993571` and lockfile-gate correction
 
@@ -962,8 +965,9 @@ fresh exact-SHA hosted packet.
 ## Publication record
 
 Authoritative current update (2026-09-22): `origin/main` is
-`9293b1f630ff3cba34f4eeb679b6e327429b4f23`, and this checkout is aligned
-with that shared tip after the TiDB performance-chunk publication.
+`83e0d3b7e11cf272d71c204fada5ea827d4a9f29`, and this checkout is aligned
+with that shared tip after the TiDB performance-chunk publication and a
+subsequent unrelated mainline reconciliation.
 The W26 metadata batching commit `c4e9a253` is included through the published
 reconciliation tip `a1cb4ca92bd0c1b619c56231002ee182852b01a8`; queue hardening
 commit `d152fa1a`, Ozone test-contract fix `edb6a43e` and cleanup correction
@@ -986,7 +990,7 @@ findings within their local scopes. The latest SQL publication scan covered
 both changed provider files with complete coverage; the TiDB session-setup
 scan covered its changed provider file with complete coverage. The TiDB
 session-setup optimization is `e41bed05` and is included in current shared
-tip `9293b1f6`. Terminal W26 producer/aggregate
+tip `83e0d3b7`. Terminal W26 producer/aggregate
 packet `35678993571` on `4b4fe43a` failed the strict IOPS gate; it is terminal
 for every W26 producer and aggregate `106595737360`. All four rows completed
 their 1,200-operation lifecycle with zero timeout/cleanup failures, but no
