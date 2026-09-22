@@ -540,9 +540,9 @@ export declare function readRwalk(reader: P9Reader): Rwalk
 export declare function writeTread(writer: P9Writer, value: Tread): void
 export declare function readTread(reader: P9Reader): Tread
 export declare function writeRread(writer: P9Writer, value: Rread): void
-export declare function readRread(reader: P9Reader): Rread
+export declare function readRread(reader: P9Reader, max?: number): Rread
 export declare function writeTwrite(writer: P9Writer, value: Twrite): void
-export declare function readTwrite(reader: P9Reader): Twrite
+export declare function readTwrite(reader: P9Reader, max?: number): Twrite
 export declare function writeRwrite(writer: P9Writer, value: Rwrite): void
 export declare function readRwrite(reader: P9Reader): Rwrite
 export declare function writeFidRequest(writer: P9Writer, value: FidRequest): void
@@ -588,7 +588,7 @@ export declare function readTxattrcreate(reader: P9Reader): Txattrcreate
 export declare function writeTreaddir(writer: P9Writer, value: Treaddir): void
 export declare function readTreaddir(reader: P9Reader): Treaddir
 export declare function writeRreaddir(writer: P9Writer, value: Rreaddir): void
-export declare function readRreaddir(reader: P9Reader): Rreaddir
+export declare function readRreaddir(reader: P9Reader, max?: number): Rreaddir
 export declare function writeDirent(writer: P9Writer, value: P9Dirent): void
 export declare function readDirent(reader: P9Reader): P9Dirent
 export declare function writeTfsync(writer: P9Writer, value: Tfsync): void

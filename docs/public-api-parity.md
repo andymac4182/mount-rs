@@ -293,6 +293,18 @@ Current focused behavior:
   with N-API job `106582464900` and Rust job `106582465059` successful. This
   closes the identified packer declaration/representation mismatch only;
   broader upstream member parity and production acceptance remain open.
+- `framesFrom` now follows the oracle's stream-helper contract: it accepts a
+  synchronous or asynchronous iterable of byte chunks and an optional
+  caller-owned `P9FrameAssembler`, so a negotiated limit can be changed on the
+  same assembler while iteration continues. The local differential covers
+  both iterable kinds and the shared assembler; generated typecheck, syntax,
+  and diff checks pass. Exact SHA
+  `412c422e2485a5c7ce2caf55892ec6475faab8d8` passed [Native 9P run
+  `35676832586`](https://github.com/andymac4182/mount-rs/actions/runs/35676832586),
+  with N-API job `106585007802` and Rust job `106585007667` successful. The
+  full package script reached all 9P checks before the unrelated NFS relisten
+  phase hit the Darwin sandbox's `Operation not permitted` boundary; broader
+  upstream member parity and production acceptance remain open.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested

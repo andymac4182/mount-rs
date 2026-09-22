@@ -84,6 +84,10 @@ import {
   p9Platform,
   P9FrameAssembler,
   framesFrom,
+  P9Reader,
+  readRread,
+  readRreaddir,
+  readTwrite,
   P9DirentPacker,
   type P9AttachOptions,
   type MountP9Options,
@@ -521,6 +525,13 @@ function checkServerAndKvSubpaths(): void {
   })()
   const p9SyncFrames = framesFrom(p9SyncChunks, p9FrameAssembler)
   const p9AsyncFrames = framesFrom(p9AsyncChunks)
+  const p9BoundedBlob = Uint8Array.of(3, 0, 0, 0, 1, 2, 3)
+  const p9BoundedRread = readRread(new P9Reader(p9BoundedBlob), 3)
+  const p9BoundedRreaddir = readRreaddir(new P9Reader(p9BoundedBlob), 3)
+  const p9BoundedTwrite = readTwrite(
+    new P9Reader(Uint8Array.of(1, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 1, 2, 3)),
+    3,
+  )
   void p9DefaultPort
   void p9DefaultSocketMode
   void p9DefaultMaxInFlight
@@ -530,6 +541,9 @@ function checkServerAndKvSubpaths(): void {
   void p9DirentMaxSize
   void p9SyncFrames
   void p9AsyncFrames
+  void p9BoundedRread
+  void p9BoundedRreaddir
+  void p9BoundedTwrite
   const p9FidOptions: FidTableOptions = { useDriverIno: true }
   const p9FidTable: FidTable = new FidTable(p9FidOptions)
   const p9Fid = p9FidTable.create(1, "/")
