@@ -237,11 +237,14 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         <code>/dev/fuse</code> result. A newer manual run
         <code>35715585800</code> at source <code>e175f80a</code> left native-FUSE
         job <code>106706185799</code> queued with no runner, completion time,
-        conclusion, or step output; mainline has since advanced to
-        <code>e984c232</code>. No hosted native-FUSE result is claimable from
-        that queue blocker, and exact-current-tip terminal evidence remains
-        required. Callback delivery, close races, crash/restart, concurrency,
-        locks, and durability remain open.
+        conclusion, or step output. Its successor run
+        <code>35716364566</code> at source <code>4e9260ea</code> was cancelled
+        before any job was created by another mainline push, and the next run
+        <code>35716566393</code> at <code>924009af</code> is pending. No hosted
+        native-FUSE result is claimable from these queue/cancellation states;
+        exact-current-tip terminal evidence remains required. Callback
+        delivery, close races, crash/restart, concurrency, locks, and
+        durability remain open.
       </>
     ),
     sources: [
@@ -256,6 +259,8 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Current exact-tip FUSE qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35700938192' },
       { label: 'Lima in-process PGlite qualification', href: 'https://github.com/andymac4182/mount-rs/commit/467da6a7' },
       { label: 'Hosted FUSE queue blocker', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715585800' },
+      { label: 'Hosted FUSE cancellation refresh', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716364566' },
+      { label: 'Pending current-tip FUSE run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716566393' },
     ],
   },
   nfs: {
