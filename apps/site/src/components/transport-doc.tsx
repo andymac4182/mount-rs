@@ -232,6 +232,14 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         external credentials. This closes the local PGlite qualification gap,
         but hosted exact-tip native-FUSE acceptance and the wider W01 release
         and provider gates remain open.
+        The published CLI at source <code>32b85965</code> also passes a strict
+        Lima Ubuntu arm64 native-FUSE smoke: the memory driver mounted through
+        <code>mount-rs --transport fuse</code>, a fixed payload survived
+        readback before and after rename, the old name was absent and the new
+        name present, SIGINT shut down the process, and the mount was absent
+        afterward (<code>CLI_FUSE_STRICT_SMOKE=PASS</code>). This closes local
+        shipped-CLI usability on Linux only; hosted terminal native-FUSE and
+        wider release gates remain open.
         The latest terminal CI packet <code>35698854392</code> at source
         <code>116e9ed4</code> canceled its native-FUSE job before a hosted
         <code>/dev/fuse</code> result. A newer manual run
@@ -261,6 +269,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Hosted FUSE queue blocker', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715585800' },
       { label: 'Hosted FUSE cancellation refresh', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716364566' },
       { label: 'Pending current-tip FUSE run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716566393' },
+      { label: 'Lima shipped-CLI FUSE smoke', href: 'https://github.com/andymac4182/mount-rs/commit/32b8596' },
     ],
   },
   nfs: {
