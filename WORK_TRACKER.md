@@ -95,7 +95,9 @@ lost-wakeup interval around `wait_closed()`.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch, and a blocked NFSv3 RPC does not
-hold a later fast RPC on the same connection behind it. The forced-crash boundary tests
+hold a later fast RPC on the same connection behind it. A `max_in_flight=1`
+wire test also proves the second call waits for the blocked first and both
+replies complete. The forced-crash boundary tests
 now reject a pre-crash NFSv3 file handle with `NFS3ERR_STALE`, a pre-crash v4
 session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
 `NFS4ERR_STALE`; the v4 session identity folds both write-verifier halves to
@@ -935,10 +937,15 @@ PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
-published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
+host-enabled provider-backed network matrix also passes 64 concurrent NodeFs
+and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
+The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
 hosted WebDAV PASS is claimable from that packet. The
+published provider-network packet `41bd16f08a4ba065046f5da4bd54d90d2a16f028`
+had no associated GitHub Actions workflow runs at the exact-SHA snapshot, so
+no hosted WebDAV PASS is claimable from that packet. The
 opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
@@ -1462,6 +1469,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFS target passed 40 unit tests and all applicable integration targets, with
   warning-denied NFS Clippy, formatting, and diff checks green. Native-client
   ordering, cross-process concurrency, and crash/durability remain open.
+- [x] The real-TCP NFSv3 flow-control test now holds one `GETATTR` in the
+  backend with `max_in_flight=1`, observes the second call remains undispatched,
+  then verifies both XIDs return exactly once after release. The focused
+  concurrency target passed 3/3; the complete locked NFS target passed 40 unit
+  tests and all applicable integration targets, with strict Clippy, formatting,
+  and diff checks green. Socket write backpressure and native-client ordering
+  remain separate gates.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1595,6 +1609,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   PUT/GET pairs for both NodeFs and SQLite with exact bytes and matching method
   counters. This is local provider evidence only; hosted remote-provider,
   network, power-loss, durable-lock, and wider ordering gates remain open.
+- [x] The focused host-enabled N-API provider-backed WebDAV network probe is now
+  part of the package test sequence: three repetitions at
+  `MOUNT_RS_WEBDAV_PROVIDER_NETWORK_CONCURRENCY=64 node
+  test/webdav-provider-network-concurrency.mjs` passed 64 concurrent HTTP
+  PUT/GET pairs for both NodeFs and SQLite, including streamed PUT/GET bodies
+  and exact counters. This is local loopback provider evidence only; hosted
+  remote-provider, hosted network, power-loss, durable-lock, and wider ordering
+  gates remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
@@ -2653,8 +2675,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   actions while **NO-GO**; any future **GO** packet must carry a concrete
   source revision, accountable owner, target environment, terminal run,
   provider versions, cleanup/rollback outcome and evidence reference for every
-  closed gate. This is admission/tracking integrity only and cannot
-  authenticate production evidence or release approval.
+  closed gate. The workflow retains this packet beside the qualification log
+  and summary in the run artifact, so the seven-gate NO-GO state travels with
+  each bounded qualification result. This is admission/tracking integrity
+  only and cannot authenticate production evidence or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove

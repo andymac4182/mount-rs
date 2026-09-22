@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
@@ -31,6 +31,7 @@ struct CompletionGateDriver {
     inner: MemoryFs,
     block_slow: Arc<AtomicBool>,
     entered: Arc<Notify>,
+    entered_count: Arc<AtomicUsize>,
     release: Arc<Notify>,
 }
 
@@ -47,6 +48,7 @@ impl FsDriver for CompletionGateDriver {
     {
         Box::pin(async move {
             if self.block_slow.load(Ordering::Acquire) && path.ends_with("/slow.txt") {
+                self.entered_count.fetch_add(1, Ordering::AcqRel);
                 self.entered.notify_one();
                 self.release.notified().await;
             }
@@ -87,6 +89,10 @@ async fn exchange(stream: &mut TcpStream, call: Vec<u8>) -> Vec<u8> {
         .write_all(&frame_record(&call).expect("frame NFS request"))
         .await
         .expect("write NFS request");
+    next_record(stream).await
+}
+
+async fn next_record(stream: &mut TcpStream) -> Vec<u8> {
     let mut marker = [0_u8; 4];
     stream
         .read_exact(&mut marker)
@@ -100,22 +106,6 @@ async fn exchange(stream: &mut TcpStream, call: Vec<u8>) -> Vec<u8> {
         .await
         .expect("read NFS reply record");
     record
-}
-
-async fn next_record(stream: &mut TcpStream, assembler: &mut RecordAssembler) -> Vec<u8> {
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let count = stream.read(&mut buffer).await.expect("read NFS reply");
-        assert!(count > 0, "NFS server closed before the reply");
-        if let Some(record) = assembler
-            .push(&buffer[..count])
-            .expect("assemble NFS reply")
-            .into_iter()
-            .next()
-        {
-            return record;
-        }
-    }
 }
 
 async fn lookup(stream: &mut TcpStream, xid: u32, root: &[u8], name: &str) -> Vec<u8> {
@@ -226,12 +216,14 @@ async fn fast_nfs_reply_bypasses_a_blocked_rpc_on_one_connection() {
         .expect("seed fast file");
     let block_slow = Arc::new(AtomicBool::new(false));
     let entered = Arc::new(Notify::new());
+    let entered_count = Arc::new(AtomicUsize::new(0));
     let release = Arc::new(Notify::new());
     let server = NfsServer::new(
         CompletionGateDriver {
             inner,
             block_slow: Arc::clone(&block_slow),
             entered: Arc::clone(&entered),
+            entered_count: Arc::clone(&entered_count),
             release: Arc::clone(&release),
         },
         NfsServerOptions {
@@ -292,13 +284,9 @@ async fn fast_nfs_reply_bypasses_a_blocked_rpc_on_one_connection() {
         .await
         .expect("slow GETATTR reaches the blocked backend");
 
-    let mut assembler = RecordAssembler::default();
-    let fast_record = timeout(
-        Duration::from_millis(250),
-        next_record(&mut stream, &mut assembler),
-    )
-    .await
-    .expect("fast GETATTR reply bypasses the blocked request");
+    let fast_record = timeout(Duration::from_millis(250), next_record(&mut stream))
+        .await
+        .expect("fast GETATTR reply bypasses the blocked request");
     let (reply, mut body) = decode_reply(&fast_record).expect("decode fast GETATTR reply");
     assert_eq!(reply.xid, 21);
     assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
@@ -308,12 +296,9 @@ async fn fast_nfs_reply_bypasses_a_blocked_rpc_on_one_connection() {
     assert_eq!(fast_result.status, NFS3_OK);
 
     release.notify_waiters();
-    let slow_record = timeout(
-        Duration::from_secs(2),
-        next_record(&mut stream, &mut assembler),
-    )
-    .await
-    .expect("slow GETATTR reply completes after release");
+    let slow_record = timeout(Duration::from_secs(2), next_record(&mut stream))
+        .await
+        .expect("slow GETATTR reply completes after release");
     let (reply, mut body) = decode_reply(&slow_record).expect("decode slow GETATTR reply");
     assert_eq!(reply.xid, 20);
     assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
@@ -321,6 +306,105 @@ async fn fast_nfs_reply_bypasses_a_blocked_rpc_on_one_connection() {
     body.end("slow GETATTR reply")
         .expect("consume slow GETATTR reply");
     assert_eq!(slow_result.status, NFS3_OK);
+
+    stream.shutdown().await.expect("close NFS client");
+    server.close().await.expect("close NFS server");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_in_flight_slot_defers_the_next_nfs_rpc_without_losing_it() {
+    let inner = MemoryFs::empty();
+    inner
+        .write_file("/slow.txt", b"slow")
+        .await
+        .expect("seed slow file");
+    let block_slow = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(Notify::new());
+    let entered_count = Arc::new(AtomicUsize::new(0));
+    let release = Arc::new(Notify::new());
+    let server = NfsServer::new(
+        CompletionGateDriver {
+            inner,
+            block_slow: Arc::clone(&block_slow),
+            entered: Arc::clone(&entered),
+            entered_count: Arc::clone(&entered_count),
+            release: Arc::clone(&release),
+        },
+        NfsServerOptions {
+            max_in_flight: 1,
+            ..NfsServerOptions::default()
+        },
+    );
+    let address = server.listen().await.expect("listen NFS server");
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect NFS client");
+    let mount_call = encode_call(
+        30,
+        MOUNT_PROGRAM,
+        MOUNT_V3,
+        MOUNTPROC3_MNT,
+        None,
+        None,
+        &encode_xdr(|writer| writer.string("/")),
+    );
+    let record = exchange(&mut stream, mount_call).await;
+    let (_, mut body) = decode_reply(&record).expect("decode MOUNT reply");
+    let mount = read_mount_res(&mut body).expect("decode MOUNT result");
+    body.end("MOUNT reply").expect("consume MOUNT reply");
+    assert_eq!(mount.status, NFS3_OK);
+    let slow = lookup(
+        &mut stream,
+        31,
+        &mount.fh.expect("MOUNT root handle"),
+        "slow.txt",
+    )
+    .await;
+    let before = server.session().stats().requests;
+
+    block_slow.store(true, Ordering::Release);
+    let mut requests = Vec::new();
+    for xid in [32, 33] {
+        let call = encode_call(
+            xid,
+            NFS_PROGRAM,
+            NFS_V3,
+            NFSPROC3_GETATTR,
+            None,
+            None,
+            &encode_xdr(|writer| writer.var_opaque(&slow)),
+        );
+        requests.extend(frame_record(&call).expect("frame GETATTR request"));
+    }
+    stream
+        .write_all(&requests)
+        .await
+        .expect("write two pipelined GETATTR requests");
+    timeout(Duration::from_secs(2), entered.notified())
+        .await
+        .expect("first GETATTR reaches the backend");
+    sleep(Duration::from_millis(25)).await;
+    assert_eq!(entered_count.load(Ordering::Acquire), 1);
+    assert_eq!(server.session().stats().requests, before + 1);
+
+    block_slow.store(false, Ordering::Release);
+    release.notify_waiters();
+    let mut xids = HashSet::new();
+    timeout(Duration::from_secs(2), async {
+        for _ in 0..2 {
+            let record = next_record(&mut stream).await;
+            let (reply, mut body) = decode_reply(&record).expect("decode GETATTR reply");
+            assert_eq!(reply.accept_stat, Some(RPC_SUCCESS));
+            assert!(xids.insert(reply.xid), "duplicate GETATTR reply XID");
+            let result = read_getattr_res(&mut body).expect("decode GETATTR result");
+            body.end("GETATTR reply").expect("consume GETATTR reply");
+            assert_eq!(result.status, NFS3_OK);
+        }
+    })
+    .await
+    .expect("both queued GETATTR replies complete");
+    assert_eq!(xids, HashSet::from([32, 33]));
+    assert_eq!(server.session().stats().requests, before + 2);
 
     stream.shutdown().await.expect("close NFS client");
     server.close().await.expect("close NFS server");

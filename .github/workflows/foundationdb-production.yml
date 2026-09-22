@@ -136,4 +136,5 @@ jobs:
           path: |
             artifacts/foundationdb-production-qualification.log
             artifacts/foundationdb-production-qualification-summary.json
+            docs/W07-production-evidence.json
           if-no-files-found: warn
