@@ -319,7 +319,9 @@ Current focused behavior:
   `waitClosed()`. The local direct/oracle audit excludes only the oracle's
   non-interface `drop()` helper; adjacent metadata/typecheck, syntax, and diff
   checks pass. Its exact [Native 9P run `35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227)
-  is queued with no materialized jobs yet, so no hosted PASS is claimed.
+  passed: N-API job `106647016617` passed the new member-surface step and all
+  hosted N-API lifecycle gates, while Rust job `106647016767` passed the Linux
+  probe plus all four ignored native lifecycle tests.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port

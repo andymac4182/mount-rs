@@ -184,9 +184,12 @@ including `waitClosed()`, while excluding only the oracle's non-interface
 `drop()` helper. Local direct/oracle execution, adjacent metadata/typecheck
 checks, syntax, and diff checks passed. The exact hosted [Native 9P run
 `35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227)
-is queued with no materialized jobs yet; no hosted PASS is claimed. Broader
-session/protocol parity, crash/reset scope, and W01 gates remain open, so
-production remains NO-GO.
+passed: N-API job `106647016617` passed the Linux probe, addon build,
+server/attach and direct-session lifecycle, the new server/connection member
+surface step, and automatic/direct/structural mounted-I/O cleanup; Rust job
+`106647016767` passed the Linux probe plus all four ignored native lifecycle
+tests. Broader session/protocol parity, crash/reset scope, and W01 gates remain
+open, so production remains NO-GO.
 
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
