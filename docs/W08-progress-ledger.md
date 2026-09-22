@@ -1,8 +1,17 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 18:20 AEST**
+Status snapshot: **2026-09-22 18:25 AEST**
 Repository: `andymac4182/mount-rs`  
-Latest synchronization: exact local merged qualification is
+Latest synchronization: exact public `origin/main` is
+`20835a079581f69d0855d23714bb7f3be5e9f124`, published after exact merged
+N-API/9P qualification `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6`. Hosted W08
+run `35704624070` targets this exact public SHA and was `pending` at 18:25
+AEST, so it is not evidence. The production workflow still has no runs, the
+protected environment is HTTP 404, releases are preview-only and no
+production-candidate tag exists. The checkout is clean and exactly equal to
+`origin/main` before this next ledger refresh.
+
+Previous synchronization (18:20 AEST): exact local merged qualification is
 `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6` after source-bearing N-API/9P
 updates through public base `24b83a60`. The full locked workspace test and
 strict Clippy with `-D warnings` passed on isolated target
@@ -842,10 +851,12 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 18:20 AEST
+### Latest evidence refresh — 2026-09-22 18:25 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
+| Published W08 qualification tip `20835a079581f69d0855d23714bb7f3be5e9f124`; exact tested source `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6` | PASS — public publication/ref integrity and exact source-health qualification; production remains NO-GO | Local `HEAD`, `origin/main` and public `refs/heads/main` are exactly `20835a07` with a clean checkout. The exact N-API/9P source qualification at `35523b9f` passed the full locked workspace test, strict Clippy, six workflow YAML parses, changed N-API/package checks, W07 platform evidence and W07/W08 tracking/evidence suites. | Retain `35523b9f` as the source-health boundary; current hosted policy is pending and provider/native/P01–P09 gates remain open. |
+| Hosted W08 policy run `35704624070`, head SHA `20835a079581f69d0855d23714bb7f3be5e9f124` | NOT EVIDENCE — `pending` at 18:25 AEST | The run was triggered by the exact published W08 qualification tip but had no terminal conclusion at observation. | Follow to terminal status; pending or superseded jobs do not close any gate. |
 | Exact merged N-API/9P source qualification `35523b9fc4b12d63d5dbfe1fbc96f080b3dce4b6` after public base `24b83a60` | PASS — full source-health/static/tracking qualification; production remains NO-GO | The full locked workspace test and strict workspace Clippy with `-D warnings` exited 0 on isolated target `/private/tmp/mount-rs-w08-qual-TeImd6`; all runnable tests passed and provider/native rows remained explicit opt-in skips. Six workflow YAML files, changed N-API/package paths including 9P lifecycle/order tests, W07 platform-evidence, W07/W08 validators/tests and `git diff --check` passed. This is exact source-health evidence only; it does not close provider/native or P01–P09 production gates. | Publish this requalified source through the next safe mainline push; retain the provider/native and production boundaries. |
 | Public docs-only reconciliation `f177e0679779e9b9e7d6baac30eba59361e91ed4` / hosted W08 run `35704230143` | NOT EVIDENCE — run `pending` at 18:20 AEST | The public delta after the exact N-API/9P qualification changed W05/W08 documentation only. `gh run view`/queue observation found the current hosted W08 run non-terminal at the exact public docs-only tip. | Follow to terminal status after publishing the exact merged source; do not promote pending or superseded runs to evidence. |
 | Live production-boundary audit, 2026-09-22 18:20 AEST | BLOCKED — production execution surface absent | Read-only checks continue to show no `w08-production-release.yml` runs, HTTP 404 for the protected `w08-production` environment, only prerelease `v0.1.0-cli-preview`, and no `v*-cli-production-candidate*` tag. No production mutation was attempted. | Configure the protected environment/reviewers/secrets, create an approved immutable candidate tag, run terminal release, retain target assets/attestations, canary, rollback and named approval evidence before changing P09 or the NO-GO decision. |
@@ -1153,6 +1164,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 17:59–18:07 AEST | Reconciled concurrent W04/W05/site documentation and site-component changes, safely published the W08 ledger merge `fb6ef40c`, verified exact local/tracking/public-main equality and a clean checkout, and observed hosted W08 run `35702979994` targeting the exact merge in `pending`. | ~0.1 engineer-day | ~1m public-ref/push verification plus ~1m hosted observation and ledger update | The W08 ledger is publicly integrated and the prior exact source-health boundary remains `245258d9`; current hosted run is not terminal evidence. No provider/native or P01–P09 production gate is closed; production remains NO-GO with zero evidence records. |
 | 2026-09-22 18:07–18:14 AEST | Reconciled the next W07/W05/W26 control/documentation tips into public merge `b4e7c868`, verified exact local/tracking/public equality and a clean checkout, followed hosted W08 run `35703582574` to its current `pending` state, and refreshed the read-only production boundary: no production runs, environment HTTP 404, preview-only release and no candidate tag. | ~0.1 engineer-day | ~1m public-ref/push verification plus ~1m hosted/live-boundary observation and ledger update | The W08 publication remains integrated and exact source-health remains green at `245258d9`; hosted current-tip evidence is non-terminal, while provider/native and P01–P09 production gates remain external and production stays NO-GO with zero evidence records. |
 | 2026-09-22 18:14–18:20 AEST | Reconciled source-bearing N-API/9P lifecycle/order and native-workflow changes through exact merged source `35523b9f`, reran full locked tests, strict Clippy, six workflow YAML parses, changed N-API/package checks, W07 platform evidence and W07/W08 controls, then reconciled docs-only public tip `f177e067` and observed hosted run `35704230143` pending. | ~0.3 engineer-day | ~2m full test/Clippy/static/policy execution plus ~3m fetch/merge/hosted observation | Exact N-API/9P source-health is green; current public docs-only hosted run is non-terminal. Provider/native services and P01–P09 production gates remain external; production stays NO-GO with zero evidence records. |
+| 2026-09-22 18:20–18:25 AEST | Published the N-API/9P qualification ledger as `20835a07`, verified exact local/tracking/public equality and a clean checkout, and observed hosted run `35704624070` targeting the exact published SHA in `pending`; refreshed the read-only production boundary. | ~0.1 engineer-day | ~1m push/ref verification plus ~1m hosted/production-boundary observation and ledger update | The exact source-health result is publicly integrated; hosted current-tip evidence is non-terminal. No provider/native or P01–P09 production gate is closed; production remains NO-GO with zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

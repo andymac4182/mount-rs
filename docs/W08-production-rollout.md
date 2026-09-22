@@ -514,6 +514,15 @@ AEST. This is source-health and hosted scheduling evidence only; no provider,
 native, production, candidate, canary, rollback or approval gate is closed.
 P01–P09 remain open and the decision remains NO-GO.
 
+The exact W08 qualification tip was published as `20835a07` and verified
+equal to local `HEAD`, `origin/main` and the public main ref with a clean
+checkout. Its hosted W08 policy run `35704624070` targets the exact published
+SHA and was still `pending` at 18:25 AEST. This is hosted scheduling evidence,
+not a terminal implementation/provider/production result. The production
+workflow still has no runs, the protected environment is unavailable (HTTP
+404), only `v0.1.0-cli-preview` exists, and no production-candidate tag is
+present; P01–P09 remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
