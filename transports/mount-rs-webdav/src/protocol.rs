@@ -47,6 +47,49 @@ pub enum WebdavBody {
     File(FileBody),
 }
 
+/// Keeps a transport-neutral response handle closeable when an embedding
+/// cancels `WebdavBody::into_bytes()` while a provider read is pending.
+struct BodyFileCloseGuard {
+    handle: Option<Arc<dyn FileHandle>>,
+}
+
+impl BodyFileCloseGuard {
+    fn new(handle: Arc<dyn FileHandle>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn handle(&self) -> Arc<dyn FileHandle> {
+        Arc::clone(self.handle.as_ref().expect("body file close guard handle"))
+    }
+
+    async fn close(&mut self) -> Result<(), FsError> {
+        let Some(handle) = self.handle.as_ref() else {
+            return Ok(());
+        };
+        let result = handle.close().await;
+        if result.is_ok() {
+            self.handle = None;
+        }
+        result
+    }
+}
+
+impl Drop for BodyFileCloseGuard {
+    fn drop(&mut self) {
+        let Some(handle) = self.handle.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        runtime.spawn(async move {
+            let _ = handle.close().await;
+        });
+    }
+}
+
 impl WebdavBody {
     /// Drain a body for a session-level test or a small embedding.
     pub async fn into_bytes(self) -> Result<Vec<u8>, FsError> {
@@ -57,13 +100,12 @@ impl WebdavBody {
                 let mut position = file.start;
                 let end = file.start.saturating_add(file.length);
                 let mut buffer = vec![0_u8; file.chunk_size.max(1)];
+                let mut close_guard = BodyFileCloseGuard::new(file.handle);
+                let handle = close_guard.handle();
                 let outcome = async {
                     while position < end {
                         let wanted = (end - position).min(buffer.len() as u64) as usize;
-                        let count = file
-                            .handle
-                            .read(&mut buffer[..wanted], Some(position))
-                            .await?;
+                        let count = handle.read(&mut buffer[..wanted], Some(position)).await?;
                         if count > wanted {
                             return Err(FsError::new(ErrorCode::Eio)
                                 .with_syscall("read")
@@ -80,7 +122,7 @@ impl WebdavBody {
                     Ok::<(), FsError>(())
                 }
                 .await;
-                let close = file.handle.close().await;
+                let close = close_guard.close().await;
                 outcome.and(close.map(|_| result))
             }
         }

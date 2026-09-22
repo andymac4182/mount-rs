@@ -2065,6 +2065,58 @@ async fn server_close_cancels_stalled_response_and_closes_file_handle() {
     drop(response);
 }
 
+#[tokio::test]
+async fn cancelling_transport_neutral_response_body_closes_file_handle() {
+    let inner = MemoryFs::empty();
+    inner.write_file("/stalled", b"x").await.unwrap();
+    let started = Arc::new(AtomicBool::new(false));
+    let started_notify = Arc::new(Notify::new());
+    let closed = Arc::new(AtomicBool::new(false));
+    let fs = Arc::new(StalledResponseFs {
+        inner,
+        handle: Arc::new(StalledReadHandle {
+            started: Arc::clone(&started),
+            started_notify: Arc::clone(&started_notify),
+            released: Arc::new(Notify::new()),
+            closed: Arc::clone(&closed),
+        }),
+    });
+    let session = WebdavSession::new(
+        Arc::clone(&fs) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "GET".to_owned(),
+                target: "/stalled".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(response.status, 200);
+    let body = response.body.expect("GET should have a file body");
+    let reader = tokio::spawn(body.into_bytes());
+    timeout(Duration::from_secs(1), async {
+        while !started.load(Ordering::SeqCst) {
+            started_notify.notified().await;
+        }
+    })
+    .await
+    .expect("response read did not start");
+
+    reader.abort();
+    assert!(reader.await.expect_err("cancelled reader").is_cancelled());
+    timeout(Duration::from_secs(1), async {
+        while !closed.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cancelled response body did not close its file handle");
+}
+
 #[test]
 fn unsupported_methods_are_explicit_and_bind_is_loopback_only_without_auth() {
     let error = parse_target_path("not/a/path").unwrap_err();
