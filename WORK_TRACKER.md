@@ -3658,8 +3658,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Tested source base `874aca5750ac3c4557ed6d3903a8c1d9e02fe5a9` was freshly
-  reverified after the WebDAV bounded propfind/copy failure fix, the
+  Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
+  reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
+  bounded propfind/copy failure fix, the
   FoundationDB storage/test qualification changes, 9P
   undefined-UID preservation, W07 lease-authority telemetry, N-API
   postbuild/session-metadata changes, the W26 fenced-metadata publication fast
@@ -3681,10 +3682,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
-  W08-P01–P09. This exact merged source was requalified after the WebDAV,
-  FoundationDB, 9P, W07 and N-API source changes; the later `66442a50`
-  documentation-only merge is source-equivalent and no source result is
-  inferred from it.
+  W08-P01–P09. This exact merged source was requalified after the 9P
+  workflow/server, WebDAV, FoundationDB, 9P, W07 and N-API source changes; no
+  source result is inferred from documentation-only evidence.
 
   Hosted W08 policy run `35681936375` at source
   `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
