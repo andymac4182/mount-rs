@@ -305,6 +305,18 @@ provide provider, production topology, candidate-release, registry, canary,
 rollback or owner-approval evidence. P01–P09 remain open and the decision
 remains NO-GO.
 
+Exact merged source `4f9120a2e61a260ea14af0953bcc3f7dc5cafe3` was then
+requalified after the concurrent S3 streamed-response fix: the shared-target
+full locked workspace test and strict Clippy exited 0, the changed N-API
+JavaScript passed `node --check`, all W08 rollout/evidence validators/tests
+passed, and `git diff --check` passed. Hosted W08 policy run `35690334790`,
+job `106625842251`, completed successfully in 2m05s with both policy steps
+green. The later public documentation-only tip is `7801ca48`; the run is
+implementation/static evidence only and does not close provider, production,
+candidate-release, canary, rollback or owner-approval gates. P01–P09 remain
+open and the decision remains NO-GO. Runs `35690233250` and `35690379506`
+were cancelled before job creation with `jobs=[]` and are not evidence.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full

@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 15:15 AEST**
+Status snapshot: **2026-09-22 15:22 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -240,6 +240,16 @@ only; it does not close provider, production, candidate-release, canary,
 rollback or owner-approval gates. The latest exact Rust qualification remains
 `761cb9d0`; the intervening W08/W07/W05 documentation commits do not add a
 new Rust qualification.
+After that checkpoint, concurrent W07/W05 documentation and S3 source updates
+advanced the public ref through `d75eb24f`, `4f9120a2` and `9e187955` to
+`7801ca48`. Exact merged source `4f9120a2e61a260ea14af0953bcc3f7dc5cafe3`
+was freshly requalified with the shared-target full locked workspace test and
+strict Clippy (both exit 0), changed N-API `node --check`, all four W08
+rollout/evidence validators/tests and `git diff --check`; capability-gated
+provider/native rows remained explicit skips. Hosted policy run
+`35690334790`, job `106625842251`, then completed successfully in 2m05s with
+both W08 policy steps green. This is exact source-health plus hosted
+implementation/static evidence only; it does not close P01–P09.
 The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
 mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
@@ -670,7 +680,7 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 15:15 AEST
+### Latest evidence refresh — 2026-09-22 15:22 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
@@ -686,6 +696,9 @@ the evidence counted here.
 | Hosted W08 policy run `35688688574`, source `6744aa42c9f3ee75a983d8a3f7b7a1027c5a2e7a` | NOT EVIDENCE — cancelled before job creation | The push-triggered run was cancelled with `jobs=[]` when concurrent public source `44cd558a1c892dd32928b6bdd476eef9ef904996` superseded it. No W08 policy step ran, so this is a hosted scheduling boundary rather than source or production evidence. | Do not count this cancellation as a failure or pass; retain earlier terminal-success policy runs and follow a stable public tip. |
 | Hosted W08 policy run `35688748583`, source `44cd558a1c892dd32928b6bdd476eef9ef904996`, job `106621265910` | PASS — hosted implementation/static qualification; production remains NO-GO | Both W08 policy steps completed in terminal `success` in 2m44s. The run had no provider credentials, production deployment, candidate tag, canary, rollback or owner approval; GitHub emitted only Node 20/Ubuntu 26 informational annotations. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
 | Hosted W08 policy run `35689651032`, source `7946979c9e5f3c91e4914a281bdcd2153f983706`, job `106623733056` | PASS — hosted implementation/static qualification; production remains NO-GO | Both W08 policy steps completed in terminal `success` in 2m41s after the W08 ledger checkpoint was pushed. The source was documentation-only relative to the exact Rust qualification `761cb9d0`; no provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
+| Hosted W08 policy run `35690233250`, source `d75eb24f950e61c92c5fd1c7382a467427953fc7` | NOT EVIDENCE — cancelled before job creation | The push-triggered run was cancelled with `jobs=[]` when concurrent mainline work superseded the checkpoint. No W08 policy step ran. | Do not count this scheduling cancellation as a failure or pass; retain terminal-success evidence from `35689651032` and `35690334790`. |
+| Hosted W08 policy run `35690334790`, source `4f9120a2e61a260ea14af0953bcc3f7dc5cafe3`, job `106625842251` | PASS — hosted implementation/static qualification; production remains NO-GO | Both W08 policy steps completed in terminal `success` in 2m05s after exact source `4f9120a2` passed the shared-target full test, strict Clippy, N-API syntax and W08 validator checks. No provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as source-health/hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
+| Hosted W08 policy run `35690379506`, source `9e1879553a5db47932eb286dd1db3a772419ca25` | NOT EVIDENCE — cancelled before job creation | The push-triggered run was cancelled with `jobs=[]` when concurrent public documentation superseded it. No W08 policy step ran. | Do not count this scheduling cancellation as a failure or pass; follow the surviving public tip `7801ca48` and retain `35690334790` as the terminal hosted result for the tested source. |
 | Hosted W08 policy run `35684358649`, source `622dd0dc82125ba1979ea7ebf2b6a1b11145c6bb` | NOT EVIDENCE — cancelled before job creation | The run was cancelled with `jobs=[]` when concurrent public source `9563d2db` superseded it. No W08 policy step ran, so this is a scheduling boundary rather than a source or production result. | Keep the terminal-success evidence from run `35684400799`; do not count this cancellation as a failure or pass. |
 | Hosted native-9P workflow run `35682638941`, source `007e6545d1b25d708abfa10f2120f81fba59a74a`, jobs `106602683880` and `106602684115` | PASS — hosted/native functional qualification; production remains NO-GO | The `native-9p` job and `N-API native 9P lifecycle` job both completed in terminal `success`. This qualifies the hosted native functional path only; it does not establish provider, production topology, candidate release, canary, rollback or owner-approval evidence. | Retain as hosted/native qualification only; keep P01–P09 open. |
 | Current tested merged source base `874aca5750ac3c4557ed6d3903a8c1d9e02fe5a9`, reconciled docs-only `HEAD` `66442a5057085267a15a2fb688f0f44f12b490f1` | PASS — full local source-health and W08 tracking verification; production remains NO-GO | After merging the WebDAV bounded propfind/copy failure fix, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing; the WebDAV test group reported 24 passing tests and native host rows remained explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0. Changed N-API JavaScript paths, package JSON, all four W08 validators/tests and `git diff --check` also passed. The later 9P/W26 merge changed documentation only, so `66442a50` is source-equivalent. | Push this reconciled checkpoint normally; retain the explicit P01–P09 blockers and do not promote this source-health result to provider/native or production acceptance. |
@@ -908,6 +921,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 15:05–15:07 AEST | Merged concurrent HTTP parity/Windows bind-error source updates at exact public tip `140ede42`, reran the full locked workspace test and strict Clippy, checked changed N-API JavaScript, reran all W08 rollout/evidence controls and verified diff hygiene. | ~0.2 engineer-day | ~1m source/policy execution plus fetch/merge reconciliation | Exact source `761cb9d0` is test-, lint-, static- and tracking-control clean. Provider/native services and all P01–P09 production gates remain external; the packet stays NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 15:07–15:09 AEST | Reconciled the docs-only W26 qualification-dispatch update, reran all W08 rollout/evidence controls and verified diff hygiene. | ~0.05 engineer-day | ~1m policy/diff verification plus fetch/merge reconciliation | Documentation-only merge `c78cd387` is tracking-control clean; no new Rust/provider/native or production result is claimed. Production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 15:09–15:15 AEST | Reconciled public W07/W05 documentation commits through `7cc9c8c5`, followed hosted W08 policy run `35689651032` / job `106623733056` for pushed source `7946979c` to terminal success in 2m41s, and recorded the result. | ~0.05 engineer-day | ~2m41s hosted policy runtime plus fetch/merge reconciliation and ledger update | Hosted implementation/static policy passed. The intervening W08/W07/W05 documentation did not change the exact Rust qualification `761cb9d0`; provider/native services and all P01–P09 production gates remain external, so production stays NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 15:15–15:22 AEST | Reconciled the W07/S3 source tip through exact merged source `4f9120a2`, ran the shared-target full locked workspace test and strict Clippy, checked changed N-API JavaScript, reran all W08 rollout/evidence controls, followed terminal hosted run `35690334790` / job `106625842251`, and recorded superseded cancellations `35690233250` and `35690379506`. | ~0.15 engineer-day | ~2m05s hosted policy runtime plus source qualification and mainline reconciliation | Exact source `4f9120a2` is test-, lint-, static- and tracking-control clean; hosted W08 policy also passed. The two cancellations had `jobs=[]` and are not evidence. Public tip `7801ca48` is docs-only after the tested source; provider/native services and all P01–P09 production gates remain external, so production stays NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
