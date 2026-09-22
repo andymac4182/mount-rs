@@ -99,7 +99,7 @@ const routes = [
     path: '/docs/providers/aws-s3',
     status: 200,
     contentType: 'text/html',
-    expected: ['AWS S3', 'mount-rs-tests/owned-run/', 'planned block key', 'Validated', 'AWS_REGION', 'AWS S3 provider crate'],
+    expected: ['AWS S3', 'mount-rs-tests/owned-run/', 'illustrative block key', 'scoped qualification', 'Validated', 'AWS_REGION', 'AWS S3 provider crate'],
   },
   {
     path: '/docs/providers/ozone',
