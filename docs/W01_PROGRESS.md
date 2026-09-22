@@ -87,6 +87,10 @@ For published provider-network packet `41bd16f08a4ba065046f5da4bd54d90d2a16f028`
 the exact-SHA GitHub Actions API returned no associated workflow runs at the
 snapshot. No hosted WebDAV PASS is claimable from that packet.
 
+The current-tip Rust WebDAV target passes 19/19 with the shared Cargo wrapper,
+and warning-denied WebDAV Clippy passes; this does not close the external
+hosted/provider lifecycle or durability gates.
+
 For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
 exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and an unrelated Native 9P workflow was

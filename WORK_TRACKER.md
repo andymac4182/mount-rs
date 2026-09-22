@@ -939,6 +939,9 @@ provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
 host-enabled provider-backed network matrix also passes 64 concurrent NodeFs
 and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
+The current-tip Rust WebDAV target passes 19/19 with the shared Cargo wrapper,
+and warning-denied WebDAV Clippy passes; this does not close external hosted,
+provider-lifecycle, or durability gates.
 The published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
 exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
 succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
