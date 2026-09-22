@@ -118,6 +118,90 @@ impl FsDriver for DurableBarrierFs {
     }
 }
 
+struct ShortSourceFs {
+    inner: MemoryFs,
+}
+
+#[async_trait]
+impl FsDriver for ShortSourceFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        let mut stats = self.inner.stat(path).await?;
+        if path == "/source" {
+            stats.size = stats.size.saturating_add(1);
+        }
+        Ok(stats)
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+}
+
+struct FailingChildStatFs {
+    inner: MemoryFs,
+}
+
+#[async_trait]
+impl FsDriver for FailingChildStatFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        if path == "/source/member" {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("stat"));
+        }
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn mkdir(&self, path: &str, options: MkdirOptions) -> FsResult<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+}
+
+struct OverflowPropfindFs {
+    inner: MemoryFs,
+}
+
+#[async_trait]
+impl FsDriver for OverflowPropfindFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn readdir_bounded(&self, _path: &str, _max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        Err(FsError::new(ErrorCode::Eoverflow).with_syscall("scandir"))
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+}
+
 #[tokio::test]
 async fn transport_connection_failures_are_reported() {
     let reports = Arc::new(Mutex::new(Vec::new()));
@@ -573,6 +657,113 @@ async fn failed_streaming_put_preserves_the_written_prefix_by_contract() {
     assert_eq!(handle.read(&mut bytes, Some(0)).await.unwrap(), bytes.len());
     assert_eq!(&bytes, b"partial");
     handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn copy_reports_premature_source_eof_in_multistatus() {
+    let driver = Arc::new(ShortSourceFs {
+        inner: MemoryFs::empty(),
+    });
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+    let created = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/source".to_owned(),
+                headers: Default::default(),
+            },
+            b"source".as_slice(),
+        )
+        .await;
+    assert_eq!(created.status, 201);
+
+    let copied = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "COPY".to_owned(),
+                target: "/source".to_owned(),
+                headers: [("destination".to_owned(), "/copy".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(copied.status, 207);
+    let document = copied
+        .body
+        .expect("COPY failure should return a multistatus body")
+        .into_bytes()
+        .await
+        .expect("multistatus body");
+    assert!(String::from_utf8_lossy(&document).contains("HTTP/1.1 500 Internal Server Error"));
+    assert_eq!(driver.inner.stat("/copy").await.unwrap().size, 6);
+}
+
+#[tokio::test]
+async fn copy_reports_child_stat_failures_in_multistatus() {
+    let inner = MemoryFs::empty();
+    inner
+        .mkdir("/source", MkdirOptions::default())
+        .await
+        .unwrap();
+    inner.write_file("/source/member", b"member").await.unwrap();
+    let driver = Arc::new(FailingChildStatFs { inner });
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+
+    let copied = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "COPY".to_owned(),
+                target: "/source".to_owned(),
+                headers: [("destination".to_owned(), "/copy".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(copied.status, 207);
+    let document = copied
+        .body
+        .expect("COPY failure should return a multistatus body")
+        .into_bytes()
+        .await
+        .expect("multistatus body");
+    let document = String::from_utf8_lossy(&document);
+    assert!(document.contains("/source/member"));
+    assert!(document.contains("HTTP/1.1 500 Internal Server Error"));
+}
+
+#[tokio::test]
+async fn depth_one_propfind_fails_closed_when_bounded_listing_overflows() {
+    let session = WebdavSession::new(
+        Arc::new(OverflowPropfindFs {
+            inner: MemoryFs::empty(),
+        }),
+        WebdavSessionOptions::default(),
+    );
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PROPFIND".to_owned(),
+                target: "/".to_owned(),
+                headers: [("depth".to_owned(), "1".to_owned())].into_iter().collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(response.status, 413);
+    assert_eq!(
+        response.headers.get("connection"),
+        Some(&"close".to_owned())
+    );
 }
 
 #[tokio::test]
