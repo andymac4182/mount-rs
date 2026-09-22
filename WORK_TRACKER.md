@@ -3663,6 +3663,11 @@ reproducible in a production-like environment.
   production workflow query and protected environment, could not resolve the
   repository release surface, and found no candidate tag. This remains an
   external API/configuration blocker and does not close P09.
+  A fresh read-only audit at 11:57 AEST returned the same workflow/environment
+  HTTP 404s, could not resolve the repository release surface, and found no
+  candidate tag. The protected workflow file remains present in fetched
+  mainline; this is still an external API/configuration blocker and does not
+  close P09.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*

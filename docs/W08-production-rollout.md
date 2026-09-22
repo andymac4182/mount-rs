@@ -195,6 +195,13 @@ AEST: only `v0.1.0-cli-preview`) is retained as the latest known release state.
 This remains an external
 GitHub/API and release-configuration blocker; no production gate is closed.
 
+A fresh read-only audit at **2026-09-22 11:57 AEST** returned the same HTTP 404
+for the W08 production workflow query and protected environment; the release
+API still could not resolve the repository, and no candidate tag was found.
+The protected workflow file remains present in fetched mainline, so this is
+still an external GitHub/API and release-configuration blocker rather than a
+missing repository implementation. No production gate is closed.
+
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or
