@@ -242,6 +242,14 @@ zero-argument binding shapes remain separate boundaries. Exact SHA
 N-API job `106596362070`, and Rust job `106596362200`, with local addon,
 helper, typecheck, syntax, and diff checks green.
 
+The direct `./9p` declarations also export the oracle's type-only
+`P9Platform = "linux"` alias and use it in `P9ClientProbe` and `p9Platform()`;
+the runtime surface is unchanged. Exact SHA
+`2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed [Native 9P run
+`35681127657`](https://github.com/andymac4182/mount-rs/actions/runs/35681127657),
+N-API job `106598109004`, and Rust job `106598109187`, with the direct
+type-import/use check, helper, syntax, and diff checks green locally.
+
 No native mount, unmount, signal, or live-filesystem result should be inferred
 from component tests. The CLI and integration test prerequisites remain an
 explicit evidence boundary.
