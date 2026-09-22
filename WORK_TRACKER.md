@@ -2080,6 +2080,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   persistent-volume identity, encrypted backup/restore/RPO/RTO, provider
   scope, collector/pager, named owners, and GO approval open; provider IOPS
   and W26 failures remain current NO-GO evidence.
+- A fresh W04 production-policy refresh is now tracked separately: run
+  [35694364538](https://github.com/andymac4182/mount-rs/actions/runs/35694364538)
+  at shared head `41032645` has queued `pglite-config` job `106638349819`.
+  Prior run `35694245181` was cancelled before any job materialized during
+  concurrent mainline pushes and is non-evidence. Queue state does not change
+  the production NO-GO decision.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
