@@ -5171,6 +5171,15 @@ reproducible in a production-like environment.
   concurrency and transient staging-scan race evidence only; live providers,
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified in-flight streamed PUT crash/restart recovery with
+  `s3-inflight-crash.mjs`: a child process is forced down after writing a
+  private streaming prefix, and replacement NodeFs and SQLite sessions keep
+  the destination unpublished, accept a fresh streamed PUT with exact bytes,
+  and reap the orphan `.mountx-put-*` entry after the effective session TTL
+  through the existing `now` hook. This is local provider/process-crash and
+  staging-TTL evidence only; physical power-loss/torn-write ordering, live
+  providers, hosted/native lifecycle, and broader workload bounds remain open,
+  so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
