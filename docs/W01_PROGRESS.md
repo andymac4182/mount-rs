@@ -1102,6 +1102,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Added public `MountError` nested-source coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added direct `FuseSession::options()` policy readback coverage; all 20 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added sequential post-teardown `unmount()` idempotence coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added direct public `max_request` and negotiated-INIT state coverage; all 20 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 
 ## Definition of W01 complete
 

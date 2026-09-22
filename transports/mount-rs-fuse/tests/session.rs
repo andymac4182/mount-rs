@@ -236,7 +236,9 @@ async fn construction_options_control_identity_timeouts_cache_and_errors() {
         path_identity.options().flush_mechanism,
         FuseFlushMechanism::Noflush
     );
+    assert_eq!(path_identity.max_request, 1024 * 1024);
     let path_visible = number(&request(&mut path_identity, 1, 1, b"visible\0").await, 0);
+    assert!(path_identity.negotiated.is_some());
     let path_alias = number(&request(&mut path_identity, 1, 1, b"alias\0").await, 0);
     assert_ne!(path_visible, path_alias);
 
