@@ -90,6 +90,13 @@ conflicts (`[kv:9007] ... Optimistic [try again later]`) and emitted
 `RUSTFS_COMBO_FAIL`. Those results keep provider launch scope open; they do
 not authorize advertising TiDB or Ozone-backed compositions in production.
 
+The terminal Ozone-compositions job [106641134304](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134304)
+measured SQLite/R2 lifecycle IOPS `127.46` (below the hard `1000` target) and
+PGlite/R2 lifecycle IOPS `1287.12` (above target). Cleanup passed, but the
+composition job failed closed on the failing row, and its queued W26 evidence
+job [106652855215](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106652855215)
+is not evidence. Provider capacity therefore remains an open production gate.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 

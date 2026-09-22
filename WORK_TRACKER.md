@@ -2219,6 +2219,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   failed on TiDB optimistic write conflicts (`[kv:9007] ... Optimistic [try
   again later]`) and emitted `RUSTFS_COMBO_FAIL`; provider launch scope is
   still open and production remains **NO-GO**.
+- Ozone-compositions `106641134304` then completed with SQLite/R2 lifecycle
+  IOPS `127.46` (failed against the hard `1000` target) and PGlite/R2
+  lifecycle IOPS `1287.12` (passed); cleanup passed, but the job is terminal
+  failure. Its W26 evidence job `106652855215` is still queued and is not
+  evidence, so provider capacity and production rollout remain **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
