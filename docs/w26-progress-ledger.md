@@ -5,6 +5,57 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, bounded remote preparation-wave scheduling chunk
+
+This is the newest implementation and qualification boundary. Source commit
+[9f6041db2f8aba9301507bad24664015890295f9](https://github.com/andymac4182/mount-rs/commit/9f6041db2f8aba9301507bad24664015890295f9)
+(perf(w26): coalesce remote mutation preparation waves) is verified at both
+the detached checkout and origin/main. It adds a bounded in-flight
+preparation counter for whole-file writes so the mutation runner does not
+declare the queue idle while peer operations are still preparing immutable
+remote blocks. The guard is released before the prepared request waits for
+the shared response; lease renewal, revision checks, fenced metadata
+publication, block flush ordering, conflict fallback and fail-closed handling
+are unchanged.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Source implementation | **PUBLISHED / 100% for this chunk** | 9f6041db is exactly origin/main; git diff --check and cargo fmt --all -- --check pass. | Requalify the real Ozone/provider path on this exact source. |
+| Chunked Rust unit gate | **PASS** | ./scripts/cargo-shared test -p mount-rs-chunked --lib --locked: 21 passed, 0 failed. | Workspace/hosted gates remain separate; retain the exact source boundary. |
+| Chunked strict Clippy gate | **PASS** | ./scripts/cargo-shared clippy -p mount-rs-chunked --lib --locked -- -D warnings completed successfully. | No local action; hosted qualification remains open. |
+| Security diff scan | **PASS — 0 findings / complete coverage** | Scan 8f4fb7da-a251-4b3b-8843-1ee87d25724c sealed with one changed-file surface, snapshot codex-security-snapshot/v1:sha256:afa23aa9a18a85096107c642e970cfbea760d566154e45dc716fa883393c05b4, findings SHA 6b7427d0359e50f49f96f11a25b45b262e51e34c9fb37801638876a702788ad0, coverage SHA 43f6e2da64b46f64f96afc696c293b521020b521ac51f56ac4fd8b4ac874df6d, manifest SHA 5b974adbc84f87b2b0c271ea60256e209dd1998c8008e54cb79b4109ab723473; report is under /private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/aa1c12a8f7d3a7c9a2399403ff3e40ff22edec21_20260922T110256Z_is0wbsnb/report.md. | Customer certificate/IAM, secret rotation, tenant isolation and provider-native controls remain separate production gates. |
+| Fresh exact-head Ozone qualification | **PENDING — run 35720016370** | Manual CI run [35720016370](https://github.com/andymac4182/mount-rs/actions/runs/35720016370) has exact workflow head 9f6041db2f8aba9301507bad24664015890295f9. Provider jobs are ozone-tidb 106720478264, ozone-foundationdb 106720478642, ozone 106720478677, and ozone-compositions 106720478705; all were queued at capture. | Wait for terminal SQLite, PGlite, TiDB, FoundationDB, base and aggregate artifacts; accept no queued result. |
+| Hosted runner capacity | **BLOCKED — external scheduling gate** | The exact-head run is workflow-dispatch triggered and currently queued across its jobs; this is runner/provider startup state, not a test failure or provider result. | Allow hosted capacity to execute; do not cancel or substitute unrelated runs. |
+| Production readiness | **NO-GO** | The new source has no terminal hosted evidence yet. Prior terminal provider rows remain below the 1,000 IOPS/drive target for three of four providers; Tier-1 99.99% reliability, five-minute RPO/RTO, customer-deployed Ozone security and Ozone/customer-owned backup/DR remain open. | Continue W26-owned implementation/qualification until all feasible providers and the end-to-end packet pass; deployment, backup/DR and releases remain external. |
+
+### Work-item delta and provisional estimates
+
+The complete W26.1–W26.15/P14 itemized table below remains the ledger of
+every work item. This chunk directly advances the implementation evidence for
+the provider-composition, no-skip qualification, aggregate/end-to-end,
+per-drive IOPS and final integration-readiness rows; it does not promote
+their hosted acceptance percentages.
+
+| Work item | Status / completion after this chunk | Evidence and remaining action | Provisional engineering time / external blocker |
+| --- | --- | --- | --- |
+| W26.3a–d — SQLite, PGlite, TiDB and FoundationDB compositions | **OPEN / 100% implementation for this scheduling chunk; hosted acceptance pending** | The preparation counter preserves the existing fenced publication boundary and is published at 9f6041db; run 35720016370 is the exact-head provider gate but has no terminal artifacts. | 0.5–1.5 d per qualification/remediation cycle; Ozone/R2 latency, provider startup and hosted runners are external. |
+| W26.7 — security/configuration policy | **OPEN for production / 100% source-diff security gate for this chunk** | Scan 8f4fb7da... is complete with zero findings and full changed-file coverage; customer/provider security evidence remains open. | 0.5–1.5 d review; customer/Ozone TLS, IAM, rotation and tenant controls are external. |
+| W26.8 — requested-provider/no-skip qualification | **OPEN / 100% verifier; exact-head packet pending** | The manual run includes all four provider jobs plus base and aggregate jobs; queue state is not acceptance. | 0.25–0.75 d review; CI scheduling and provider startup are external. |
+| W26.11/W26.14 — aggregate and end-to-end packet | **OPEN / 100% fail-closed verifier; exact-head aggregate pending** | Require terminal functional/restart/cleanup/authority/lease markers and all provider artifacts on run 35720016370; no partial packet is promoted. | 0.5–1.5 d review; GitHub artifacts, native runners and Ozone topology are external. |
+| W26.15 — per-drive hard IOPS gate | **OPEN / 100% verifier; current acceptance unchanged at 1/4 from the last terminal packet** | Retain the hard 1,000 IOPS/drive threshold. The new run must produce four terminal finite rows at or above target; do not average, lower or skip a provider. | 1.5–4 d per cycle plus queue; provider/Ozone performance and artifact retention are external. |
+| P14 — final integration-readiness review | **NO-GO / 50% provisional** | Positive source/local/security evidence is insufficient while exact-head hosted performance, aggregate, customer SLO/RPO/RTO and production security gates remain open. | 1–2 d after W26.15; customer SLO/RPO/RTO, security, backup/DR and release-stream gates are external. |
+
+### Session time log — bounded preparation-wave scheduling chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — diagnosis/implementation | Traced the 64-way whole-file qualification wave and changed only the batcher's idle decision to observe active immutable-block preparation; the publication response is explicitly excluded from the counter to avoid self-waiting. | ~0.75–1.25 h | 0 h | The scheduling window remains bounded by the existing 64 rounds, 64-request target and 1024 pending-request cap. |
+| 2026-09-22 — local verification | Ran cargo fmt --all -- --check, git diff --check, the chunked 21-test library suite and strict Clippy with -D warnings. | ~0.25–0.5 h | ~0.1–0.25 h shared Cargo target wait | All local source gates pass. |
+| 2026-09-22 — security review | Ran security preflight, one-file discovery, source-backed threat review and final scan 8f4fb7da...; complete coverage and zero findings were sealed before commit. | ~0.5–0.75 h | ~0.25 h workbench finalization | No security candidate survived; customer/provider controls remain separately tracked. |
+| 2026-09-22 — publication | Committed, rebased over concurrent mainline updates, pushed 9f6041db to origin/main, fetched again, and verified local HEAD equals remote. | ~0.25–0.5 h | ~0.25–0.75 h mainline reconciliation | Other threads can build from the exact implementation tip. |
+| 2026-09-22 — dispatch | Dispatched exact-head manual CI run 35720016370; its workflow head is exactly 9f6041db and all listed provider/base/aggregate jobs were queued at capture. | ~0.1–0.25 h | CI queue pending; provisional ~0.5–2 h | The run is the authoritative hosted gate; queued state is not acceptance. |
+| 2026-09-22 — next gate | Retrieve every terminal provider and aggregate artifact from run 35720016370, compare each provider row to the hard target and classify any native/provider/customer gate separately. | ~0.5–1.5 d provisional | Hosted runner/provider wait is external | Keep production **NO-GO** until the complete end-to-end packet and all production gates close. |
+
 ## Current authority override — 2026-09-22, FoundationDB publication read-overlap chunk
 
 This is the newest implementation boundary. Source commit

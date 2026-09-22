@@ -4,6 +4,39 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 bounded preparation-wave scheduling boundary (2026-09-22)
+
+Source commit
+[9f6041db2f8aba9301507bad24664015890295f9](https://github.com/andymac4182/mount-rs/commit/9f6041db2f8aba9301507bad24664015890295f9)
+(perf(w26): coalesce remote mutation preparation waves) is published and
+verified exactly at origin/main. The chunk adds a bounded in-flight
+preparation counter for whole-file writes so the mutation runner continues
+collecting concurrent immutable-block preparations before taking a metadata
+batch. The counter is released before the caller waits for the batch response;
+lease renewal, revision/CAS checks, fenced publication, block flush ordering,
+conflict fallback and fail-closed behavior are unchanged.
+
+Local evidence is complete for this chunk: cargo fmt --all -- --check,
+git diff --check, ./scripts/cargo-shared test -p mount-rs-chunked --lib
+--locked (21 passed, 0 failed), and strict chunked Clippy with -D warnings
+all pass. Security scan
+8f4fb7da-a251-4b3b-8843-1ee87d25724c has complete changed-file coverage
+and zero reportable findings. The detailed evidence, artifact digests,
+provisional estimates and session log are in
+[docs/w26-progress-ledger.md](docs/w26-progress-ledger.md).
+
+Fresh exact-head manual qualification run
+[35720016370](https://github.com/andymac4182/mount-rs/actions/runs/35720016370)
+is bound to workflow head 9f6041db2f8aba9301507bad24664015890295f9. Its
+SQLite/base, PGlite/compositions, TiDB, FoundationDB and aggregate-related
+jobs were queued at capture; this is an external hosted-runner/provider
+startup blocker, not a provider result. Production remains **NO-GO**:
+the 1,000 IOPS/drive gate, complete end-to-end packet, customer/Ozone
+security, Tier-1 99.99% reliability, five-minute RPO/RTO and
+Ozone/customer-owned backup/DR evidence remain open. W26 continues to own
+compatibility and qualification only; customers deploy Ozone and releases
+remain with the separate stream.
+
 Current W26 exact-head replacement qualification boundary (2026-09-22): run
 `35707725455 <https://github.com/andymac4182/mount-rs/actions/runs/35707725455>`
 targeted source/lockfile SHA `1ceaa96486a96ed4288c079dcde2b3b2d18900bb` after
