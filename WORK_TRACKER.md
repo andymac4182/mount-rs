@@ -2249,9 +2249,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   wording in the N-API server facade to the public `EADDRINUSE` contract.
   Shared-target Rust compilation, 40-case local HTTP parity, N-API release
   build, JS syntax, and the 9P port-conflict boundary passed locally. The
-  correction is included in current `origin/main` `7946979c`; dispatch a new
+  correction is included in current `origin/main` `48c9455a`; dispatch a new
   non-cancelling exact-tip qualification from that revision before promoting
   any current-tip recovery or production evidence.
+
+- Active exact-tip qualification: non-cancelling manual run `35690190817` was
+  dispatched from exact published head `48c9455a` after the correction and
+  current documentation publication. At the first snapshot ARM Node
+  `106625340801` was in progress; macOS-15-intel `106625340880`,
+  macOS-latest `106625340836`, Ubuntu `106625340916`, Windows `106625340742`,
+  native FUSE `106625340820`, native WebDAV `106625340733`, native NFS
+  `106625340790`, native 9P `106625340829`, Rust `106625340784`, and
+  observability `106625340718` were queued. Queue/in-progress state is not
+  acceptance; keep production **NO-GO** until terminal exact recovery,
+  package/native/provider/W26, persistence/rollback, operations, ownership,
+  and release evidence is complete.
 
 ## W05 — Cloudflare R2
 
