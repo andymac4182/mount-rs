@@ -3541,10 +3541,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `541365432f4400a2309002a138cfbea75f26d44b` was freshly
+  Merged source base `32b1a229cd195ad90df592437ccfe10d88cb4804` was freshly
   reverified after concurrent WebDAV mounted-restart cleanup correction,
-  chunked lease-release fix, 9P synchronous mount inspection, S3
-  conditional-put/session-concurrency gateway coverage, N-API
+  chunked lease-release fix, 9P synchronous mount inspection, FoundationDB
+  qualification-harness updates, S3 conditional-put/session-concurrency
+  gateway coverage, N-API
   provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P bounded-reader,
   9P frame-assembler and WebDAV native-concurrency, R2 upload coalescing, N-API
   declaration/P9 normalization, 9P codec, S3-session-concurrency,
