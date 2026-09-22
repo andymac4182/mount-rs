@@ -2356,6 +2356,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Clippy, formatting, and diff checks pass. The failed Ubuntu job does not
   count as native-v3 acceptance; a corrected exact-SHA hosted rerun is needed,
   and W01-NFS remains production NO-GO.
+- [x] W01-NFS rejects malformed `AUTH_NONE` and `AUTH_SYS` credential bodies
+  before shared-router or direct v3/v4 dispatch, returning RPC `AUTH_BADCRED`
+  instead of silently treating a truncated `AUTH_SYS` body as an absent UID/GID.
+  The pre-fix-failing real-TCP test now passes six malformed and two valid
+  cases; the rebuilt release addon passes direct unified/v3/v4 assertions.
+  Full locked NFS, pinned 266-pass/18-skip upstream parity, complete N-API
+  server integration, generated typecheck, strict affected Clippy, formatting,
+  and diff checks pass locally. `AUTH_SYS` remains client-asserted identity;
+  native-client ordering, crash/power-loss durability, exact-tip hosted
+  acceptance, and W01-NFS production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

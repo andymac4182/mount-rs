@@ -122,6 +122,27 @@ pub fn credentials_of(credential: &OpaqueAuth) -> RpcCredentials {
     }
 }
 
+/// Validate a call credential before any protocol dispatch. The public
+/// `credentials_of` helper is intentionally lossy for codec inspection; a
+/// server must not turn a malformed AUTH_SYS body into an anonymous or root
+/// identity by using that helper alone.
+pub(crate) fn checked_credentials_of(credential: &OpaqueAuth) -> Result<RpcCredentials, u32> {
+    match credential.flavor {
+        AUTH_NONE if credential.body.is_empty() => Ok(credentials_of(credential)),
+        AUTH_NONE => Err(AUTH_BADCRED),
+        AUTH_SYS => {
+            let auth = decode_auth_sys(&credential.body).map_err(|_| AUTH_BADCRED)?;
+            Ok(RpcCredentials {
+                flavor: AUTH_SYS,
+                uid: Some(auth.uid),
+                gid: Some(auth.gid),
+                gids: auth.gids,
+            })
+        }
+        _ => Err(AUTH_TOOWEAK),
+    }
+}
+
 fn read_auth(reader: &mut XdrReader<'_>, what: &str) -> Result<OpaqueAuth, XdrError> {
     Ok(OpaqueAuth {
         flavor: reader.u32(&format!("{what} flavor"))?,
