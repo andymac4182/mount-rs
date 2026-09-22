@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 21:26 AEST (2026-09-22 11:26 UTC)
+Last updated: 2026-09-22 21:31 AEST (2026-09-22 11:31 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,10 +10,10 @@ hosted or native gate.
 ## Overall position
 
 Current shared-main observation: remote `origin/main` is
-`2bb846247aca02e9ce47a80a808314ca4beeed29` (`2bb84624`) at this capture;
+`d1a81ad45158dc80647b723f175c01a98b9ed458` (`d1a81ad4`) at this capture;
 the exact pushed W05 candidate boundary is
-`7efded5424f8ad6c2335e7be1cde98c22b9315fe` (`7efded54`). It is held
-immutable on branch `andymac4182/c/w05-production-candidate-20260922c` while
+`d1a81ad45158dc80647b723f175c01a98b9ed458` (`d1a81ad4`). It is held
+immutable on branch `andymac4182/c/w05-production-candidate-20260922d` while
 the remaining same-SHA hosted workflows run. The earlier exact pushed W05
 implementation boundary
 `515bdc00792a62403b0ee7b94e904434d067f43b` (`515bdc00`) was fully qualified
@@ -412,6 +412,7 @@ gates therefore remain actionable work in this session.
 | W05.58 Classify the same-SHA Ozone/FoundationDB hard-IOPS failure | Hosted provider-capacity gate | Terminal provider-capacity failure; implementation tests and cleanup are green | 100% local / 44% hosted provisional | CI `35714144497`, Ozone/FoundationDB job `106701528236`, exact candidate SHA `7efded5424f8ad6c2335e7be1cde98c22b9315fe`: the durable composition completed `1200/1200` successful operations across `400` lifecycle iterations with `timeoutCount=0` and `cleanupFailureCount=0`, but the required `minIops=1000` gate measured `298.6107927173534` and emitted `IOPS_TARGET_NOT_MET`; the job then emitted `RUSTFS_COMBO_FAIL` and `OZONE_CLEANUP_PASS`. This is the second independent same-SHA Ozone capacity miss and does not justify lowering the production floor. | Keep Ozone excluded from production acceptance unless the hosted provider can meet `1000` IOPS or an approved scope decision changes the requirement; finish the remaining CI/provider/native/package/security/R2/scope/W20.6 gates and rerun only on a new immutable candidate if implementation evidence—not provider capacity—requires it. | 0.5–2 h active evidence/decision work; 2–16 h hosted provider wait | Apache Ozone/FoundationDB service capacity and hosted runner conditions are external; AWS/OIDC, post-reset R2, native-FUSE, package publication and support scope remain open. |
 | W05.59 Record terminal W07, native-FUSE, cross-platform Rust/NFS, and W08 asset-verification sub-gates | Hosted provider/platform/native/package evidence | W07, native FUSE, Rust macOS/Windows, NFS macOS, and W08 downloaded-asset checks passed; release packet remains open | 100% local / 68% hosted provisional | Exact candidate `7efded5424f8ad6c2335e7be1cde98c22b9315fe`: W07 `35714147247` is terminal-successful with assembly job `106709151497`; it emitted `W07_PLATFORM_QUALIFICATION_PASS linux=terminal macos=feature-compile-only provenance=bound`, and retained artifacts `10690300620` (durable evidence) and `10690995180` (cross-platform assembly, digest `a342f32cbd7c8b6fc2336da202fa0c19a8032f4dd5fe0a631f5197d5b57d7953`). W08 `35714146811` build jobs `106701533638`/`106701533824` and downloaded-asset jobs `106708898505`/`106708898619` passed; Linux and macOS manifests/SBOM checks reported 288 components and source commit `7efded54`, with package digests `b93450472c0ed1d2bd9c5e06998e60d65071e4ac1af3050ebd07d8b650130db4` and `a6fab3b9374ebcc5e150d71c6493f2005dec60cb7ee90892045dee68c6dda67b`. W08 attestations remain queued. CI `35714144497` native-FUSE job `106701527830`, Rust macOS `106701527825`, Rust Windows `106701527935`, and native NFS macOS `106701527843` passed; native-FUSE logs show injected panic recovery and all exercised tests passing. | Wait for W08 attestation and the remaining CI jobs to reach terminal state; retain exact artifacts and classify any failure. Then close Ozone capacity or approved scope, AWS/OIDC, post-reset R2, package publication/signing, advertised support, and W20.6. | 0.75–1.5 h active evidence reconciliation; 2–16 h hosted/provider/publication wait | W08 attestation queue, CI runner capacity, Ozone service capacity, AWS security administration, R2 UTC-month reset/token rotation, native platform scope, registries/signing, and final audit remain external. |
 | W05.60 Requalify the latest shared code after NFS, FoundationDB, and W08 succession | Current-tip local release qualification + candidate preparation | Current shared code requalified locally; no new same-SHA hosted packet yet | 100% local / 0% current-tip hosted provisional | Current `origin/main` is `2bb846247aca02e9ce47a80a808314ca4beeed29`; its intervening ancestry after tested code `65776be8` is documentation/lockfile-only, with no code delta. On the code-equivalent snapshot, focused NFS (`42` unit tests, v4 wire `23`, process/restart/concurrency/lifecycle suites) and FoundationDB locked tests passed; full locked Rust workspace, strict Clippy, formatting and diff checks passed; optimized Darwin N-API build/load reported `253` exports, `stroff=22007680`, `stroff % 8 = 0`, minimum macOS `11.0`, SDK `26.0`; complete Node/N-API/oracle suite passed; and `scripts/test-pglite.sh` passed Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, with only explicit live R2/TiDB/RustFS skips. | Freeze `2bb84624` as a new immutable candidate, rerun the same-SHA hosted CI/Fault/W04/W07/W08 policy/targets/Native 9P packet, retain terminal artifacts and classify failures, then close post-reset R2, security-provisioned AWS/OIDC, Ozone capacity or approved scope, package publication/signing, advertised support, and W20.6. | 1.5–3 h active candidate/qualification work; 4–16 h hosted/provider/native/publication wait | Concurrent mainline movement, GitHub queues, R2 UTC-month cap and token rotation, AWS security administration, Ozone capacity, native privileges, registries/signing, support scope, and final audit remain external. |
+| W05.61 Freeze the current-tip candidate and dispatch the same-SHA hosted packet | Release engineering + hosted qualification coordination | Candidate `d1a81ad4` published; seven non-R2/AWS workflows dispatched and pending | 100% local / 5% hosted provisional | Immutable branch `andymac4182/c/w05-production-candidate-20260922d` resolves to `d1a81ad45158dc80647b723f175c01a98b9ed458`. Fresh runs are CI `35721887870`, Fault `35721895670`, W04 policy `35721891003`, W07 FoundationDB `35721892642`, W08 policy `35721891447`, W08 release targets with `attest=true` `35721892593`, and Native 9P `35721891380`. The candidate inherits the current-tip local packet recorded in W05.60. Live R2 was not dispatched because the monthly cap remains closed; AWS was not dispatched because protected security/OIDC inputs remain absent. | Poll all seven runs to terminal, retain exact artifacts and source bindings, repair any actionable implementation failure on a new immutable candidate, then run one post-reset bounded R2 packet and one security-approved AWS packet within their cost controls; close Ozone/native/package/support-scope/W20.6. | 0.5–1.5 h active dispatch/tracking; 4–16 h hosted/provider/native/publication wait | GitHub runner queues, R2 cap/reset/token rotation, AWS security provisioning, Ozone capacity, native privileges, registries/signing, support scope, and final audit remain external. |
 
 ### W05.40 exact candidate evidence (2026-09-22 17:09 AEST)
 
@@ -843,6 +844,33 @@ old-SHA hosted evidence. The next release-control action is to freeze
 `2bb84624` as a new immutable candidate and dispatch a fresh same-SHA packet.
 Production remains **NO-GO** pending hosted/provider/security/native/package/
 scope gates and W20.6.
+
+### W05.61 current-tip candidate frozen and same-SHA packet dispatched (2026-09-22 21:31 AEST)
+
+Candidate branch `andymac4182/c/w05-production-candidate-20260922d` resolves
+to exact SHA `d1a81ad45158dc80647b723f175c01a98b9ed458`. The local packet is
+the code-equivalent qualification recorded in W05.60; the candidate adds only
+the ledger/mainline documentation successors needed to bind the release
+record.
+
+Fresh hosted workflows were dispatched against this exact branch and SHA:
+
+| Gate | Run |
+| --- | --- |
+| CI | `35721887870` |
+| Fault injection | `35721895670` |
+| W04 production policy | `35721891003` |
+| W07 FoundationDB | `35721892642` |
+| W08 release policy | `35721891447` |
+| W08 release targets, attestations enabled | `35721892593` |
+| Native 9P | `35721891380` |
+
+R2 was deliberately not dispatched because the September usage envelope is
+closed. AWS was deliberately not dispatched because the protected
+`aws-s3-ci` environment and OIDC role remain an open security request. No
+credential value or Keychain item was read. Production remains **NO-GO** until
+these workflows and the remaining provider, security, packaging, support-scope,
+and W20.6 gates are terminally closed.
 
 ### W05.56 terminal Native 9P lifecycle and root-conformance acceptance (2026-09-22 20:46 AEST)
 
@@ -1384,6 +1412,7 @@ in Keychain; no security request was fabricated.
 | PR-19 / W05.58 | Same-SHA Ozone/FoundationDB hard-IOPS failure classification | Terminal provider-capacity failure; no implementation regression inferred | 100% local / 44% hosted provisional | CI job `106701528236` completed 1200/1200 operations over 400 iterations with zero timeout/cleanup failures but measured `298.6107927173534` IOPS against the hard `1000` floor, emitted `IOPS_TARGET_NOT_MET` and `RUSTFS_COMBO_FAIL`, and recorded `OZONE_CLEANUP_PASS`. | Retain the hard floor, classify the remaining CI/provider/native gates, and decide performance repair versus advertised-scope exclusion before W20.6. | 0.5–2 h active; 2–16 h provider wait | Ozone/FoundationDB capacity and hosted runner conditions are external; remaining AWS/R2/native/package/scope gates are open. |
 | PR-20 / W05.59 | Terminal W07/native/platform and W08 asset-verification sub-gates | Named hosted sub-gates passed; release packet remains open | 100% local / 68% hosted provisional | W07 `35714147247` passed with bound provenance and artifacts `10690300620`/`10690995180`; W08 build/download verification passed for Linux and macOS with source `7efded54`, 288 SBOM components, and recorded package digests, but attestations remain queued. CI native FUSE `106701527830`, Rust macOS `106701527825`, Rust Windows `106701527935`, and native NFS macOS `106701527843` passed. | Wait for W08 attestations and remaining CI jobs; retain artifacts, classify failures, and close Ozone/AWS/R2/package/scope/W20.6 gates. | 0.75–1.5 h active; 2–16 h hosted/provider/publication wait | Attestation/runner queues, Ozone capacity, AWS security administration, R2 reset/rotation, registries/signing, support scope, and final audit remain external. |
 | PR-21 / W05.60 | Latest shared-code local requalification and immutable-candidate preparation | Local current-code packet complete; new hosted packet not yet dispatched | 100% local / 0% current-tip hosted provisional | Current `origin/main` `2bb84624` is code-equivalent to tested `65776be8` after documentation/lockfile-only successors. Focused NFS/FoundationDB, full locked Rust, strict Clippy, formatting/diff, optimized Darwin addon load, full Node/N-API, and PGlite/Rust/Node/CLI matrix passed; live R2/TiDB/RustFS remained explicit skips. | Freeze `2bb84624`, dispatch fresh same-SHA hosted workflows, retain artifacts, and close R2/AWS/Ozone/native/package/scope/W20.6 gates. | 1.5–3 h active; 4–16 h hosted/provider/native/publication wait | Mainline movement, runner queues, R2 cap/rotation, AWS security/OIDC, Ozone capacity, native privileges, signing/registries, support scope, and final audit remain external. |
+| PR-22 / W05.61 | Immutable current-tip candidate and same-SHA hosted packet dispatch | Candidate published; seven non-R2/AWS workflows pending | 100% local / 5% hosted provisional | Candidate branch `andymac4182/c/w05-production-candidate-20260922d` resolves to `d1a81ad45158dc80647b723f175c01a98b9ed458`; CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets/attestations `35721892593`, and Native 9P `35721891380` were dispatched on that branch. R2 and AWS were intentionally held behind the cap and security request. | Poll all seven workflows, retain terminal artifacts, repair any implementation failure on a new candidate, then close R2/AWS/Ozone/native/package/scope/W20.6. | 0.5–1.5 h active; 4–16 h hosted/provider/native/publication wait | GitHub queues, R2 cap/rotation, AWS security/OIDC, Ozone capacity, native privileges, signing/registries, support scope, and final audit remain external. |
 
 ### Current immutable-candidate addendum (2026-09-22 17:09 AEST)
 
@@ -1526,6 +1555,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 11:26–11:31 UTC (21:26–21:31 AEST) | Published immutable candidate `d1a81ad4` and dispatched the fresh same-SHA non-R2/AWS hosted packet | Release engineering / hosted qualification coordination | Candidate branch `andymac4182/c/w05-production-candidate-20260922d` was verified at the exact SHA; CI `35721887870`, Fault `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets `35721892593` with attestations, and Native 9P `35721891380` were dispatched. R2/AWS remain held by cap/security gates; W05.61/PR-22 records the next terminal-evidence checkpoint. |
 | 2026-09-22 10:56–11:04 UTC (20:56–21:04 AEST) | Re-polled the exact candidate, retrieved terminal W07/W08/native/platform logs, and reconciled the new hosted evidence | Hosted provider/platform/native/package evidence | W07 passed with bound provenance and artifacts; W08 Linux/macOS builds and downloaded-asset verification passed with attestations queued; native FUSE, Rust macOS/Windows, and macOS NFS passed. W05.59/PR-20 records these green sub-gates while production remains NO-GO. |
 | 2026-09-22 11:04–11:26 UTC (21:04–21:26 AEST) | Reconciled concurrent NFS/FoundationDB/W08 mainline successors and requalified the code-equivalent current shared snapshot | Current-tip local release qualification / candidate preparation | Focused NFS/FoundationDB, full locked Rust, strict Clippy, optimized N-API load, full Node/N-API suite, and PGlite/Rust/Node/CLI matrix passed; current `2bb84624` has no code delta from tested `65776be8` beyond docs/lockfile successors. W05.60/PR-21 records the next immutable-candidate action; production remains NO-GO. |
 | 2026-09-22 11:02–11:06 UTC (21:02–21:06 AEST) | Retrieved the terminal Ozone/FoundationDB provider log and classified its hard capacity gate | Hosted provider-capacity evidence | Ozone/FoundationDB completed 1200/1200 operations over 400 iterations with zero timeout/cleanup failures but measured 298.61/1000 IOPS; `IOPS_TARGET_NOT_MET`, `RUSTFS_COMBO_FAIL`, and `OZONE_CLEANUP_PASS` were emitted. W05.58/PR-19 records the second same-SHA provider NO-GO boundary without weakening the floor. |
