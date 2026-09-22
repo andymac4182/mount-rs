@@ -4638,6 +4638,13 @@ reproducible in a production-like environment.
   bounded local wire evidence only, so live providers, power-loss durability,
   broader workload bounds, and native/hosted acceptance remain open and
   W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 framing packet adds the oracle-derived `Expect:
+  100-continue` regression: the gateway emits the interim response, accepts the
+  delayed content-length body, returns `200`, and persists exact bytes. The
+  focused test and full Rust 5/6/35/5 packet, strict Clippy, formatting, and
+  diff checks passed; this is bounded local HTTP/1.1 evidence only, so live
+  providers, power-loss durability, broader workload bounds, and native/hosted
+  acceptance remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `4f9120a2` were
   refreshed: AWS run `35690334807` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35690334795`

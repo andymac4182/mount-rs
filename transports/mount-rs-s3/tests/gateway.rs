@@ -2954,6 +2954,75 @@ async fn http_server_answers_pipelined_requests_in_order() {
     server.close().await.expect("clean shutdown");
 }
 
+#[tokio::test]
+async fn http_server_accepts_expect_continue_upload() {
+    let memory = MemoryFs::empty();
+    let server = S3Server::start(
+        Arc::new(S3Session::new(memory.clone())),
+        S3ServerOptions::default(),
+    )
+    .await
+    .expect("loopback listener");
+    let payload = b"a body the client held back until it was invited";
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/continue.txt HTTP/1.1\r\nHost: {}\r\nContent-Length: {}\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n",
+        server.address(),
+        payload.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write expect-continue request head");
+
+    let mut interim = Vec::new();
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let mut buffer = [0_u8; 1024];
+            let count = stream
+                .read(&mut buffer)
+                .await
+                .expect("read continue response");
+            assert!(count > 0, "server closed before sending 100 Continue");
+            interim.extend_from_slice(&buffer[..count]);
+            if interim.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("bounded wait for 100 Continue");
+    assert!(String::from_utf8_lossy(&interim).starts_with("HTTP/1.1 100 Continue"));
+
+    stream
+        .write_all(payload)
+        .await
+        .expect("write expect-continue body");
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .expect("read final response");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+
+    let handle = memory
+        .open("/continue.txt", "r", 0)
+        .await
+        .expect("stored expect-continue object");
+    let mut stored = vec![0_u8; payload.len()];
+    let count = handle
+        .read(&mut stored, Some(0))
+        .await
+        .expect("read stored expect-continue object");
+    handle.close().await.expect("close stored object");
+    assert_eq!(count, payload.len());
+    assert_eq!(stored, payload);
+    server.close().await.expect("clean shutdown");
+}
+
 #[derive(Debug)]
 struct WireResponse {
     status: u16,
