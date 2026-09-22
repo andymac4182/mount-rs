@@ -285,7 +285,7 @@ impl WebdavServer {
         let running = self
             .state
             .lock()
-            .map(|state| state.task.is_some())
+            .map(|state| task_is_running(state.task.as_ref()))
             .unwrap_or(false);
         let closing = self.closing.load(Ordering::Acquire) != 0;
         if closing {
@@ -735,6 +735,10 @@ fn unbracket_host(host: &str) -> Option<&str> {
     }
 }
 
+fn task_is_running(task: Option<&tokio::task::JoinHandle<()>>) -> bool {
+    task.is_some_and(|task| !task.is_finished())
+}
+
 pub fn bind_refusal(host: &str, credentials: bool) -> Option<WebdavBindError> {
     if credentials || is_loopback_host(host) {
         return None;
@@ -785,5 +789,31 @@ pub fn create_webdav_server_with_session_hooks(
 fn report(hooks: &WebdavServerHooks, error: WebdavTransportError) {
     if let Some(hook) = &hooks.on_transport_error {
         hook(error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_is_running;
+
+    #[tokio::test]
+    async fn a_finished_listener_task_is_not_considered_running() {
+        let task = tokio::spawn(async {});
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        assert!(!task_is_running(Some(&task)));
+        assert!(!task_is_running(None));
+    }
+
+    #[tokio::test]
+    async fn a_pending_listener_task_is_considered_running() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        tokio::task::yield_now().await;
+
+        assert!(task_is_running(Some(&task)));
+
+        task.abort();
     }
 }

@@ -1733,6 +1733,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   payload. The live authenticated HTTP regression rejects `Basic<base64>` and
   still accepts the configured credentials; provider/native/hosted lifecycle,
   power-loss durability, durable locks, and broader ordering remain open.
+- [x] The WebDAV listener lifecycle now distinguishes a finished accept-loop
+  task from a running server, allowing a serialized relisten to recover after
+  an accept failure instead of returning false success. Focused Tokio task-state
+  regressions cover finished and pending handles; deterministic socket-level
+  accept-failure injection and hosted/provider/power-loss qualification remain
+  open.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
