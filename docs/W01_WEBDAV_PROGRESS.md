@@ -89,12 +89,14 @@ advertising durable writes without that callback still fails closed as
 - Keep the pinned pure oracle differential green; the full supported
   server/session prototype-member and direct-method differential plus the
   pinned TypeScript-vs-Rust loopback HTTP differential are evidenced below.
-- Keep `Depth: 1` PROPFIND directory materialization bounded at 4,096 child
-  resources through `FsDriver::readdir_bounded`; a driver-reported overflow
-  fails closed as `413` with `Connection: close`, and child-stat failures remain
-  visible as per-resource multistatus errors. COPY also fails closed for
-  premature source EOF or child-stat errors instead of returning a successful
-  incomplete tree.
+- Keep WebDAV directory walks bounded at 4,096 child resources per visited
+  directory through `FsDriver::readdir_bounded`; a driver-reported overflow in
+  `Depth: 1` PROPFIND fails closed as `413` with `Connection: close`, while
+  recursive COPY and DELETE surface the bounded-listing failure as a per-resource
+  multistatus error without continuing the affected directory. Child-stat
+  failures and premature COPY source EOF remain visible instead of becoming a
+  successful incomplete tree; drivers without the bounded seam retain an
+  explicit `ENOTSUP`/`501` supported-capability boundary.
 - Qualify supported provider/hosted paths and remaining native environments;
   the local NodeFs and SQLite provider/reopen classifications are recorded
   below, while crash/power-loss and live-provider behavior remain separate;
@@ -111,6 +113,7 @@ advertising durable writes without that callback still fails closed as
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
 | 2026-09-22 | WebDAV duplicate-header preservation | The Rust HTTP listener and N-API request-head adapter now retain repeated field values instead of silently taking the last one; `If` fields use whitespace joining so multiple state lists remain valid RFC 4918 syntax. A raw loopback request with one true and one false duplicate `If` list returns `200` and the exact body | Live-provider qualification, hosted lifecycle/concurrency, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV bounded recursive mutation traversal | Recursive COPY and DELETE now use the driver-enforced 4,096-entry directory seam instead of unbounded `readdir`; overflow or unsupported enumeration returns a per-resource `207 Multi-Status` failure without traversing that directory. A focused regression verifies COPY leaves only its created destination and DELETE leaves the source intact when bounded enumeration returns `EOVERFLOW`; formatting, warning-denied WebDAV Clippy, and the focused target remain green | Live-provider qualification, hosted lifecycle/concurrency, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV listener-task lifecycle recovery | `listen()` now treats a finished accept-loop task as stopped, allowing a subsequent serialized bind after an accept failure instead of falsely reporting an existing server; focused task-state regressions cover finished and pending handles, and the full WebDAV target remains green | A deterministic socket-level accept-failure injection is not exposed by the portable listener; hosted lifecycle, live-provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | Current exact-tip hosted WebDAV queue audit | Exact-tip CI run `35682524510` at published packet `8e23ca06` was cancelled before GitHub materialized any jobs, so it supplies no hosted WebDAV result; prior terminal hosted native runs remain the latest accepted hosted evidence | No hosted result is claimable from this cancelled run; live-provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV Basic authentication grammar hardening | Basic credentials now require the oracle/RFC `Basic +<base64>` separator; the live authenticated HTTP test rejects `Basic<base64>` and still accepts the configured pair. Focused WebDAV tests, all package targets, warning-denied Clippy, formatting, and `git diff --check` remain green | Live-provider qualification, current hosted queue, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |

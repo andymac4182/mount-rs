@@ -93,6 +93,10 @@ impl FsDriver for DurableBarrierFs {
         self.inner.readdir(path).await
     }
 
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         self.inner.open(path, flags, mode).await
     }
@@ -140,6 +144,10 @@ impl FsDriver for ShortSourceFs {
         self.inner.readdir(path).await
     }
 
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         self.inner.open(path, flags, mode).await
     }
@@ -166,6 +174,10 @@ impl FsDriver for FailingChildStatFs {
         self.inner.readdir(path).await
     }
 
+    async fn readdir_bounded(&self, path: &str, max_entries: usize) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir_bounded(path, max_entries).await
+    }
+
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         self.inner.open(path, flags, mode).await
     }
@@ -175,12 +187,12 @@ impl FsDriver for FailingChildStatFs {
     }
 }
 
-struct OverflowPropfindFs {
+struct OverflowBoundedDirectoryFs {
     inner: MemoryFs,
 }
 
 #[async_trait]
-impl FsDriver for OverflowPropfindFs {
+impl FsDriver for OverflowBoundedDirectoryFs {
     fn capabilities(&self) -> Capabilities {
         self.inner.capabilities()
     }
@@ -199,6 +211,18 @@ impl FsDriver for OverflowPropfindFs {
 
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         self.inner.open(path, flags, mode).await
+    }
+
+    async fn mkdir(&self, path: &str, options: MkdirOptions) -> FsResult<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+
+    async fn rmdir(&self, path: &str) -> FsResult<()> {
+        self.inner.rmdir(path).await
+    }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
     }
 }
 
@@ -744,7 +768,7 @@ async fn copy_reports_child_stat_failures_in_multistatus() {
 #[tokio::test]
 async fn depth_one_propfind_fails_closed_when_bounded_listing_overflows() {
     let session = WebdavSession::new(
-        Arc::new(OverflowPropfindFs {
+        Arc::new(OverflowBoundedDirectoryFs {
             inner: MemoryFs::empty(),
         }),
         WebdavSessionOptions::default(),
@@ -764,6 +788,67 @@ async fn depth_one_propfind_fails_closed_when_bounded_listing_overflows() {
         response.headers.get("connection"),
         Some(&"close".to_owned())
     );
+}
+
+#[tokio::test]
+async fn recursive_mutations_fail_closed_when_bounded_listing_overflows() {
+    let inner = MemoryFs::empty();
+    inner.mkdir("/tree", MkdirOptions::default()).await.unwrap();
+    inner.write_file("/tree/member", b"member").await.unwrap();
+    let driver = Arc::new(OverflowBoundedDirectoryFs { inner });
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+
+    let copied = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "COPY".to_owned(),
+                target: "/tree".to_owned(),
+                headers: [("destination".to_owned(), "/copy".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(copied.status, 207);
+    let copied_document = copied
+        .body
+        .expect("COPY overflow should return a multistatus body")
+        .into_bytes()
+        .await
+        .expect("COPY multistatus body");
+    let copied_document = String::from_utf8_lossy(&copied_document);
+    assert!(copied_document.contains("/tree"));
+    assert!(
+        copied_document.contains("HTTP/1.1 500 Internal Server Error"),
+        "COPY response: {copied_document}"
+    );
+    assert!(driver.inner.stat("/copy").await.unwrap().is_directory());
+
+    let deleted = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "DELETE".to_owned(),
+                target: "/tree".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(deleted.status, 207);
+    let deleted_document = deleted
+        .body
+        .expect("DELETE overflow should return a multistatus body")
+        .into_bytes()
+        .await
+        .expect("DELETE multistatus body");
+    let deleted_document = String::from_utf8_lossy(&deleted_document);
+    assert!(deleted_document.contains("/tree"));
+    assert!(deleted_document.contains("HTTP/1.1 500 Internal Server Error"));
+    assert!(driver.inner.stat("/tree").await.unwrap().is_directory());
 }
 
 #[tokio::test]

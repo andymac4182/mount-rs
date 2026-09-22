@@ -1719,15 +1719,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   against one exclusive lock and both receive `423` without its submitted
   token; clients coordinate shared-resource writes through WebDAV lock/`If`
   state. Provider, power-loss, and durable-lock acceptance remain separate.
-- [x] The WebDAV remote-response and recursive-copy failure boundary is now
-  fail-closed: `Depth: 1` `PROPFIND` asks `FsDriver::readdir_bounded` for at
-  most 4,096 child resources and maps provider `EOVERFLOW` to `413` with
-  `Connection: close`; recursive `COPY` reports child-stat failures and
-  rejects premature or over-reported source reads instead of silently
-  returning incomplete success. The focused WebDAV target passed 24/24,
-  package targets and warning-denied Clippy passed, and the native mount test
-  remains explicitly ignored. Provider/native/hosted qualification,
-  power-loss durability, durable locks, and broader ordering remain open.
+- [x] The WebDAV remote-response and recursive-mutation failure boundary is
+  now fail-closed: `Depth: 1` `PROPFIND`, recursive `COPY`, and recursive
+  `DELETE` ask `FsDriver::readdir_bounded` for at most 4,096 child resources
+  per visited directory. `PROPFIND` maps provider `EOVERFLOW` to `413` with
+  `Connection: close`; recursive mutations surface overflow or unsupported
+  enumeration as per-resource `207` failures without traversing that
+  directory. COPY also reports child-stat failures and rejects premature or
+  over-reported source reads instead of silently returning incomplete success.
+  The focused WebDAV target, package targets, warning-denied Clippy, and
+  formatting pass; the native mount test remains explicitly ignored.
+  Provider/native/hosted qualification, power-loss durability, durable locks,
+  and broader ordering remain open.
 - [x] The WebDAV Basic parser now requires the oracle/RFC `Basic +<base64>`
   separator instead of accepting a scheme concatenated directly with the
   payload. The live authenticated HTTP regression rejects `Basic<base64>` and
