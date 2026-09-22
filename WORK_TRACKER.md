@@ -1153,7 +1153,10 @@ and warning-denied WebDAV Clippy passes; the target now includes a durable
 driver barrier regression covering successful PUT, MKCOL, PROPPATCH, COPY,
 MOVE, DELETE, resource creation by LOCK, and injected barrier failure/retry.
 This is transport-level barrier evidence and does not close external hosted,
-provider-lifecycle, power-loss, or durable-lock gates.
+provider-lifecycle or power-loss gates. Durable lock persistence is explicitly
+outside the supported WebDAV scope: the NodeFs and SQLite forced-process-loss
+probes recreate the provider in a replacement session and observe
+`lockCount === 0` after the killed child held an exclusive lock.
 The current shell has no AWS/R2/Cloudflare credential names available; live
 provider acceptance remains externally gated and no credential values were
 read or persisted.
@@ -1217,8 +1220,9 @@ concurrency evidence is not promoted to hosted acceptance.
 The pinned WebDAV oracle deliberately has no `PathLock` for this HTTP session;
 the transport therefore supports concurrent independent resources and
 WebDAV lock/`If` coordination, but does not claim linearizable same-resource
-ordering or atomic same-target `PUT` publication. Power-loss durability,
-live-provider behavior, and durable locks remain separate gates.
+ordering or atomic same-target `PUT` publication. Power-loss durability and
+live-provider behavior remain separate gates; durable lock persistence is
+outside the supported WebDAV scope.
 
 - [x] Land Rust filesystem contract and implementations, with separate crates.
 - [x] Pin mountx oracle to `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`.
