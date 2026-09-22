@@ -120,13 +120,13 @@ jobs:
       - name: Verify durable FoundationDB metadata, RustFS chunks, and restart
         env:
           RUSTFS_COMBO_NAME: foundationdb-production-qualification
-          RUSTFS_COMBO_TIMEOUT_SECONDS: '900'
+          RUSTFS_COMBO_TIMEOUT_SECONDS: '1500'
           RUSTFS_COMBO_COMMAND: ./scripts/test-foundationdb.sh
           MOUNT_RS_FOUNDATIONDB_TOPOLOGY: durable
-          # Five isolated real-provider rounds give the dedicated production
-          # qualification lane a bounded soak signal without presenting it as
-          # a production-duration or capacity result.
-          MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS: '5'
+          # Ten isolated real-provider rounds give the dedicated production
+          # qualification lane an extended bounded soak signal without
+          # presenting it as a production-duration or capacity result.
+          MOUNT_RS_FOUNDATIONDB_SOAK_ROUNDS: '10'
           MOUNT_RS_FOUNDATIONDB_NAPI: '1'
           MOUNT_RS_FOUNDATIONDB_NATIVE_CLI: '1'
           # Fixed, bounded workload qualification: 400 iterations at 64
@@ -168,7 +168,7 @@ jobs:
           set -o pipefail
           node scripts/verify-w07-qualification-log.mjs \
             artifacts/foundationdb-production-qualification.log \
-            5 \
+            10 \
             artifacts/foundationdb-production-qualification-summary.json \
             2>&1 | tee -a artifacts/foundationdb-production-qualification.log
 
