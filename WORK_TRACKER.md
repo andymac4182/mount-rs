@@ -958,6 +958,7 @@ patch):
 | Main | W01 N-API 9P native connection close idempotence | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-server-connection-lifecycle.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native `P9Connection.close()` promise at the JavaScript boundary, preserving concurrent/repeated/post-closure idempotence. The real-TCP regression covers concurrent calls, `closed`/`waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local syntax, diff, focused close/order/identity/member checks, metadata/session/observability/type checks, and the elevated `p9` selector passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the native close-idempotence check and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 N-API 9P mounted view identity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `1a18c7b82285ea557956cb35d15f1af189803d4d` caches `Mounted.server` and `Mounted.connection` wrappers and reuses the matching `P9Server.clients` wrapper by stable transport id. The direct native-mount regression covers repeated getter identity, cross-view connection identity, native stream/peer/session views, and cleanup. Local syntax, focused lifecycle checks, metadata/session/observability/type checks, and the elevated 9P selector passed; published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 9P supported-scope closure audit | `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md`, `docs/public-api-parity.md`, `transports/mount-rs-9p/README.md` | Current audit classifies the advertised codec/session/server/connection/attach/mount slice as qualified by local evidence and published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` / [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373), N-API job `106667799214`, and Rust job `106667799016`. Legacy/auth/xattr families, unadvertised upstream members, native-listener Node-stream identity, root automatic cross-transport signals, process-crash/arbitrary kernel-reset recovery, and non-Linux native mounts are explicit scope boundaries; broader oracle parity remains partial by design and overall W01/release remains NO-GO |
+| Main | W01 dedicated hosted upstream 9P conformance gate | `.github/workflows/native-9p.yml`, `tests/upstream/p9-conformance.test.mjs`, `examples/p9_oracle.rs`, `docs/W01_9P_PROGRESS.md`, `docs/W01_PROGRESS.md` | Published SHA `a6b3e2aa10cfdb3ee730d41c5886436b02c260de` adds the revision-matched Linux `upstream-9p` job and routes the fixture through `scripts/cargo-shared`. [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973) passed upstream job `106680012604` with `144 passed` and `2 skipped` root-gated ownership cases out of `146`; N-API job `106680012485` and Rust job `106680013203` also passed. Local YAML/syntax, focused oracle/public-surface, and diff checks passed; local full-suite execution is blocked before tests by the Mac's unaccepted Xcode license. The documented legacy/auth/xattr, broader upstream member, supervisor-owned crash/reset, and non-Linux native-mount boundaries remain explicit, so production remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -1001,7 +1002,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
-| W05 | Cloudflare R2 | Functional slice complete; exact immutable candidate `87f3cdf0` is locally green across Rust/Node SDK+CLI, N-API, PGlite, and oracle paths; production closure remains active with hosted rerun, AWS security/OIDC, R2 cap reset/rotation, Ozone performance, native-FUSE, platform, package, scope, and W20.6 gates open | Main |
+| W05 | Cloudflare R2 | Functional slice and exact local Rust/Node SDK+CLI/N-API/PGlite/oracle packet are green; candidate CI `35702348089` is terminal-failed on an actionable Rust 9P test race, Node 9P timeout, Windows Node timeout, a TiDB prepared-statement failure-injector gap, and hard Ozone IOPS below 1000. The first Rust repair is published at `be98aca9`; TiDB prepared-statement tracking and Node 9P cleanup repairs are compile-/focused-check green locally, while the replacement candidate and hosted rerun remain open | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest exact-tip terminal cross-platform qualification packet is green at [run `35705886860`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35705886860) / exact source `ab74870c58ab768c65679ea80feb18a8f54cbe00`, Linux job `106674581511`, macOS job `106674582039`, aggregate job `106678244742`; Linux run-bound provenance, durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen and RustFS integration paths passed, as did the 30-second heartbeat with 120-second bound and reconciled stats; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the repaired aggregate verifier emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,848µs, p95/p99 13,430µs and 260.46 ops/s, ten-round soak p95/p99 was 11,732–13,359µs at 241.11–268.03 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 228.83 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact `foundationdb-production-qualification-35705886860-1` (ID `10684961250`, SHA-256 `b7243f25a5761ff33eb934dfdf3c6cb11e759152b6d89da81443f2b1a56a713d`), macOS artifact ID `10684372277` (SHA-256 `4a6d62462416dda0708b6ffd99ae52ce922a3be9ee528a803044bad72c4890f3`) and aggregate artifact ID `10684129931` (SHA-256 `ce9efe4f961aca6f8b0906ba55b9039ebfa4690b5e864f071574fa9b8f2026b6`) were retained and independently revalidated; the seven-gate packet remains NO-GO with zero production evidence records. This is exact-tip hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
@@ -1302,6 +1303,16 @@ green.
 The pinned `CARGO=./scripts/cargo-shared MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node scripts/check-http-parity.mjs`
 HTTP differential also passes all 40 paired S3+WebDAV cases, including its 16
 WebDAV cases, after the authority audit.
+The current conditional-header packet keeps entity-tag parsing aligned with the
+pinned oracle: optional whitespace around `If-Match`/`If-None-Match` list
+members is accepted, while whitespace between `W/` and the quoted value is
+preserved so malformed input cannot become a false weak match. The focused
+regression and full WebDAV target pass 41/41; workspace warning-denied Clippy,
+formatting, diff checks, and the pinned 40-case differential also pass.
+Because the shared Cargo target lost artifacts during a concurrent rebuild, the
+final exact-head focused/full/Clippy proof used the fresh explicit
+`CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through
+`./scripts/cargo-shared`; the shared cache was not cleaned or deleted.
 The public `DavLockTableOptions` finite-timeout path now caps before applying
 the one-second minimum, so even `max_timeout_seconds: 0` cannot reach Rust's
 invalid `clamp(1, 0)` panic; the deterministic regression and the full 29/29
@@ -2084,6 +2095,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   process-crash namespace recovery, not directory-fsync/power-loss durability,
   durable v4 state, native-client ordering, or hosted acceptance; W01-NFS
   remains NO-GO.
+- [x] The shared NFS RPC version router now advertises the actually served
+  NFSv3..v4 range for unsupported NFS versions, rather than falling into the
+  standalone v3 session's v3-only refusal. A real-TCP regression reproduced
+  the old `3..3` response, then passed `3..4` for versions 2 and 5 while
+  retaining MOUNTv3's `3..3`, unknown-program, RPC-version, auth, and valid
+  v3/v4 behavior. TCP and direct N-API dispatch use one Rust router. The full
+  locked NFS target, 266 pinned parity cases (18 explicit skips), affected
+  strict Clippy, N-API release compilation/typecheck, formatting, and diff
+  checks pass. Local direct N-API runtime execution remains unqualified:
+  the macOS-built addon fails `dlopen` with a mis-aligned LINKEDIT string
+  pool, despite a successful shared-target build. Native/hosted ordering,
+  crash/power-loss durability, and W01-NFS production acceptance remain NO-GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second
@@ -2713,6 +2736,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   format, strict Clippy, and locked workspace tests. TLS compile/policy
   `106658534528` and Ubuntu native NFS `106658534834` also passed their
   terminal support gates. Production remains **NO-GO**.
+- The same run was cancelled after Ubuntu Rust spent more than an hour in
+  `cargo test --workspace --all-targets --locked` without a terminal result;
+  comparable successful Rust jobs finish in roughly 1.5–3 minutes. W26 job
+  `106670761354` independently failed closed with
+  `W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-artifact-source-checkout-dirty`
+  because the composition tee log was created inside the checkout before
+  provenance capture. The follow-up workflow fix moves the W26 composition
+  log/JSON to `$RUNNER_TEMP` and bounds the Rust matrix at 25 minutes;
+  `benchmarks/storage/test.mjs`, the rollout policy checks, YAML parsing, and
+  diff checks pass locally. A fresh hosted run is required; W04 current-tip
+  acceptance and production remain **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
@@ -4153,9 +4187,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
   production gates or external-drill boundary. This is an internal tracking
   invariant, not production acceptance.
-  `scripts/test-w07-rollout-ledger.mjs` runs six regression cases for the
-  current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
-  complete-GO states; these cases validate the tracking control only.
+  `scripts/test-w07-rollout-ledger.mjs` runs eight regression cases for the
+  current NO-GO, premature-GO, missing-gate, missing-drill, incomplete
+  P0–P14 ledger and synthetic complete-GO states; these cases validate the
+  tracking control only. The verifier also requires exactly one row for every
+  P0–P14 gate, rejects a terminal gate status while the decision is **NO-GO**,
+  and requires every gate to be terminally accepted before a **GO** decision.
   The hosted workflow runs `scripts/test-w07-qualification-log.mjs` with
   eight credential-free verifier cases. The qualification log verifier
   requires the exact accepted configuration shape, both expected negative
@@ -4188,16 +4225,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   remain open.
   The hosted workflow also validates the machine-readable
   `docs/W07-production-evidence.json` packet with
-  `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
+  `scripts/verify-w07-production-evidence.mjs` and runs sixteen credential-free
   packet cases through `scripts/test-w07-production-evidence.mjs`. The packet
   has one row for each W07.7 production gate and requires explicit remaining
   actions while **NO-GO**; any future **GO** packet must carry a concrete
-  source revision, accountable owner, target environment, terminal run,
-  provider versions, cleanup/rollback outcome and evidence reference for every
-  closed gate. The workflow retains this packet beside the qualification log
-  and summary in the run artifact, so the seven-gate NO-GO state travels with
-  each bounded qualification result. This is admission/tracking integrity
-  only and cannot authenticate production evidence or release approval.
+  source revision, unique record ID, accountable owner, target environment,
+  terminal run, provider versions, configuration and authority references,
+  people, ordered ISO-8601 lifecycle timestamps, measured result,
+  cleanup/rollback outcome and evidence reference for every closed gate. The
+  workflow retains this packet beside the qualification log and summary in the
+  run artifact, so the seven-gate NO-GO state travels with each bounded
+  qualification result. This is admission/tracking integrity only and cannot
+  authenticate production evidence or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
@@ -6259,6 +6298,24 @@ listing a source does not mean it has been reviewed or its code can be reused.
   The credential-free template, bucket-policy, CI-config, and CI-environment
   contract fixtures also passed. Explicitly ignored native/service rows and
   all production deployment gates remain separate prerequisites.
+- [x] The current credential-free W25 harness contract chunk added a
+  fail-closed validator and synthetic regression matrix for W25.2/W25.3.
+  `AWS_S3_TEST_CONFIG_TEST_PASS cases=10` passed without invoking AWS, Cargo,
+  or a provider. The matrix covers profile and explicit temporary-credential
+  inputs, role/account binding, missing or mismatched expected accounts,
+  incomplete or ambiguous credential sources, endpoint overrides, unsafe
+  prefixes, and secret-safe output. The local live harness now runs this guard
+  before AWS CLI access and requires `AWS_S3_TEST_EXPECTED_ACCOUNT_ID` whenever
+  an optional role ARN is supplied.
+- [x] The hosted AWS workflow now triggers and hashes the harness validator
+  and its offline test, and runs the 10-case contract preflight before
+  authentication. Existing credential-free rollout fixtures also passed in
+  the same verification set: `AWS_S3_CI_CONFIG_TEST_PASS cases=7`,
+  `AWS_S3_CI_ENVIRONMENT_TEST_PASS cases=3`,
+  `AWS_S3_BUCKET_POLICY_TEST_PASS cases=2`, and
+  `AWS_S3_TEMPLATE_CONTRACT_PASS statements=5`. These are fail-closed
+  safeguards only; they do not replace live W25.3 service acceptance or
+  production deployment approval.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,
@@ -7186,6 +7243,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV conditional ETag whitespace compatibility | Preserve the pinned entity-tag grammar at the `If-Match`/`If-None-Match` boundary: trim list-member OWS, but do not trim after `W/`, preventing malformed `W/ "etag"` from becoming a weak match | Final exact-head focused 1/1 and full 41/41 tests plus workspace warning-denied Clippy used `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through `./scripts/cargo-shared`; formatting, diff checks, and the pinned 40-case HTTP differential also pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV HTTP-date leap-second compatibility | Accept RFC 9110 `:60` seconds by normalizing only the valid seconds field to `:59`, matching the pinned oracle while preserving rejection of invalid minutes and malformed dates | Focused date-form regression and full WebDAV target 40/40, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV If-parser UTF-8 boundary safety | Probe the public `Not` grammar with UTF-8-safe access so malformed non-ASCII input such as `(éé)` returns `None` instead of panicking at a code-point boundary | Focused regression reproduced the pre-fix panic and now passes; full WebDAV target 39/39, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV XML parser character validation | Reject invalid UTF-8 and raw XML-invalid characters before tree construction, matching the pinned `invalid-character` refusal instead of preserving controls in `XmlNode` text | Focused raw-NUL parser regression and full WebDAV target 38/38, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |

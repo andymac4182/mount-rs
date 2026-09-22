@@ -456,6 +456,18 @@ async function exerciseNfs() {
     assert.equal(await server.session.v4.sweepExpired(), 0);
     assert.ok(clockCalls.length > 0, "NFSv4 uses the injected JavaScript clock");
 
+    const unsupportedVersion = nfsV4NullCall(45);
+    unsupportedVersion.writeUInt32BE(5, 16);
+    const directMismatch = await server.session.handleCall(unsupportedVersion);
+    assert.equal(directMismatch.readUInt32BE(20), nfs.RPC_PROG_MISMATCH);
+    assert.equal(directMismatch.readUInt32BE(24), 3);
+    assert.equal(directMismatch.readUInt32BE(28), 4);
+    const standaloneV3Mismatch = await server.session.v3.handleCall(unsupportedVersion);
+    assert.equal(standaloneV3Mismatch.readUInt32BE(20), nfs.RPC_PROG_MISMATCH);
+    assert.equal(standaloneV3Mismatch.readUInt32BE(24), 3);
+    assert.equal(standaloneV3Mismatch.readUInt32BE(28), 3);
+    assert.equal(server.session.stats.requests, 5);
+
     // Exercise the callback-backed NFSv4 state path through the actual N-API
     // server. The synchronous JS callbacks are invoked from the Rust async
     // worker and their translated owner strings are returned on the wire.
@@ -1241,15 +1253,25 @@ async function exerciseP9ServerBoundary() {
     const taken = createP9Server(memoryFilesystem(), { host: "127.0.0.1", port: 0 });
     let listening;
     let clash;
+    let clashListening = false;
+    let clashListen;
     try {
       ({ listening } = await listenLifecycle(taken, "9P port conflict owner"));
       clash = createP9Server(memoryFilesystem(), {
         host: "127.0.0.1",
         port: taken.port,
       });
-      await assert.rejects(clash.listen(), (error) => error?.code === "EADDRINUSE");
+      clashListen = clash.listen();
+      try {
+        await clashListen;
+        clashListening = true;
+        assert.fail("the occupied 9P port must reject a second listener");
+      } catch (error) {
+        if (clashListening) throw error;
+        assert.equal(error?.code, "EADDRINUSE");
+      }
     } finally {
-      if (clash) await clash.close();
+      if (clashListening) await closeLifecycle(clash, "9P port conflict loser", clashListen);
       await closeLifecycle(taken, "9P port conflict owner", listening);
     }
   }
@@ -2736,6 +2758,11 @@ const requestedServerPhase = process.env.MOUNT_RS_SERVER_PHASE
 
 await within(
   (async () => {
+    if (requestedServerPhase === "nfs") {
+      await runPhase("NFS exercise", exerciseNfs);
+      await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
+      return;
+    }
     if (requestedServerPhase === "p9") {
       await runPhase("9P exercise", exerciseP9);
       await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);

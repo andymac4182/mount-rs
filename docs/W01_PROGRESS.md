@@ -252,6 +252,18 @@ N-API job `106667799214`, and Rust job `106667799016`; the detailed decision
 is recorded in [`W01_9P_PROGRESS.md`](./W01_9P_PROGRESS.md). This narrows the
 9P claim without changing the overall W01/release **NO-GO** decision.
 
+The dedicated hosted upstream 9P conformance packet was published at exact SHA
+`a6b3e2aa10cfdb3ee730d41c5886436b02c260de`. Its `upstream-9p` job checks out
+oracle revision `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`, builds the Rust
+fixture through `scripts/cargo-shared`, and runs the unmodified pinned TCP
+conformance suite. [Native 9P run `35707546973`](https://github.com/andymac4182/mount-rs/actions/runs/35707546973)
+passed upstream job `106680012604` with `144 passed` and `2 skipped` explicit
+non-root ownership cases out of `146`, alongside N-API job `106680012485` and
+Rust job `106680013203`. This strengthens hosted protocol evidence without
+silently converting the documented legacy/auth/xattr, broader-member,
+supervisor-owned crash/reset, or non-Linux native-mount boundaries into claims;
+W01/release remains **NO-GO**.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
@@ -360,6 +372,14 @@ After server replacement, wire `LOOKUP` reports the old name absent and the
 new name present, with exact host bytes at the new path. This is one-host
 process-crash namespace evidence, not directory-fsync or power-loss durability;
 W01-NFS stays NO-GO.
+
+The shared NFS RPC router now advertises the actual v3..v4 supported range
+when a client requests an unsupported NFS version. The real-TCP regression
+reproduced the former v3-only `3..3` response and now passes `3..4` while
+retaining MOUNTv3-only, unknown-program, RPC-version, auth, and valid-version
+behavior. The direct N-API path compiles through the same router, but its
+local runtime assertion is blocked by a malformed macOS addon LINKEDIT and is
+not claimed as a pass. W01-NFS remains NO-GO.
 
 W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
 orderly TCP reconnect: the same cached slot/sequence returns the original
@@ -1286,6 +1306,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-WebDAV | Hardened public XML parsing with a pre-parse UTF-8/XML-character validation gate: raw controls such as NUL now produce the pinned `invalid-character`/400 refusal instead of surviving in `XmlNode` text; the focused regression reproduced and closed the prior acceptance | — | 77% W01.1 planning view | This closes a local public XML-parser safety/parity boundary only; full WebDAV 38/38, warning-denied workspace Clippy, formatting, git diff --check, and the pinned 40-case differential pass, while hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Hardened the public `If` parser's `Not` keyword probe against UTF-8 byte-boundary panics: malformed `(éé)` input now returns the ordinary invalid-header result, with the pre-fix panic reproduced by the focused regression | — | 77% W01.1 planning view | This closes a local public `If`-parser safety boundary only; full WebDAV 39/39, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential pass, while hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Aligned public HTTP-date parsing with RFC 9110 and the pinned oracle: valid `:60` leap seconds now parse as the preceding `:59`, while invalid minutes remain rejected; the focused regression covers IMF-fixdate, RFC 850, asctime, leap-second, and invalid-minute forms | — | 77% W01.1 planning view | This closes a local HTTP-date parser parity boundary only; full WebDAV 40/40, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential pass, while hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Aligned `If-Match`/`If-None-Match` entity-tag parsing with the pinned oracle: optional whitespace around list members remains accepted, while malformed whitespace between `W/` and the quoted value no longer becomes a false weak match; final exact-head focused/full tests and workspace Clippy used `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through `./scripts/cargo-shared`; focused 1/1, full 41/41, warning-denied Clippy, formatting, `git diff --check`, and the pinned 40-case S3+WebDAV differential passed | — | 77% W01.1 planning view | This closes a local conditional-header parser parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and same-resource ordering remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-FUSE | Reconciled the FUSE README boundary with the current dispatch: session-scoped `GETLK`/`SETLK` are supported, `SETLKW` deliberately returns `EAGAIN`, and Linux handles targeted `INTERRUPT`; hosted native lock/interrupt and lifecycle evidence remain open | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Rechecked deterministic FUSE lifecycle coverage: 14 library tests and 20 focused session tests passed with an isolated Cargo target; Darwin cannot execute the Linux-gated `/dev/fuse` lifecycle, crash/restart, concurrency, locks or durability scenarios | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Rechecked deterministic mount-free durability barriers: all 4 `sync_barrier` tests passed for `SYNCFS`, `FSYNCDIR`, durable/volatile `FLUSH`, and backend errors; this does not qualify kernel persistence or crash recovery | W01 remains NO-GO |
@@ -1310,6 +1331,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Added directory-handle accounting coverage for `OPENDIR`/`RELEASEDIR`; all 21 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with wire `REMOVE` of a seeded host file before termination; replacement-session wire `LOOKUP` returned `NFS4ERR_NOENT`, while the existing `FILE_SYNC4` readback and stale session/handle checks remained green. Direct process restart passed 2/2; the full locked NFS target passed 41 unit and all applicable integrations, including 20 v4 wire; strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with successful wire `RENAME` of a seeded host file; after forced termination, replacement-session wire `LOOKUP` found the old name absent and the new name present, and exact host bytes remained at the destination. Direct process restart passed 2/2, the full locked NFS target passed 41 unit and all applicable integrations including 20 v4 wire, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is same-directory, one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Corrected the shared RPC router's unsupported NFS version response from v3-only `3..3` to the actual v3..v4 range. The pre-fix real-TCP regression failed, then passed 1/1 with MOUNT, program, RPC-version, auth, valid v3/v4, and shared-stat boundaries; full locked NFS passed 41 unit and all applicable integrations including 20 v4 wire, pinned upstream parity passed 266 with 18 explicit skips, affected strict Clippy, N-API release compilation/typecheck, formatting, and diff checks passed | — | 75% W01.4 planning view | Direct N-API runtime assertion remains unqualified locally because the built macOS addon fails `dlopen` with mis-aligned LINKEDIT; native/hosted ordering, crash/power-loss durability, exact-tip hosted acceptance, and W01 production acceptance remain NO-GO |
 
 ## Definition of W01 complete
 

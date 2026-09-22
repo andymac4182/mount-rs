@@ -891,6 +891,7 @@ name = "mount-rs-pglite"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "md-5 0.10.6",
  "mount-rs-core",
  "mount-rs-persist",
  "serde_json",

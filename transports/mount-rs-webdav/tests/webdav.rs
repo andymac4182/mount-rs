@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,9 +11,9 @@ use mount_rs_core::{
     Result as FsResult, Stats,
 };
 use mount_rs_webdav::protocol::{
-    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_http_date_ms, parse_if,
-    parse_lock_info, parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml,
-    status_of_error, xml_document,
+    RangeSpec, collect_body, evaluate_conditionals, href_of, parse_depth, parse_destination,
+    parse_http_date_ms, parse_if, parse_lock_info, parse_lock_token, parse_overwrite, parse_range,
+    parse_target_path, parse_xml, resource_etag, status_of_error, xml_document,
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, DavLockGrant, DavLockRequest, DavLockTable,
@@ -1619,6 +1620,40 @@ fn http_date_parser_accepts_rfc9110_wire_forms() {
         parse_http_date_ms("Sun, 06 Nov 1994 08:60:60 GMT"),
         None,
         "an invalid minute must not be normalized as a leap second"
+    );
+}
+
+#[test]
+fn conditional_etags_preserve_invalid_weak_marker_spacing() {
+    let stats = Stats {
+        dev: 0,
+        ino: 1,
+        mode: mount_rs_core::S_IFREG,
+        nlink: 1,
+        uid: 0,
+        gid: 0,
+        rdev: 0,
+        size: 1,
+        blksize: 1,
+        blocks: 1,
+        atime_ms: 0,
+        mtime_ms: 0,
+        ctime_ms: 0,
+        birthtime_ms: 0,
+    };
+    let etag = resource_etag(&stats);
+    let mut headers = BTreeMap::from([(String::from("if-none-match"), format!("W/ {etag}"))]);
+    assert_eq!(
+        evaluate_conditionals(&headers, Some(&stats), "GET").status,
+        200,
+        "the pinned parser does not ignore whitespace between W/ and the quoted tag"
+    );
+
+    headers.insert(String::from("if-none-match"), format!(" W/{etag} "));
+    assert_eq!(
+        evaluate_conditionals(&headers, Some(&stats), "GET").status,
+        304,
+        "optional whitespace around a valid list member remains accepted"
     );
 }
 

@@ -49,10 +49,12 @@ object ARN prefix. The bucket and prefix must be owned by the test account;
 the harness does not create or discover resources.
 
 For a short-lived least-privilege role, set `AWS_S3_TEST_ROLE_ARN` alongside
-`AWS_PROFILE` (or explicit base credentials). The harness obtains temporary
-role credentials with `sts:AssumeRole` before the preflight and uses those
-credentials for the Rust tests and cleanup. It never creates or modifies the
-role, policy, bucket, or access keys.
+`AWS_PROFILE` (or explicit base credentials) and set
+`AWS_S3_TEST_EXPECTED_ACCOUNT_ID` to the approved 12-digit account. The
+harness obtains temporary role credentials with `sts:AssumeRole` before the
+preflight, requires the role ARN account to match that expected account, and
+uses the resulting credentials for the Rust tests and cleanup. It never creates
+or modifies the role, policy, bucket, or access keys.
 
 For the recorded bucket, the identity policy can be scoped to the harness's
 dedicated test namespace (replace the bucket ARN if the test bucket changes;
@@ -153,6 +155,7 @@ MOUNT_RS_RUN_AWS_S3=1 \
 MOUNT_RS_RUN_AWS_S3_PGLITE=1 \
 AWS_PROFILE=myroot \
 AWS_S3_TEST_ROLE_ARN=arn:aws:iam::922978963556:role/mount-rs/mount-rs-aws-s3-integration-test \
+AWS_S3_TEST_EXPECTED_ACCOUNT_ID=922978963556 \
 AWS_S3_TEST_BUCKET=mount-rs-integration-922978963556-ap-southeast-2 \
 AWS_S3_TEST_REGION=ap-southeast-2 \
 ./scripts/test-aws-s3.sh
@@ -183,6 +186,7 @@ The explicit opt-in is required:
 ```sh
 AWS_PROFILE=myroot \
 AWS_S3_TEST_ROLE_ARN=arn:aws:iam::922978963556:role/mount-rs/mount-rs-aws-s3-integration-test \
+AWS_S3_TEST_EXPECTED_ACCOUNT_ID=922978963556 \
 AWS_S3_TEST_BUCKET=mount-rs-integration-922978963556-ap-southeast-2 \
 AWS_S3_TEST_REGION=ap-southeast-2 \
 MOUNT_RS_RUN_AWS_S3=1 \

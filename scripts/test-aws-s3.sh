@@ -60,6 +60,10 @@ case "$prefix" in
     ;;
 esac
 
+AWS_S3_TEST_REGION="$region" \
+MOUNT_RS_AWS_S3_TEST_PREFIX="$prefix" \
+  "$repo_dir/scripts/validate-aws-s3-test-config.sh"
+
 # A local or S3-compatible endpoint would make a green result non-AWS
 # evidence. The Rust client also omits an endpoint, but reject CLI endpoint
 # overrides so the preflight and the test cannot disagree.

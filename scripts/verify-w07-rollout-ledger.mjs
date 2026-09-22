@@ -40,6 +40,26 @@ const tracker = await load(trackerPath, "tracker");
 const rollout = await load(rolloutPath, "rollout-ledger");
 const runbook = await load(runbookPath, "operations-runbook");
 
+const productionGateIds = Array.from({ length: 15 }, (_, index) => `P${index}`);
+const productionGateRows = [
+  ...rollout.matchAll(
+    /^\|\s*(P(?:0|[1-9]|1[0-4]))\s+—[^|\n]*\|\s*([^|\n]+?)\s*\|/gmu,
+  ),
+].map((match) => ({ id: match[1], status: match[2].trim() }));
+if (productionGateRows.length !== productionGateIds.length) {
+  fail("production-gate-ledger-must-have-fifteen-rows");
+}
+const productionGateStatuses = new Map();
+for (const gateId of productionGateIds) {
+  const matchingRows = productionGateRows.filter((row) => row.id === gateId);
+  if (matchingRows.length !== 1) {
+    fail(`production-gate-${gateId.toLowerCase()}-row-must-be-unique`);
+  }
+  productionGateStatuses.set(gateId, matchingRows[0].status);
+}
+
+const terminalGateStatus = /^(?:complete|go|accepted)\b/iu;
+
 const noGo = /\|\s*Production rollout\s*\|\s*\*\*NO-GO\*\*\s*\|/u.test(
   rollout,
 );
@@ -97,6 +117,11 @@ if (noGo) {
     /Not executed — external production gate/u,
     "no-go-requires-unexecuted-drill-boundary",
   );
+  for (const [gateId, status] of productionGateStatuses) {
+    if (terminalGateStatus.test(status)) {
+      fail(`no-go-requires-open-${gateId.toLowerCase()}`);
+    }
+  }
 } else {
   requireMatch(
     tracker,
@@ -119,13 +144,11 @@ if (noGo) {
   if (/No P0–P14 gate is currently terminally accepted\./u.test(rollout)) {
     fail("go-cannot-retain-open-p0-p14-ledger");
   }
-  const p14 = rollout.match(/^\| P14[^\n]*$/mu)?.[0] ?? "";
-  const p14Status = p14.split("|")[2]?.trim() ?? "";
-  requireMatch(
-    p14Status,
-    /^(?:Complete|GO|Accepted)\b/iu,
-    "go-requires-p14-acceptance",
-  );
+  for (const [gateId, status] of productionGateStatuses) {
+    if (!terminalGateStatus.test(status)) {
+      fail(`go-requires-terminal-${gateId.toLowerCase()}`);
+    }
+  }
 }
 
 console.log(

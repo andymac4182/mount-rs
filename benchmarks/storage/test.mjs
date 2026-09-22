@@ -453,6 +453,31 @@ async function testProductionRolloutContract() {
   )
 }
 
+async function testW26WorkflowKeepsProvenanceClean() {
+  const workflow = await readFile(".github/workflows/ci.yml", "utf8")
+  const compositionStart = workflow.indexOf("  ozone-compositions:")
+  const compositionEnd = workflow.indexOf("  ozone-tidb:", compositionStart)
+  assert.notEqual(compositionStart, -1)
+  assert.notEqual(compositionEnd, -1)
+  const compositionJob = workflow.slice(compositionStart, compositionEnd)
+  assert.match(
+    compositionJob,
+    /MOUNT_RS_OZONE_IOPS_OUTPUT: \$\{\{ runner\.temp \}\}\/w26-ozone-compositions\/ozone-iops\.json/u,
+  )
+  assert.match(
+    compositionJob,
+    /tee "\$RUNNER_TEMP\/w26-ozone-compositions\/ozone-compositions\.log"/u,
+  )
+  assert.doesNotMatch(compositionJob, /tee artifacts\/ozone-compositions\.log/u)
+  assert.doesNotMatch(compositionJob, /artifacts\/ozone-iops\.json/u)
+
+  const rustStart = workflow.indexOf("  rust:")
+  const rustEnd = workflow.indexOf("  http-observability:", rustStart)
+  assert.notEqual(rustStart, -1)
+  assert.notEqual(rustEnd, -1)
+  assert.match(workflow.slice(rustStart, rustEnd), /timeout-minutes: 25/u)
+}
+
 async function testExecutionSurfaceLabels() {
   const definitions = providerById({})
   assert.deepEqual(definitions.get("mount-rs-memory").executionSurface, {
@@ -541,6 +566,7 @@ await testRequiredProviderConfiguration()
 await testQualificationArtifact()
 await testEvidencePacket()
 await testProductionRolloutContract()
+await testW26WorkflowKeepsProvenanceClean()
 await testExecutionSurfaceLabels()
 await testOzoneProviderMatrix()
 await testDeferredWriteCleanup()
