@@ -755,6 +755,17 @@ impl FsDriver for InstrumentedDriver {
         }))
     }
 
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.telemetry
+            .observe_fs(
+                "core",
+                "write_file",
+                Some(path),
+                self.inner.write_file(path, data),
+            )
+            .await
+    }
+
     async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
         self.telemetry
             .observe_fs("core", "mkdir", Some(path), self.inner.mkdir(path, options))

@@ -799,6 +799,24 @@ impl FsDriver for DriverSlot {
         Box::pin(async move { driver.open_flags(path, flags, mode).await })
     }
 
+    fn write_file<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        data: &'c [u8],
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        let driver = match self.get() {
+            Ok(driver) => driver,
+            Err(error) => return Box::pin(async move { Err(error) }),
+        };
+        Box::pin(async move { driver.write_file(path, data).await })
+    }
+
     fn mkdir<'a, 'b, 'async_trait>(
         &'a self,
         path: &'b str,
@@ -1549,6 +1567,20 @@ impl FsDriver for MountDriver {
         Self: 'async_trait,
     {
         self.0.open_flags(path, flags, mode)
+    }
+
+    fn write_file<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        data: &'c [u8],
+    ) -> Pin<Box<dyn Future<Output = CoreResult<()>> + Send + 'async_trait>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        self.0.write_file(path, data)
     }
 
     fn mkdir<'a, 'b, 'async_trait>(
@@ -3635,6 +3667,33 @@ mod tests {
                 Poll::Pending => std::thread::yield_now(),
             }
         }
+    }
+
+    #[test]
+    fn driver_slot_forwards_atomic_write_file() {
+        let metadata = MemoryMetadataStore::new();
+        let blocks = MemoryBlockStore::new();
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            blocks,
+            ChunkedOptions::fixed("napi-write-file-forwarding", 4096).unwrap(),
+        ))
+        .expect("chunked filesystem should open");
+        let driver = DriverSlot::new(Arc::new(filesystem));
+        let before = block_on(metadata.load())
+            .expect("metadata should load")
+            .revision;
+
+        block_on(driver.write_file("/atomic", b"atomic bytes")).expect("write_file");
+
+        let after = block_on(metadata.load())
+            .expect("metadata should load after write")
+            .revision;
+        assert_eq!(
+            after,
+            before + 1,
+            "the N-API forwarding layer must preserve the atomic one-publication path"
+        );
     }
 
     #[derive(Default)]

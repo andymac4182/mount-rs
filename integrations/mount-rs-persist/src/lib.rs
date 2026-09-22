@@ -332,6 +332,11 @@ impl<S: StateStore + 'static> FsDriver for PersistedFs<S> {
         }))
     }
 
+    async fn write_file(&self, path: &str, data: &[u8]) -> Result<()> {
+        self.core.write_file(path, data).await?;
+        self.persist().await
+    }
+
     async fn mkdir(&self, path: &str, options: MkdirOptions) -> Result<Option<String>> {
         let first_created = self.core.mkdir(path, options).await?;
         self.persist().await?;
