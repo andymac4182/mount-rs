@@ -420,9 +420,10 @@ but its exact W08 policy run `35696013114` cancelled before job creation with
 `35696137073`, also cancelled with `jobs=[]`) and the W07/W04 CI-and-ledger
 control tip `8834abd3`. The reconciled ledger merge `a8c78312` was safely
 pushed to shared `origin/main`; its exact W08 policy run `35696819458` then
-cancelled before job creation with `jobs=[]`. Shared main has since advanced
-with W04 documentation-only tip `f68ed226`; the current exact public tip is
-`f68ed226405b01f7e09485b8fc9fbfd9ee18660b`, and W08 run `35696948306` is
+cancelled before job creation with `jobs=[]`. Shared main then advanced
+through W04/W26/site documentation tips to public merge `09b554a1`; the
+current exact public tip is
+`09b554a1409e8790ab057d7ab9ed70a835585428`, and W08 run `35697289516` is
 pending and is not evidence. These scheduling boundaries and
 source-equivalent mainline changes add no provider/native or production
 qualification. The last retained terminal hosted W08 policy pass remains
