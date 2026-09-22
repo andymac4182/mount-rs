@@ -331,6 +331,13 @@ Current focused behavior:
   passed: N-API job `106652302954` passed the new identity step and all hosted
   N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe
   plus all four ignored native lifecycle tests.
+- The mixed native/attached client-order packet at exact SHA
+  `b01f40b306fcb177dde7f5d0bb02195dfd8d0bef` adds one JS arrival ledger for
+  `P9Server.clients`, so native-listener and `attach()` connections are returned
+  in arrival order rather than by backing-store type. Its real-TCP regression
+  covers native-first and attached-first order, stable native wrappers, and
+  cleanup. Local focused checks passed; hosted verification is pending
+  publication and production remains NO-GO.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port
