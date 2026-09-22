@@ -2338,16 +2338,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   explicit skips or separate acceptance boundaries; this local packet does
   not replace terminal same-SHA production evidence.
 - [x] W05.9 Requalify the exact post-9P-admission release-candidate packet.
-  Pushed `338026ae` passed `cargo fmt`, `git diff --check`, the full locked
-  Rust workspace including the loopback 9P admission test, strict Clippy,
-  optimized N-API build/postbuild, the complete elevated Node SDK/CLI suite,
-  and `scripts/test-pglite.sh`. The packet reports Rust SDK `6/3/0`, Node SDK
-  `5/3/0`, CLI `12/2`, upstream `1200/82`, and all `40 × 621` oracle traces.
-  Current `origin/main` `44cd558a` is a documentation-only successor over
-  that tested implementation. R2, AWS/security/OIDC, privileged native,
-  external-provider, package/provenance, scope, and final-audit gates remain
-  explicit blockers; no credential value was read or stored and no Keychain
-  access was attempted.
+  Pushed `01f844c` passed `cargo fmt`, `git diff --check`, the full locked
+  Rust workspace including the SQLite publication and HTTP/Windows parity
+  successors, strict Clippy, optimized N-API build/postbuild, the complete
+  elevated Node SDK/CLI suite, and `scripts/test-pglite.sh`. The packet
+  reports Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
+  and all `40 × 621` oracle traces. Current `origin/main` `4baa82a` is a
+  documentation-only successor over that tested implementation. R2,
+  AWS/security/OIDC, privileged native, external-provider,
+  package/provenance, scope, and final-audit gates remain explicit blockers;
+  no credential value was read or stored and no Keychain access was attempted.
 
 ## W06 — RustFS integration service
 
