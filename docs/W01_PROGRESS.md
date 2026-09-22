@@ -352,6 +352,14 @@ sequence. Exact-reply recovery for a canceled request, uncached completed-reply
 handling, persistent replay, native-client ordering, and exact-tip hosted
 acceptance remain open.
 
+For completed cached NFSv4.1 replies, a real-TCP `AUTH_SYS` regression now
+rejects a same-slot retry from a different effective user with
+`NFS4ERR_SEQ_FALSE_RETRY`. The original user can still receive the cached
+mutating reply without a second execution and advance the slot. This is
+replay-user consistency for decoded credentials, not cryptographic `AUTH_SYS`
+authentication, uncached reply recovery, durable replay, or native-client
+ordering; W01-NFS remains NO-GO.
+
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
 the prefix already written at the destination. The focused Rust regression and
