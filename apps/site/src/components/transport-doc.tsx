@@ -552,6 +552,16 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         over a late adapter error while the caller-owned structural source
         remains alive; both the N-API and Rust jobs passed their Linux probe
         and mounted-I/O cleanup suites.
+        The attached-connection parity packet at exact SHA
+        <code>1c791cf6</code> adds the declared
+        <code>P9Connection.waitClosed()</code> member to the
+        <code>server.attach()</code> wrapper, and the metadata teardown
+        regression now awaits it after <code>close()</code>. Local metadata,
+        direct-session, observability, fid, mount-helper, generated typecheck,
+        syntax, diff, and elevated server-selector checks passed. Hosted run
+        <code>35696071202</code> is queued with no terminal result, so no
+        hosted PASS is claimed; broader upstream parity and crash/reset
+        recovery remain open.
       </>
     ),
     sources: [
@@ -562,6 +572,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'Latest hosted Native 9P lifecycle', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35685073733' },
       { label: 'Latest hosted Native 9P structural session', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35691732267' },
       { label: 'Latest hosted Native 9P state machine', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693518562' },
+      { label: 'Latest Native 9P attached waitClosed parity (queued)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696071202' },
       { label: 'Hosted 9P wire-framing qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955065' },
       { label: 'Hosted 9P Unix-listener qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },

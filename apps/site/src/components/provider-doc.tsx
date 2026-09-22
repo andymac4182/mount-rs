@@ -910,6 +910,13 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         capacity target; identity/ACL/TLS, backup/restore, production
         capacity, multi-day operation, failover, macOS coverage, and release
         approval remain open.
+        The W07 workflow now assembles a fail-closed cross-platform packet: the
+        Linux qualification must pass alongside an independent macOS
+        native-feature compile lane before it can emit
+        <code>W07_PLATFORM_QUALIFICATION_PASS</code>. Hosted run
+        <code>35696391744</code> at exact source <code>8834abd3</code> is still
+        pending, so this adds a qualification boundary rather than macOS or
+        cross-platform acceptance.
         These hosted results do not establish production identity/ACL/TLS,
         backup/restore, production capacity, multi-day operation, failover,
         macOS acceptance, or release approval.
@@ -922,6 +929,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35692674674' },
+      { label: 'Latest W07 cross-platform qualification (pending)', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35696391744' },
     ],
   },
   'aws-s3': {
