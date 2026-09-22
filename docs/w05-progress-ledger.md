@@ -821,7 +821,7 @@ green hosted/provider/native/package/scope gates.
 
 ## Production-readiness dependency register
 
-Current production-candidate addendum (2026-09-22 16:39 AEST): the selected
+Historical production-candidate addendum (superseded candidate, 2026-09-22 16:39 AEST): the selected
 release-control branch is
 `andymac4182/c/w05-production-candidate-20260922` at immutable SHA
 `25e275ab6d4f918be72dcd8f62a5baca6bbcd251`. Its exact local Rust/Node/SDK/CLI
@@ -837,6 +837,29 @@ production path. Percentages and estimates are provisional planning values,
 not a weighted release score. Every row must either reach 100% with evidence
 or be explicitly removed from the release scope by a recorded decision before
 the final audit can issue a GO decision.
+
+### Latest immutable-candidate addendum (2026-09-22 18:34 AEST)
+
+The active release-control candidate is the immutable branch
+`andymac4182/c/w05-production-candidate-20260922` at exact SHA
+`87f3cdf0a8b3d29c89ff6c1e8d6cbd2409d0c01d`. Its local Rust/Node SDK/CLI,
+N-API, PGlite/oracle, packaging, and license packet is green. Same-SHA
+hosted evidence currently has Native 9P `35702349894`, Fault injection
+`35702350927`, W04 policy `35702351026`, and W08 release policy `35702353241`
+terminal-successful. W07 durable qualification job `106663122874` is green,
+but W07 macOS feature compilation `106663122748` remains queued. W08 Linux
+and macOS builds plus macOS asset verification are green, while Linux asset
+verification `106671605507` and attestation remain queued. CI `35702348089`
+remains queued. These job-level results are not promoted to workflow or
+production acceptance until their parent workflows are terminal and their
+redacted artifacts are reviewed.
+
+Live R2 remains fail-closed behind the monthly usage cap and short-lived-token
+rotation. AWS remains blocked by security issue [#3](https://github.com/andymac4182/mount-rs/issues/3) and its missing protected OIDC inputs;
+no credential value was read, stored, or accessed through Keychain. The
+production decision is **NO-GO** until CI/W07/W08 terminal evidence, AWS and
+post-reset R2 provider gates, platform/package/signing and clean-install
+evidence, support scope, and W20.6 are complete.
 
 Current release-candidate addendum: exact tested pushed `1bdf8846` is the
 strongest current local implementation/SDK/CLI/PGlite packet, while fetched
