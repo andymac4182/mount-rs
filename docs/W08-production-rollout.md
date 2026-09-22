@@ -205,6 +205,15 @@ The protected workflow file remains present in fetched mainline, so this is
 still an external GitHub/API and release-configuration blocker rather than a
 missing repository implementation. No production gate is closed.
 
+A fresh read-only audit at **2026-09-22 12:25 AEST** returned HTTP 404 for both
+the production and policy workflow queries and the protected environment;
+`gh release list` still could not resolve the repository, and the candidate-tag
+query returned no tag. A later branch-ref `git ls-remote` hit transient DNS
+resolution failure, so it is not promoted to a public-ref claim; the exact
+public equality for checkpoint `ea49dc65` was already verified at 12:24 AEST.
+No release, canary, rollback or approval evidence was created, so P09 remains
+externally blocked.
+
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or

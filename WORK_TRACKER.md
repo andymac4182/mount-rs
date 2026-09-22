@@ -3700,6 +3700,13 @@ reproducible in a production-like environment.
   candidate tag. The protected workflow file remains present in fetched
   mainline; this is still an external API/configuration blocker and does not
   close P09.
+  A fresh 12:25 AEST audit returned HTTP 404 for both protected workflow
+  queries and the `w08-production` environment, could not resolve the release
+  surface, and found no production-candidate tag. A later branch-ref
+  `git ls-remote` hit transient DNS failure, so it is not used as public-ref
+  evidence; checkpoint `ea49dc65` had already passed exact public equality and
+  ancestry verification at 12:24 AEST. No release, canary, rollback or
+  approval evidence was created, so P09 remains externally blocked.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
