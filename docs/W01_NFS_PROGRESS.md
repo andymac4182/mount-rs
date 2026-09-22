@@ -48,9 +48,12 @@ semantics.
   body without executing the changed operation; a fresh sequence still makes
   progress. A separate blocked-backend test proves an in-flight same-slot
   retry reaches the server, waits, and then receives the cached original
-  reply. It does not prove prompt `NFS4ERR_DELAY` or concurrent independent
-  slots: every v4.1 call currently awaits the lease-sweep `path_lock.write()`
-  before dispatch. Crash-durable replay also remains open.
+  reply. An early active-slot check now returns prompt `NFS4ERR_DELAY` for the
+  in-flight retry and `NFS4ERR_SEQ_MISORDERED` for a premature next sequence;
+  the completed request still caches its reply, and slot sequence numbers
+  wrap to zero. Independent-slot overlap is not established: ordinary v4.1
+  calls still await the lease-sweep `path_lock.write()` before dispatch.
+  Crash-durable replay also remains open.
 - Keep the hosted native result current. Run `35658285441` completed both
   `native-nfs (macos-latest)` and `native-nfs (ubuntu-latest)` successfully:
   macOS covered native NFSv3, CLI persistence/cleanup, and SQLite hosting;
@@ -105,11 +108,12 @@ semantics.
 | 2026-09-22 | host-backed NFSv4.1 `FILE_SYNC4` crash readback | The forced-child-process restart test now creates an NFSv4.1 file, writes exact bytes with `FILE_SYNC4`, kills the seed server without async shutdown, rejects the old session with `NFS4ERR_BADSESSION` and both old root and file handles with `NFS4ERR_STALE`, then establishes a replacement session, opens the file by path and reads back the bytes. The host file also contains the exact bytes after the replacement is killed. The focused process target passed 2/2; the complete locked NFS target passed 40 unit, native harness claim 1 with 1 mount ignored, process restart 2, rootless wire 1, concurrency 3, errors 4, lifecycle 5, v4 barrier 1 and v4 wire 7; warning-denied Clippy passed. | This is one-host process-crash backend data recovery with a synchronized write, not power-loss durability, durable v4 session/lease/replay/file-handle recovery, native-client ordering, multi-process arbitration, or production acceptance |
 | 2026-09-22 | NFSv4.1 mutating reply replay across TCP reconnect | A real-TCP test completes `SEQUENCE`/`PUTROOTFH`/`REMOVE` on slot 0, disconnects, then retries the same sequence with a deliberately different `REMOVE` target. The exact original COMPOUND body is returned, the second file remains present, and a fresh sequence removes it. The focused case passed 20 consecutive reruns; the complete locked NFS target passed 40 unit, native mountpoint claim 1 with 1 mount ignored, process restart 2, rootless wire 1, concurrency 3, errors 4, lifecycle 5, v4 barrier 1, and v4 wire 8; strict Clippy, formatting and diff checks passed. | This is completed-request replay within one server process, not in-flight same-slot ordering, crash-durable replay, native-client ordering, or production acceptance |
 | 2026-09-22 | in-flight NFSv4.1 retry ordering and global gate audit | A real-TCP test blocks the first slot-0 `GETATTR` in `FsDriver::stat`, confirms a retry with the same sequence has reached the v4 server, and observes it remains pending until release. The retry then receives the exact cached original COMPOUND body, and the next sequence succeeds. The focused case passed 10 consecutive reruns; the complete locked NFS target passed 40 unit, 1 native mountpoint claim with 1 mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier and 9 v4 wire; warning-denied Clippy, formatting, and diff checks passed. | The request waits at the global lease-sweep write lock before slot admission. [RFC 8881 §2.10.6.2](https://www.rfc-editor.org/rfc/rfc8881.html#section-2.10.6.2) recommends `NFS4ERR_DELAY` for an in-progress retry; prompt DELAY, independent-slot overlap, crash-durable replay, native-client ordering, and production acceptance remain open |
+| 2026-09-22 | prompt NFSv4.1 busy-slot reply and sequence wrap | The v4 handler now tracks each session slot's active sequence with an abort-safe scope guard and checks a fully decoded busy-slot COMPOUND before the per-RPC lease sweep can block. The real-TCP blocked-backend test gets bounded `NFS4ERR_DELAY` for the active retry and `NFS4ERR_SEQ_MISORDERED` for a premature next sequence; after release the original reply is cached and the next sequence succeeds. A unit test covers `u32::MAX` to zero slot-sequence wrap. The focused busy-slot case passed 20 reruns; the complete locked NFS target passed 41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, and 9 v4 wire; strict Clippy passed. | This closes prompt same-slot admission in one live process, not independent-slot overlap, canceled-operation reply recovery, crash-durable replay, native-client ordering, power-loss durability, or production acceptance |
 
 ## Exact commands and gate boundaries
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
-  40 unit tests, process restart 2, rootless wire 1, transport concurrency 3,
+  41 unit tests, process restart 2, rootless wire 1, transport concurrency 3,
   transport errors 4, lifecycle 5, v4 commit barrier 1, and v4 wire 9; the
   native mount target passes its 32-way mountpoint claim test and retains 1
   explicitly ignored native test. The reconnect and pipelining rows are

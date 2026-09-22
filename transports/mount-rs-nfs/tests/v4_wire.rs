@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
-    NFS4ERR_BADSESSION, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE, NFS4ERR_SHARE_DENIED,
-    NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
-    UNSTABLE4,
+    NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE,
+    NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL,
+    OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
 };
 use mount_rs_nfs::{
     NFS_V4, NFS4_PROGRAM, Nfs4Clock, Nfs4IdMap, NfsServer, NfsServerOptions, RecordAssembler,
@@ -1448,7 +1448,7 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
 }
 
 #[test]
-fn nfs_v4_in_flight_retry_waits_then_replays_without_reexecution() {
+fn nfs_v4_busy_slot_delays_retry_and_rejects_next_sequence() {
     std::thread::Builder::new()
         .name("nfs-v4-busy-slot-test".into())
         .stack_size(8 * 1024 * 1024)
@@ -1500,7 +1500,7 @@ fn nfs_v4_in_flight_retry_waits_then_replays_without_reexecution() {
 
                     let requests_before_retry = server.v4_session().stats().requests;
                     let retry_args = getattr(&client);
-                    let mut retry_task = tokio::spawn(async move {
+                    let retry_task = tokio::spawn(async move {
                         let mut second = second;
                         let mut reply = rpc(&mut second, 705, retry_args).await;
                         (second, reply.rest())
@@ -1512,14 +1512,26 @@ fn nfs_v4_in_flight_retry_waits_then_replays_without_reexecution() {
                     })
                     .await
                     .expect("retry reaches the NFSv4 server while original is blocked");
-                    assert!(
-                        timeout(Duration::from_millis(25), &mut retry_task)
-                            .await
-                            .is_err(),
-                        "the in-flight retry must not complete before the original"
-                    );
+                    let (mut second, delay_body) = timeout(Duration::from_millis(250), retry_task)
+                        .await
+                        .expect("in-flight retry receives a bounded SEQUENCE reply")
+                        .expect("in-flight retry task succeeds");
+                    let mut delayed = XdrReader::new(&delay_body);
+                    assert_eq!(parse_compound_status(&mut delayed, 0), NFS4ERR_DELAY);
+                    delayed.end("in-flight retry response").unwrap();
                     let mut next_client = client.clone();
                     next_client.sequence += 1;
+                    let mut premature = timeout(
+                        Duration::from_millis(250),
+                        rpc(&mut second, 706, getattr(&next_client)),
+                    )
+                    .await
+                    .expect("premature next sequence receives a bounded reply");
+                    assert_eq!(
+                        parse_compound_status(&mut premature, 0),
+                        NFS4ERR_SEQ_MISORDERED
+                    );
+                    premature.end("premature sequence response").unwrap();
                     release.notify_one();
                     let first_body = timeout(Duration::from_secs(2), first_task)
                         .await
@@ -1527,11 +1539,8 @@ fn nfs_v4_in_flight_retry_waits_then_replays_without_reexecution() {
                         .expect("original request task succeeds");
                     let mut original = XdrReader::new(&first_body);
                     parse_compound_header(&mut original, 3);
-                    let (mut second, replay_body) = timeout(Duration::from_secs(2), retry_task)
-                        .await
-                        .expect("queued retry finishes after the original")
-                        .expect("queued retry task succeeds");
-                    assert_eq!(replay_body, first_body);
+                    let mut replay = rpc(&mut second, 707, getattr(&client)).await;
+                    assert_eq!(replay.rest(), first_body);
                     let mut fresh = rpc(&mut second, 708, getattr(&next_client)).await;
                     parse_compound_header(&mut fresh, 3);
                     second.shutdown().await.expect("close busy-slot transport");
