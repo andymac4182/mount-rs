@@ -4,7 +4,8 @@
 //! documentation also identifies Apple's `mount_webdav` as the macOS client,
 //! so the probe accepts that platform's native helper without pretending the
 //! oracle has a macOS mount suite. This file is ignored and environment-gated;
-//! ordinary tests never ask the host kernel to mount anything.
+//! ordinary tests never ask the host kernel to mount anything. The explicit
+//! probe covers one round trip plus eight concurrent native-client I/O pairs.
 
 use std::ffi::OsString;
 use std::fs;
@@ -21,6 +22,7 @@ use tokio::time::{sleep, timeout};
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const MOUNT_TIMEOUT: Duration = Duration::from_secs(10);
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
+const NATIVE_CONCURRENCY: usize = 8;
 
 #[derive(Debug, Clone, Copy)]
 enum NativeClientKind {
@@ -336,9 +338,78 @@ async fn native_round_trip(mountpoint: &Path, driver: &Loopback) -> Result<(), S
     Err("native PUT did not reach the driver before the deadline".to_owned())
 }
 
+async fn native_concurrent_round_trips(mountpoint: &Path, driver: &Loopback) -> Result<(), String> {
+    let mut tasks = Vec::with_capacity(NATIVE_CONCURRENCY);
+    for index in 0..NATIVE_CONCURRENCY {
+        let path = mountpoint.join(format!("parallel-{index}.txt"));
+        let expected = format!("native concurrent payload {index}\n").repeat(1024);
+        tasks.push(tokio::task::spawn_blocking(move || {
+            fs::write(&path, expected.as_bytes())
+                .map_err(|error| format!("native concurrent PUT failed: {error}"))?;
+            let actual = fs::read(&path)
+                .map_err(|error| format!("native concurrent GET failed: {error}"))?;
+            if actual.as_slice() != expected.as_bytes() {
+                return Err(format!(
+                    "native concurrent GET returned unexpected bytes for {}",
+                    path.display()
+                ));
+            }
+            Ok::<_, String>((path, expected))
+        }));
+    }
+
+    let completed = timeout(IO_TIMEOUT, async {
+        let mut completed = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            completed.push(
+                task.await
+                    .map_err(|error| format!("native concurrent I/O task failed: {error}"))??,
+            );
+        }
+        Ok::<_, String>(completed)
+    })
+    .await
+    .map_err(|_| "native concurrent I/O timed out".to_owned())??;
+
+    timeout(IO_TIMEOUT, async {
+        let deadline = tokio::time::Instant::now() + IO_TIMEOUT;
+        for (path, expected) in completed {
+            let name = path
+                .file_name()
+                .ok_or_else(|| {
+                    format!(
+                        "native concurrent path has no file name: {}",
+                        path.display()
+                    )
+                })?
+                .to_string_lossy();
+            let driver_path = format!("/{name}");
+            let mut observed = None;
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(actual) = driver.read_file(&driver_path).await {
+                    observed = Some(actual.clone());
+                    if actual == expected.as_bytes() {
+                        break;
+                    }
+                }
+                sleep(Duration::from_millis(50)).await;
+            }
+            if observed.as_deref() != Some(expected.as_bytes()) {
+                return Err(format!(
+                    "native concurrent PUT did not reach the driver for {driver_path}"
+                ));
+            }
+        }
+        Ok::<_, String>(())
+    })
+    .await
+    .map_err(|_| "native concurrent driver readback timed out".to_owned())??;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires explicit native WebDAV prerequisites and host mount privileges"]
-async fn native_webdav_mount_probe_and_round_trip() {
+async fn native_webdav_mount_probe_round_trip_and_concurrency() {
     assert_eq!(
         std::env::var("MOUNT_RS_WEBDAV_NATIVE_TEST").ok().as_deref(),
         Some("1"),
@@ -402,12 +473,21 @@ async fn native_webdav_mount_probe_and_round_trip() {
     }
 
     let round_trip = native_round_trip(&mountpoint, &loopback).await;
+    let concurrent = if round_trip.is_ok() {
+        native_concurrent_round_trips(&mountpoint, &loopback).await
+    } else {
+        Err("skipped native concurrency after the basic round trip failed".to_owned())
+    };
     let unmount = guard.unmount().await;
     let close = server.close().await;
     let remove = fs::remove_dir(&mountpoint);
     assert!(
         round_trip.is_ok(),
         "native WebDAV I/O failed: {round_trip:?}"
+    );
+    assert!(
+        concurrent.is_ok(),
+        "native WebDAV concurrent I/O failed: {concurrent:?}"
     );
     assert!(unmount.is_ok(), "native WebDAV unmount failed: {unmount:?}");
     assert!(close.is_ok(), "WebDAV server close failed: {close:?}");

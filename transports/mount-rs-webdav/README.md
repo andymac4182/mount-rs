@@ -27,6 +27,8 @@ The HTTP integration tests bind an ephemeral loopback TCP socket and run as an
 ordinary user on both macOS and Linux. They are protocol tests; they do not
 claim native mount verification. `tests/native_mount.rs` is the separate,
 ignored harness corresponding to the oracle's `test/webdav/mount.test.ts`.
+After the basic round trip it also performs eight concurrent native-client
+write/read pairs and verifies each exact byte payload through the driver.
 Run it only with:
 `MOUNT_RS_WEBDAV_NATIVE_TEST=1 cargo test -p mount-rs-webdav --test native_mount -- --ignored --nocapture`.
 It hard-fails
