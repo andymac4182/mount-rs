@@ -557,17 +557,16 @@ impl P9Session {
     }
 
     async fn run(&self, header: P9Header, body: P9Reader<'_>, generation: u64) -> Vec<u8> {
-        let result = self.dispatch(header, body).await.and_then(|reply| {
-            if header.type_ != P9_TVERSION && self.generation() != generation {
-                Err(if self.destroyed() {
-                    FsError::new(ErrorCode::Enodev)
-                } else {
-                    FsError::new(ErrorCode::Eio)
-                })
+        let result = self.dispatch(header, body).await;
+        let result = if header.type_ != P9_TVERSION && self.generation() != generation {
+            Err(if self.destroyed() {
+                FsError::new(ErrorCode::Enodev)
             } else {
-                Ok(reply)
-            }
-        });
+                FsError::new(ErrorCode::Eio)
+            })
+        } else {
+            result
+        };
         match result {
             Ok(reply) => {
                 self.count_reply(false);
@@ -1896,7 +1895,137 @@ fn child_of(parent: &str, name: &str, syscall: &str) -> FsResult<String> {
 mod tests {
     use super::*;
     use mount_rs_core::MemoryFs;
+    use std::{future::Future, pin::Pin, sync::Arc};
+    use tokio::sync::Notify;
     use tokio::time::{Duration, timeout};
+
+    struct BlockingErrorDriver {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl FsDriver for BlockingErrorDriver {
+        fn capabilities(&self) -> mount_rs_core::Capabilities {
+            mount_rs_core::Capabilities::default()
+        }
+
+        fn stat<'a, 'b, 'async_trait>(
+            &'a self,
+            _path: &'b str,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = mount_rs_core::Result<mount_rs_core::Stats>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            let entered = Arc::clone(&self.entered);
+            let release = Arc::clone(&self.release);
+            Box::pin(async move {
+                entered.notify_one();
+                release.notified().await;
+                Err(FsError::new(ErrorCode::Ebadf))
+            })
+        }
+
+        fn readdir<'a, 'b, 'async_trait>(
+            &'a self,
+            _path: &'b str,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = mount_rs_core::Result<Vec<mount_rs_core::DirEntry>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Err(FsError::new(ErrorCode::Enotsup)) })
+        }
+
+        fn open<'a, 'b, 'c, 'async_trait>(
+            &'a self,
+            _path: &'b str,
+            _flags: &'c str,
+            _mode: u32,
+        ) -> Pin<
+            Box<
+                dyn Future<Output = mount_rs_core::Result<Arc<dyn mount_rs_core::FileHandle>>>
+                    + Send
+                    + 'async_trait,
+            >,
+        >
+        where
+            'a: 'async_trait,
+            'b: 'async_trait,
+            'c: 'async_trait,
+            Self: 'async_trait,
+        {
+            Box::pin(async { Err(FsError::new(ErrorCode::Enotsup)) })
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn destroy_overrides_late_driver_error_for_inflight_call() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let session = P9Session::new(BlockingErrorDriver {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+        });
+        session
+            .inner
+            .state
+            .lock()
+            .expect("9P session mutex poisoned")
+            .msize = Some(8192);
+        session
+            .fid_create(1, "/")
+            .expect("create a direct-session fid");
+        let request = encode_message(P9_TGETATTR, 7, 256, |writer| {
+            write_tgetattr(
+                writer,
+                Tgetattr {
+                    fid: 1,
+                    request_mask: P9_GETATTR_BASIC,
+                },
+            );
+            Ok(())
+        })
+        .expect("Tgetattr encodes");
+        let task_session = session.clone();
+        let task = tokio::spawn(async move {
+            task_session
+                .handle_call(&request)
+                .await
+                .expect("in-flight Tgetattr gets a response")
+        });
+
+        timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("Tgetattr reaches the blocking driver");
+        assert_eq!(session.inflight(), 1);
+        session.destroy().await;
+        assert!(session.destroyed());
+        assert_eq!(session.inflight(), 0);
+        release.notify_waiters();
+
+        let response = timeout(Duration::from_secs(1), task)
+            .await
+            .expect("destroyed Tgetattr completes")
+            .expect("Tgetattr task joins");
+        let (header, mut body) = decode_message(&response).expect("stale response decodes");
+        assert_eq!(header.type_, P9_RLERROR);
+        assert_eq!(read_rlerror(&mut body).expect("Rlerror decodes").ecode, 19);
+    }
 
     #[tokio::test]
     async fn destroy_releases_flush_waiters_and_clears_inflight() {
