@@ -2129,6 +2129,59 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn closed_reply_peer_reports_one_owned_write_error() {
+        use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+
+        let (device_stream, mut peer) = UnixStream::pair().expect("socket pair");
+        let standard = device_stream.into_std().expect("standard Unix stream");
+        // SAFETY: the raw descriptor is transferred immediately into OwnedFd.
+        let descriptor = unsafe { OwnedFd::from_raw_fd(standard.into_raw_fd()) };
+        let device = FuseDevice::from_owned_fd(descriptor, DEFAULT_MAX_FRAME)
+            .expect("socket descriptor should satisfy the device boundary");
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-write-error-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            device,
+            Arc::clone(&state),
+        ));
+
+        let init: Vec<u8> = [7_u32, 41, 65536, u32::MAX, u32::MAX]
+            .into_iter()
+            .flat_map(u32::to_le_bytes)
+            .collect();
+        peer.write_all(&test_frame(26, 1, 0, &init))
+            .await
+            .expect("send init before closing reply peer");
+        drop(peer);
+
+        task.await
+            .expect("session task should finish after reply peer closes");
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Write);
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn panicking_transport_error_hook_isolated_and_reported_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};

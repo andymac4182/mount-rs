@@ -1094,6 +1094,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Added concurrent-unmount waiter coverage for the shared terminal lifecycle result; host tests, Linux-target test check, and warning-denied Clippy passed, while actual `/dev/fuse` execution remains external | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added failure-then-retry coverage for graceful unmount state restoration; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted helper/kernel behavior remains external | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added multi-observer `wait_closed()` cleanup coverage; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted kernel lifecycle remains external | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added closed-peer write-error callback coverage for the native session loop; host tests, Linux-target test check, and warning-denied Clippy passed, while hosted callback delivery remains open | W01 remains NO-GO |
 
 ## Definition of W01 complete
 
