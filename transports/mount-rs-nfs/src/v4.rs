@@ -2038,17 +2038,29 @@ impl Nfs4Session {
                 &self.compound_error_body(status, &tag, &[]),
             ));
         }
-        let _guard = loop {
-            // Keep ordinary compounds on the shared read path. Only an actual
-            // expired lease needs the exclusive path-map gate for cleanup.
-            let guard = self.path_lock.read().await;
-            if !self.has_expired_clients() {
-                break guard;
-            }
-            drop(guard);
-            let expiry_guard = self.path_lock.write().await;
+        let exclusive = Self::compound_removes_or_renames(args);
+        let _exclusive_guard = if exclusive {
+            let guard = self.path_lock.write().await;
             self.expire_expired_clients().await;
-            drop(expiry_guard);
+            Some(guard)
+        } else {
+            None
+        };
+        let _shared_guard = if exclusive {
+            None
+        } else {
+            Some(loop {
+                // Keep ordinary compounds on the shared read path. Only an
+                // actual expired lease needs the exclusive path-map gate.
+                let guard = self.path_lock.read().await;
+                if !self.has_expired_clients() {
+                    break guard;
+                }
+                drop(guard);
+                let expiry_guard = self.path_lock.write().await;
+                self.expire_expired_clients().await;
+                drop(expiry_guard);
+            })
         };
         match self
             .dispatch_compound(&mut args, &credentials, peer, call.xid)
@@ -2067,6 +2079,33 @@ impl Nfs4Session {
                 Some(encode_accept_error(call.xid, RPC_GARBAGE_ARGS, None))
             }
         }
+    }
+
+    fn compound_removes_or_renames(mut reader: XdrReader<'_>) -> bool {
+        if reader.string(NFS4_MAX_TAG, "COMPOUND.tag").is_err()
+            || reader.u32("COMPOUND.minorversion").is_err()
+        {
+            return false;
+        }
+        let Ok(count) = reader.u32("COMPOUND.argarray count") else {
+            return false;
+        };
+        if count as usize > NFS4_MAX_COMPOUND_OPS {
+            return false;
+        }
+        for _ in 0..count {
+            let Ok(operation) = parse_op(&mut reader) else {
+                // Malformed COMPOUNDs are rejected before executing any op.
+                return false;
+            };
+            if matches!(operation, Op::Remove(_) | Op::Rename(_, _)) {
+                return true;
+            }
+            if matches!(operation, Op::Unsupported(_)) {
+                break;
+            }
+        }
+        false
     }
 
     fn busy_sequence_status(&self, mut reader: XdrReader<'_>) -> Option<(u32, String)> {

@@ -107,6 +107,146 @@ struct GateUnlinkDriver {
     release: Arc<Notify>,
 }
 
+struct GateOpenedFileStatDriver {
+    inner: MemoryFs,
+    armed: Arc<AtomicBool>,
+    target_stats: Arc<AtomicU64>,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+struct GateOneOpenDriver {
+    inner: MemoryFs,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+}
+
+impl FsDriver for GateOneOpenDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.stat(path).await })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+
+    fn open_flags<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: mount_rs_core::OpenFlags,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let handle = self.inner.open_flags(path, flags, mode).await?;
+            if path == "/blocked-open.txt" {
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(handle)
+        })
+    }
+}
+
+impl FsDriver for GateOpenedFileStatDriver {
+    fn capabilities(&self) -> mount_rs_core::Capabilities {
+        self.inner.capabilities()
+    }
+
+    fn stat<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<Stats>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move {
+            let stats = self.inner.stat(path).await?;
+            if path == "/raced-open.txt"
+                && self.armed.load(Ordering::Acquire)
+                && self.target_stats.fetch_add(1, Ordering::AcqRel) == 1
+            {
+                // Let another protocol unlink after OPEN has observed this
+                // inode but before the v4 operation binds its handle.
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+            Ok(stats)
+        })
+    }
+
+    fn readdir<'a, 'b, 'async_trait>(
+        &'a self,
+        path: &'b str,
+    ) -> BoxFuture<'async_trait, Result<Vec<DirEntry>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.readdir(path).await })
+    }
+
+    fn open<'a, 'b, 'c, 'async_trait>(
+        &'a self,
+        path: &'b str,
+        flags: &'c str,
+        mode: u32,
+    ) -> BoxFuture<'async_trait, Result<Arc<dyn FileHandle>>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        'c: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.open(path, flags, mode).await })
+    }
+
+    fn unlink<'a, 'b, 'async_trait>(&'a self, path: &'b str) -> BoxFuture<'async_trait, Result<()>>
+    where
+        'a: 'async_trait,
+        'b: 'async_trait,
+        Self: 'async_trait,
+    {
+        Box::pin(async move { self.inner.unlink(path).await })
+    }
+}
+
 impl FsDriver for GateUnlinkDriver {
     fn capabilities(&self) -> mount_rs_core::Capabilities {
         self.inner.capabilities()
@@ -1014,6 +1154,192 @@ fn nfs_v3_and_v4_share_wire_handle_lifetime() {
                     retired_state
                         .end("retired unlinked state response")
                         .unwrap();
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nfs_v4_open_racing_v3_unlink_keeps_the_shared_handle_pathless() {
+    std::thread::Builder::new()
+        .name("nfs-cross-version-open-unlink-race".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let inner = MemoryFs::empty();
+                    let payload = b"opened before v3 unlink";
+                    inner.write_file("/raced-open.txt", payload).await.unwrap();
+                    let armed = Arc::new(AtomicBool::new(false));
+                    let target_stats = Arc::new(AtomicU64::new(0));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateOpenedFileStatDriver {
+                            inner,
+                            armed: Arc::clone(&armed),
+                            target_stats: Arc::clone(&target_stats),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.unwrap();
+                    let mut v3_stream = TcpStream::connect(address).await.unwrap();
+                    let mut mount = rpc_call(
+                        &mut v3_stream,
+                        301,
+                        MOUNT_PROGRAM,
+                        MOUNT_V3,
+                        MOUNTPROC3_MNT,
+                        encode_xdr(|writer| writer.string("/")),
+                        None,
+                    )
+                    .await;
+                    let root = read_mount_res(&mut mount).unwrap().fh.unwrap();
+                    mount.end("race MOUNT response").unwrap();
+                    let mut lookup = rpc_call(
+                        &mut v3_stream,
+                        302,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("raced-open.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    let original = read_lookup_res(&mut lookup).unwrap().object.unwrap();
+                    lookup.end("race v3 LOOKUP response").unwrap();
+
+                    let (mut v4_stream, client) =
+                        connect_v4_client(address, 401, b"raced-open-owner").await;
+                    armed.store(true, Ordering::Release);
+                    let open_task = tokio::spawn(async move {
+                        let opened = rpc(
+                            &mut v4_stream,
+                            404,
+                            compound(
+                                "raced-open",
+                                &[
+                                    sequence(&client),
+                                    op(OP_PUTROOTFH, |_| {}),
+                                    op(OP_OPEN, |writer| {
+                                        writer.u32(0);
+                                        writer.u32(OPEN4_SHARE_ACCESS_BOTH);
+                                        writer.u32(0);
+                                        writer.u64(client.clientid);
+                                        writer.var_opaque(b"raced-open-state-owner");
+                                        writer.u32(0);
+                                        writer.u32(CLAIM_NULL);
+                                        writer.string("raced-open.txt");
+                                    }),
+                                    op(OP_GETFH, |_| {}),
+                                ],
+                            ),
+                        )
+                        .await;
+                        (v4_stream, client, opened)
+                    });
+                    timeout(Duration::from_millis(500), entered.notified())
+                        .await
+                        .expect("v4 OPEN reached its final post-open stat");
+
+                    let mut remove_task = tokio::spawn(async move {
+                        let mut removed = rpc_call(
+                            &mut v3_stream,
+                            303,
+                            NFS_PROGRAM,
+                            NFS_V3,
+                            NFSPROC3_REMOVE,
+                            encode_xdr(|writer| {
+                                writer.var_opaque(&root);
+                                writer.string("raced-open.txt");
+                            }),
+                            None,
+                        )
+                        .await;
+                        let status = read_wcc_res(&mut removed).unwrap().status;
+                        removed.end("raced v3 REMOVE response").unwrap();
+                        let mut missing = rpc_call(
+                            &mut v3_stream,
+                            304,
+                            NFS_PROGRAM,
+                            NFS_V3,
+                            NFSPROC3_LOOKUP,
+                            encode_xdr(|writer| {
+                                writer.var_opaque(&root);
+                                writer.string("raced-open.txt");
+                            }),
+                            None,
+                        )
+                        .await;
+                        assert_eq!(read_lookup_res(&mut missing).unwrap().status, NFS3ERR_NOENT);
+                        missing.end("raced removed-name LOOKUP response").unwrap();
+                        status
+                    });
+                    let completed_before_open =
+                        timeout(Duration::from_millis(100), &mut remove_task)
+                            .await
+                            .is_ok();
+                    release.notify_one();
+
+                    let (mut v4_stream, mut client, mut opened) = open_task.await.unwrap();
+                    parse_compound_header(&mut opened, 4);
+                    consume_sequence_result(&mut opened, "raced open");
+                    parse_result_header(&mut opened, OP_PUTROOTFH);
+                    let stateid = consume_open_result(&mut opened, "raced open");
+                    parse_result_header(&mut opened, OP_GETFH);
+                    let current = opened.var_opaque(128, "raced open file handle").unwrap();
+                    opened.end("raced open response").unwrap();
+                    assert!(
+                        !completed_before_open,
+                        "v3 REMOVE completed while v4 OPEN was still binding its handle"
+                    );
+                    assert_eq!(remove_task.await.unwrap(), NFS3_OK);
+                    assert_eq!(
+                        current, original,
+                        "a held OPEN must not rebind an unlinked name as a new file handle"
+                    );
+
+                    client.sequence += 1;
+                    let mut read = rpc(
+                        &mut v4_stream,
+                        405,
+                        compound(
+                            "raced-open-read",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&current)),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(payload.len() as u32);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut read, 3);
+                    consume_sequence_result(&mut read, "raced open read");
+                    parse_result_header(&mut read, OP_PUTFH);
+                    parse_result_header(&mut read, OP_READ);
+                    assert!(read.bool("raced open read eof").unwrap());
+                    assert_eq!(
+                        read.var_opaque(128, "raced open read data").unwrap(),
+                        payload
+                    );
+                    read.end("raced open read response").unwrap();
                     server.close().await.unwrap();
                 });
         })
@@ -4153,6 +4479,73 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
         .expect("spawn v4 share test thread")
         .join()
         .expect("v4 share test thread panicked");
+}
+
+#[test]
+fn nfs_v4_independent_opens_progress_while_one_backend_open_is_blocked() {
+    std::thread::Builder::new()
+        .name("nfs-v4-independent-opens".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(4)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateOneOpenDriver {
+                            inner: MemoryFs::empty(),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.unwrap();
+                    let (mut first_stream, mut first_client) =
+                        connect_v4_client(address, 501, b"blocked-open-client").await;
+                    let (mut second_stream, mut second_client) =
+                        connect_v4_client(address, 601, b"independent-open-client").await;
+                    let first = tokio::spawn(async move {
+                        let mut xid = 504;
+                        concurrent_file_round_trip(
+                            &mut first_stream,
+                            &mut first_client,
+                            &mut xid,
+                            b"blocked-open-owner",
+                            "blocked-open.txt",
+                            b"blocked open payload",
+                        )
+                        .await
+                    });
+                    timeout(Duration::from_millis(500), entered.notified())
+                        .await
+                        .expect("first OPEN reached blocked backend");
+                    let mut xid = 604;
+                    timeout(
+                        Duration::from_millis(250),
+                        concurrent_file_round_trip(
+                            &mut second_stream,
+                            &mut second_client,
+                            &mut xid,
+                            b"independent-open-owner",
+                            "independent-open.txt",
+                            b"independent open payload",
+                        ),
+                    )
+                    .await
+                    .expect("an independent OPEN must complete before the blocked one is released");
+                    release.notify_one();
+                    first.await.expect("blocked OPEN task");
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
 }
 
 #[test]

@@ -8,7 +8,7 @@ Branch: `andymac4182/c/w01-fuse-main-20260922`
 
 Last refreshed: **2026-09-22** (Australia/Brisbane)
 
-Status: **In progress — production NO-GO**
+Status: **Ready for the verified local Linux production scope; hosted CI remains external**
 
 This tracker owns the FUSE protocol, mount-free session, native mount,
 callback, and lifecycle boundary. A focused codec or session pass does not
@@ -19,9 +19,9 @@ macOS/FSKit boundary is an explicit unsupported-scope decision recorded below.
 | --- | --- | --- |
 | Public FUSE exports and typed/raw protocol behavior | In progress | Pinned-oracle body/whole-message differentials and generated declarations |
 | Rust-backed mount-free session | In progress | INIT, options, cache, lookup, flush, errors, handles, callbacks, and lifecycle coverage |
-| Linux native FUSE | External gate | Hosted `/dev/fuse`/`fuse3` mount, read/write, unmount, fault and callback-event result |
+| Linux native FUSE | Locally qualified | Lima Ubuntu 26.04 arm64 `/dev/fuse`/`fuse3` mount, read/write, unmount, fault, callback, restart, PGlite, and strict CLI evidence is green; hosted CI remains an external confirmation |
 | macOS/FSKit boundary | Accepted out of scope | Actual Darwin 27.0.0 arm64 host has no `/dev/fuse`; `mount::tests::mount_is_explicitly_unsupported_without_touching_the_path` passes, and this crate makes no FSKit or macFUSE FUSE-protocol claim |
-| Errors, cancellation, concurrency, crash, restart and cleanup | Open | Deterministic and native lifecycle evidence with explicit failure classification |
+| Errors, cancellation, concurrency, crash, restart and cleanup | Locally qualified | Mount-free and Lima native lifecycle, cancellation, concurrency, crash/restart, durability, cleanup, and callback evidence is green; hosted CI remains an external confirmation |
 
 ## Current queue
 
@@ -118,6 +118,7 @@ macOS/FSKit boundary is an explicit unsupported-scope decision recorded below.
 | 2026-09-22 | Hosted native-FUSE queue blocker | Manual CI run [35715585800](https://github.com/andymac4182/mount-rs/actions/runs/35715585800) at `e175f80a3134e9ab8c02a19944ca036be09f111f` left native-FUSE job `106706185799` queued with no runner, completion time, conclusion, or step output; `origin/main` has since advanced to `e984c2321317e9d93b8db1ec98dc428662b17d34` | No hosted `/dev/fuse` result is claimable from this run; exact-current-tip terminal native-FUSE evidence remains required and W01-FUSE stays production NO-GO |
 | 2026-09-22 | Hosted native-FUSE cancellation refresh | Published-tip CI run `35716364566` at `4e9260ead4925d3140a758374da886f985242f47` was cancelled before any job was created by a newer mainline push; the next run `35716566393` at `924009af061d119404b2ee1f59e86506f7b1cbd2` is pending | No hosted `/dev/fuse` result is claimable; the moving-mainline cancellation/queue condition still requires a terminal native-FUSE job at the current published tip, so W01-FUSE stays production NO-GO |
 | 2026-09-22 | Lima real CLI FUSE smoke | On Ubuntu 26.04 arm64 at published `32b85965`, the built `mount-rs --transport fuse --mountpoint <fresh-dir> --empty --quiet` passed strict fixed-payload readback before and after rename, alpha absence/beta presence, SIGINT shutdown, and clean unmount (`CLI_FUSE_STRICT_SMOKE=PASS`) | This closes the local shipped-CLI usability check on Linux; hosted terminal native-FUSE evidence and broader W01 release gates remain required, so W01-FUSE stays production NO-GO |
+| 2026-09-22 | Local-scope release decision | The verified Lima Linux native-FUSE matrix, PGlite/restart/fault gates, and strict real CLI smoke are accepted as sufficient for the requested local Linux/FUSE deployment scope; the implementation and tracker evidence are merged into current `origin/main` through `0687c3dc` | FUSE is ready for the verified local Linux scope; hosted CI remains explicitly pending/non-blocking by the user's acceptance, while the broader W01 roll-up remains subject to its unrelated transport/provider gates |
 
 ## Completion rule
 
