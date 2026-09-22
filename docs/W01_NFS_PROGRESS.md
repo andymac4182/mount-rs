@@ -218,7 +218,43 @@ semantics.
 
 | 2026-09-22 | cross-version unlinked OPEN state retirement | The real-TCP v3/v4.1 open-unlink test now sends `TEST_STATEID` on the original v4.1 stateid after the v3 unlink and before v4.1 CLOSE, receiving `NFS4_OK`; after CLOSE, the same session and stateid return `NFS4ERR_BAD_STATEID`. Focused wire 1/1, full locked NFS (42 unit plus all integrations including 21 v4 wire), strict NFS Clippy, pinned upstream parity (266 passed, 18 explicit skips), and opt-in macOS native NFSv3 1/1 pass locally. | This proves one live session's state transition, not durable or cross-process state recovery, native-client ordering, physical power-loss durability, exact-tip hosted acceptance, or production readiness. Manual CI at older SHAs remains queued and is not acceptance evidence |
 
+| 2026-09-22 | actual macOS CLI-to-folder host-backed NFS smoke | Built the current CLI through `./scripts/cargo-shared`, mounted a fresh host-backed source at a separate disposable folder with `--transport nfs`, and observed `127.0.0.1:/` in the kernel mount table. Create, append, read, stat (34 bytes), and list through the mounted path passed; `cmp` matched the source file. Ctrl-C returned exit 0 with `unmounted`; the mount-table entry disappeared, the mount folder was empty, and the 34-byte source file persisted. | This is local macOS kernel NFS CLI and backing-path lifecycle evidence; the negotiated NFS version was not measured. Native NFSv4.1 ordering, Linux acceptance at this tip, durable v4 state, power-loss durability, exact-tip hosted acceptance, and production readiness remain open |
+
 ## Exact commands and gate boundaries
+
+- macOS host-backed CLI smoke on 2026-09-22 (`Darwin arm64`, macOS 27.0,
+  installed Command Line Tools, user-owned `/private/tmp` directories, local
+  loopback NFS mount permission). From the repository root:
+
+  ```sh
+  DEVELOPER_DIR=/Library/Developer/CommandLineTools ./scripts/cargo-shared build --locked -p mount-rs-cli
+  smoke_root=$(mktemp -d /private/tmp/mount-rs-nfs-cli-smoke.XXXXXX)
+  mkdir "$smoke_root/source" "$smoke_root/mount"
+  # In a foreground terminal; the selected smoke_root was /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5.
+  /Users/andrewmcclenaghan/Library/Caches/mount-rs/cargo-target/debug/mount-rs mount /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount --transport nfs --driver host --root /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/source --quiet
+  # In another terminal while mounted:
+  mount | rg -F '/private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount'
+  printf 'nfs-cli-smoke-v1\n' > /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount/roundtrip.txt
+  printf 'nfs-cli-smoke-v2\n' >> /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount/roundtrip.txt
+  cmp /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount/roundtrip.txt /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/source/roundtrip.txt
+  stat -f 'mount stat: %N size=%z mode=%p' /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount/roundtrip.txt
+  ls -la /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount
+  sed -n '1,2p' /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount/roundtrip.txt
+  # Ctrl-C in the CLI terminal, then check:
+  mount | rg -F '/private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount' # no match
+  ls -la /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/mount # empty
+  stat -f 'backing stat: %N size=%z' /private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/source/roundtrip.txt
+  ```
+
+  The CLI reported `mounted nfs ... (source: 127.0.0.1:/)`; the kernel mount
+  table showed `127.0.0.1:/ on .../mount (nfs, nodev, nosuid, nobrowse, mounted
+  by andrewmcclenaghan)`. All mounted-path operations passed; stat returned
+  size 34 and mode `100644`, and readback contained both lines. Ctrl-C exited
+  0 with `unmounted`; the exact mount-table entry disappeared, the mount
+  folder was empty, and backing stat still showed 34 bytes. No `sudo` or host
+  configuration change was needed. This is a local smoke gate; the negotiated
+  NFS protocol version was not captured and remaining hosted, ordering, and
+  durability gates are not inferred from it.
 
 - `./scripts/cargo-shared test -p mount-rs-nfs --all-targets --locked` — PASS:
   42 unit tests, process restart 2, rootless wire 1, version routing 2,

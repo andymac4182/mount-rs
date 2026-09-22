@@ -2432,6 +2432,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   266-pass/18-skip parity, and opt-in macOS native NFSv3 mount pass locally.
   Durable/cross-process v4 state, native-client ordering, power-loss, exact-tip
   hosted acceptance, and W01-NFS production readiness remain open.
+- [x] W01-NFS actual macOS CLI-to-folder NFS smoke passed with fresh distinct
+  host-backed source and mount directories under
+  `/private/tmp/mount-rs-nfs-cli-smoke.Vggoo5`. The kernel reported the NFS
+  mount; create, append, read, stat, and list through the mounted folder
+  matched the 34-byte backing file. Ctrl-C exited cleanly with `unmounted`,
+  the mount-table entry disappeared, and backing bytes persisted. Exact CLI
+  command and prerequisites are recorded in `docs/W01_NFS_PROGRESS.md`.
+  Linux/native v4.1 ordering, exact-tip hosted acceptance, durable v4 state,
+  physical power-loss durability, and production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
