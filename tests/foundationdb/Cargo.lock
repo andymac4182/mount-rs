@@ -886,6 +886,7 @@ dependencies = [
  "mount-rs-core",
  "serde_json",
  "sha2",
+ "tracing",
 ]
 
 [[package]]

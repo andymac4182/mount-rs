@@ -3297,6 +3297,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     stronger hosted implementation qualification, not production capacity,
     collector, failover, recovery or owner evidence.
 
+    Hosted attempt
+    [35685846631](https://github.com/andymacclenaghan/mount-rs/actions/runs/35685846631)
+    (job `106612350173`, exact revision
+    `e9e2d30c6be06a5aa1f0e81e39fb5a0450c77a78`) did not produce a qualification
+    pass: all policy, configuration, prerequisite, N-API and Linux FUSE steps
+    passed, but the durable step stopped before provider execution because the
+    standalone `tests/foundationdb/Cargo.lock` lacked the new `tracing` feature
+    dependency and `--locked` refused to update it. This is a reproducibility
+    failure, not FoundationDB/RustFS runtime evidence; the missing lockfile edge
+    is corrected in the next mainline chunk and requires a fresh exact-tip run.
+
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
