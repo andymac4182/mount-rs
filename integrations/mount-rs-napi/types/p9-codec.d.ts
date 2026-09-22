@@ -283,8 +283,8 @@ export interface P9ClientProbe {
   reason?: string
 }
 
-export declare function p9ClientProbe(): P9ClientProbe
-export declare function p9Platform(): "linux" | undefined
+export declare function p9ClientProbe(platform?: NodeJS.Platform): P9ClientProbe
+export declare function p9Platform(platform?: NodeJS.Platform): "linux" | undefined
 export declare function socketPathRefusal(path: string): string | undefined
 export declare function tcpSourceRefusal(host: string): string | undefined
 export declare function p9MountOptions(target: P9MountTarget, options?: MountP9Options): string

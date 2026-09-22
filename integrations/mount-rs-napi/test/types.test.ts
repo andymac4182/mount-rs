@@ -218,13 +218,21 @@ const p9MountConfig: MountP9Options = {
 }
 const p9Target: P9MountTarget = { trans: "tcp", port: 564 }
 const p9Probe: P9ClientProbe = p9ClientProbe()
+const p9ProbeLinux: P9ClientProbe = p9ClientProbe("linux")
+const p9ProbeDarwin: P9ClientProbe = p9ClientProbe("darwin")
 const p9OptionsString: string = p9MountOptions(p9Target, p9MountConfig)
 const p9PlatformName: "linux" | undefined = p9Platform()
+const p9PlatformLinux: "linux" | undefined = p9Platform("linux")
+const p9PlatformDarwin: "linux" | undefined = p9Platform("darwin")
 declare const p9Mounted: P9Mount
 void mount9p
 void p9Probe
+void p9ProbeLinux
+void p9ProbeDarwin
 void p9OptionsString
 void p9PlatformName
+void p9PlatformLinux
+void p9PlatformDarwin
 void p9Mounted
 const p9MountSource: string = p9Mounted.source
 const p9MountTrans: "unix" | "tcp" = p9Mounted.trans
