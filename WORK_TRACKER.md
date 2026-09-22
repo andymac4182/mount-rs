@@ -909,7 +909,8 @@ complete.
 
 Current W26 authority override (2026-09-22, FoundationDB transaction-sharing
 chunk): the current shared mainline tip is
-`origin/main=9c44d2a4210bcc98d752319aae9b06f65d370337`, containing implementation
+`origin/main=9c44d2a4210bcc98d752319aae9b06f65d370337` at the previous ledger
+publication, containing implementation
 commit `5e3680117c26f5b7bb1b9280eec65a350b3dd2f7`. Commit `5e368011`
 (`perf(w26): share fdb lease authority transaction`) adds the
 source-compatible `LeaseOracle::now_ms_in_transaction` hook, makes the shared
@@ -936,7 +937,13 @@ compositions `106636116105` failed, TiDB `106636116197` failed and FoundationDB
 push-triggered current-code run `35694753908` selected `5e368011` and was
 pending at capture. W26 remains **NO-GO**. Customer Ozone deployment, secure
 topology, 99.99% availability, five-minute RPO/RTO, backup/DR and the release
-stream remain external ownership boundaries.
+stream remain external ownership boundaries. Manual retained qualification
+run `35695427227` selected exact SHA `e7850fb41775351503e5aa685484906b3a3cbbe4`
+with base `106641134190`, compositions `106641134304`, TiDB `106641134221`
+and FoundationDB `106641134132` queued at capture; its aggregate was not yet
+created. The earlier automatic current-code run `35694753908` was canceled by
+ordinary-push concurrency. Treat the manual run as the hosted qualification
+boundary and retain the detailed ledger in `docs/w26-progress-ledger.md`.
 
 Current W26 hosted dispatch boundary: poll `35694753908` for the exact
 `5e368011` provider and aggregate results; retain all artifacts/logs and do not
