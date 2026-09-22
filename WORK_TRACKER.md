@@ -2854,6 +2854,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the historical W04.2 closure or production **NO-GO**. Inspect the Ubuntu,
   native/package/provider/W26, and Rust lanes before promoting current-main
   qualification.
+- [x] W04.2 current-candidate terminal boundary is now recorded for run
+  [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406)
+  at candidate `c87adf7b`: all four Unix Node jobs
+  (`106699957205`, `106699956916`, `106699957225`, `106699957273`) passed both
+  exact recovery steps with rollback/N-API/`providersFailed: 0` markers. This
+  does not promote the whole qualification: native FUSE failed rootless
+  operations and was cancelled in finalization, Ubuntu Rust was cancelled after
+  two failed tests and a hung invalid-device-read test, Windows Node timed out
+  before recovery, and W26 job `106716562320` is queued with `runner_name: null`
+  after its four `needs` jobs became terminal. Provider IOPS were SQLite/R2
+  `661.53`, PGlite/R2 `1342.61`, TiDB/R2 `493.32`, and FoundationDB/R2 `184.54`
+  against target `1000`; current qualification and production remain **NO-GO**.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer
