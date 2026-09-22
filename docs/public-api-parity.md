@@ -310,8 +310,16 @@ Current focused behavior:
   typecheck, syntax, diff, and elevated server-selector checks passed. Exact
   SHA `1c791cf67861efdfe8e5da223048904c88c6b168` has [Native 9P run
   `35696071202`](https://github.com/andymac4182/mount-rs/actions/runs/35696071202)
-  pending with no materialized jobs (`jobs: []`); this is not hosted PASS
-  evidence.
+  passed: N-API job `106645117281` and Rust job `106645117408` were green,
+  including the Linux 9P probe, addon build, server/attach and direct-session
+  lifecycle, and automatic/direct/structural mounted-I/O cleanup.
+- The server/connection member-surface packet at exact SHA
+  `75c149f857f6056a7435a80a1493a9dfc8e53f59` audits the ten semantic
+  `P9Server` members and the declared attached-connection surface, including
+  `waitClosed()`. The local direct/oracle audit excludes only the oracle's
+  non-interface `drop()` helper; adjacent metadata/typecheck, syntax, and diff
+  checks pass. Its exact [Native 9P run `35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227)
+  is queued with no materialized jobs yet, so no hosted PASS is claimed.
 - That selector also covers the Unix listener policy: private-directory
   refusal, explicit `allowSharedDirectory`, `0600` socket mode, Unix protocol
   handshake and transport-source peer, socket cleanup, and path/port
@@ -410,11 +418,12 @@ Current focused behavior:
   semantic set (`driver`, `options`, `fids`, `locks`, `stats`, `assertions`,
   `msize`, `version`, `generation`, `inflight`, `destroyed`, `userFor`,
   `handleCall`, and `destroy`) with the pinned oracle's set; both pass locally.
-  Exact SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3` has [Native 9P run
-  `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984)
-  queued with N-API job `106639369581` and Rust job `106639369868`, so no
-  hosted PASS is claimed yet. Broader protocol/session behavior remains a
-  separate gate.
+  Exact SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3` completed [Native 9P
+  run `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984):
+  N-API job `106639369581` passed, but Rust job `106639369868` failed because
+  `native_linux_external_umount_finishes_server_lifecycle` reported external
+  `umount` exit status 32. The overall run is not hosted PASS evidence.
+  Broader protocol/session behavior remains a separate gate.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
