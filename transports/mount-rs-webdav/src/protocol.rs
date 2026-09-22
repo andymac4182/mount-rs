@@ -360,19 +360,53 @@ pub fn parse_destination(value: Option<&str>, host: Option<&str>) -> Result<Stri
     }
     let url = Url::parse(value)
         .map_err(|_| refuse(400).with_message("the Destination header is not a URI"))?;
-    let authority = url.host_str().unwrap_or_default();
-    let host_matches = host.is_some_and(|host| {
-        let candidate = if let Some(port) = url.port() {
-            format!("{authority}:{port}")
-        } else {
-            authority.to_owned()
-        };
-        candidate.eq_ignore_ascii_case(host)
-    });
-    if authority.is_empty() || !host_matches {
+    let host_matches = host.is_some_and(|host| authority_matches(&url, host));
+    if url.host_str().is_none() || !host_matches {
         return Err(refuse(502).with_message("the Destination is not on this server"));
     }
     parse_target_path(url.path())
+}
+
+fn authority_parts(value: &str) -> Option<(String, Option<u16>)> {
+    let value = value.trim();
+    if value.starts_with('[') {
+        let end = value.find(']')?;
+        let host = &value[1..end];
+        let suffix = &value[end + 1..];
+        let port = if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.strip_prefix(':')?.parse().ok()?)
+        };
+        return Some((host.to_ascii_lowercase(), port));
+    }
+    if value.matches(':').count() > 1 {
+        return Some((value.to_ascii_lowercase(), None));
+    }
+    if let Some((host, port)) = value.rsplit_once(':')
+        && let Ok(port) = port.parse::<u16>()
+    {
+        return Some((host.to_ascii_lowercase(), Some(port)));
+    }
+    Some((value.to_ascii_lowercase(), None))
+}
+
+fn authority_matches(url: &Url, host: &str) -> bool {
+    let Some((candidate_host, candidate_port)) = authority_parts(host) else {
+        return false;
+    };
+    let Some(url_host) = url.host_str().and_then(authority_parts) else {
+        return false;
+    };
+    if !candidate_host.eq_ignore_ascii_case(&url_host.0) {
+        return false;
+    }
+    let default_port = match url.scheme() {
+        "http" => Some(80),
+        "https" => Some(443),
+        _ => None,
+    };
+    candidate_port.or(default_port) == url.port().or(default_port)
 }
 
 pub fn parse_timeout(value: Option<&str>) -> Option<LockTimeout> {
@@ -465,15 +499,7 @@ fn resource_tag(reference: &str, host: Option<&str>) -> (Option<String>, bool) {
     let Ok(url) = Url::parse(reference) else {
         return (None, true);
     };
-    let authority = url.host_str().unwrap_or_default();
-    let local = host.is_some_and(|host| {
-        let candidate = if let Some(port) = url.port() {
-            format!("{authority}:{port}")
-        } else {
-            authority.to_owned()
-        };
-        candidate.eq_ignore_ascii_case(host)
-    });
+    let local = host.is_some_and(|host| authority_matches(&url, host));
     if !local {
         return (None, true);
     }

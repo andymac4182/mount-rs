@@ -10,7 +10,7 @@ use mount_rs_core::{
     Result as FsResult, Stats,
 };
 use mount_rs_webdav::protocol::{
-    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_info,
+    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_if, parse_lock_info,
     parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
 };
 use mount_rs_webdav::{
@@ -1095,6 +1095,14 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
         "/a b"
     );
     assert_eq!(
+        parse_destination(Some("http://[::1]:8080/a%20b"), Some("[::1]:8080")).unwrap(),
+        "/a b"
+    );
+    assert_eq!(
+        parse_destination(Some("http://[::1]/a"), Some("[::1]")).unwrap(),
+        "/a"
+    );
+    assert_eq!(
         parse_destination(Some("/a/b"), Some("dav.example")).unwrap(),
         "/a/b"
     );
@@ -1104,6 +1112,13 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
             .status,
         502
     );
+    let tagged = parse_if(
+        "<http://[::1]:8080/a> (<urn:uuid:token>)",
+        Some("[::1]:8080"),
+    )
+    .expect("IPv6 tagged If resource");
+    assert_eq!(tagged[0].resource.as_deref(), Some("/a"));
+    assert!(!tagged[0].foreign);
 
     let too_large = collect_body(b"12345", 4).unwrap_err();
     assert_eq!(status_of_error(&too_large), 413);
