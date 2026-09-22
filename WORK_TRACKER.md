@@ -1727,6 +1727,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package targets and warning-denied Clippy passed, and the native mount test
   remains explicitly ignored. Provider/native/hosted qualification,
   power-loss durability, durable locks, and broader ordering remain open.
+- [x] The WebDAV Basic parser now requires the oracle/RFC `Basic +<base64>`
+  separator instead of accepting a scheme concatenated directly with the
+  payload. The live authenticated HTTP regression rejects `Basic<base64>` and
+  still accepts the configured credentials; provider/native/hosted lifecycle,
+  power-loss durability, durable locks, and broader ordering remain open.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
