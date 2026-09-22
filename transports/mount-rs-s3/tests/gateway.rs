@@ -3023,6 +3023,63 @@ async fn http_server_accepts_expect_continue_upload() {
     server.close().await.expect("clean shutdown");
 }
 
+#[tokio::test]
+async fn http_server_rejects_transfer_encoding_without_content_length() {
+    let memory = MemoryFs::empty();
+    let server = S3Server::start(Arc::new(S3Session::new(memory)), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let payload = b"framed by the transport";
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/te.txt HTTP/1.1\r\nHost: {}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+        server.address()
+    );
+    let mut request = request_head.into_bytes();
+    request.extend_from_slice(format!("{:x}\r\n", payload.len()).as_bytes());
+    request.extend_from_slice(payload);
+    request.extend_from_slice(b"\r\n0\r\n\r\n");
+    stream
+        .write_all(&request)
+        .await
+        .expect("write transfer-encoded request");
+    let mut raw = Vec::new();
+    stream
+        .read_to_end(&mut raw)
+        .await
+        .expect("read transfer-encoding refusal");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 411);
+    assert!(String::from_utf8_lossy(&response.body).contains("<Code>MissingContentLength</Code>"));
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn http_server_carries_head_length_without_a_body() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x3a; 4096];
+    let handle = memory
+        .open("/sized.bin", "w", 0o666)
+        .await
+        .expect("open object");
+    handle.write(&payload, Some(0)).await.expect("write object");
+    handle.close().await.expect("close object");
+    let server = S3Server::start(Arc::new(S3Session::new(memory)), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+
+    let response = wire_request(&server, "HEAD", "/mountx/sized.bin", &[], &[]).await;
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers.get("content-length").map(String::as_str),
+        Some("4096")
+    );
+    assert!(response.body.is_empty());
+    server.close().await.expect("clean shutdown");
+}
+
 #[derive(Debug)]
 struct WireResponse {
     status: u16,

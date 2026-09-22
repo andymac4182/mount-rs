@@ -4645,6 +4645,14 @@ reproducible in a production-like environment.
   diff checks passed; this is bounded local HTTP/1.1 evidence only, so live
   providers, power-loss durability, broader workload bounds, and native/hosted
   acceptance remain open and W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 framing packet adds oracle-derived HEAD and
+  `Transfer-Encoding: chunked` regressions: HEAD preserves `Content-Length`
+  with no body, while a transfer-encoded PUT returns `411
+  MissingContentLength`. The focused HTTP subset and full Rust 5/6/37/5 packet,
+  strict Clippy, formatting, and diff checks passed; this is bounded local
+  HTTP/1.1 evidence only, so live providers, power-loss durability, broader
+  workload bounds, and native/hosted acceptance remain open and W01-S3 stays
+  **NO-GO**.
 - [x] The automatic provider runs for published packet `4f9120a2` were
   refreshed: AWS run `35690334807` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35690334795`
