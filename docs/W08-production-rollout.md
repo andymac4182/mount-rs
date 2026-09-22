@@ -418,14 +418,17 @@ The next W08 ledger publication `60fcef71` was pushed to shared `origin/main`,
 but its exact W08 policy run `35696013114` cancelled before job creation with
 `jobs=[]`. Shared main then advanced through `10cb081c` (exact W08 run
 `35696137073`, also cancelled with `jobs=[]`) and the W07/W04 CI-and-ledger
-control tip `8834abd3`. The current exact public tip is
-`8834abd344a2e6956cc7ffb9bb5cbdd803c946e6`; W08 run `35696375269` is still
-pending and is not evidence. These scheduling boundaries and source-equivalent
-mainline changes add no provider/native or production qualification. The last
-retained terminal hosted W08 policy pass remains `35692664144` / job
-`106632773424` for source `5a6d6507`. No provider credentials, production
-deployment, candidate tag, canary, rollback or owner approval exists. P01–P09
-remain open and the decision remains NO-GO.
+control tip `8834abd3`. The reconciled ledger merge `a8c78312` was safely
+pushed to shared `origin/main`; its exact W08 policy run `35696819458` then
+cancelled before job creation with `jobs=[]`. Shared main has since advanced
+with W04 documentation-only tip `f68ed226`; the current exact public tip is
+`f68ed226405b01f7e09485b8fc9fbfd9ee18660b`, and W08 run `35696948306` is
+pending and is not evidence. These scheduling boundaries and
+source-equivalent mainline changes add no provider/native or production
+qualification. The last retained terminal hosted W08 policy pass remains
+`35692664144` / job `106632773424` for source `5a6d6507`. No provider
+credentials, production deployment, candidate tag, canary, rollback or owner
+approval exists. P01–P09 remain open and the decision remains NO-GO.
 
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
