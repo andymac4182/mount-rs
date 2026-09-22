@@ -1426,6 +1426,8 @@ spent waiting for a hosted job or credential approval.
 
 | 2026-09-22 | W01-NFS | Actual macOS CLI host-backed NFS smoke passed: the shared-target CLI mounted a fresh `/private/tmp/mount-rs-nfs-cli-smoke.Vggoo5/source` at a separate `mount` folder; the kernel reported NFS, mounted-path create/append/read/stat/list matched the backing file (34 bytes), Ctrl-C exited 0 with `unmounted`, and the mount-table entry disappeared while source bytes persisted. Exact commands and prerequisites are in `docs/W01_NFS_PROGRESS.md` | — | Local macOS CLI-to-folder NFS smoke passed | Native NFSv4.1 ordering, Linux/exact-tip hosted acceptance, durable v4 state, power-loss durability, and W01 production readiness remain open; W01 stays NO-GO |
 
+| 2026-09-22 | W01-NFS | A HostFs-backed real-TCP v4.1 regression exposed `NFS4ERR_IO` after a successful same-owner read-only to read/write OPEN upgrade because the server kept a read-only backend handle. OPEN state now retains per-access backend handles and closes each distinct handle during CLOSE/expiry/destroy. The fixed test passes both read-to-write and write-to-read upgrades with exact data and preserves cross-client share denial; full locked NFS (42 unit, 21 v4 wire), strict NFS/N-API Clippy, pinned parity (266 pass/18 explicit skips), and local native macOS NFSv3 1/1 pass | — | Local host-backed NFSv4.1 access-upgrade gate passed | Native v4.1 client ordering, cross-process state recovery, power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:

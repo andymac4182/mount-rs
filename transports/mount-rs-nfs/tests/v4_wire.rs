@@ -8,12 +8,14 @@
 //! privilege-specific.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
+use mount_rs_host::HostFs;
 use mount_rs_nfs::constants::{
     CREATE_UNCHECKED, MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, NFS_PROGRAM, NFS_V3, NFS3_OK,
     NFS3ERR_NOENT, NFS3ERR_STALE, NFSPROC3_CREATE, NFSPROC3_GETATTR, NFSPROC3_LOOKUP,
@@ -299,6 +301,24 @@ fn parse_result_header(reader: &mut XdrReader<'_>, expected_op: u32) {
 fn parse_result_status(reader: &mut XdrReader<'_>, expected_op: u32) -> u32 {
     assert_eq!(reader.u32("result op").unwrap(), expected_op);
     reader.u32("result status").unwrap()
+}
+
+fn consume_open_result(reader: &mut XdrReader<'_>, label: &str) -> Vec<u8> {
+    parse_result_header(reader, OP_OPEN);
+    let stateid = reader
+        .fixed_opaque(16, &format!("{label} stateid"))
+        .unwrap();
+    let _ = reader.bool(&format!("{label} atomic")).unwrap();
+    let _ = reader.u64(&format!("{label} change before")).unwrap();
+    let _ = reader.u64(&format!("{label} change after")).unwrap();
+    let _ = reader.u32(&format!("{label} result flags")).unwrap();
+    let _ = reader
+        .array(16, &format!("{label} attrset"), |reader| {
+            reader.u32("attribute word")
+        })
+        .unwrap();
+    assert_eq!(reader.u32(&format!("{label} delegation")).unwrap(), 0);
+    stateid
 }
 
 fn consume_sequence_result(reader: &mut XdrReader<'_>, label: &str) {
@@ -3665,6 +3685,15 @@ fn nfs_v4_state_limits_are_advertised_and_enforced() {
 
 #[test]
 fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
+    struct HostRoot(PathBuf);
+
+    impl Drop for HostRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("share-file"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
     std::thread::Builder::new()
         .name("nfs-v4-open-share-test".into())
         .stack_size(8 * 1024 * 1024)
@@ -3676,7 +3705,26 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
                 .build()
                 .expect("build v4 share test runtime")
                 .block_on(async {
-                    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+                    let nonce = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock after Unix epoch")
+                        .as_nanos();
+                    let root = (0..32)
+                        .find_map(|attempt| {
+                            let path = std::env::temp_dir().join(format!(
+                                "mount-rs-nfs-open-upgrade-{}-{nonce}-{attempt}",
+                                std::process::id()
+                            ));
+                            match std::fs::create_dir(&path) {
+                                Ok(()) => Some(HostRoot(path)),
+                                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                    None
+                                }
+                                Err(error) => panic!("create host-backed NFS root: {error}"),
+                            }
+                        })
+                        .expect("claim a unique host-backed NFS root");
+                    let server = NfsServer::new(HostFs::new(&root.0), NfsServerOptions::default());
                     let address = server.listen().await.expect("listen rootless NFS server");
                     let mut stream = TcpStream::connect(address)
                         .await
@@ -3824,6 +3872,71 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
                     assert_eq!(response.u32("upgrade delegation").unwrap(), 0);
                     response.end("same-owner upgrade response").unwrap();
 
+                    // HostFs uses real open flags. Widening only the NFS state
+                    // while keeping the original read-only descriptor would
+                    // make this WRITE fail despite the successful OPEN.
+                    client.sequence += 1;
+                    let payload = b"upgraded owner may write";
+                    let mut response = rpc(
+                        &mut stream,
+                        106,
+                        compound(
+                            "write-after-upgrade",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_WRITE, |writer| {
+                                    writer.fixed_opaque(&upgraded_stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(UNSTABLE4);
+                                    writer.var_opaque(payload);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut response, 3), 0);
+                    consume_sequence_result(&mut response, "write after upgrade");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    parse_result_header(&mut response, OP_WRITE);
+                    assert_eq!(
+                        response.u32("upgraded write count").unwrap(),
+                        payload.len() as u32
+                    );
+                    let _ = response.u32("upgraded write stability").unwrap();
+                    let _ = response.fixed_opaque(8, "upgraded write verifier").unwrap();
+                    response.end("write after upgrade response").unwrap();
+                    assert_eq!(std::fs::read(root.0.join("share-file")).unwrap(), payload);
+
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        107,
+                        compound(
+                            "read-after-upgrade",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&upgraded_stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(payload.len() as u32);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "read after upgrade");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    parse_result_header(&mut response, OP_READ);
+                    assert!(response.bool("upgraded read eof").unwrap());
+                    assert_eq!(
+                        response.var_opaque(128, "upgraded read data").unwrap(),
+                        payload
+                    );
+                    response.end("read after upgrade response").unwrap();
+
                     let mut stream_two = TcpStream::connect(address)
                         .await
                         .expect("connect second NFS client");
@@ -3922,8 +4035,118 @@ fn nfs_v4_open_same_owner_upgrades_but_cross_client_is_denied() {
                     );
                     response.end("cross-client deny response").unwrap();
 
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        108,
+                        compound(
+                            "close-upgraded-open",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_CLOSE, |writer| {
+                                    writer.u32(1);
+                                    writer.fixed_opaque(&upgraded_stateid, 16);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "close upgraded open");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    parse_result_header(&mut response, OP_CLOSE);
+                    let _ = response.fixed_opaque(16, "closed stateid").unwrap();
+                    response.end("close upgraded open response").unwrap();
+
+                    // Reverse the upgrade direction on the same host file:
+                    // O_WRONLY first, then a same-owner OPEN adds READ.
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        109,
+                        compound(
+                            "write-only-open",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_OPEN, |writer| {
+                                    writer.u32(0);
+                                    writer.u32(2);
+                                    writer.u32(0);
+                                    writer.u64(client.clientid);
+                                    writer.var_opaque(b"reverse-owner");
+                                    writer.u32(0);
+                                    writer.u32(CLAIM_FH);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "write-only open");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    let _write_only_stateid = consume_open_result(&mut response, "write-only");
+                    response.end("write-only open response").unwrap();
+
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        110,
+                        compound(
+                            "read-upgrade",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_OPEN, |writer| {
+                                    writer.u32(0);
+                                    writer.u32(1);
+                                    writer.u32(0);
+                                    writer.u64(client.clientid);
+                                    writer.var_opaque(b"reverse-owner");
+                                    writer.u32(0);
+                                    writer.u32(CLAIM_FH);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "read upgrade");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    let read_upgraded_stateid = consume_open_result(&mut response, "read-upgraded");
+                    response.end("read upgrade response").unwrap();
+
+                    client.sequence += 1;
+                    let mut response = rpc(
+                        &mut stream,
+                        111,
+                        compound(
+                            "read-after-write-only-upgrade",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&file_handle)),
+                                op(OP_READ, |writer| {
+                                    writer.fixed_opaque(&read_upgraded_stateid, 16);
+                                    writer.u64(0);
+                                    writer.u32(payload.len() as u32);
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut response, 3);
+                    consume_sequence_result(&mut response, "reverse upgrade read");
+                    parse_result_header(&mut response, OP_PUTFH);
+                    parse_result_header(&mut response, OP_READ);
+                    assert!(response.bool("reverse upgrade eof").unwrap());
+                    assert_eq!(
+                        response.var_opaque(128, "reverse upgrade data").unwrap(),
+                        payload
+                    );
+                    response.end("reverse upgrade read response").unwrap();
+
                     let _ = initial_stateid;
-                    let _ = upgraded_stateid;
                     server.close().await.expect("close NFS server");
                 });
         })

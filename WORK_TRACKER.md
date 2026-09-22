@@ -2453,6 +2453,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   command and prerequisites are recorded in `docs/W01_NFS_PROGRESS.md`.
   Linux/native v4.1 ordering, exact-tip hosted acceptance, durable v4 state,
   physical power-loss durability, and production readiness remain open.
+- [x] W01-NFS host-backed v4.1 same-owner OPEN upgrades now retain usable
+  backend handles for each granted access mode. The real-TCP HostFs test first
+  reproduced `NFS4ERR_IO` on WRITE after a successful read-only to read/write
+  upgrade; after the fix, both read-to-write and write-to-read upgrades pass
+  exact WRITE/READ checks, while cross-client share denial remains enforced.
+  CLOSE, lease expiry, and destroy close each distinct backend descriptor.
+  Full locked NFS (42 unit and 21 v4 wire), strict NFS/N-API Clippy, pinned
+  266-pass/18-skip parity, and opt-in macOS native NFSv3 pass locally. Native
+  v4.1 client ordering, cross-process state recovery, power-loss durability,
+  exact-tip hosted acceptance, and production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
