@@ -382,17 +382,19 @@ SQL`,
         <code>onAssertion</code> controls with callback keepalive/release;
         its callback-observability, package, Rust, and strict-Clippy checks
         passed. These remain local controls, not live-provider acceptance. The
-        latest AWS admission <code>35692509801</code> on published source
-        <code>d4f43b28</code> stopped at
+        latest AWS admission <code>35693941024</code> on published source
+        <code>fcf1d547</code> stopped at
         <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code>. The latest R2
-        admission <code>35692509869</code> on the same source stopped at
-        <code>count=325 limit=20</code> and skipped its live integration job,
+        admission <code>35693941037</code> on the same source stopped at
+        <code>count=329 limit=20</code> and skipped its live integration job,
         so neither produced a live service PASS. The current S3 transport
         packet also closes bounded HEAD Content-Length/no-body, chunked PUT
         <code>411 MissingContentLength</code>, <code>Expect: 100-continue</code>,
         pipelined-response ordering, short streamed-response, and rejected-body
-        keep-alive reuse cases; the full local Rust packet passed 38 gateway
-        cases alongside strict Clippy, formatting, and diff checks. These are
+        keep-alive reuse cases; the full local Rust packet passed 40 gateway
+        cases alongside strict Clippy, formatting, and diff checks.
+        The same packet also proves bounded graceful close for an in-flight
+        response. These are
         local transport boundaries, not live-provider acceptance.
       </>
     ),
@@ -489,7 +491,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
-      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35692509869' },
+      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693941037' },
       { label: 'S3 session-hook change', href: 'https://github.com/andymac4182/mount-rs/commit/d43f5ea4' },
     ],
   },
@@ -890,20 +892,20 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         <code>foundationdb-production-qualification-35671492720-1</code> with
         SHA-256
         <code>815dfecadab366a9fca9a7501c4a36d771324d8f71b521e0e8082261cbe431c3</code>.
-        The latest hosted requalification <code>35691106828</code> at exact
-        revision <code>6b8639aa</code> passed the guarded-authority packet,
-        durable three-server composition, live Node/N-API, Linux CLI/FUSE
-        mount and reopen, service restart, and RustFS recovery checks. Its
-        corrected fixed profile completed 400 writes, reads, and deletes at
-        64-way concurrency with 4 KiB payloads, measured
-        <code>259.35</code> lifecycle IOPS, and had zero timeouts or cleanup
-        failures. The base marker recorded <code>p50_us=13759</code>,
-        <code>p95_us=13759</code>, <code>p99_us=13759</code>, and
-        <code>throughput_ops_per_sec=254.79</code>; five-round soak throughput
-        ranged from 241.60 to 248.00 ops/s. The retained artifact is
-        <code>foundationdb-production-qualification-35691106828-1</code> with
+        The latest extended hosted qualification <code>35692674674</code> at
+        exact revision <code>5a6d6507</code> passed the guarded-authority
+        packet, durable three-server composition, live Node/N-API, Linux
+        CLI/FUSE mount and reopen, service restart, and RustFS recovery checks
+        across ten isolated soak rounds. Its bounded workload recorded 1,200
+        successful lifecycle operations at <code>110.18</code> IOPS with zero
+        timeouts and cleanup failures; the base p95/p99 was
+        <code>439603</code> microseconds at <code>21.41</code> ops/s, while the
+        ten-round soak ranged from <code>70204</code> to <code>236130</code>
+        microseconds and <code>18.19</code> to <code>96.22</code> ops/s. The
+        retained artifact is
+        <code>foundationdb-production-qualification-35692674674-1</code> with
         SHA-256
-        <code>f26ae7cb81dd298cc78153f27e573bdb1096a6ae038cc8f42a40d7cbeeab3c17</code>.
+        <code>44beef451832c307a53571bb86f92293b70c302d0add5104152059ed4c41d2ec</code>.
         The fixed-profile floor is structural rather than a production
         capacity target; identity/ACL/TLS, backup/restore, production
         capacity, multi-day operation, failover, macOS coverage, and release
@@ -919,7 +921,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
-      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35691106828' },
+      { label: 'Latest hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35692674674' },
     ],
   },
   'aws-s3': {
@@ -1076,7 +1078,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         <code>process.abort()</code> multipart restart check is
         native-filesystem evidence only; neither result changes the live AWS
         or power-loss acceptance boundary. The latest admission
-        <code>35692509801</code> at published source <code>d4f43b28</code>
+        <code>35693941024</code> at published source <code>fcf1d547</code>
         reached the same protected-config validator and stopped at
         <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code> before AWS
         authentication. No live AWS service PASS is claimable until the
@@ -1088,7 +1090,7 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35692509801' },
+      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35693941024' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
