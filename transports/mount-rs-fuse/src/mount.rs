@@ -2352,6 +2352,11 @@ mod tests {
         };
 
         assert_eq!(mount.source(), Some("mount-rs-source-test"));
+        assert_eq!(mount.mode(), MountMode::Privileged);
+        assert_eq!(
+            mount.mountpoint(),
+            Path::new("/tmp/mount-rs-fuse-source-test")
+        );
         state.mounted.store(false, Ordering::Release);
     }
 
