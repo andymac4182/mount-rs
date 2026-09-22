@@ -2269,6 +2269,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `106658535160`, with Windows Node `106658534774` and native FUSE
   `106658535119`. All 23 displayed jobs were queued at the first snapshot, so
   no current-tip acceptance is claimed; production remains **NO-GO**.
+- The same current-tip run has now produced one terminal result: ARM Node
+  `106658534921` passed both exact `Verify fragmented request early rejection`
+  and `Verify PGlite integration and restart recovery` steps, with
+  `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration PASS, and
+  `providersFailed: 0`. Windows Node and macOS-15-intel were in progress at
+  the latest inspection; macOS-latest, Ubuntu, native FUSE, package, provider,
+  and W26 gates are not terminal. This is partial current-tip evidence only;
+  W04 and production rollout remain open/NO-GO until the full matrix is
+  inspected and the seven production gates close.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
