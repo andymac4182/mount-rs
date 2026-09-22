@@ -296,6 +296,15 @@ evidence only; it does not provide production topology, provider,
 candidate-release, registry, canary, rollback or owner-approval evidence, so
 P01–P09 remain open and the decision remains NO-GO.
 
+The latest pushed W08 ledger checkpoint `7946979c9e5f3c91e4914a281bdcd2153f983706`
+passed hosted W08 policy run `35689651032`, job `106623733056`, in 2m41s with
+both the rollout-ledger and release-identity/provenance steps green. The
+checkpoint was documentation-only relative to exact Rust qualification
+`761cb9d0`; this is hosted implementation/static evidence only and does not
+provide provider, production topology, candidate-release, registry, canary,
+rollback or owner-approval evidence. P01–P09 remain open and the decision
+remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
