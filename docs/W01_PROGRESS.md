@@ -157,9 +157,12 @@ compares the native direct `P9Session` semantic member set with the pinned
 oracle's 14-member set and passes alongside the adjacent metadata,
 observability, fid, mount-helper, typecheck, syntax, and diff checks. The
 exact hosted [Native 9P run `35694841984`](https://github.com/andymac4182/mount-rs/actions/runs/35694841984)
-is queued with N-API job `106639369581` and Rust job `106639369868`; it is
-pending evidence, not a hosted PASS. Broader session/protocol parity,
-crash/reset scope, and W01 gates remain open, so production remains NO-GO.
+completed with N-API job `106639369581` passing, but Rust job
+`106639369868` failed because `native_linux_external_umount_finishes_server_lifecycle`
+reported external `umount` exit status 32 (three native tests passed, one
+failed). It is not hosted PASS evidence. Broader session/protocol parity,
+crash/reset scope, the failed native external-umount gate, and W01 gates
+remain open, so production remains NO-GO.
 
 The attached-connection API parity packet was published at exact SHA
 `1c791cf67861efdfe8e5da223048904c88c6b168`. It adds the declared
@@ -168,9 +171,22 @@ metadata teardown regression awaits it after `close()`. Local metadata,
 direct-session, observability, fid, mount-helper, generated typecheck, syntax,
 diff, and elevated `MOUNT_RS_SERVER_PHASE=p9` server-selector checks passed.
 The exact hosted [Native 9P run `35696071202`](https://github.com/andymac4182/mount-rs/actions/runs/35696071202)
-is still pending with no materialized jobs (`jobs: []`), so it is not hosted
-PASS evidence. Broader session/protocol parity, crash/reset scope, and W01
-gates remain open, so production remains NO-GO.
+passed: N-API job `106645117281` and Rust job `106645117408` were green,
+including the Linux 9P probe, addon build, server/attach and direct-session
+lifecycle, and automatic/direct/structural mounted-I/O cleanup. Broader
+session/protocol parity, crash/reset scope, and W01 gates remain open, so
+production remains NO-GO.
+
+The server/connection member-surface packet was published at exact SHA
+`75c149f857f6056a7435a80a1493a9dfc8e53f59`. Its focused regression audits the
+ten semantic `P9Server` members and the declared attached-connection members,
+including `waitClosed()`, while excluding only the oracle's non-interface
+`drop()` helper. Local direct/oracle execution, adjacent metadata/typecheck
+checks, syntax, and diff checks passed. The exact hosted [Native 9P run
+`35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227)
+is queued with no materialized jobs yet; no hosted PASS is claimed. Broader
+session/protocol parity, crash/reset scope, and W01 gates remain open, so
+production remains NO-GO.
 
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
