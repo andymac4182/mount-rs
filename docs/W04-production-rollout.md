@@ -204,6 +204,14 @@ The provider metrics were SQLite/R2 `661.53`, PGlite/R2 `1342.61`, TiDB/R2
 `493.32`, and FoundationDB/R2 `184.54` IOPS against the hard `1000` target;
 the W26 packet is not accepted. Production remains **NO-GO**.
 
+A follow-up implementation chunk hardens the Linux FUSE control plane at the
+hosted failure boundary: terminal `FUSE_DESTROY` aborts blocked read workers
+without waiting the full drain deadline, the invalid-device regression uses a
+deterministically readable `eventfd`, and the retryable-unmount fixture uses a
+real mounted path. Host FUSE tests and Linux-target compilation pass locally,
+but hosted Linux Rust and native-FUSE confirmation is still required; this
+does not close a production gate.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 

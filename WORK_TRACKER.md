@@ -2877,6 +2877,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   after its four `needs` jobs became terminal. Provider IOPS were SQLite/R2
   `661.53`, PGlite/R2 `1342.61`, TiDB/R2 `493.32`, and FoundationDB/R2 `184.54`
   against target `1000`; current qualification and production remain **NO-GO**.
+- [x] W04 production-support follow-up: harden the Linux FUSE teardown/read
+  control plane at the hosted failure boundary. Terminal `FUSE_DESTROY` now
+  aborts blocked positional-read workers immediately; the invalid-device
+  regression uses a ready `eventfd` rather than a write-only pipe; and the
+  retryable-unmount fixture uses `/` so the real mounted-path failure branch is
+  exercised. Host `mount-rs-fuse` passed `15/15`, Linux-target test
+  compilation passed, and formatting/diff checks passed. This is local
+  implementation evidence only; hosted Linux Rust/native-FUSE rerun and all
+  remaining production gates are still open.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer

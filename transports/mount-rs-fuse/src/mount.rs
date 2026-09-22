@@ -1137,6 +1137,12 @@ async fn run_session_loop(
             // run_session() performs the final session-owned cleanup.
             pending_reads.clear();
             state.request_stop();
+            // DESTROY has no reply path, so retaining blocked read workers
+            // until the one-second drain deadline only delays device close
+            // and can race the native teardown deadline. Abort the workers
+            // immediately; drain_read_tasks still observes their cancellation
+            // and preserves any already-recorded transport failure.
+            read_tasks.abort_all();
             break;
         }
         match session.prepare_read(&frame) {
@@ -2219,15 +2225,17 @@ mod tests {
     async fn invalid_device_read_reports_one_owned_read_error() {
         use std::os::fd::{FromRawFd, OwnedFd};
 
-        let mut pipe = [0; 2];
-        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
-        // SAFETY: pipe returned two owned descriptors and each is transferred
-        // exactly once into an OwnedFd.
-        let read_end = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
-        let write_end = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
-        let device = FuseDevice::from_owned_fd(write_end, DEFAULT_MAX_FRAME)
-            .expect("write-only pipe should satisfy the device boundary");
-        drop(read_end);
+        // An eventfd is readable immediately, but its eight-byte counter
+        // cannot satisfy the FUSE device's larger frame read. That produces a
+        // deterministic EINVAL instead of relying on a write-only pipe whose
+        // read readiness is platform/kernel dependent and can wait forever.
+        let fd = unsafe { libc::eventfd(1, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+        assert!(fd >= 0, "eventfd should be available on Linux");
+        // SAFETY: eventfd returned one owned descriptor transferred exactly
+        // once into OwnedFd.
+        let device_fd = unsafe { OwnedFd::from_raw_fd(fd) };
+        let device = FuseDevice::from_owned_fd(device_fd, DEFAULT_MAX_FRAME)
+            .expect("eventfd should satisfy the descriptor boundary");
 
         let observed = Arc::new(Mutex::new(Vec::new()));
         let observed_callback = Arc::clone(&observed);
@@ -3955,7 +3963,7 @@ mod tests {
 
         let state = Arc::new(MountState::new(
             MountMode::Rootless,
-            PathBuf::from("/tmp/mount-rs-fuse-retry-unmount-test"),
+            PathBuf::from("/"),
             MountOptions {
                 mode: MountMode::Rootless,
                 ..MountOptions::default()
@@ -3965,7 +3973,7 @@ mod tests {
         ));
         let mount = FuseMount {
             state: Arc::clone(&state),
-            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-retry-unmount-test"),
+            mountpoint: PathBuf::from("/"),
         };
 
         let first = mount.unmount().await;
