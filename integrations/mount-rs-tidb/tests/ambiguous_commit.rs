@@ -1,10 +1,10 @@
 //! Failure-injection coverage for TiDB transaction commits.
 //!
 //! This test deliberately sits between the provider and a real TiDB SQL
-//! endpoint. It forwards the MySQL wire protocol, lets TiDB finish a COMMIT,
-//! then drops the client connection before the COMMIT response is delivered.
-//! The provider must surface an unknown outcome and must not replay the
-//! publication automatically.
+//! endpoint. It forwards the MySQL wire protocol, lets TiDB finish the
+//! publication statement, then drops the client connection before its
+//! acknowledgement is delivered. The provider must surface an unknown
+//! outcome and must not replay the publication automatically.
 
 use mount_rs_core::chunking::{Chunker, FixedSizeChunker};
 use mount_rs_core::storage::{MetadataStore, Namespace, NodeData, NodeMetadata};
@@ -145,7 +145,22 @@ fn is_commit_query(packet: &MysqlPacket) -> bool {
             .is_ok_and(|query| query.trim().eq_ignore_ascii_case("COMMIT"))
 }
 
-async fn relay_until_commit_response(client: TcpStream, upstream: TcpStream) -> IoResult<()> {
+fn is_publication_update_query(packet: &MysqlPacket) -> bool {
+    packet.payload.first() == Some(&0x03)
+        && std::str::from_utf8(&packet.payload[1..]).is_ok_and(|query| {
+            let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
+            let normalized = normalized.to_ascii_uppercase();
+            normalized.starts_with("UPDATE MOUNT_RS_TIDB_METADATA ")
+                && normalized.contains(" SET REVISION=")
+                && normalized.contains(" NAMESPACE=")
+        })
+}
+
+fn is_publication_ack_query(packet: &MysqlPacket) -> bool {
+    is_commit_query(packet) || is_publication_update_query(packet)
+}
+
+async fn relay_until_publication_response(client: TcpStream, upstream: TcpStream) -> IoResult<()> {
     let (mut client_reader, mut client_writer) = client.into_split();
     let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
 
@@ -153,13 +168,14 @@ async fn relay_until_commit_response(client: TcpStream, upstream: TcpStream) -> 
         tokio::select! {
             packet = read_packet(&mut client_reader) => {
                 let packet = packet?;
-                let is_commit = is_commit_query(&packet);
+                let drops_acknowledgement = is_publication_ack_query(&packet);
                 write_packet(&mut upstream_writer, &packet).await?;
-                if is_commit {
+                if drops_acknowledgement {
                     // Reading the response proves TiDB has finished processing
-                    // COMMIT. Drop both sockets before forwarding it so the
-                    // provider cannot observe whether the commit succeeded.
-                    let _commit_response = read_packet(&mut upstream_reader).await?;
+                    // the publication. Drop both sockets before forwarding its
+                    // acknowledgement so the provider cannot observe whether
+                    // the commit succeeded.
+                    let _publication_response = read_packet(&mut upstream_reader).await?;
                     return Ok(());
                 }
             }
@@ -171,7 +187,7 @@ async fn relay_until_commit_response(client: TcpStream, upstream: TcpStream) -> 
     }
 }
 
-async fn start_commit_drop_proxy(database_url: &str) -> (String, JoinHandle<IoResult<()>>) {
+async fn start_publication_drop_proxy(database_url: &str) -> (String, JoinHandle<IoResult<()>>) {
     let target = Url::parse(database_url).expect("the TiDB URL must be parseable");
     assert_eq!(
         target.scheme(),
@@ -205,7 +221,7 @@ async fn start_commit_drop_proxy(database_url: &str) -> (String, JoinHandle<IoRe
                 accepted = listener.accept() => {
                     let (client, _) = accepted?;
                     let upstream = TcpStream::connect((target_host.as_str(), target_port)).await?;
-                    relays.spawn(async move { relay_until_commit_response(client, upstream).await });
+                    relays.spawn(async move { relay_until_publication_response(client, upstream).await });
                 }
                 relay = relays.join_next(), if !relays.is_empty() => {
                     if let Some(Ok(Ok(()))) = relay {
@@ -253,14 +269,14 @@ async fn actual_tidb_commit_outcome_is_ambiguous_and_not_replayed() {
         .await
         .expect("acquire the TiDB writer before failure injection");
 
-    let (proxy_url, proxy_task) = start_commit_drop_proxy(&direct_url).await;
+    let (proxy_url, proxy_task) = start_publication_drop_proxy(&direct_url).await;
     let via_proxy = TidbMetadataStore::connect_with_options(&proxy_url, options(&volume_key))
         .await
         .expect("connect the TiDB metadata store through the proxy");
     let error = via_proxy
         .publish(0, &lease, root_namespace().await)
         .await
-        .expect_err("a dropped COMMIT response must not be reported as success");
+        .expect_err("a dropped publication response must not be reported as success");
     assert!(
         error.to_string().contains("commit outcome is unknown"),
         "ambiguous commit must be distinguishable from a retryable statement conflict: {error}"
