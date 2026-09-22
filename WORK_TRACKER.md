@@ -3552,6 +3552,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   release-manifest fixtures, and failed closed on the invalid manifest. These
   are admission-control checks only; no provider, signing, SBOM, canary,
   rollback or approval evidence was created, so P01/P02/P07/P09 remain open.
+  A 12:30 AEST prerequisite probe could not contact the Docker daemon and
+  found no live TiDB/R2/PGlite/RustFS endpoint or credential variable. The
+  representative TLS-policy config passed, the inline-secret config failed
+  closed, and the strict accepted release-manifest fixture passed with
+  `--require-release-acceptance`; these remain repository controls only and
+  do not close P01/P02/P07/P09.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 

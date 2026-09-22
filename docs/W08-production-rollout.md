@@ -214,6 +214,14 @@ public equality for checkpoint `ea49dc65` was already verified at 12:24 AEST.
 No release, canary, rollback or approval evidence was created, so P09 remains
 externally blocked.
 
+A local prerequisite probe at **2026-09-22 12:30 AEST** could not contact the
+Docker daemon, and no live TiDB/R2/PGlite/RustFS endpoint or credential
+variables were present. The representative out-of-band TLS-policy config
+passed, the inline-secret config failed closed, and the strict accepted
+release-manifest fixture passed with `--require-release-acceptance`. These are
+repository admission controls only; they do not close P01/P02/P07/P09 or
+create provider, signing, SBOM-service, canary, rollback or approval evidence.
+
 The W08.11 release-policy job is a separate credential-free implementation
 gate. It validates a manifest shape and, when supplied, an artifact checksum;
 it does not sign artifacts, create an SBOM, run a canary, perform rollback or
