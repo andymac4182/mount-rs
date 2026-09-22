@@ -1,0 +1,169 @@
+{
+  "version": 1,
+  "environment_class": "production-like-staging",
+  "runbook": {
+    "path": "docs/W08-operations-runbook.md",
+    "status": "controlled-template",
+    "current_decision": "NO-GO",
+    "evidence_records_required": true,
+    "terminal_status_required": true,
+    "redacted_logs_required": true
+  },
+  "evidence_record": {
+    "fields": [
+      "record_id",
+      "tested_revision",
+      "configuration",
+      "provider_versions",
+      "topology",
+      "environment",
+      "people",
+      "time",
+      "result"
+    ],
+    "timestamp_fields": [
+      "start",
+      "detection",
+      "acknowledgement",
+      "mitigation",
+      "recovery",
+      "cleanup"
+    ],
+    "terminal_results": ["PASS", "FAIL"],
+    "cleanup_outcome_required": true,
+    "rollback_outcome_required": true
+  },
+  "incident": {
+    "incident_commander_required": true,
+    "stop_writers_required": true,
+    "preserve_evidence_required": true,
+    "failure_domains": [
+      "metadata",
+      "block-store",
+      "client-transport",
+      "credentials-tls",
+      "network-partition",
+      "capacity",
+      "release-artifact"
+    ],
+    "integrity_checks": [
+      "fresh-client-readback",
+      "lease-fence-state",
+      "block-hash-manifest",
+      "metadata-revision",
+      "cleanup-boundary"
+    ],
+    "closure_requires_fresh_client": true,
+    "closure_requires_named_ack": true
+  },
+  "drills": [
+    {
+      "id": "D01",
+      "failure": "tidb-frontend-loss",
+      "signal": ["readiness", "error"],
+      "recovery": ["fresh-client", "metadata-integrity", "fencing"],
+      "gate_refs": ["P03", "P05", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/operations"
+    },
+    {
+      "id": "D02",
+      "failure": "tikv-or-pd-member-loss",
+      "signal": ["provider-health", "capacity"],
+      "recovery": ["quorum", "restart-reopen", "measured-rto"],
+      "gate_refs": ["P01", "P03", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/operations"
+    },
+    {
+      "id": "D03",
+      "failure": "block-endpoint-outage",
+      "signal": ["block-error", "block-latency"],
+      "recovery": ["scoped-retry", "manifest-hash", "orphan-check"],
+      "gate_refs": ["P03", "P05", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/operations"
+    },
+    {
+      "id": "D04",
+      "failure": "stale-lease-old-writer",
+      "signal": ["estale", "fencing"],
+      "recovery": ["old-identity-fenced", "new-owner", "fresh-client"],
+      "gate_refs": ["P02", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/operations"
+    },
+    {
+      "id": "D05",
+      "failure": "network-partition-split-brain",
+      "signal": ["partition", "ownership"],
+      "recovery": ["one-authority", "no-divergence", "integrity-check"],
+      "gate_refs": ["P01", "P05", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/operations"
+    },
+    {
+      "id": "D06",
+      "failure": "partial-object-publication",
+      "signal": ["manifest-hash", "integrity"],
+      "recovery": ["consistent-restore", "approved-repair", "no-guessed-replay"],
+      "gate_refs": ["P03", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/operations"
+    },
+    {
+      "id": "D07",
+      "failure": "certificate-expiry-credential-revocation",
+      "signal": ["tls", "iam"],
+      "recovery": ["rotation", "revocation", "guarded-provider-test"],
+      "gate_refs": ["P02", "P07", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/security"
+    },
+    {
+      "id": "D08",
+      "failure": "clean-environment-backup-restore",
+      "signal": ["restore-job", "rpo-rto"],
+      "recovery": ["metadata-block-consistency", "fresh-read", "measured-rpo-rto"],
+      "gate_refs": ["P03", "P08"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/data-owner"
+    },
+    {
+      "id": "D09",
+      "failure": "bad-client-provider-deployment",
+      "signal": ["release", "canary"],
+      "recovery": ["artifact-rollback", "read-fence-ownership", "approval"],
+      "gate_refs": ["P04", "P09"],
+      "cleanup_required": true,
+      "rollback_required": true,
+      "owner_role": "role/release-owner"
+    }
+  ],
+  "on_call": {
+    "primary_route_ref": "route/on-call-primary",
+    "secondary_route_ref": "route/on-call-secondary",
+    "escalation_policy_ref": "docs/W08-operations-runbook.md#immediate-incident-actions",
+    "coverage": "24x7",
+    "max_acknowledgement_minutes": 15,
+    "tabletop_required": true,
+    "acknowledgement_record_required": true
+  },
+  "ownership": {
+    "incident_commander": "role/incident-commander",
+    "primary_on_call": "role/on-call-primary",
+    "secondary_on_call": "role/on-call-secondary",
+    "operations_owner": "role/operations",
+    "data_owner": "role/data-owner",
+    "security_owner": "role/security",
+    "release_owner": "role/release-owner"
+  }
+}

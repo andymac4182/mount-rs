@@ -11,6 +11,14 @@ provider identities, monitoring route and on-call owner are recorded. The
 current rollout decision remains **NO-GO**. A completed demo, a local check, or
 the retained hosted qualification jobs do not count as an executed drill.
 
+The credential-free runbook-shape policy is checked by
+`node scripts/verify-w08-production-operations.mjs
+tests/tidb/production-operations-policy.json` and its eight-case regression
+suite. It validates D01–D09 coverage, evidence-record completeness, incident
+closure controls, cleanup/rollback requirements and on-call acknowledgement;
+it does not execute a failure injection, page an operator or create an
+incident record.
+
 The release admission path is also a controlled template until the GitHub
 `w08-production` environment has required reviewers and tag/branch policy. The
 `v*-cli-production-candidate*` workflow produces a protected prerelease with

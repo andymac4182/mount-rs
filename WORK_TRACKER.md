@@ -5797,6 +5797,32 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   current-tip terminal hosted qualification exists. P07 provider/security
   evidence and production sign-off remain open.
 
+- [x] W08.44 **External operations, failure-drill and on-call policy:** added
+  `tests/tidb/production-operations-policy.json`,
+  `scripts/verify-w08-production-operations.mjs` and its eight-case
+  `scripts/test-w08-production-operations.mjs` control over the existing
+  `docs/W08-operations-runbook.md`. The credential-free contract requires all
+  D01–D09 drills with mapped P01–P09 gate references, named owner roles,
+  required signals, recovery checks, cleanup and rollback outcomes; a complete
+  redacted evidence record with immutable revision, topology, provider,
+  environment, people, timestamp and terminal-result fields; incident
+  commander, writer-stop, evidence-preservation, failure-domain and
+  fresh-client/integrity closure controls; 24x7 primary/secondary routes,
+  escalation linkage, a maximum 15-minute acknowledgement, tabletop evidence
+  and acknowledgement records. The runbook remains a controlled template with
+  an explicit NO-GO decision, so these checks do not execute a failure drill,
+  page an operator or create incident evidence. The checks are wired into both
+  W08 release workflows. *(Implementation/static qualification; operational
+  and production evidence remain external.)*
+
+  Local policy/test output passed with
+  `W08_PRODUCTION_OPERATIONS_POLICY_PASS drills=9 evidence_fields=9
+  incident_domains=7 ack_minutes=15 runbook=docs/W08-operations-runbook.md`
+  and `W08_PRODUCTION_OPERATIONS_TEST_PASS cases=8`. The W08 rollout ledger
+  now protects 44 functional items; P08 remains open until D01–D09 are run in
+  the approved environment with terminal redacted records, measured recovery,
+  integrity, cleanup/rollback results and named on-call acknowledgement.
+
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
   bounded propfind/copy failure fix, the
