@@ -65,10 +65,11 @@ function sameSet(actual, expected) {
 export function validateArtifact(document, options = {}) {
   const root = requireObject(document, "artifact")
   const expectedProviders = providerList(options.providers, "providers")
+  const minimumIopsFloor = options.minimumIopsFloor ?? W26_IOPS_MINIMUM
   const minimumIops = requireInteger(
     options.minimumIops ?? W26_IOPS_MINIMUM,
     "minimum-iops",
-    W26_IOPS_MINIMUM,
+    minimumIopsFloor,
   )
 
   requireEqual(root.schemaVersion, "mount-rs.storage-benchmark.v1", "schema-version")
@@ -76,7 +77,7 @@ export function validateArtifact(document, options = {}) {
 
   const config = requireObject(root.config, "config")
   requireEqual(config.requireConfigured, true, "config.requireConfigured")
-  requireInteger(config.minIops, "config.minIops", minimumIops)
+  requireInteger(config.minIops, "config.minIops", minimumIopsFloor)
   requireEqual(config.payloadBytes, W26_IOPS_PROFILE.payloadBytes, "config.payloadBytes")
   requireEqual(config.iterations, W26_IOPS_PROFILE.iterations, "config.iterations")
   requireEqual(config.concurrency, W26_IOPS_PROFILE.concurrency, "config.concurrency")

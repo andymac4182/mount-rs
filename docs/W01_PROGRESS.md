@@ -72,10 +72,11 @@ barrier evidence, not proof of a particular provider's power-loss ordering or
 durable lock policy.
 
 The structural N-API `FsDriver` adapter now forwards an optional `syncfs()`
-callback, and the WebDAV regression drives both successful and failing durable
-barriers through `createWebdavServer`. Durable structural drivers without that
-callback still fail closed with `ENOSYS`; this local seam evidence does not
-qualify live providers, power-loss ordering, or hosted acceptance.
+callback, and the WebDAV regression drives successful, failing, and missing-
+callback durable barriers through `createWebdavServer`. Durable structural
+drivers without that callback still fail closed with `ENOSYS`; this local seam
+evidence does not qualify live providers, power-loss ordering, or hosted
+acceptance.
 
 The focused N-API in-flight streamed-`PUT` crash probe also yields and
 independently reads back the prefix before forcing the child process down.
@@ -597,7 +598,7 @@ spent waiting for a hosted job or credential approval.
 
 | Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
 | --- | --- | --- | ---: | ---: | --- |
-| 2026-09-22 | W01-WebDAV | Added structural N-API `FsDriver.syncfs()` forwarding, its public declaration, and a WebDAV `createWebdavServer` success/error regression; host-enabled release build, generated typecheck, adjacent WebDAV lifecycle/direct-session/network checks, N-API warning-denied Clippy, and locked WebDAV Rust tests passed 20/20 | — | 77% planning view | Local structural-driver/transport evidence only; hosted lifecycle/concurrency, live-provider, power-loss, durable-lock, and wider ordering gates remain open |
+| 2026-09-22 | W01-WebDAV | Added structural N-API `FsDriver.syncfs()` forwarding, its public declaration, and a WebDAV `createWebdavServer` success/500-error/501-missing-callback regression; host-enabled release build, generated typecheck, adjacent WebDAV lifecycle/direct-session/network checks, N-API warning-denied Clippy, and locked WebDAV Rust tests passed 20/20 | — | 77% planning view | Local structural-driver/transport evidence only; hosted lifecycle/concurrency, live-provider, power-loss, durable-lock, and wider ordering gates remain open |
 | 2026-09-22 | W01-FUSE | Added public Rust `FuseSessionOptions`/`FuseFlushMechanism`, configured inode identity, INIT preferences, cache/timeout policy, error readback, handle counts and destroy-state observability; the complete locked FUSE target (14 unit, 6 INIT, 6 notify/record, 11 protocol, 18 session, 3 sync-barrier tests), strict scoped Clippy, formatting and diff checks passed | — | 66% planning view | Native Linux/FSKit, callbacks, hosted platform, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-22 | W01-FUSE | Added the Rust-backed N-API `FuseSession` and public `./fuse` facade with typed options/defaults, negotiated state, inode views, request/reply/error counters, assertion/error callbacks, notification encoders, destroy-state readback, generated declarations, and raw INIT/LOOKUP/READLINK coverage; locked N-API check/Clippy, debug addon build, focused session/codec/typecheck tests, FUSE tests, formatting and diff checks passed | — | 68% planning view | `MOUNTX_SOURCE`-backed full package suite, native Linux FUSE/callback events, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |
 | 2026-09-22 | W01-FUSE | Added Rust-native `FuseMountHooks`/`FuseTransportError` reporting through `mount_with_hooks`, exactly-once terminal callback delivery, callback-panic isolation, and a mount-free Unix-stream protocol-failure harness; locked FUSE tests, formatting and diff checks passed on macOS | — | 70% planning view | Linux-only hook harness and hosted `/dev/fuse` callback delivery, FSKit, cancellation/concurrency, crash/restart and durability evidence remain open |

@@ -3898,6 +3898,18 @@ impl S3Session {
         self.inner.assertions()
     }
 
+    /// Sweep the session-owned multipart staging roots without requiring a
+    /// listening server. This mirrors the upstream session lifecycle; the
+    /// server close path remains idempotent when it calls the same transport
+    /// operation afterwards.
+    #[napi]
+    pub async fn close(&self) -> napi::Result<()> {
+        self.inner
+            .close()
+            .await
+            .map_err(|error| transport_error("S3 session close", error))
+    }
+
     /// Read a coherent snapshot of the transport-owned session metrics.
     #[napi]
     pub async fn stats(&self) -> S3SessionStats {

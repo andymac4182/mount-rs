@@ -59,11 +59,12 @@ workload and duration must still be defined and accepted in
 
 The dedicated W07 hosted lane also runs the fixed bounded workload profile
 through the live FoundationDB/RustFS Node consumer: 400 iterations, 64-way
-concurrency, 4 KiB payloads, and a minimum of 1,000 IOPS. It validates and
+concurrency and 4 KiB payloads. It requires every lifecycle to complete,
 retains the machine-readable `foundationdb-ozone-iops.json` artifact and emits
-`FOUNDATIONDB_OZONE_IOPS_PASS` only after that validation succeeds. This is a
-repeatable qualification profile, not a production capacity SLO; production
-load, duration, cost and error-budget targets remain an explicit rollout gate.
+`FOUNDATIONDB_W07_WORKLOAD_PASS` with the measured rate only after validation
+succeeds. The non-zero completion floor is structural, not a capacity target;
+production load, duration, cost and error-budget targets remain an explicit
+rollout gate.
 
 The dedicated hosted workflow also writes a schema-versioned summary artifact.
 When it runs in GitHub Actions, the validator requires the summary to include

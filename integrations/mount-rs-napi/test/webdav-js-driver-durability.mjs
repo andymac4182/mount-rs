@@ -4,7 +4,8 @@ import { createDriver, createMemoryDriver, createWebdavServer } from "../index.j
 
 const payload = Buffer.from("structural durable WebDAV bytes")
 
-async function exercise(failSyncfs) {
+async function exercise(mode) {
+  const failSyncfs = mode === "failure"
   const backing = createMemoryDriver()
   const calls = []
   const driver = {
@@ -25,14 +26,16 @@ async function exercise(failSyncfs) {
     truncate: backing.truncate.bind(backing),
     utimes: backing.utimes.bind(backing),
     lutimes: backing.lutimes.bind(backing),
-    async syncfs() {
+  }
+  if (mode !== "missing") {
+    driver.syncfs = async () => {
       calls.push("syncfs")
       if (failSyncfs) {
         const error = new Error("durability barrier rejected by structural driver")
         Object.assign(error, { code: "EIO", errno: -5, syscall: "syncfs" })
         throw error
       }
-    },
+    }
   }
   const filesystem = createDriver(driver)
   const server = createWebdavServer(filesystem, {
@@ -45,12 +48,14 @@ async function exercise(failSyncfs) {
       { method: "PUT", target: "/structural-durable.txt", headers: [] },
       payload,
     )
-    if (failSyncfs) {
+    if (mode === "failure") {
       assert.equal(response.status, 500)
+    } else if (mode === "missing") {
+      assert.equal(response.status, 501)
     } else {
       assert.ok([200, 201, 204].includes(response.status))
     }
-    assert.deepEqual(calls, ["syncfs"])
+    assert.deepEqual(calls, mode === "missing" ? [] : ["syncfs"])
   } finally {
     await server.close().catch(() => {})
     await filesystem.shutdown().catch(() => {})
@@ -58,7 +63,8 @@ async function exercise(failSyncfs) {
   }
 }
 
-await exercise(false)
-await exercise(true)
+await exercise("success")
+await exercise("failure")
+await exercise("missing")
 
 console.log("mount-rs N-API WebDAV structural-driver durability: PASS")

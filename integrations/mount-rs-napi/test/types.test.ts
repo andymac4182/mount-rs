@@ -521,7 +521,7 @@ function checkServerAndKvSubpaths(): void {
   const p9FidResume: DirResume<string> = p9FidTable.snapshot(p9Fid, ["entry"])
   const p9FidCursor: DirCursor<string> = {
     entries: ["entry"],
-    offsets: new Map<bigint, number>(),
+    offsets: [{ offset: 1n, index: 0 }],
   }
   const p9FidOpen: FidOpenState = {
     flags: 0,
@@ -535,6 +535,8 @@ function checkServerAndKvSubpaths(): void {
     iounit: 0,
     cursor: p9FidCursor,
   }
+  p9FidShape.iounit = 8192
+  p9FidShape.cursor = undefined
   const p9FirstQidPath: 1n = FIRST_QID_PATH
   const p9QidType: number = qidType(0o100644)
   const p9QidVersion: number = qidVersion({ mtimeMs: 1 })
