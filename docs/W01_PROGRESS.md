@@ -59,7 +59,17 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P direct-type packet at exact SHA
+The latest W01-9P P9User packet at exact SHA
+`1c43f66ec570be35444055ab6adb0f841628fef6` passed [Native 9P run
+`35681672318`](https://github.com/andymac4182/mount-rs/actions/runs/35681672318):
+N-API job `106599754171` and Rust job `106599753872` both passed their Linux
+probes and supported lifecycle gates. The packet preserves an own
+`P9User.uid` property with `undefined` for a missing numeric uid and declares
+`uid: number | undefined`; the broad local `servers.mjs` script stopped at the
+unrelated Darwin NFS relisten sandbox boundary before reaching 9P. Broader W01
+acceptance remains NO-GO.
+
+The preceding W01-9P direct-type packet at exact SHA
 `2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed [Native 9P run
 `35681127657`](https://github.com/andymac4182/mount-rs/actions/runs/35681127657):
 N-API job `106598109004` and Rust job `106598109187` both passed their Linux

@@ -250,6 +250,19 @@ the runtime surface is unchanged. Exact SHA
 N-API job `106598109004`, and Rust job `106598109187`, with the direct
 type-import/use check, helper, syntax, and diff checks green locally.
 
+The N-API `P9User` boundary now matches the oracle's required identity shape:
+`userFor(fid)` returns an object with `uname`, `uid: number | undefined`, and
+`aname`, and the JavaScript facade owns `uid` with value `undefined` when the
+native uid sentinel does not produce a number. The generated direct declaration,
+runtime own-key assertion, and focused metadata/type/syntax/diff checks pass.
+Exact SHA `1c43f66ec570be35444055ab6adb0f841628fef6` passed [Native 9P run
+`35681672318`](https://github.com/andymac4182/mount-rs/actions/runs/35681672318),
+with N-API job `106599754171` passing automatic/direct/structural mounted
+I/O/cleanup and Rust job `106599753872` passing all four ignored native
+lifecycles. The broad local `servers.mjs` script remains bounded by an
+unrelated Darwin NFS relisten `Operation not permitted` sandbox failure before
+its 9P phase; that is not promoted as a 9P failure or pass.
+
 No native mount, unmount, signal, or live-filesystem result should be inferred
 from component tests. The CLI and integration test prerequisites remain an
 explicit evidence boundary.
