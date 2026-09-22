@@ -1580,6 +1580,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   not cryptographic `AUTH_SYS` identity, uncached reply
   recovery, crash-durable replay, native-client ordering, power-loss
   durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
+- [x] A bounded completed NFSv4.1 reply is now cached even when
+  `SEQUENCE.cachethis=false`, as permitted by RFC 8881. A new real-TCP
+  `REMOVE` regression initially got `NFS4ERR_SEQ_MISORDERED` on a retry;
+  after the fix it receives the original reply byte-for-byte and leaves a
+  changed target intact until the next sequence. The full locked NFS target
+  passes (41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart,
+  1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 13 v4
+  wire), and the direct v4 wire target, warning-denied Clippy, formatting, and
+  diff checks pass. This does not establish oversized-reply safety,
+  crash-durable replay/lease/handle
+  state, native-client ordering, power-loss durability, or exact-tip hosted
+  acceptance; W01-NFS remains NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

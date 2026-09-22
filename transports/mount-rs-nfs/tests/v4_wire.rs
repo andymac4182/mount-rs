@@ -238,12 +238,16 @@ fn op(opcode: u32, body: impl FnOnce(&mut XdrWriter)) -> Vec<u8> {
 }
 
 fn sequence(client: &Client) -> Vec<u8> {
+    sequence_with_cachethis(client, true)
+}
+
+fn sequence_with_cachethis(client: &Client, cachethis: bool) -> Vec<u8> {
     op(OP_SEQUENCE, |writer| {
         writer.fixed_opaque(&client.session, 16);
         writer.u32(client.sequence);
         writer.u32(client.slot);
         writer.u32(0);
-        writer.bool(true);
+        writer.bool(cachethis);
     })
 }
 
@@ -1555,6 +1559,109 @@ fn nfs_v4_cached_remove_reply_survives_tcp_reconnect_without_reexecution() {
         .expect("spawn v4 replay test thread")
         .join()
         .expect("v4 replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_uncached_hint_still_replays_small_completed_mutation() {
+    std::thread::Builder::new()
+        .name("nfs-v4-uncached-hint-replay-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build uncached-hint replay runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver
+                        .write_file("/uncached-first", b"first")
+                        .await
+                        .unwrap();
+                    driver
+                        .write_file("/uncached-second", b"second")
+                        .await
+                        .unwrap();
+                    let server = NfsServer::new(driver.clone(), NfsServerOptions::default());
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 801, b"uncached-hint-client").await;
+
+                    let mut response = rpc(
+                        &mut stream,
+                        804,
+                        compound(
+                            "uncached-first",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("uncached-first")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let first_body = response.rest();
+                    let mut first = XdrReader::new(&first_body);
+                    parse_compound_header(&mut first, 3);
+                    consume_sequence_result(&mut first, "uncached-hint first sequence");
+                    parse_result_header(&mut first, OP_PUTROOTFH);
+                    parse_result_header(&mut first, OP_REMOVE);
+                    let _ = first.bool("remove change atomic").unwrap();
+                    let _ = first.u64("remove change before").unwrap();
+                    let _ = first.u64("remove change after").unwrap();
+                    first.end("uncached-hint first response").unwrap();
+                    assert!(driver.stat("/uncached-first").await.is_err());
+
+                    // The changed target must not execute, even though the
+                    // original SEQUENCE did not request full reply caching.
+                    let mut retry = rpc(
+                        &mut stream,
+                        805,
+                        compound(
+                            "uncached-retry",
+                            &[
+                                sequence_with_cachethis(&client, false),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("uncached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), first_body);
+                    assert!(driver.stat("/uncached-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        806,
+                        compound(
+                            "uncached-fresh",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("uncached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "uncached-hint fresh sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    let _ = fresh.bool("fresh remove change atomic").unwrap();
+                    let _ = fresh.u64("fresh remove change before").unwrap();
+                    let _ = fresh.u64("fresh remove change after").unwrap();
+                    fresh.end("uncached-hint fresh response").unwrap();
+                    assert!(driver.stat("/uncached-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn uncached-hint replay test thread")
+        .join()
+        .expect("uncached-hint replay test thread panicked");
 }
 
 #[test]

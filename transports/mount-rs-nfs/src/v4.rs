@@ -583,7 +583,7 @@ enum Op {
         sequence: u32,
         slot: u32,
         highest: u32,
-        cachethis: bool,
+        _cachethis: bool,
     },
     ReclaimComplete(bool),
     TestStateid(Vec<Stateid4>),
@@ -1285,7 +1285,7 @@ fn parse_op(reader: &mut XdrReader<'_>) -> Result<Op, XdrError> {
             sequence: reader.u32("SEQUENCE.sequence")?,
             slot: reader.u32("SEQUENCE.slot")?,
             highest: reader.u32("SEQUENCE.highest")?,
-            cachethis: reader.bool("SEQUENCE.cachethis")?,
+            _cachethis: reader.bool("SEQUENCE.cachethis")?,
         },
         OP_RECLAIM_COMPLETE => Op::ReclaimComplete(reader.bool("RECLAIM_COMPLETE.one_fs")?),
         OP_TEST_STATEID => Op::TestStateid(reader.array(
@@ -2144,7 +2144,7 @@ impl Nfs4Session {
             sequence,
             slot,
             highest,
-            cachethis,
+            _cachethis: _,
         } = &operations[0]
         else {
             unreachable!("sequence was checked above")
@@ -2277,7 +2277,10 @@ impl Nfs4Session {
         }
         let body = compound_body(status, &tag, &results);
         v4_trace_compound_reply(peer, xid, status, results.len(), false);
-        if *cachethis && body.len() <= session.max_cached {
+        // RFC 8881 permits caching the full reply even when sa_cachethis is
+        // false. Keep bounded completed replies so a retry cannot re-execute
+        // a mutation whose caller omitted the caching hint.
+        if body.len() <= session.max_cached {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             if let Some(session) = state.sessions.get_mut(sessionid) {
                 let slot_index = *slot as usize;

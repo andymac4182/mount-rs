@@ -189,8 +189,10 @@ For a completed cached reply, a retry whose decoded `AUTH_SYS` credentials
 identify a different effective user receives `NFS4ERR_SEQ_FALSE_RETRY` instead
 of the other user's cached body. A same-user retry can still receive that
 original body even when its operation arguments differ; neither retry
-re-executes the mutation. `AUTH_SYS` is not cryptographic authentication, and
-uncached or restart-spanning replay remains outside this guarantee.
+re-executes the mutation. `AUTH_SYS` is not cryptographic authentication.
+Completed replies that fit the negotiated cache bound are retained even when
+`SEQUENCE.cachethis` is false, so their same-slot retries cannot repeat a
+mutation. Oversized or restart-spanning replay remains outside this guarantee.
 The exclusive lease-sweep lock is now taken only when a client has expired;
 otherwise independent slots of the same live session can overlap on separate
 TCP connections. A controlled rootless test proves this for two `GETATTR`
