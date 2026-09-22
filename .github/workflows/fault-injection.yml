@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: fault-injection-${{ github.workflow }}-${{ github.ref }}
+  group: fault-injection-${{ github.workflow }}-${{ github.ref }}${{ github.event_name == 'workflow_dispatch' && format('-manual-{0}', github.run_id) || '' }}
   # A manual dispatch is the release-qualification path: retain its terminal
   # result even when shared mainline continues to move.
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
