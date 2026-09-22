@@ -911,13 +911,13 @@ complete.
 > W26 current-status note: the row above is historical summary text. The
 > authoritative current tip, exact hosted packet, every W26 work-item status
 > and production NO-GO boundary are in the latest W26 authority override
-> below, which records `origin/main=5e368011` and the post-publication ledger.
+> below, which records the published FoundationDB transaction-sharing chunk
+> and the retained manual qualification boundary.
 
 Current W26 authority override (2026-09-22, FoundationDB transaction-sharing
-chunk): the current shared mainline tip is
-`origin/main=9c44d2a4210bcc98d752319aae9b06f65d370337` at the previous ledger
-publication, containing implementation
-commit `5e3680117c26f5b7bb1b9280eec65a350b3dd2f7`. Commit `5e368011`
+chunk): this ledger was reconciled against `origin/main=07a6b501648120039b2f0ec8c83e549a64a84033`
+before publication, and contains implementation commit
+`5e3680117c26f5b7bb1b9280eec65a350b3dd2f7`. Commit `5e368011`
 (`perf(w26): share fdb lease authority transaction`) adds the
 source-compatible `LeaseOracle::now_ms_in_transaction` hook, makes the shared
 FoundationDB oracle read its protected authority key inside the already-open
@@ -937,23 +937,28 @@ SQLite/R2 reached `213.947686`, TiDB/R2 `333.356025` and FoundationDB/R2
 `363.254472`; all rows completed 1,200/1,200 operations with zero timeouts and
 cleanup failures, but aggregate `106631474430` correctly failed closed on
 missing `OZONE_IOPS_PASS`. Targeted run `35693778762` selected
-`b3fb7988bce1edaafbd44f2adf22bb217ca99671`: base `106636116163` passed,
-compositions `106636116105` failed, TiDB `106636116197` failed and FoundationDB
-`106636116201` was still in progress at capture; no aggregate existed. The
-push-triggered current-code run `35694753908` selected `5e368011` and was
-pending at capture. W26 remains **NO-GO**. Customer Ozone deployment, secure
+`b3fb7988bce1edaafbd44f2adf22bb217ca99671` and has now completed all four
+producers: base `106636116163` passed, compositions `106636116105` failed,
+TiDB `106636116197` failed and FoundationDB `106636116201` failed. Its
+aggregate `106641631860` is queued at latest capture. The targeted rows
+measured SQLite/R2 `580.6091135`, PGlite/R2 `963.6041014`, TiDB/R2
+`385.2624172` and FoundationDB/R2 `337.4773006` IOPS; all completed
+1,200/1,200 operations with zero timeouts and cleanup failures, but all missed
+the hard target. W26 remains **NO-GO**. Customer Ozone deployment, secure
 topology, 99.99% availability, five-minute RPO/RTO, backup/DR and the release
 stream remain external ownership boundaries. Manual retained qualification
 run `35695427227` selected exact SHA `e7850fb41775351503e5aa685484906b3a3cbbe4`
 with base `106641134190`, compositions `106641134304`, TiDB `106641134221`
-and FoundationDB `106641134132` queued at capture; its aggregate was not yet
-created. The earlier automatic current-code run `35694753908` was canceled by
-ordinary-push concurrency. Treat the manual run as the hosted qualification
-boundary and retain the detailed ledger in `docs/w26-progress-ledger.md`.
+and FoundationDB `106641134132` still queued at latest capture; its aggregate
+was not yet created. The earlier automatic current-code run `35694753908` was
+canceled by ordinary-push concurrency. Treat the manual run as the hosted
+qualification boundary and retain the detailed ledger in
+`docs/w26-progress-ledger.md`.
 
-Current W26 hosted dispatch boundary: poll `35694753908` for the exact
-`5e368011` provider and aggregate results; retain all artifacts/logs and do not
-promote queued, pending, failed, skipped, canceled, incomplete or missing
+Current W26 hosted dispatch boundary: poll retained manual run `35695427227`
+for exact `e7850fb4` provider and aggregate results, and poll targeted aggregate
+`106641631860` to close its diagnostic record; retain all artifacts/logs and do
+not promote queued, pending, failed, skipped, canceled, incomplete or missing
 marker results. The detailed per-item ledger, provisional estimates, external
 gates and session log are in `docs/w26-progress-ledger.md`.
 
