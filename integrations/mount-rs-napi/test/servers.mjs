@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, rm, stat } from "node:fs/promises";
 import * as net from "node:net";
-import { tmpdir } from "node:os";
+import { networkInterfaces, tmpdir } from "node:os";
 import { join } from "node:path";
 import { Duplex } from "node:stream";
 import { pathToFileURL } from "node:url";
@@ -1436,6 +1436,59 @@ async function exerciseP9WireFraming() {
   }
 }
 
+async function exerciseP9RemoteAdmission() {
+  const external = Object.values(networkInterfaces())
+    .flat()
+    .find(
+      (entry) =>
+        entry !== undefined &&
+        (entry.family === "IPv4" || entry.family === 4) &&
+        !entry.internal,
+    );
+  if (external === undefined) {
+    markPhase("9P remote admission skipped: no external IPv4 interface");
+    return;
+  }
+
+  const reports = [];
+  const server = createP9Server(memoryFilesystem(), {
+    host: "0.0.0.0",
+    port: 0,
+    onTransportError(error, peer) {
+      reports.push({ error, peer });
+    },
+  });
+  let socket;
+  try {
+    await within(server.listen(), "9P remote admission listen");
+    socket = net.createConnection({
+      host: external.address,
+      localAddress: external.address,
+      port: server.port,
+    });
+    socket.on("error", () => {});
+    await within(
+      new Promise((resolve, reject) => {
+        socket.once("connect", resolve);
+        socket.once("error", reject);
+      }),
+      "9P remote admission connect",
+    );
+    await within(
+      new Promise((resolve) => socket.once("close", resolve)),
+      "9P remote admission close",
+    );
+    const report = await waitForTransportError(reports, "9P remote admission transport error");
+    assert.match(report.error.message, /remote 9P peer is not allowed|loopback-only/i);
+    assert.match(report.peer, new RegExp(`^${external.address}:\\d+$`));
+    assert.equal(server.connections, 0);
+    assert.equal(reports.length, 1);
+  } finally {
+    if (socket) socket.destroy();
+    await server.close();
+  }
+}
+
 async function exerciseP9Unix() {
   if (process.platform === "win32") return;
 
@@ -2639,6 +2692,7 @@ await within(
       await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
       await runPhase("9P server boundary", exerciseP9ServerBoundary);
       await runPhase("9P wire framing", exerciseP9WireFraming);
+      await runPhase("9P remote admission", exerciseP9RemoteAdmission);
       await runPhase("9P Unix listener policy", exerciseP9Unix);
       await runPhase("9P teardown", exerciseP9Teardown);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
@@ -2662,6 +2716,7 @@ await within(
     await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
     await runPhase("9P server boundary", exerciseP9ServerBoundary);
     await runPhase("9P wire framing", exerciseP9WireFraming);
+    await runPhase("9P remote admission", exerciseP9RemoteAdmission);
     await runPhase("9P Unix listener policy", exerciseP9Unix);
     await runPhase("9P teardown", exerciseP9Teardown);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
