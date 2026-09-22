@@ -298,23 +298,8 @@ types = types.replace(
   "handleRequestStream(head: WebdavRequestHead, body: WebdavRequestStreamBody): Promise<WebdavStreamResponse>",
 )
 if (!types.includes("export type WebdavRequestStreamBody =")) types += webdavRequestStreamTypes
-// The P9 postlude restores the generated object to a Map at runtime. Keep the
-// checked-in declaration aligned with that public shape after every clean
-// napi build, just like the WebDAV method-count normalization below.
-types = types.replace(
-  /(export interface P9SessionStats \{[\s\S]*?messages: )Record<string, number>/,
-  "$1Map<string, number>",
-)
 types = types.replace(
   /(export interface WebdavSessionStats \{[\s\S]*?methods: )Record<string, number>/,
-  "$1Map<string, number>",
-)
-// N-API represents the native P9 message-count map as an object in its
-// generated declarations, while the public postlude exposes the same
-// insertion-ordered counters as a JavaScript Map. Keep clean builds aligned
-// with the package contract and the public 9P type tests.
-types = types.replace(
-  /(export interface P9SessionStats \{[\s\S]*?messages: )Record<string, number>/,
   "$1Map<string, number>",
 )
 await writeFile(declarations, types)
