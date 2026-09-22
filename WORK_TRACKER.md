@@ -1956,6 +1956,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   from this exact published tip is required; this local test hardening does not
   close the hosted or production gates.
 
+- Current exact-tip qualification: full CI run `35678123095` was dispatched
+  from published `0b6e8c4f01ebdd9254c7d6c61595628e0ce4a824` after the cleanup
+  chunk and ledger publication. Its Node jobs are queued across Ubuntu, ARM,
+  macOS-latest, macOS-15-intel, and Windows, with Ubuntu Rust and native FUSE
+  also queued. Queue state is not evidence; the exact recovery steps, native
+  behavior, package/artifact provenance, provider gates, and production-owner
+  approvals remain open and the rollout stays **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
