@@ -1195,6 +1195,9 @@ The first exact-tip hosted rerun, CI `35677973511` at
 the harness treated the server-induced `not currently mounted` cleanup result
 as failure; the corrected cleanup now accepts an absent mount and still fails
 if the mount remains active. A fresh hosted rerun is required.
+The corrected manual run `35678488755` at `ed29016e82c46e23e372f0615916ed3c1608370b`
+was still aggregate-queued at the latest refresh, with neither native-WebDAV
+job started; no hosted teardown/restart result is claimable yet.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
