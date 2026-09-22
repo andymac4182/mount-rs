@@ -302,12 +302,4 @@ types = types.replace(
   /(export interface WebdavSessionStats \{[\s\S]*?methods: )Record<string, number>/,
   "$1Map<string, number>",
 )
-// N-API represents the native P9 message-count map as an object in its
-// generated declarations, while the public postlude exposes the same
-// insertion-ordered counters as a JavaScript Map. Keep clean builds aligned
-// with the package contract and the public 9P type tests.
-types = types.replace(
-  /(export interface P9SessionStats \{[\s\S]*?messages: )Record<string, number>/,
-  "$1Map<string, number>",
-)
 await writeFile(declarations, types)
