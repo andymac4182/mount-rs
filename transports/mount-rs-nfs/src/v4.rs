@@ -2261,9 +2261,12 @@ impl Nfs4Session {
             let mut result = self.execute_op(operation, &mut cursor, credentials).await;
             if *cachethis
                 && result.status == NFS4_OK
-                && matches!(operation, Op::Read(..) | Op::Readdir { .. } | Op::Readlink)
+                && matches!(
+                    operation,
+                    Op::Getattr(_) | Op::Read(..) | Op::Readdir { .. } | Op::Readlink
+                )
             {
-                // READ, READDIR, and READLINK have no mutation to replay. If a
+                // These read-only operations have no mutation to replay. If a
                 // variable-length result would overflow a required cache,
                 // retain earlier results and cache a bounded error here.
                 let mut candidate = results.clone();

@@ -1806,6 +1806,113 @@ fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
 }
 
 #[test]
+fn nfs_v4_cache_required_oversized_getattr_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-getattr-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build oversized GETATTR runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/attr-first", b"first").await.unwrap();
+                    driver.write_file("/attr-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 160;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1301, b"oversized-getattr-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1304,
+                        compound(
+                            "attr-big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("attr-first")),
+                                op(OP_GETATTR, |writer| {
+                                    writer.u32(2);
+                                    writer.u32(u32::MAX);
+                                    writer.u32(!((1_u32 << 16) | (1_u32 << 22)));
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 160, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 4),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "oversized GETATTR sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_GETATTR),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("oversized GETATTR response").unwrap();
+                    assert!(driver.stat("/attr-first").await.is_err());
+                    assert!(driver.stat("/attr-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1305,
+                        compound(
+                            "changed-attr-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("attr-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/attr-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1306,
+                        compound(
+                            "fresh-attr-sequence",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("attr-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "fresh GETATTR sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    assert!(driver.stat("/attr-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn oversized GETATTR test thread")
+        .join()
+        .expect("oversized GETATTR test thread panicked");
+}
+
+#[test]
 fn nfs_v4_cache_required_oversized_readlink_preserves_mutation_reply() {
     std::thread::Builder::new()
         .name("nfs-v4-cache-required-oversized-readlink-test".into())
