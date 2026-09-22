@@ -223,7 +223,11 @@ impl DavLockTable {
             None => self.options.default_timeout_seconds,
             Some(LockTimeout::Infinite) => self.options.max_timeout_seconds,
             Some(LockTimeout::Seconds(seconds)) => {
-                seconds.clamp(1, self.options.max_timeout_seconds)
+                // Keep the public option boundary non-panicking even when a
+                // caller supplies a zero maximum. This mirrors the oracle's
+                // finite-timeout ordering: cap first, then enforce the
+                // protocol's one-second minimum.
+                seconds.min(self.options.max_timeout_seconds).max(1)
             }
         }
     }

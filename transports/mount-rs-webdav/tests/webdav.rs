@@ -1003,6 +1003,49 @@ async fn injected_session_clock_controls_lock_expiry_deterministically() {
     assert!(session.lock_records().is_empty());
 }
 
+#[tokio::test]
+async fn zero_lock_timeout_maximum_does_not_panic_finite_requests() {
+    let now = Arc::new(AtomicI64::new(10_000));
+    let clock = Arc::clone(&now);
+    let options = WebdavSessionOptions {
+        now: Some(Arc::new(move || clock.load(Ordering::SeqCst))),
+        locks: mount_rs_webdav::DavLockTableOptions {
+            default_timeout_seconds: 5,
+            max_timeout_seconds: 0,
+            ..mount_rs_webdav::DavLockTableOptions::default()
+        },
+        ..WebdavSessionOptions::default()
+    };
+    let session = WebdavSession::new(Arc::new(MemoryFs::empty()), options);
+
+    let response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/zero-max-timeout".to_owned(),
+                headers: [("timeout".to_owned(), "Second-30".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#
+                .to_vec(),
+        )
+        .await;
+
+    assert_eq!(response.status, 201);
+    assert!(
+        response
+            .body
+            .expect("finite timeout lock response body")
+            .into_bytes()
+            .await
+            .expect("lock response bytes")
+            .windows(b"Second-1".len())
+            .any(|window| window == b"Second-1")
+    );
+    assert_eq!(session.lock_records()[0].timeout_seconds, 1);
+}
+
 async fn read_http_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {
     let mut response = Vec::new();
     let (header_end, content_length) = loop {
