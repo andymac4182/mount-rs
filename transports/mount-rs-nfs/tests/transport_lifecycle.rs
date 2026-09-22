@@ -269,3 +269,16 @@ async fn concurrent_listen_calls_share_one_nfs_listener() {
     assert_eq!(server.connections(), 0);
     server.close().await.expect("close NFS server");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn listen_after_server_close_is_rejected() {
+    let server = NfsServer::new(MemoryFs::empty(), NfsServerOptions::default());
+    server.listen().await.expect("listen NFS server");
+    server.close().await.expect("close NFS server");
+
+    let error = server
+        .listen()
+        .await
+        .expect_err("closed NFS server must not relisten");
+    assert_eq!(error.kind(), std::io::ErrorKind::NotConnected);
+}

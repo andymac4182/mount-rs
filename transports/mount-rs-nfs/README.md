@@ -39,7 +39,9 @@ with `NFS4ERR_BADSESSION`; both halves of the eight-byte write verifier
 contribute to its session identity, avoiding the observed rapid-replacement
 alias. Concurrent `NfsServer::listen()` calls share one bound listener, and
 `close()` is serialized with bind so a lifecycle race cannot leave an
-untracked listener running after teardown begins.
+untracked listener running after teardown begins. Closing the server is
+terminal: a later Rust `listen()` call returns `NotConnected` instead of the
+address of a listener that has already stopped.
 
 The rootless process-restart gate also starts a real child server over a
 `HostFs` root, writes a `FILE_SYNC` NFSv3 payload, force-terminates that child,
