@@ -25,10 +25,10 @@ use mount_rs_nfs::protocol::{
 };
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
-    NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_REP_TOO_BIG_TO_CACHE,
-    NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP, NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED,
-    NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE,
-    OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
+    NFS4ERR_BAD_STATEID, NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC,
+    NFS4ERR_REP_TOO_BIG_TO_CACHE, NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP,
+    NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED, NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS,
+    NFS4ERR_TOOSMALL, OPEN4_CREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
 };
 use mount_rs_nfs::xdr::encode_xdr;
 use mount_rs_nfs::{
@@ -185,6 +185,7 @@ const OP_CREATE_SESSION: u32 = 43;
 const OP_FREE_STATEID: u32 = 45;
 const OP_RECLAIM_COMPLETE: u32 = 58;
 const OP_SEQUENCE: u32 = 53;
+const OP_TEST_STATEID: u32 = 55;
 
 #[derive(Clone)]
 struct Client {
@@ -928,9 +929,30 @@ fn nfs_v3_and_v4_share_wire_handle_lifetime() {
                     assert_eq!(read.var_opaque(128, "v4 read payload").unwrap(), payload);
                     read.end("v4 held-open read response").unwrap();
 
-                    let mut closed = rpc(
+                    let test_stateid = op(OP_TEST_STATEID, |writer| {
+                        writer.u32(1);
+                        writer.fixed_opaque(&v4_stateid, 16);
+                    });
+                    let mut live_state = rpc(
                         &mut v4_stream,
                         208,
+                        compound(
+                            "test-open-after-v3-unlink",
+                            &[sequence(&client), test_stateid.clone()],
+                        ),
+                    )
+                    .await;
+                    client.sequence += 1;
+                    parse_compound_header(&mut live_state, 2);
+                    consume_sequence_result(&mut live_state, "live unlinked state");
+                    parse_result_header(&mut live_state, OP_TEST_STATEID);
+                    assert_eq!(live_state.u32("live state count").unwrap(), 1);
+                    assert_eq!(live_state.u32("live state status").unwrap(), 0);
+                    live_state.end("live unlinked state response").unwrap();
+
+                    let mut closed = rpc(
+                        &mut v4_stream,
+                        209,
                         compound(
                             "close-after-v3-unlink",
                             &[
@@ -950,6 +972,28 @@ fn nfs_v3_and_v4_share_wire_handle_lifetime() {
                     parse_result_header(&mut closed, OP_CLOSE);
                     let _ = closed.fixed_opaque(16, "v4 close stateid").unwrap();
                     closed.end("v4 close response").unwrap();
+                    client.sequence += 1;
+
+                    let mut retired_state = rpc(
+                        &mut v4_stream,
+                        210,
+                        compound(
+                            "test-closed-after-v3-unlink",
+                            &[sequence(&client), test_stateid],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut retired_state, 2);
+                    consume_sequence_result(&mut retired_state, "closed unlinked state");
+                    parse_result_header(&mut retired_state, OP_TEST_STATEID);
+                    assert_eq!(retired_state.u32("retired state count").unwrap(), 1);
+                    assert_eq!(
+                        retired_state.u32("retired state status").unwrap(),
+                        NFS4ERR_BAD_STATEID
+                    );
+                    retired_state
+                        .end("retired unlinked state response")
+                        .unwrap();
                     server.close().await.unwrap();
                 });
         })

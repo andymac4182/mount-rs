@@ -53,7 +53,12 @@ queued from `main` at workflow head
 `af7e73dfb7f54a31c1a91be829238571950a48e1`; source
 `fba61979f1f6c9858026cd5ebc4c5d3d357f366b` is an ancestor and therefore
 included. Its SQLite, PGlite, TiDB, FoundationDB and aggregate jobs have no
-terminal result yet, so no performance or end-to-end result is promoted.
+terminal result yet, so no performance or end-to-end result is promoted. At
+the 20:41 AEST poll the four provider jobs were still queued; a 20:47 AEST
+queue inventory showed nine complete `ci.yml` workflows queued since 10:01
+UTC. This is a CI-capacity blocker, not provider evidence. The manual run
+remains the authoritative non-canceling exact-head gate despite newer
+unrelated push runs.
 
 Current W26 FoundationDB optimization boundary (2026-09-22): source commit
 `ff0ccfddcad786fdce142adebc16fa50347b9b13`
@@ -1089,7 +1094,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
-| W05 | Cloudflare R2 | Immutable candidate `7efded54` is locally green through the current Rust workspace/NFS/S3/Clippy suite, dyld-safe macOS N-API package load, full Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths. Same-SHA CI `35714144497`, Fault `35714146067`, W04 `35714141926`, W07 `35714147247`, W08 policy `35714144646`, W08 targets `35714146811`, and Native 9P `35714145176` are queued on the candidate branch; the prior candidate failure remains classified in the ledger. Live R2/AWS are intentionally held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
+| W05 | Cloudflare R2 | Immutable candidate `7efded54` is locally green through the current Rust workspace/NFS/S3/Clippy suite, dyld-safe macOS N-API package load, full Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths. W04 policy `35714141926` and W08 policy `35714144646` passed; Fault `35714146067` is terminal-successful on all three OSes, Native 9P `35714145176` is terminal-successful including root conformance 146/146, W07 has its compile/durable jobs green with assembly queued, W08 has Linux/macOS builds green with asset verification queued, and CI `35714144497` remains queued with the isolated macOS artifact finalization timeout plus provider/native jobs incomplete. Live R2/AWS remain held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest current-public-main exact-tip terminal cross-platform qualification packet is green at [run `35712676265`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265) / exact source `ff5cc58188d9783a80de96698a187e1f6416b83e`, Linux job `106696766067`, macOS job `106696766203`, aggregate job `106702286990`; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, authority heartbeat/stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,311µs, p95/p99 37,919µs and 164.77 ops/s, ten-round soak p95/p99 was 9,841–17,582µs at 269.41–330.32 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 716.30 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10688222438`, macOS artifact ID `10688396103` and aggregate artifact ID `10688622703` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. This is current-public-main hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
@@ -2425,6 +2430,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFSv3 mount pass locally. This does not establish cross-process open-state
   recovery, native-client ordering, power-loss durability, exact-tip hosted
   acceptance, or W01-NFS production readiness.
+- [x] W01-NFS unlinked-open CLOSE now has explicit wire state retirement:
+  `TEST_STATEID` reports `NFS4_OK` after v3 removes the name but before v4.1
+  CLOSE, then `NFS4ERR_BAD_STATEID` for the same session/stateid afterward.
+  Full locked NFS (42 unit, 21 v4 wire), strict Clippy, pinned
+  266-pass/18-skip parity, and opt-in macOS native NFSv3 mount pass locally.
+  Durable/cross-process v4 state, native-client ordering, power-loss, exact-tip
+  hosted acceptance, and W01-NFS production readiness remain open.
+- [x] W01-NFS actual macOS CLI-to-folder NFS smoke passed with fresh distinct
+  host-backed source and mount directories under
+  `/private/tmp/mount-rs-nfs-cli-smoke.Vggoo5`. The kernel reported the NFS
+  mount; create, append, read, stat, and list through the mounted folder
+  matched the 34-byte backing file. Ctrl-C exited cleanly with `unmounted`,
+  the mount-table entry disappeared, and backing bytes persisted. Exact CLI
+  command and prerequisites are recorded in `docs/W01_NFS_PROGRESS.md`.
+  Linux/native v4.1 ordering, exact-tip hosted acceptance, durable v4 state,
+  physical power-loss durability, and production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -2752,6 +2773,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   timeout/test boundaries. Dispatch a fresh run from current `origin/main`
   after this ledger chunk; W04.2 remains historically closed, current-tip
   acceptance is pending, and production rollout remains **NO-GO**.
+- [x] W04.2 current-main qualification evidence is in progress in run
+  [35713659406](https://github.com/andymac4182/mount-rs/actions/runs/35713659406)
+  at exact published head `c87adf7b`: ARM, macOS-latest, and macOS-15-intel
+  Node jobs are terminal success with both exact recovery steps green and
+  rollback/N-API/`providersFailed: 0` markers; Ubuntu Node `106699957273` is
+  still queued. This is 3/4 current-tip Unix evidence only and does not change
+  the historical W04.2 closure or production **NO-GO**. Inspect the Ubuntu,
+  native/package/provider/W26, and Rust lanes before promoting current-main
+  qualification.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer
@@ -3270,12 +3300,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  Shared `origin/main` advanced to `c57e2ea3` while the W05.52 candidate was
+  Shared `origin/main` advanced to `05e320ad` while the W05.52 candidate was
   being qualified. Immutable candidate `7efded54` is locally green through
   the current Rust workspace/NFS/S3/Clippy, dyld-safe macOS N-API build and
   load, complete Node SDK/CLI/N-API suite, real PGlite lifecycle, and
-  Rust/Node/CLI provider matrix. Its seven same-SHA hosted workflows are
-  queued under the exact candidate SHA; the prior immutable candidate
+  Rust/Node/CLI provider matrix. W04 policy `35714141926` and W08 policy
+  `35714144646` passed; Fault `35714146067` is terminal-successful on all
+  three OSes, Native 9P `35714145176` is terminal-successful including root
+  conformance 146/146, W07 has compile/durable success with assembly queued,
+  W08 has Linux/macOS build success with asset verification queued, and CI
+  `35714144497` remains queued with the isolated macOS artifact finalization
+  timeout plus provider/native jobs incomplete. The prior immutable candidate
   `25e275ab` has terminal CI `failure`: TiDB/TiDB-RustFS stale harness
   assertions, Ozone/TiDB and Ozone/FoundationDB hard-IOPS misses, W26 dirty
   provenance, and cancelled native FUSE; the exact evidence and estimates are
@@ -6306,6 +6341,53 @@ listing a source does not mean it has been reviewed or its code can be reused.
 
 ## W25 — Actual AWS S3 integration
 
+### Current W25 gate map — 2026-09-22
+
+This map is the current scope summary for W25. A qualification-account or
+credential-free PASS proves only the bounded provider contract and safety
+check it names; it does not promote test resources, local metadata, or CI
+configuration into a production deployment.
+
+| Gate | Current status | Boundary and next evidence |
+| --- | --- | --- |
+| AWS S3 provider and public SDK/CLI qualification | **PASS for W25 qualification** | The authorized `myroot` packet and public consumer paths pass the live block, composed-filesystem, restart/reopen, cleanup, and optional local PGlite pairing rows recorded below. This is provider compatibility evidence; make a separate current-source library release decision after the package/support-matrix and release-artifact gates. |
+| Qualification-account resources and role | **PASS for test scope only** | The read-only audit and scoped-role prefix denial pass for the dedicated test bucket. The bucket, role, prefix, and `myroot` session are not production ownership or least-privilege approval. |
+| Production bucket/IAM/IaC | **OPEN** | The CloudFormation and policy contracts are reviewable and locally validated, but production parameters, change set, role trust, resource creation, and live production audit still require an adopter/deployment owner. |
+| Hosted OIDC and protected environment | **BLOCKED** | Read-only audits still report missing environment protection/reviewer and inputs, GitHub OIDC provider, and immutable-subject role trust. The workflow must remain unauthenticated until those external controls are configured and approved. |
+| Production metadata, recovery, and DR | **OPEN** | Local AWS+PGlite pairing, fencing, restore, and fresh-server reopen are composition evidence. Production metadata ownership, multi-writer scope, schema migration, failure recovery, independent backup/restore, and DR drills remain unverified. |
+| Deployment operations | **OPEN** | Stats, runbooks, provenance binding, and contract fixtures are implementation safeguards. Exporters, retry measurement, credential-expiry/cost alerts, approved SLOs, load/soak/fault/restore, canary, rollback, and post-deploy smoke remain deployment evidence. |
+| Hosted release evidence | **BLOCKED** | The provenance contract is locally fail-closed, but hosted AWS authentication/acceptance is still blocked by external OIDC and protected-environment state; no load/soak/fault/restore, canary, rollback, or post-deploy smoke result is claimed. |
+| Production sign-off | **NO-GO** | W25.5-W25.8 are not all complete. Do not call the adopter/reference deployment production-ready from the qualification packet or local gates. |
+
+### Next verifiable W25 gates
+
+Run these in order and record each result against the exact source and owner:
+
+1. **Library/runtime release decision:** run the current-source locked package
+   gates, supported-platform matrix, security/release-artifact review, and
+   public SDK/CLI provenance check. This is the remaining runtime release
+   decision; it does not require this repository to own a production AWS
+   account, pager, canary, or customer SLO.
+2. **Deployment contract:** the adopter/deployment owner supplies and reviews
+   the production account, bucket, region, prefix, versioning/encryption,
+   runtime and maintenance roles, IaC change set, and protected OIDC
+   environment. Re-run the read-only resource, policy, environment, and OIDC
+   audits before any live acceptance.
+3. **Hosted base acceptance:** run the workflow on `refs/heads/main` with the
+   approved short-lived role and expected account binding. Require the public
+   SDK/CLI, block, composed, restart/reopen, ownership-gated cleanup, and
+   artifact/provenance results; a safe preflight refusal is not acceptance.
+4. **Metadata and recovery acceptance:** select the production metadata
+   provider, then pass multi-writer/fencing, restart, schema migration,
+   backup/restore, failure recovery, and DR tests against the production
+   topology. Hosted PGlite remains optional deployment-confidence evidence
+   unless this repository operates that reference deployment.
+5. **Operations and rollout:** attach exporter/retry/expiry/cost signals to
+   approved SLOs, run load/soak/fault/restore drills, deploy a canary, exercise
+   rollback, and capture post-deploy smoke for the exact released artifact.
+6. **Sign-off:** record the released commit/image, configuration digest,
+   identity, evidence links, rollback owner, and explicit GO/NO-GO decision.
+
 - [x] Scope boundary clarified for this library/runtime: W25 qualification
   evidence determines whether the AWS S3 provider and its public SDK/CLI paths
   are suitable for release, while production bucket/IAM/IaC, hosted OIDC,
@@ -7657,3 +7739,5 @@ cross-drive isolation.
 | `467da6a` | W01-FUSE Lima Linux qualification | Exact published commit passed the Lima Ubuntu arm64 `/dev/fuse` native Rust, automatic facade, CLI lifecycle, Node N-API/structural/SDK native FUSE, SQLite restart, and Python fault-injection gates; backend persistence/reopen was 3/4 with PGlite skipped because `PGLITE_DATABASE_URL` was unset. Local Linux runtime is green; hosted exact-tip acceptance and credentialed PGlite evidence remain open. |
 | `467da6a` | W01-FUSE Lima in-process PGlite qualification | Repository `scripts/test-pglite.sh` native-FUSE scope passed mounted PGlite connection reopen and PGlite-backed SQLite compositions using the in-process test server; no external credentials were required. Hosted exact-tip native-FUSE acceptance remains open. |
 | `35715585800` / `106706185799` | W01-FUSE hosted native-FUSE queue blocker | Manual CI run at `e175f80a3134e9ab8c02a19944ca036be09f111f` remained queued with no runner, completion time, conclusion, or step output; `origin/main` has since advanced to `e984c2321317e9d93b8db1ec98dc428662b17d34`. No hosted `/dev/fuse` result is claimable; exact-current-tip terminal native-FUSE evidence remains required and W01 stays NO-GO. |
+| `35716364566` / `35716566393` | W01-FUSE hosted CI cancellation/queue refresh | Published-tip run `35716364566` at `4e9260ead4925d3140a758374da886f985242f47` was cancelled before any job was created by a newer mainline push; the next run `35716566393` at `924009af061d119404b2ee1f59e86506f7b1cbd2` is pending. No hosted `/dev/fuse` result is claimable; exact-current-tip terminal native-FUSE evidence remains required and W01 stays NO-GO. |
+| `32b8596` | W01-FUSE Lima real CLI smoke | On Ubuntu 26.04 arm64, the published CLI mounted the memory driver through native FUSE; strict fixed-payload readback before/after rename, alpha absence/beta presence, SIGINT shutdown, and mount cleanup all passed (`CLI_FUSE_STRICT_SMOKE=PASS`). This closes local shipped-CLI usability; hosted terminal native-FUSE evidence and wider W01 gates remain open. |

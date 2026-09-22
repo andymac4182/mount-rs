@@ -309,6 +309,13 @@ SQL`,
         packet. The provider remains a Preview/NO-GO deployment boundary until
         persistent production storage, restore RPO/RTO, observability,
         ownership, and release approval are recorded.
+        A newer current-main run <code>35713659406</code> at source
+        <code>c87adf7b</code> has terminal success on ARM, macOS-latest, and
+        macOS Intel Node lanes, including exact fragmented-request rejection,
+        PGlite integration/restart recovery, rollback, N-API, and
+        <code>providersFailed: 0</code> markers. The Ubuntu Node lane remains
+        queued, so this is 3/4 current-tip Unix recovery evidence only; native,
+        package, provider, W26, Rust, and production gates remain open.
       </>
     ),
     sources: [
@@ -318,6 +325,7 @@ SQL`,
       { label: 'PGlite progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w04-progress-ledger.md' },
       { label: 'Hosted W04 qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635114595' },
       { label: 'Current W04 exact-tip qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673738166' },
+      { label: 'Current-main W04 recovery qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35713659406' },
       { label: 'PGlite production rollout', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W04-production-rollout.md' },
     ],
   },
@@ -677,6 +685,15 @@ LIMIT 20;`,
         rows. Authoritative hosted runs include
         <code>35624385556</code>, <code>35627761501</code>, and
         <code>35631063978</code>; each remains revision- and scope-specific.
+        The repository now also enforces a credential-free W08.39 backup,
+        restore, and disaster-recovery policy with an eight-case regression:
+        transactionally consistent TiDB metadata snapshots, revision capture,
+        encrypted immutable/versioned blocks, isolated restore without a
+        production-writer identity, fresh-client readback, corruption,
+        partial-object and region-loss cases, bounded 60-minute RPO and
+        240-minute RTO, a second region, and named owner sign-offs are required
+        by the checked-in control. This is implementation/static qualification,
+        not a backup, restore, second-region drill, or production approval.
         Production is still NO-GO: topology, secret management/IAM, backup and
         restore, upgrade/rollback, SLOs/capacity, security sign-off, on-call,
         canary, and release-owner approval remain open. A green functional
@@ -690,6 +707,7 @@ LIMIT 20;`,
       { label: 'Durable Ozone/TiDB CI gate', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
       { label: 'TiDB progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-progress-ledger.md' },
       { label: 'TiDB production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-production-rollout.md' },
+      { label: 'W08.39 backup and restore policy', href: 'https://github.com/andymac4182/mount-rs/commit/896330a' },
     ],
   },
   foundationdb: {
@@ -952,22 +970,35 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         tracking, but remains feature-compile-only on macOS and does not prove
         live macOS service/mount, production capacity, identity/ACL,
         backup/restore, failover, observability, signing, or release approval.
-        The latest repaired exact-tip W07 qualification at source
-        <code>8b4cbc38</code> passed hosted run <code>35709640688</code> across
+        The current-public-main W07 qualification at source
+        <code>ff5cc581</code> passed hosted run <code>35712676265</code> across
         the durable provider job, macOS feature compilation, and aggregate
-        evidence assembly. The Linux packet covered the policy and workload
-        preflight, durable FoundationDB/RustFS metadata, Node/N-API, Linux
-        CLI/FUSE, restart/reopen, fresh-client, heartbeat, reconciled stats,
-        and ten-round soak; the bounded workload recorded
-        <code>338.55</code> lifecycle IOPS over 1,200 successful operations
-        with zero timeouts or cleanup failures. The aggregate again emitted
-        <code>W07_PLATFORM_QUALIFICATION_PASS provenance=bound</code>. Its
-        base telemetry was <code>p50=3075us</code>,
-        <code>p95/p99=317846us</code>, and <code>39.06</code> ops/s; soak
-        telemetry ranged from 7.51 to 254.49 ops/s. This remains
+        evidence assembly. Linux passed the policy/ledger/workload preflight,
+        durable FoundationDB/RustFS metadata, Node/N-API, Linux CLI/FUSE,
+        restart/reopen, fresh-client, authority heartbeat/stats, and ten-round
+        soak; macOS passed the FoundationDB provider/test, CLI
+        <code>native_lifecycle</code>, N-API feature compilation, and bound
+        provenance; the aggregate emitted
+        <code>W07_PLATFORM_QUALIFICATION_PASS provenance=bound</code>. The
+        bounded workload recorded <code>716.30</code> lifecycle IOPS over 1,200
+        successful operations with zero timeouts or cleanup failures. Base
+        telemetry was <code>p50=2311us</code>,
+        <code>p95/p99=37919us</code>, and <code>164.77</code> ops/s; soak
+        telemetry ranged from 269.41 to 330.32 ops/s. This supersedes the
+        previous terminal packet for current-main tracking but remains
         qualification-only and NO-GO for live macOS service/mount, production
         capacity, identity/ACL, backup/restore, failover, observability,
         signing, and release approval.
+        The current implementation at source <code>fba61979</code> overlaps
+        the independent lease, manifest, and authority-time reads inside the
+        existing FoundationDB publication transaction while preserving one
+        read version, lease/fence validation, revision CAS, and fail-closed
+        ambiguous-commit handling. Feature compile/test-target checks and
+        strict Clippy pass, but the focused native tests remain blocked by the
+        missing <code>fdb_c</code> linker library. Exact-head run
+        <code>35715790619</code> at workflow head <code>af7e73df</code> includes
+        this source as an ancestor but remains queued, so no new performance
+        or provider qualification is promoted from this optimization yet.
       </>
     ),
     sources: [
@@ -978,7 +1009,10 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Previous hosted FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698630720' },
       { label: 'Previous hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35702352395' },
-      { label: 'Latest hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35709640688' },
+      { label: 'Previous hosted W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35709640688' },
+      { label: 'Current-public-main W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35712676265' },
+      { label: 'FoundationDB publication read-overlap source', href: 'https://github.com/andymac4182/mount-rs/commit/fba61979f1f6c9858026cd5ebc4c5d3d357f366b' },
+      { label: 'Queued exact-head read-overlap qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715790619' },
     ],
   },
   'aws-s3': {

@@ -226,12 +226,33 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         release. This is a session-boundary behavior, not native mount proof.
         <code>FALLOCATE</code>, <code>LSEEK</code>, and
         <code>COPY_FILE_RANGE</code> remain unsupported boundaries.
+        The Lima source packet at commit <code>467da6a7</code> now also passes
+        the repository's in-process PGlite native-FUSE scope: mounted PGlite
+        connection reopen and PGlite-backed SQLite compositions pass without
+        external credentials. This closes the local PGlite qualification gap,
+        but hosted exact-tip native-FUSE acceptance and the wider W01 release
+        and provider gates remain open.
+        The published CLI at source <code>32b85965</code> also passes a strict
+        Lima Ubuntu arm64 native-FUSE smoke: the memory driver mounted through
+        <code>mount-rs --transport fuse</code>, a fixed payload survived
+        readback before and after rename, the old name was absent and the new
+        name present, SIGINT shut down the process, and the mount was absent
+        afterward (<code>CLI_FUSE_STRICT_SMOKE=PASS</code>). This closes local
+        shipped-CLI usability on Linux only; hosted terminal native-FUSE and
+        wider release gates remain open.
         The latest terminal CI packet <code>35698854392</code> at source
         <code>116e9ed4</code> canceled its native-FUSE job before a hosted
-        <code>/dev/fuse</code> result; the current exact-tip run
-        <code>35700938192</code> is still nonterminal. No new native-FUSE
-        acceptance is promoted, and callback delivery, close races,
-        crash/restart, concurrency, locks, and durability remain open.
+        <code>/dev/fuse</code> result. A newer manual run
+        <code>35715585800</code> at source <code>e175f80a</code> left native-FUSE
+        job <code>106706185799</code> queued with no runner, completion time,
+        conclusion, or step output. Its successor run
+        <code>35716364566</code> at source <code>4e9260ea</code> was cancelled
+        before any job was created by another mainline push, and the next run
+        <code>35716566393</code> at <code>924009af</code> is pending. No hosted
+        native-FUSE result is claimable from these queue/cancellation states;
+        exact-current-tip terminal evidence remains required. Callback
+        delivery, close races, crash/restart, concurrency, locks, and
+        durability remain open.
       </>
     ),
     sources: [
@@ -244,6 +265,11 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Latest hosted FUSE diagnostic', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35666436803' },
       { label: 'Latest hosted FUSE status packet', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35698854392' },
       { label: 'Current exact-tip FUSE qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35700938192' },
+      { label: 'Lima in-process PGlite qualification', href: 'https://github.com/andymac4182/mount-rs/commit/467da6a7' },
+      { label: 'Hosted FUSE queue blocker', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715585800' },
+      { label: 'Hosted FUSE cancellation refresh', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716364566' },
+      { label: 'Pending current-tip FUSE run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35716566393' },
+      { label: 'Lima shipped-CLI FUSE smoke', href: 'https://github.com/andymac4182/mount-rs/commit/32b8596' },
     ],
   },
   nfs: {
@@ -411,6 +437,30 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         unsupported-version assertion pass locally. This qualifies local
         addon loading and runtime reachability only, not hosted ordering,
         crash durability, or production readiness.
+        The current shared-target CLI also passes a local macOS host-backed NFS
+        smoke at source <code>be382691</code>: a fresh source directory mounted
+        through <code>--transport nfs</code>, the kernel reported
+        <code>127.0.0.1:/</code>, and create, append, read, stat, and list
+        through the mounted folder matched the 34-byte backing file. Ctrl-C
+        exited 0 with <code>unmounted</code>, the mount-table entry disappeared,
+        the mount folder was empty, and the backing bytes persisted. This is
+        local macOS CLI-to-folder and lifecycle evidence only; the negotiated
+        NFS version was not captured, and Linux/v4.1 ordering, durable state,
+        power-loss, hosted acceptance, and production readiness remain open.
+        The latest NFS source at commit <code>ff4b091c</code> now validates
+        complete <code>AUTH_SYS</code> bodies before shared-router or v3/v4
+        dispatch. Its real-TCP regression denies five malformed credential
+        cases across MOUNTv3, NFSv3, NFSv4, an unsupported NFS version, and
+        trailing <code>AUTH_SYS</code> bytes while accepting three controls,
+        including nonempty <code>AUTH_NONE</code>; the full locked target passed
+        42 unit tests and the pinned oracle remained 266 passed with 18
+        explicit skips. Malformed <code>AUTH_SYS</code> bodies receive
+        <code>AUTH_BADCRED</code>, while unsupported flavors retain
+        <code>AUTH_TOOWEAK</code>. RFC 5531 leaves opaque <code>AUTH_NONE</code>
+        bytes undefined while recommending a zero length. This is fail-closed
+        protocol parsing; <code>AUTH_SYS</code> remains client-asserted identity
+        rather than cryptographic authentication, and native ordering, crash
+        durability, hosted acceptance, and production readiness remain open.
       </>
     ),
     sources: [
@@ -423,6 +473,8 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'Latest NFS process-restart qualification', href: 'https://github.com/andymac4182/mount-rs/commit/96df991f4d4c682fb7a8186bc37013410e93837d51db164' },
       { label: 'NFSv4 process-restart rename qualification', href: 'https://github.com/andymac4182/mount-rs/commit/6d520dd2903a03230e673840b47934e7374959f3' },
       { label: 'macOS N-API loader repair', href: 'https://github.com/andymac4182/mount-rs/commit/b7ba3806e5a36f9732b1976e100c5d0e3004dd1e' },
+      { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
+      { label: 'macOS CLI host-backed NFS smoke', href: 'https://github.com/andymac4182/mount-rs/commit/be382691822327b41bffb9823cd3b235630698b2' },
       { label: 'Latest hosted NFS status check', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35670416469' },
       { label: 'Historical hosted Linux transport CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35575442663' },
     ],
@@ -1006,6 +1058,15 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         Ubuntu, but the surrounding workflow failed in provider/W26, Windows,
         and native-FUSE lanes. This is scoped native execution evidence, not a
         full hosted lifecycle or release-acceptance result.
+        The current N-API package refresh at source <code>c57e2ea3</code> also
+        passes the WebDAV-only lifecycle, 64-pair direct-session/network
+        concurrency, NodeFs/SQLite provider and network matrices, orderly
+        reopen, process-crash and in-flight PUT recovery, structural-driver
+        durability, Rust WebDAV 41/41, typecheck, strict Clippy, formatting,
+        and diff checks. Manual current-package run
+        <code>35714570430</code> at <code>92a6539e</code> remains queued, so
+        this is local package evidence only; live-provider, physical power-loss,
+        durable-lock, and stronger same-resource-ordering gates remain open.
       </>
     ),
     sources: [
@@ -1023,6 +1084,9 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'WebDAV bounded enumeration and copy failures', href: 'https://github.com/andymac4182/mount-rs/commit/8e08ac4' },
       { label: 'Latest hosted WebDAV queue audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35681127696' },
       { label: 'Latest hosted WebDAV/provider audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955189' },
+      { label: 'Current WebDAV N-API package qualification', href: 'https://github.com/andymac4182/mount-rs/commit/c57e2ea3' },
+      { label: 'Queued current-package WebDAV run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714570430' },
+      { label: 'Current WebDAV oracle parity', href: 'https://github.com/andymac4182/mount-rs/commit/72011a0' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
