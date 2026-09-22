@@ -11,8 +11,8 @@ At 22:22 AEST, manual run
 still reports exact workflow head `a7e459e6`, status `queued`, and no
 conclusion. Its seven W26 jobs (`ozone-tidb`, `ozone-foundationdb`,
 `foundationdb-rustfs`, `ozone`, `tidb`, `ozone-compositions` and `tidb-rustfs`)
-remain queued. The current shared docs tip is `a82800c1`, a docs-only descendant
-that does not alter the tested source. This is hosted runner capacity, not a
+remain queued. The current shared tip is `1a0e09ad`, which contains later
+docs-only descendants and does not alter the tested source. This is hosted runner capacity, not a
 provider result. W26.15 remains at the prior terminal 1/4 provider acceptance,
 and production remains **NO-GO** until all four providers pass 1,000 IOPS/drive
 with the complete end-to-end packet and customer/Ozone security, SLO, RPO/RTO
