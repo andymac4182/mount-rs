@@ -5128,6 +5128,15 @@ reproducible in a production-like environment.
   This is bounded local pre-body cancellation evidence only; live providers,
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified streamed driver-read fault recovery with the oracle-aligned
+  `http_server_aborts_driver_read_error_without_reusing_connection`: an
+  injected `EIO` on the first streamed GET read terminates the damaged response,
+  emits exactly one `S3 response body stream failed` transport report, and a
+  fresh GET returns exact bytes. The complete current Rust 5/6/42/5 packet,
+  strict Clippy, formatting/diff checks, and isolated S3 N-API server
+  integration passed. This is bounded local streamed fault evidence only; live
+  providers, power-loss durability, broader workload bounds, and native/hosted
+  acceptance remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`

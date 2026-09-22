@@ -3117,6 +3117,95 @@ async fn http_server_aborts_short_streamed_response_without_reusing_connection()
 }
 
 #[tokio::test]
+async fn http_server_aborts_driver_read_error_without_reusing_connection() {
+    const SIZE: usize = 256 * 1024;
+    let payload = (0..SIZE)
+        .map(|index| ((index * 17 + (index >> 8)) & 0xff) as u8)
+        .collect::<Vec<_>>();
+    let memory = MemoryFs::empty();
+    for path in ["/read-error.bin", "/healthy-after-error.bin"] {
+        let handle = memory.open(path, "w", 0o666).await.expect("open object");
+        handle.write(&payload, Some(0)).await.expect("write object");
+        handle.close().await.expect("close object");
+    }
+    let reports = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let observed = Arc::clone(&reports);
+    let server = S3Server::start_with_hooks(
+        Arc::new(S3Session::new(FaultOnReadFs {
+            inner: memory,
+            fail_next_read: Arc::new(AtomicBool::new(true)),
+            fail_unlink: Arc::new(AtomicBool::new(false)),
+            durable_writes: false,
+            sync_calls: Arc::new(AtomicUsize::new(0)),
+            fail_syncfs: Arc::new(AtomicBool::new(false)),
+        })),
+        S3ServerOptions::default(),
+        S3ServerHooks {
+            on_transport_error: Some(Arc::new(move |error| {
+                observed
+                    .lock()
+                    .expect("read error reports lock")
+                    .push(error.message);
+            })),
+        },
+    )
+    .await
+    .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/read-error.bin HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write read-error request");
+    let mut raw = Vec::new();
+    timeout(Duration::from_secs(2), stream.read_to_end(&mut raw))
+        .await
+        .expect("read-error connection terminated")
+        .expect("read read-error response");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers.get("content-length"),
+        Some(&SIZE.to_string())
+    );
+    assert!(response.body.len() < SIZE);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if reports
+                .lock()
+                .expect("read error reports lock")
+                .iter()
+                .any(|message| message.contains("S3 response body stream failed"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("read error transport report");
+    let stream_reports = reports
+        .lock()
+        .expect("read error reports lock")
+        .iter()
+        .filter(|message| message.contains("S3 response body stream failed"))
+        .count();
+    assert_eq!(stream_reports, 1);
+
+    let next = wire_request(&server, "GET", "/mountx/healthy-after-error.bin", &[], &[]).await;
+    assert_eq!(next.status, 200);
+    assert_eq!(next.body, payload);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn http_server_answers_pipelined_requests_in_order() {
     let memory = MemoryFs::empty();
     for (path, payload) in [
