@@ -1185,6 +1185,9 @@ normalized matcher, so bracketed IPv6 Host values and explicit/default HTTP(S)
 ports are compared consistently; the focused parser fixture covers `[::1]`
 and `[::1]:8080`, and the full WebDAV target remains 28/28 with strict Clippy
 and formatting green.
+The pinned `CARGO=./scripts/cargo-shared MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921 node scripts/check-http-parity.mjs`
+HTTP differential also passes all 40 paired S3+WebDAV cases, including its 16
+WebDAV cases, after the authority normalization.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
