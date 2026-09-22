@@ -131,6 +131,12 @@ checks. The workflow remains nonterminal on an unrelated native-FUSE job; no
 hosted mounted-host concurrency, live-provider, power-loss, or durable-lock
 acceptance is inferred.
 
+The ignored native WebDAV harness now performs eight concurrent native-client
+write/read pairs after its basic round trip and verifies every payload through
+the driver. The host-enabled macOS run passed 1/1 with the shared Cargo
+wrapper; hosted Linux/macOS reruns are required before mounted-host
+concurrency is accepted.
+
 The current shell has no AWS/R2/Cloudflare credential names available, so live
 provider acceptance remains an explicit external blocker; no credential values
 were read or persisted.
@@ -625,6 +631,7 @@ spent waiting for a hosted job or credential approval.
 
 | Date | Work item | Change/evidence | Actual h | New completion | Notes/blockers |
 | --- | --- | --- | ---: | ---: | --- |
+| 2026-09-22 | W01-WebDAV | Extended the ignored native WebDAV mount harness with eight concurrent native-client write/read pairs and exact driver-side byte readback; the host-enabled macOS native test passed 1/1, the harness compiled, rustfmt passed, and the focused Rust target passed 20/20 | — | 77% planning view | Hosted Linux/macOS reruns are required for mounted-host concurrency; live-provider, power-loss, durable-lock, mounted-host teardown, and wider ordering remain open |
 | 2026-09-22 | W01-WebDAV | Exact-tip hosted CI `35674823787` passed the four N-API `node` jobs, three Rust jobs, and both native WebDAV jobs at `e5ae05d07bbc73184952def0437e58be9efef790`; the `node` workflow runs the full pinned-oracle N-API package script | — | 77% planning view | Hosted cross-platform package/native evidence is green, but the overall workflow remains nonterminal on unrelated native-FUSE work; live-provider, power-loss, durable-lock, mounted-host concurrency, and wider ordering remain open |
 | 2026-09-22 | W01-WebDAV | Refreshed current checkout `d761deb23513ec78b61d7b627f67b46606ee4956`: NodeFs/SQLite reopen and crash recovery, 128-pair provider direct-session, 64-pair provider loopback network, in-flight streamed-`PUT` recovery, pinned barrel/session-member differentials, and the 40-case TypeScript/Rust S3+WebDAV HTTP differential passed | — | 77% planning view | Local provider/crash, pinned-oracle, and loopback evidence only; hosted lifecycle/concurrency, live-provider, power-loss, durable-lock, and wider ordering gates remain open |
 | 2026-09-22 | W01-WebDAV | Requalified exact current tip `e5ae05d07bbc73184952def0437e58be9efef790`: locked WebDAV Rust tests passed 20 with the native probe explicitly ignored; N-API warning-denied Clippy, host-enabled release build, generated typecheck, structural durable-driver success/500-error/501-missing-callback, lifecycle, 64-pair direct-session, 64-pair network/auth/streaming, formatting, and diff checks passed | — | 77% planning view | The manual run was queued at this evidence snapshot; its subsequent successful native jobs are recorded below. No hosted PASS is claimable, and hosted/provider lifecycle, power-loss/live-provider durability, durable locks, and wider ordering remain open |
