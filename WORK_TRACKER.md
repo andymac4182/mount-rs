@@ -4,6 +4,40 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 active-preparation regression boundary (2026-09-22)
+
+Test commit
+[`bd28cf46569ec94a481f97eab1dbf8e2b27d0515`](https://github.com/andymac4182/mount-rs/commit/bd28cf46569ec94a481f97eab1dbf8e2b27d0515)
+(`test(w26): cover active mutation preparation window`) is published at
+`origin/main`. It adds a focused regression for the bounded mutation-runner
+window: a queued unlink remains pending while a peer whole-file operation is
+still preparing immutable blocks beyond the initial adaptive idle window, and
+publishes once that preparation is released. It does not change the runtime
+implementation or weaken the existing fenced publication, lease, revision/CAS,
+flush-ordering, conflict or fail-closed boundaries.
+
+Local evidence is complete for this chunk: the focused chunked suite is
+22 passed/0 failed, focused strict Clippy passes, the full locked workspace
+all-target test matrix exits 0, and full workspace strict Clippy with
+`-D warnings` exits 0. Explicitly opt-in native/live provider tests remain
+separate gates. Security diff scan
+`d72a974f-0b62-4b30-a6d2-dbd848a37b38` has complete changed-file coverage and
+zero findings. The detailed work-item status, evidence, provisional estimates,
+external blockers and session time log are in
+[docs/w26-progress-ledger.md](docs/w26-progress-ledger.md).
+
+Hosted evidence is not yet terminal for this test descendant. Manual run
+[`35720016370`](https://github.com/andymac4182/mount-rs/actions/runs/35720016370)
+is bound to the preceding runtime commit `9f6041db` and remains queued; push
+run [`35722832900`](https://github.com/andymac4182/mount-rs/actions/runs/35722832900)
+has exact head `bd28cf46` and was pending at 21:41 AEST. Neither queued state
+is a provider, performance or aggregate result. Production remains **NO-GO**:
+all four feasible providers must pass the hard 1,000 IOPS/drive target, the
+complete end-to-end packet must pass, and customer/Ozone security, Tier-1
+99.99% reliability, five-minute RPO/RTO and customer-owned backup/DR evidence
+must close. W26 owns compatibility and qualification; customers deploy Ozone,
+Ozone/customer owns backup/DR, and another stream owns releases.
+
 ## Current W26 bounded preparation-wave scheduling boundary (2026-09-22)
 
 Source commit
