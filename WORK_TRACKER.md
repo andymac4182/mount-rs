@@ -99,8 +99,9 @@ session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
 avoid the observed replacement alias. Two independent v4 sessions also
 complete concurrent distinct-file OPEN/WRITE/READ round trips. Multiple server
 processes sharing one backend remain explicitly outside the supported scope.
-The pinned current-tip NFS conformance refresh passed 266 tests with 18
-explicit capability/root skips and zero mismatches. The opt-in macOS native
+The pinned oracle at published terminal-close commit `90e130b8` passed 266
+tests with 18 explicit capability/root skips and zero mismatches. CI run
+`35670416469` cancelled both native-NFS jobs before any steps ran. The opt-in macOS native
 NFSv3 loopback mount gate passed 1/1 in 0.11s, and hosted run
 `35658285441` passed the named macOS and Ubuntu native-NFS jobs; the overall
 workflow was not green because unrelated jobs failed. Production remains
@@ -3157,13 +3158,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source `7f964ca3` was freshly reverified after the concurrent NFS/9P/WebDAV/
-  HTTP/provider, Ozone, FUSE, chunked, 9P parity, bounded teardown and NFS
-  restart-fencing updates with the full locked workspace test suite (exit 0)
-  and strict workspace Clippy with `-D warnings` (exit 0). Provider/
-  native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit
-  opt-in skips. This is source-health evidence only and does not close
-  W08-P01–P09.
+  Source base `916d1a77333de788b6adc16416789c6e944bdb0e` was freshly reverified
+  after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider, Ozone,
+  FUSE, chunked, bounded teardown and restart-fencing updates with the full
+  locked workspace test suite (exit 0) and strict workspace Clippy with
+  `-D warnings` (exit 0). The four W08 rollout/evidence policy commands also
+  passed with 36 functional items, 9 open production gates, 7 rollout tests
+  and 11 evidence tests; the packet remains NO-GO with zero evidence records.
+  Provider/native rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained
+  explicit opt-in skips. This is source-health and tracking-control evidence
+  only and does not close W08-P01–P09.
 
 ### W08 production rollout track — NO-GO (15% provisional)
 
