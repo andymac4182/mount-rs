@@ -94,6 +94,10 @@ as `ENOSYS`.
   return the ordinary invalid-header result rather than slicing through a code
   point and panicking while probing the `Not` keyword. The focused `(éé)`
   regression protects this parser boundary.
+- Keep HTTP-date parsing aligned with RFC 9110 and the pinned oracle: accept a
+  valid leap-second `:60` seconds field as the preceding `:59`, while retaining
+  rejection of invalid minutes and malformed dates. The focused regression
+  covers IMF-fixdate, RFC 850, asctime, leap-second, and invalid-minute forms.
 - Keep lock-root cleanup fail-closed across provider recovery faults: after a
   DELETE or MOVE, remove a lock only when `stat` confirms `ENOENT`; retain it
   when the provider returns an I/O error and the namespace cannot be resolved.
@@ -291,6 +295,7 @@ as `ENOSYS`.
 | 2026-09-22 | WebDAV XML serializer safety/parity | `xml_document` now matches the pinned codec for hostile text and namespace values: CR becomes `&#13;`, invalid XML controls become U+FFFD, and markup remains escaped. The focused text/`xmlns` fixture and full WebDAV target passed 37/37, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential passed | This closes a local public XML-encoding safety/parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV XML parser character validation | `parse_xml` now rejects invalid UTF-8 and raw XML-invalid characters before `quick-xml` tree construction; the raw-NUL regression reproduced the prior `XmlNode` acceptance and now matches the pinned parser's `invalid-character` refusal. The full WebDAV target passed 38/38, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case differential passed | This closes a local public XML-parser safety/parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV `If` parser UTF-8 boundary safety | The public `Not` keyword probe now uses UTF-8-safe string access; malformed `(éé)` input reproduces no panic and returns the ordinary invalid-header result. The focused regression and full WebDAV target passed 39/39, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case S3+WebDAV differential passed | This closes a local public `If`-parser safety boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV HTTP-date leap-second compatibility | `parse_http_date_ms` now recognizes a valid `:60` seconds field and parses it as `:59`, matching the pinned parser's leap-second behavior without normalizing an invalid `08:60:60` minute. The focused date-form regression and full WebDAV target passed 40/40, warning-denied workspace Clippy, formatting, `git diff --check`, and the pinned 40-case S3+WebDAV differential passed | This closes a local HTTP-date parser parity boundary only; hosted/provider qualification, power-loss ordering, crash/power-loss filesystem durability, durable lock persistence, and the explicit same-resource ordering boundary remain open |
 
 ## Completion rule
 
