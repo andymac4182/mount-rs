@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 18:08 AEST (2026-09-22 08:08 UTC)
+Last updated: 2026-09-22 18:11 AEST (2026-09-22 08:11 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -520,6 +520,12 @@ capacity rather than a service outage. The older duplicate push-triggered CI
 run `35700818889` was requested for cancellation at 18:07 AEST; the API still
 reported it queued at the 18:08 capture, so the cancellation is not promoted as
 terminal until GitHub confirms it.
+
+At 18:10 AEST the repository-wide queue contained 21 queued runs and zero
+in-progress runs; the oldest queued run was CI `35700399264` created at
+07:35:51 UTC on `f94b53d8`. This confirms a shared hosted-capacity backlog,
+not a candidate-specific missing workflow or input. A queued Live R2 run from
+another workstream is not touched or treated as W05 provider evidence.
 
 ### W05.45 exact package evidence (2026-09-22 18:03 AEST)
 
@@ -1049,6 +1055,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 08:10–08:11 UTC (18:10–18:11 AEST) | Counted repository-wide queued/in-progress Actions runs and checked the public GitHub status | Hosted capacity evidence | 21 queued, 0 in progress; oldest queued run `35700399264` dates to 07:35:51 UTC. Candidate remains queued; this is a hosted-capacity gate. |
 | 2026-09-22 08:06–08:08 UTC (18:06–18:08 AEST) | Audited the hosted queue and GitHub Actions status, then requested cancellation of the older duplicate CI run `35700818889` | Hosted capacity / release-control hygiene | Actions reported operational, but the seven primary candidate runs and the duplicate remained queued; no hosted pass or cancellation was inferred. |
 | 2026-09-22 07:59–08:03 UTC (17:59–18:03 AEST) | Rechecked exact-candidate npm package contents and locked workspace licenses; corrected the package-command probe | Local packaging / dependency gate | Both intended npm dry-runs passed; core includes the Darwin arm64 addon and notices, virtual-fs includes declarations/notices, and all 25 workspace packages are Apache-2.0. Cross-platform publication/signing remains open. |
 | 2026-09-22 07:53–07:59 UTC (17:53–17:59 AEST) | Verified the immutable candidate ref, inspected workflow dispatch contracts, dispatched the non-R2 same-SHA hosted packet, and captured run IDs | Hosted release-control coordination | Seven primary runs queued on `87f3cdf0`; Live R2, Live AWS, and production-release publication intentionally held behind their explicit gates. |
