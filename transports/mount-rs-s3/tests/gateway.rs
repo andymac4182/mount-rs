@@ -2272,10 +2272,13 @@ struct ProbeSignals {
     first_read: Arc<Notify>,
     second_read: Arc<Notify>,
     release_read: Arc<Notify>,
+    open_started: Arc<Notify>,
+    release_open: Arc<Notify>,
     writes: Arc<AtomicUsize>,
     reads: Arc<AtomicUsize>,
     opens: Arc<AtomicUsize>,
     closes: Arc<AtomicUsize>,
+    park_open: Arc<AtomicBool>,
 }
 
 impl ProbeSignals {
@@ -2285,10 +2288,13 @@ impl ProbeSignals {
             first_read: Arc::new(Notify::new()),
             second_read: Arc::new(Notify::new()),
             release_read: Arc::new(Notify::new()),
+            open_started: Arc::new(Notify::new()),
+            release_open: Arc::new(Notify::new()),
             writes: Arc::new(AtomicUsize::new(0)),
             reads: Arc::new(AtomicUsize::new(0)),
             opens: Arc::new(AtomicUsize::new(0)),
             closes: Arc::new(AtomicUsize::new(0)),
+            park_open: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -2360,6 +2366,10 @@ impl FsDriver for ProbeFs {
     async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
         let inner = self.inner.open(path, flags, mode).await?;
         self.signals.opens.fetch_add(1, Ordering::Relaxed);
+        if flags == "r" && self.signals.park_open.load(Ordering::Acquire) {
+            self.signals.open_started.notify_one();
+            self.signals.release_open.notified().await;
+        }
         Ok(Arc::new(ProbeHandle {
             inner,
             signals: self.signals.clone(),
@@ -2368,6 +2378,22 @@ impl FsDriver for ProbeFs {
 
     async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
         self.inner.rename(old_path, new_path).await
+    }
+
+    async fn mkdir(
+        &self,
+        path: &str,
+        options: mount_rs_core::MkdirOptions,
+    ) -> FsResult<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+
+    async fn rmdir(&self, path: &str) -> FsResult<()> {
+        self.inner.rmdir(path).await
+    }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
     }
 }
 
@@ -2646,6 +2672,134 @@ async fn real_http_fragmented_upload_reaches_driver_before_body_end() {
 }
 
 #[tokio::test]
+async fn real_http_aborted_upload_removes_staging_and_object() {
+    let memory = MemoryFs::empty();
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let payload = vec![0x6b; 512 * 1024];
+    let first_fragment = 64 * 1024;
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/aborted-http.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        server.address(),
+        payload.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write request head");
+    stream
+        .write_all(&payload[..first_fragment])
+        .await
+        .expect("write partial request body");
+    timeout(Duration::from_secs(2), signals.first_write.notified())
+        .await
+        .expect("staging write before client disconnect");
+    let stream = stream.into_std().expect("convert client stream");
+    SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .expect("set reset-on-close");
+    drop(stream);
+
+    wait_for_no_root_staging(&memory).await;
+    assert!(memory.stat("/aborted-http.bin").await.is_err());
+    assert!(session.assertions().is_empty());
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_aborted_multipart_part_preserves_existing_part() {
+    let memory = MemoryFs::empty();
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    }));
+    let initiated = session
+        .handle(request("POST", "/mountx/atomic-http.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let original = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/atomic-http.bin?uploadId={upload_id}&partNumber=1"),
+            b"original http part",
+            &[],
+        ))
+        .await;
+    assert_eq!(original.status, 200);
+    timeout(Duration::from_secs(1), signals.first_write.notified())
+        .await
+        .expect("consume original part write notification");
+    let writes_before = signals.writes.load(Ordering::Acquire);
+    signals.release_read.notify_one();
+
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let replacement = vec![0x73; 512 * 1024];
+    let first_fragment = 64 * 1024;
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/atomic-http.bin?uploadId={upload_id}&partNumber=1 HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        server.address(),
+        replacement.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write replacement request head");
+    stream
+        .write_all(&replacement[..first_fragment])
+        .await
+        .expect("write partial replacement body");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if signals.writes.load(Ordering::Acquire) > writes_before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement staging write before client disconnect");
+    let stream = stream.into_std().expect("convert client stream");
+    SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .expect("set reset-on-close");
+    drop(stream);
+
+    wait_for_no_part_staging(&memory, &upload_id).await;
+    let path = format!("/.mountx-multipart/{upload_id}/part-1");
+    let stats = memory.stat(&path).await.expect("original part remains");
+    let handle = memory
+        .open(&path, "r", 0)
+        .await
+        .expect("open original part");
+    let mut bytes = vec![0_u8; stats.size as usize];
+    let count = handle
+        .read(&mut bytes, Some(0))
+        .await
+        .expect("read original part");
+    handle.close().await.expect("close original part");
+    bytes.truncate(count);
+    assert_eq!(bytes, b"original http part");
+    assert!(session.assertions().is_empty());
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
 async fn real_http_fragmented_aws_chunked_upload_decodes_before_terminal_frame() {
     let signals = ProbeSignals::new();
     let memory = MemoryFs::empty();
@@ -2842,6 +2996,61 @@ async fn http_server_closes_abandoned_download_handle() {
     .await;
     assert_eq!(next.status, 206);
     assert_eq!(next.body, payload[..4]);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn http_server_closes_download_handle_before_first_body_chunk() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x38; 512 * 1024];
+    let handle = memory
+        .open("/before-body.bin", "w", 0o666)
+        .await
+        .expect("open object");
+    handle.write(&payload, Some(0)).await.expect("write object");
+    handle.close().await.expect("close object");
+
+    let signals = ProbeSignals::new();
+    signals.park_open.store(true, Ordering::Release);
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory,
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/before-body.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write before-body request");
+    timeout(Duration::from_secs(2), signals.open_started.notified())
+        .await
+        .expect("download handle opened before the first body chunk");
+    drop(stream);
+    signals.release_open.notify_one();
+
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let opens = signals.opens.load(Ordering::Acquire);
+            let closes = signals.closes.load(Ordering::Acquire);
+            if opens > 0 && closes == opens {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unsent response handle closed");
+    assert_eq!(signals.opens.load(Ordering::Acquire), 1);
+    assert_eq!(signals.closes.load(Ordering::Acquire), 1);
     server.close().await.expect("clean shutdown");
 }
 
@@ -3046,6 +3255,95 @@ async fn http_server_aborts_short_streamed_response_without_reusing_connection()
     assert!(framing_message.contains(&format!("declared {WHOLE} bytes and produced {DELIVERED}")));
 
     let next = wire_request(&server, "GET", "/mountx/whole.bin", &[], &[]).await;
+    assert_eq!(next.status, 200);
+    assert_eq!(next.body, payload);
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn http_server_aborts_driver_read_error_without_reusing_connection() {
+    const SIZE: usize = 256 * 1024;
+    let payload = (0..SIZE)
+        .map(|index| ((index * 17 + (index >> 8)) & 0xff) as u8)
+        .collect::<Vec<_>>();
+    let memory = MemoryFs::empty();
+    for path in ["/read-error.bin", "/healthy-after-error.bin"] {
+        let handle = memory.open(path, "w", 0o666).await.expect("open object");
+        handle.write(&payload, Some(0)).await.expect("write object");
+        handle.close().await.expect("close object");
+    }
+    let reports = Arc::new(StdMutex::new(Vec::<String>::new()));
+    let observed = Arc::clone(&reports);
+    let server = S3Server::start_with_hooks(
+        Arc::new(S3Session::new(FaultOnReadFs {
+            inner: memory,
+            fail_next_read: Arc::new(AtomicBool::new(true)),
+            fail_unlink: Arc::new(AtomicBool::new(false)),
+            durable_writes: false,
+            sync_calls: Arc::new(AtomicUsize::new(0)),
+            fail_syncfs: Arc::new(AtomicBool::new(false)),
+        })),
+        S3ServerOptions::default(),
+        S3ServerHooks {
+            on_transport_error: Some(Arc::new(move |error| {
+                observed
+                    .lock()
+                    .expect("read error reports lock")
+                    .push(error.message);
+            })),
+        },
+    )
+    .await
+    .expect("loopback listener");
+
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/read-error.bin HTTP/1.1\r\nHost: {}\r\nConnection: keep-alive\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write read-error request");
+    let mut raw = Vec::new();
+    timeout(Duration::from_secs(2), stream.read_to_end(&mut raw))
+        .await
+        .expect("read-error connection terminated")
+        .expect("read read-error response");
+    let response = parse_wire_response(raw);
+    assert_eq!(response.status, 200);
+    assert_eq!(
+        response.headers.get("content-length"),
+        Some(&SIZE.to_string())
+    );
+    assert!(response.body.len() < SIZE);
+
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if reports
+                .lock()
+                .expect("read error reports lock")
+                .iter()
+                .any(|message| message.contains("S3 response body stream failed"))
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("read error transport report");
+    let stream_reports = reports
+        .lock()
+        .expect("read error reports lock")
+        .iter()
+        .filter(|message| message.contains("S3 response body stream failed"))
+        .count();
+    assert_eq!(stream_reports, 1);
+
+    let next = wire_request(&server, "GET", "/mountx/healthy-after-error.bin", &[], &[]).await;
     assert_eq!(next.status, 200);
     assert_eq!(next.body, payload);
     server.close().await.expect("clean shutdown");

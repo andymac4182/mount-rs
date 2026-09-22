@@ -907,7 +907,7 @@ patch):
 | Main | W01 N-API 9P direct constructible session boundary | `integrations/mount-rs-napi/src/servers.rs`, `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-session.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds constructible `new P9Session(driver, options?)` over native `Filesystem` input, optional scalar policy/shared locks/request-error and assertion hooks, direct frame/error behavior, serializable effective options, and callback-handle release on `destroy()`. Local addon rebuild, 36 focused `mount-rs-9p` tests, strict Clippy, generated typecheck, direct-session/metadata/observability checks, syntax/diff checks, and real-socket 9P selector passed. Exact SHA `1e9fffe0f2765e0be17c1a2e394b70c05dea112e` passed Native 9P run `35690887775`, N-API job `106627448717` with the Linux probe, addon build, isolated server/attach selector, direct session lifecycle, and automatic/direct/structural mounted-I/O cleanup, and Rust job `106627448526` with the Linux probe plus all four ignored native lifecycle tests; direct structural `FsDriver` adaptation, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P structural direct session adaptation | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/postbuild.mjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/p9-session.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Follow-up bounded packet extends constructible `new P9Session(driver, options?)` to structural `FsDriver` input through the existing adapter, retains the adapter until direct-session `destroy()`, releases it once, and keeps the caller-owned structural source alive; native `Filesystem` input remains supported without an owned adapter. Local addon rebuild, generated typecheck, direct-session/metadata/observability checks, syntax/diff checks, and real-socket 9P selector passed. Exact SHA `496ed42b3cfaca4a379f7e061d24bd27b5e23372` passed Native 9P run `35691732267`, N-API job `106629973640` with the Linux probe, addon build, isolated server/attach selector, direct native/structural session lifecycle, and automatic/direct/structural mounted-I/O cleanup, and Rust job `106629973787` with the Linux probe plus all four ignored native lifecycle tests; process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P direct-session state-machine cancellation | `transports/mount-rs-9p/src/session.rs`, `integrations/mount-rs-napi/test/p9-session.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet fixes stale-generation precedence over late provider errors and proves direct `Tflush` wakeup, `Tversion` reset with stale `EIO`, and `destroy()` with stale `ENODEV`, including fid/user reset and caller-owned structural-source survival. Local addon rebuild, direct session/metadata/observability/fid/mount-helper checks, generated typecheck, syntax, elevated server selector, full `mount-rs-9p` target (36 tests), strict Clippy, formatting, and diff checks passed. Exact SHA `c627761721b982f78fd33942f7287753fad972f8` passed Native 9P run `35693518562`, N-API job `106635345169` with the direct state-machine and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106635344863` with the Linux probe plus all four ignored native lifecycle tests; process-crash and arbitrary kernel-reset recovery, broader upstream parity, automatic cross-transport signal ownership, and W01 acceptance remain open, so production remains NO-GO |
-| Main | W01 N-API 9P direct-session member-surface audit | `integrations/mount-rs-napi/test/p9-session.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds an oracle-backed runtime audit for the native direct `P9Session` semantic member set: `driver`, `options`, `fids`, `locks`, `stats`, `assertions`, `msize`, `version`, `generation`, `inflight`, `destroyed`, `userFor`, `handleCall`, and `destroy`. Local direct/oracle execution plus adjacent metadata/observability/fid/mount-helper checks, generated typecheck, syntax, and diff checks passed. Exact SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3` completed Native 9P run `35694841984`: N-API job `106639369581` passed, but Rust job `106639369868` failed because `native_linux_external_umount_finishes_server_lifecycle` reported external `umount` exit status 32; no hosted PASS is claimed. Broader protocol/session parity, process-crash and arbitrary kernel-reset recovery, automatic cross-transport signal ownership, and W01 acceptance remain open, so production remains NO-GO |
+| Main | W01 N-API 9P direct-session member-surface audit | `integrations/mount-rs-napi/test/p9-session.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds an oracle-backed runtime audit for the native direct `P9Session` semantic member set: `driver`, `options`, `fids`, `locks`, `stats`, `assertions`, `msize`, `version`, `generation`, `inflight`, `destroyed`, `userFor`, `handleCall`, and `destroy`. Local direct/oracle execution plus adjacent metadata/observability/fid/mount-helper checks, generated typecheck, syntax, and diff checks passed. Historical SHA `fb532b46fd8b6c5af66dc9b771e84116b2997ca3` had the Rust external-umount failure in run `35694841984`; current published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` reran the direct session/member path in N-API job `106667799214` and passed it, while Rust job `106667799016` passed all four ignored native lifecycle tests; the historical failure is superseded for the current supported slice. Broader protocol/session parity, process-crash and arbitrary kernel-reset recovery, automatic cross-transport signal ownership, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P server/connection member-surface audit | `integrations/mount-rs-napi/test/p9-server-members.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds an oracle-backed runtime audit for the ten semantic `P9Server` members and the declared attached-connection surface, including `waitClosed()`; the oracle's non-interface `drop()` helper is explicitly excluded. Local direct/oracle execution, adjacent metadata/typecheck checks, syntax, and diff checks passed. Exact SHA `75c149f857f6056a7435a80a1493a9dfc8e53f59` passed Native 9P run `35697338227`: N-API job `106647016617` passed the new member-surface step plus all hosted N-API lifecycle gates, and Rust job `106647016767` passed the Linux probe plus all four ignored native lifecycle tests. Broader protocol/session parity, process-crash and arbitrary kernel-reset recovery, automatic cross-transport signal ownership, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P native server client identity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-server-identity.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `15cb940988913c666d8d592a583e7eb3d2d82241` caches native `P9Connection` wrappers by stable transport id, preserving repeated `P9Server.clients` connection/session/closed identity and pruning wrappers after transport removal. The real-TCP regression covers registration, stable views, `close()`/`waitClosed()`, and cleanup. [Native 9P run `35698924766`](https://github.com/andymac4182/mount-rs/actions/runs/35698924766) passed N-API job `106652302954` with the new identity step and all hosted N-API lifecycle gates, and Rust job `106652303250` with the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
 | Main | W01 N-API 9P mixed native/attached client arrival order | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/p9-server-order.mjs`, `integrations/mount-rs-napi/package.json`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Exact SHA `a3554b105be58cc5ff6cacc03de53f09c0461419` adds one JS arrival ledger for native and attached `P9Server.clients`, observes accepted native clients before `attach()`, preserves stable native wrappers, and prunes closed entries. The real-TCP regression covers native-first and attached-first order plus cleanup. Local syntax, focused order/identity/member checks, metadata/session/observability/type checks, and the elevated `p9` selector passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the mixed arrival-order check and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests; broader parity and production remain NO-GO |
@@ -2414,10 +2414,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration PASS, and
   `providersFailed: 0`. macOS-15-intel Node `106658534854` also passed both
   exact steps, and Ubuntu Node `106658535160` has now passed both exact steps
-  as well. Native FUSE `106658535119` failed `Exercise actual rootless kernel
+  as well. macOS-latest Node `106658535116` has now passed both exact steps
+  and its mounted I/O cleanup. Native FUSE `106658535119` failed `Exercise actual rootless kernel
   file operations`, skipped mounted follow-on checks, and remained in its
-  completion hook; macOS-latest is still building and package/provider/W26
-  gates are not terminal. This is partial current-tip evidence only;
+  completion hook; package/provider/W26 gates are not terminal. This is
+  partial current-tip evidence only;
   W04 and production rollout remain open/NO-GO until the full matrix is
   inspected and the seven production gates close.
 - The same run then recorded a Windows Node timing failure and a provider
@@ -5221,6 +5222,75 @@ reproducible in a production-like environment.
   passed; this is bounded local graceful-close evidence only, so live providers,
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open and W01-S3 stays **NO-GO**.
+- [x] Re-qualified the current release N-API S3 runtime on published mainline
+  `76eb2914`: the fresh release addon build, callback observability, 64-way/CAS
+  concurrency, session differential, exact 155/258/153 barrel scope, process
+  restart, generated typecheck, distribution, and isolated S3 server phase all
+  passed. This refreshes local Rust/N-API evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
+- [x] Added the oracle-derived pre-body disconnect regression
+  `http_server_closes_download_handle_before_first_body_chunk`: a delayed
+  driver open is parked after opening the object, the client disconnects before
+  any response body chunk, and the released handle closes exactly once. The
+  complete current Rust 5/6/41/5 packet, strict Clippy, formatting/diff checks,
+  and isolated S3 N-API server integration passed; the initial sandbox socket
+  bind `PermissionDenied` was classified and the host-enabled rerun passed.
+  This is bounded local pre-body cancellation evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified streamed driver-read fault recovery with the oracle-aligned
+  `http_server_aborts_driver_read_error_without_reusing_connection`: an
+  injected `EIO` on the first streamed GET read terminates the damaged response,
+  emits exactly one `S3 response body stream failed` transport report, and a
+  fresh GET returns exact bytes. The complete current Rust 5/6/42/5 packet,
+  strict Clippy, formatting/diff checks, and isolated S3 N-API server
+  integration passed. This is bounded local streamed fault evidence only; live
+  providers, power-loss durability, broader workload bounds, and native/hosted
+  acceptance remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified real HTTP aborted-upload cleanup with
+  `real_http_aborted_upload_removes_staging_and_object`: after a partial staged
+  PUT is visible, the client sends a TCP reset; the private `.mountx-put-*`
+  entry is reaped within the bounded wait and the destination is not published.
+  The complete current Rust 5/6/43/5 packet, strict Clippy, formatting/diff
+  checks, and isolated S3 N-API server integration passed. This is bounded
+  local request-cancellation staging evidence only; live providers, power-loss
+  durability, broader workload bounds, and native/hosted acceptance remain open
+  and W01-S3 stays **NO-GO**.
+- [x] Qualified real HTTP aborted multipart-part replacement cleanup with
+  `real_http_aborted_multipart_part_preserves_existing_part`: after an existing
+  multipart part is committed, a replacement part is partially staged and the
+  client sends a TCP reset; the private `.part-*` staging entry is reaped within
+  the bounded wait and the original part remains byte-for-byte intact. The
+  complete current Rust 5/6/44/5 packet, strict Clippy, formatting/diff checks,
+  and isolated S3 N-API server integration passed. This is bounded local
+  multipart request-cancellation replacement evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified provider-backed S3 network concurrency and the staging-scan
+  race with `s3-provider-network-concurrency.mjs`: the NodeFs/SQLite matrix
+  initially reproduced transient `NoSuchKey` responses when concurrent
+  streaming PUTs renamed private staging files between `readdir` and `stat`;
+  S3 quota/reaper scans now ignore only vanished `ENOENT`/`ENOTDIR` entries while
+  preserving other errors. The final matrix passed 32 concurrent buffered
+  PUT/GET pairs plus content-length streamed PUT/GET for both providers with
+  zero session errors. The current Rust 5/6/44/5 packet, strict Clippy,
+  formatting/diff checks, release N-API build, pinned S3 session differential,
+  exact barrel scope, 64-way/CAS concurrency, process restart, callback
+  observability, typecheck/distribution, and isolated S3 N-API server
+  integration passed. This closes bounded local NodeFs/SQLite provider
+  concurrency and transient staging-scan race evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
+- [x] Qualified in-flight streamed PUT crash/restart recovery with
+  `s3-inflight-crash.mjs`: a child process is forced down after writing a
+  private streaming prefix, and replacement NodeFs and SQLite sessions keep
+  the destination unpublished, accept a fresh streamed PUT with exact bytes,
+  and reap the orphan `.mountx-put-*` entry after the effective session TTL
+  through the existing `now` hook. This is local provider/process-crash and
+  staging-TTL evidence only; physical power-loss/torn-write ordering, live
+  providers, hosted/native lifecycle, and broader workload bounds remain open,
+  so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
