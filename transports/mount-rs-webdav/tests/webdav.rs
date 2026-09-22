@@ -228,6 +228,55 @@ impl FsDriver for FailingChildStatFs {
     }
 }
 
+struct CleanupStatFaultFs {
+    inner: MemoryFs,
+    locked_stat_calls: AtomicUsize,
+}
+
+impl CleanupStatFaultFs {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryFs::empty(),
+            locked_stat_calls: AtomicUsize::new(0),
+        })
+    }
+}
+
+#[async_trait]
+impl FsDriver for CleanupStatFaultFs {
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        let call = if path == "/locked" {
+            self.locked_stat_calls.fetch_add(1, Ordering::SeqCst) + 1
+        } else {
+            0
+        };
+        if path == "/locked" && call >= 3 {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("stat"));
+        }
+        self.inner.stat(path).await
+    }
+
+    async fn lstat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.lstat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
+    }
+}
+
 struct OverflowBoundedDirectoryFs {
     inner: MemoryFs,
 }
@@ -1735,6 +1784,45 @@ async fn recursive_delete_honors_submitted_member_lock_tokens() {
         .unwrap();
     assert_eq!(allowed.status(), 204);
     server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn lock_cleanup_retains_lock_when_provider_stat_fails() {
+    let driver = CleanupStatFaultFs::new();
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/locked".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#
+                .to_vec(),
+        )
+        .await;
+    assert_eq!(lock.status, 201);
+    let token = lock.headers.get("lock-token").cloned().expect("lock token");
+
+    let deleted = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "DELETE".to_owned(),
+                target: "/locked".to_owned(),
+                headers: [("if".to_owned(), format!("({token})"))]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+
+    assert_eq!(deleted.status, 204);
+    assert_eq!(session.lock_count(), 1);
+    assert_eq!(session.lock_records()[0].path, "/locked");
 }
 
 #[tokio::test]

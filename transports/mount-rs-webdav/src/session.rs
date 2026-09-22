@@ -1629,12 +1629,10 @@ impl WebdavSession {
             .map(|mut locks| locks.within(path, now))
             .unwrap_or_default();
         for lock in locks {
-            if self
-                .stat_or_absent(&lock.path)
-                .await
-                .ok()
-                .flatten()
-                .is_none()
+            // A provider error leaves the namespace unknown. Retain the lock
+            // until absence is confirmed instead of treating an I/O failure
+            // as proof that its root was unmapped.
+            if matches!(self.stat_or_absent(&lock.path).await, Ok(None))
                 && let Ok(mut table) = self.locks.lock()
             {
                 table.remove(&lock.token);
