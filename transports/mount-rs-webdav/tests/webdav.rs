@@ -1581,6 +1581,15 @@ async fn protocol_fixtures_match_mountx_path_and_header_rules() {
     );
 }
 
+#[test]
+fn xml_parser_rejects_raw_invalid_characters() {
+    assert_eq!(
+        parse_xml(b"<x>\0</x>", 256).unwrap_err().status,
+        400,
+        "raw XML controls must not survive into the parsed tree"
+    );
+}
+
 #[tokio::test]
 async fn http_round_trip_covers_class_one_methods_and_properties() {
     let server = server().await;

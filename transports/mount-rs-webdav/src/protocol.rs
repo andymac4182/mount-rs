@@ -948,6 +948,16 @@ pub fn parse_xml(body: &[u8], max_bytes: usize) -> Result<XmlNode, DavFault> {
     if body.len() > max_bytes {
         return Err(refuse(413).with_message("the XML body exceeds its byte budget"));
     }
+    let text =
+        std::str::from_utf8(body).map_err(|_| xml_fault("the XML body is not valid UTF-8"))?;
+    if text
+        .chars()
+        .any(|character| !is_xml_character(character as u32))
+    {
+        return Err(xml_fault(
+            "the XML body contains a character XML cannot carry",
+        ));
+    }
     let mut reader = Reader::from_reader(body);
     reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
