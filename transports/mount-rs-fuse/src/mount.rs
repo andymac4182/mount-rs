@@ -679,27 +679,30 @@ impl MountState {
                 // forced phase behind the same request.
                 self.request_stop();
                 let task = self.task.lock().expect("mount task lock poisoned").take();
-                let deadline = Instant::now() + timeout;
-                let force = force_unmount_until(
+                // Keep the forced phase within the same bounded teardown
+                // contract as the graceful attempt. A third of the
+                // configured timeout leaves margin below the timeout plus
+                // half-timeout regression bound, while the cap prevents a
+                // blocked session from extending forced teardown indefinitely.
+                let forced_budget = (timeout / 3).min(FORCED_STOP_GRACE);
+                let forced_phase_deadline = Instant::now() + forced_budget;
+                if let Some(task) = task {
+                    // Give a normally polling session a short opportunity to
+                    // observe the stop request and run its terminal cleanup.
+                    // A session blocked in the kernel's device read cannot
+                    // observe that request; the drain helper aborts the owner
+                    // task when this shared deadline expires, closing the
+                    // descriptor before lazy detach starts.
+                    drain_session_task(&self, task, Some(forced_phase_deadline)).await;
+                }
+                force_unmount_until(
                     self.mode,
                     &self.mountpoint,
                     self.helper.as_deref(),
-                    deadline,
-                );
-                if let Some(task) = task {
-                    // Give a normally polling session a short opportunity to
-                    // observe the stop request and run its terminal cleanup,
-                    // while lazy detach runs concurrently. A session blocked
-                    // in the kernel's device read cannot observe that request;
-                    // the drain helper aborts the owner task when this grace
-                    // period expires, closing the descriptor so the helper
-                    // can finish without adding a serialized second timeout.
-                    let grace_deadline = Instant::now() + FORCED_STOP_GRACE;
-                    tokio::join!(force, drain_session_task(&self, task, Some(grace_deadline)));
-                } else {
-                    force.await;
-                }
-                forced_deadline = Some(deadline);
+                    forced_phase_deadline,
+                )
+                .await;
+                forced_deadline = Some(forced_phase_deadline);
                 let mount_still_present = mounted_at(&self.mountpoint);
                 forced_mount_present = Some(mount_still_present);
                 self.record_transport_error(FuseTransportError::from_message(
