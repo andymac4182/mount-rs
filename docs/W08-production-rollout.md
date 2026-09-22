@@ -191,6 +191,15 @@ skips. This exact merged source was requalified after the 9P workflow/server,
 WebDAV, FoundationDB, 9P, W07 and N-API source changes; no source result is
 inferred from documentation-only evidence.
 
+After origin/main advanced with the WebDAV N-API test update `de78011` and
+concurrent documentation, exact merged source
+`068c42d6f540e31e88368e59546f19dd595f1070` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; changed N-API
+JavaScript/package checks, all four W08 rollout/evidence validators/tests,
+native-9P workflow YAML parsing and `git diff --check` also passed. This is
+source-health and tracking-control evidence only; provider/native rows remain
+explicit opt-in skips and production P01–P09 remain open.
+
 Hosted W08 policy run `35681936375` at source
 `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
 successfully in 2m48s. Its rollout-ledger and release-identity/provenance
