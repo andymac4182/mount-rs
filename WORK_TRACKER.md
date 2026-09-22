@@ -2713,6 +2713,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   format, strict Clippy, and locked workspace tests. TLS compile/policy
   `106658534528` and Ubuntu native NFS `106658534834` also passed their
   terminal support gates. Production remains **NO-GO**.
+- The same run was cancelled after Ubuntu Rust spent more than an hour in
+  `cargo test --workspace --all-targets --locked` without a terminal result;
+  comparable successful Rust jobs finish in roughly 1.5–3 minutes. W26 job
+  `106670761354` independently failed closed with
+  `W26_OZONE_EVIDENCE_PACKET_FAIL reason=ozone-compositions-artifact-source-checkout-dirty`
+  because the composition tee log was created inside the checkout before
+  provenance capture. The follow-up workflow fix moves the W26 composition
+  log/JSON to `$RUNNER_TEMP` and bounds the Rust matrix at 25 minutes;
+  `benchmarks/storage/test.mjs`, the rollout policy checks, YAML parsing, and
+  diff checks pass locally. A fresh hosted run is required; W04 current-tip
+  acceptance and production remain **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
