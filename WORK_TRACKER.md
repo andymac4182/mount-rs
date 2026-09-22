@@ -3435,14 +3435,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Source base `eeb628da9deed5ad0b9670756b406556a659f9b8` was freshly reverified
-  after concurrent FUSE, N-API, S3-test, WebDAV, lockfile, NFS, 9P and provider
-  updates with the full locked workspace test suite (exit 0) and strict
-  workspace Clippy with `-D warnings` (exit 0). The four W08 rollout/evidence
-  policy commands also passed with 36 functional items, 9 open production
-  gates, 7 rollout tests and 11 evidence tests; the packet remains NO-GO with
-  zero evidence records. A subsequent unrelated documentation-only merge is
-  source-equivalent to this tested tree. Provider/native rows requiring TiDB,
+  Merged source base `a09984141bcb04875dbfadf180d2ca8bfbb8824c` was freshly
+  reverified after concurrent N-API declaration and P9 normalization, 9P codec,
+  S3-session-concurrency, session-parity, chunked durability, FUSE, S3-test,
+  WebDAV, lockfile, NFS and provider updates with the full locked workspace
+  test suite (exit 0) and strict workspace Clippy with `-D warnings` (exit 0).
+  The four W08 rollout/evidence policy commands also passed with 36 functional
+  items, 9 open production gates, 7 rollout tests and 11 evidence tests; the
+  packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
+  package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
   W08-P01–P09.
@@ -3588,6 +3589,10 @@ reproducible in a production-like environment.
   no candidate tag was found, while both protected workflow files remained
   present in the fetched mainline. The latest known release remains the
   preview-only observation above. This does not close P09.
+  A fresh read-only audit at 11:08 AEST again returned HTTP 404 for the W08
+  production workflow query and protected environment, could not resolve the
+  repository release surface, and found no candidate tag. This remains an
+  external API/configuration blocker and does not close P09.
   *(Release implementation + hosted;
   registry, signing/attestation, deployment controller and approvers are
   external.)*
