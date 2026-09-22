@@ -2047,6 +2047,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) and remains
   NO-GO until artifact/package, persistence/rollback, provider, and
   operational gates also close.
+- [x] W04.2 current-tip revalidation: replacement qualification run
+  [35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
+  ran from exact published `d870f900`. macOS-latest
+  `106631238012`, macOS-15-intel `106631238033`, and Ubuntu
+  `106631238088` completed successfully with both fragmented early-rejection
+  and exact `Verify PGlite integration and restart recovery` steps green;
+  ARM Node `106631237930` passed the same two exact steps, and Windows Node
+  `106631238113` passed its package/distribution lane. The macOS, Ubuntu, and
+  ARM logs include `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`; aggregate-native
+  `106634465987` passed artifact aggregation, all five native package
+  validations, and clean-consumer smoke. W04.2 remains closed and current-tip
+  confirmed. The same run's provider/W26 failures are separate production
+  blockers; rollout remains **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
