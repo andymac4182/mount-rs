@@ -764,9 +764,17 @@ impl MountState {
                 // Treat that specific helper outcome as a forced-teardown
                 // handoff; unrelated helper failures remain ordinary errors.
                 self.request_stop();
-                self.abort_task();
                 let forced_phase_deadline = Instant::now() + FORCED_STOP_GRACE;
-                force_unmount_until(
+                let task = self.task.lock().expect("mount task lock poisoned").take();
+                if let Some(task) = task {
+                    // The normal helper returned EBUSY before the session
+                    // descriptor had necessarily been dropped. Drain the
+                    // aborted owner task before asking fusermount for a lazy
+                    // detach, otherwise the helper can observe the same
+                    // outstanding FUSE connection and fail again with EBUSY.
+                    drain_session_task(&self, task, Some(forced_phase_deadline)).await;
+                }
+                let forced = force_unmount_until(
                     self.mode,
                     &self.mountpoint,
                     self.helper.as_deref(),
@@ -775,8 +783,13 @@ impl MountState {
                 .await;
                 forced_deadline = Some(forced_phase_deadline);
                 let mount_still_present = mounted_at(&self.mountpoint);
-                forced_mount_present = Some(mount_still_present);
-                if mount_still_present {
+                // A successful lazy detach may leave the mount listed until
+                // the kernel releases the blocked request. Treat the helper
+                // success as the authoritative teardown handoff; the
+                // blocked request is expected to complete with an error after
+                // the serving descriptor has been closed.
+                forced_mount_present = Some(if forced { false } else { mount_still_present });
+                if !forced && mount_still_present {
                     self.record_transport_error(FuseTransportError::from_message(
                         FuseTransportErrorKind::Task,
                         format!(
@@ -1845,12 +1858,13 @@ async fn force_unmount_until(
     mountpoint: &Path,
     helper: Option<&Path>,
     deadline: Instant,
-) {
+) -> bool {
     match mode {
         MountMode::Rootless => {
             if let Some(helper) = helper {
                 let remaining = deadline.saturating_duration_since(Instant::now());
-                let _ = run_child(
+                return matches!(
+                    run_child(
                     helper.as_os_str(),
                     &[
                         PathBuf::from("-u"),
@@ -1860,10 +1874,14 @@ async fn force_unmount_until(
                     ],
                     remaining,
                 )
-                .await;
+                .await,
+                    Ok(Some(outcome)) if outcome.status.success()
+                );
             }
+            false
         }
         MountMode::Privileged => {
+            let mut detached = false;
             for arguments in [
                 vec![PathBuf::from("-f"), mountpoint.to_owned()],
                 vec![PathBuf::from("-l"), mountpoint.to_owned()],
@@ -1875,8 +1893,15 @@ async fn force_unmount_until(
                 if remaining.is_zero() {
                     break;
                 }
-                let _ = run_child(OsStr::new("umount"), &arguments, remaining).await;
+                if matches!(
+                    run_child(OsStr::new("umount"), &arguments, remaining).await,
+                    Ok(Some(outcome)) if outcome.status.success()
+                ) {
+                    detached = true;
+                    break;
+                }
             }
+            detached
         }
         MountMode::Auto => unreachable!("mounted mode is resolved before state creation"),
     }

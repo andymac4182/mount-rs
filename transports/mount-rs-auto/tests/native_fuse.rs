@@ -7,7 +7,10 @@
 #![cfg(target_os = "linux")]
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -17,6 +20,8 @@ use mount_rs_auto::{
 };
 use mount_rs_core::{FileHandle, FsDriver, MemoryFs};
 use mount_rs_fuse::mount::{FuseMountHooks, FuseTransportError, FuseTransportErrorKind};
+
+static NEXT_MOUNTPOINT_ID: AtomicU64 = AtomicU64::new(0);
 
 fn opted_in() -> bool {
     std::env::var_os("MOUNT_RS_RUN_NATIVE_FUSE").as_deref() == Some(std::ffi::OsStr::new("1"))
@@ -46,7 +51,11 @@ fn unique_mountpoint() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before Unix epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("mount-rs-auto-fuse-{}-{nonce}", std::process::id()))
+    let sequence = NEXT_MOUNTPOINT_ID.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "mount-rs-auto-fuse-{}-{nonce}-{sequence}",
+        std::process::id()
+    ))
 }
 
 fn assert_native_prerequisites() {

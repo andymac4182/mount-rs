@@ -12,7 +12,10 @@
 #[cfg(target_os = "linux")]
 mod linux {
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    };
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
@@ -21,6 +24,8 @@ mod linux {
         FuseMountHooks, FuseTransportError, FuseTransportErrorKind, MountOptions, mount,
         mount_with_hooks,
     };
+
+    static NEXT_MOUNTPOINT_ID: AtomicU64 = AtomicU64::new(0);
 
     fn native_mount_opted_in() -> bool {
         std::env::var_os("MOUNT_RS_RUN_NATIVE_FUSE").as_deref() == Some(std::ffi::OsStr::new("1"))
@@ -57,8 +62,9 @@ mod linux {
             .duration_since(UNIX_EPOCH)
             .expect("system clock before Unix epoch")
             .as_nanos();
+        let sequence = NEXT_MOUNTPOINT_ID.fetch_add(1, Ordering::Relaxed);
         std::env::temp_dir().join(format!(
-            "mount-rs-fuse-native-{}-{nonce}",
+            "mount-rs-fuse-native-{}-{nonce}-{sequence}",
             std::process::id()
         ))
     }
