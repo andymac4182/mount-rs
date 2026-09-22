@@ -749,6 +749,33 @@ function p9Frame(type, tag, body = Buffer.alloc(0)) {
   return frame;
 }
 
+function p9Pattern(size, seed) {
+  const bytes = Buffer.alloc(size);
+  let state = seed >>> 0;
+  for (let index = 0; index < size; index += 1) {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    bytes[index] = state >>> 24;
+  }
+  return bytes;
+}
+
+function p9WriteBody(fid, offset, data) {
+  const body = Buffer.alloc(16 + data.length);
+  body.writeUInt32LE(fid, 0);
+  body.writeBigUInt64LE(BigInt(offset), 4);
+  body.writeUInt32LE(data.length, 12);
+  data.copy(body, 16);
+  return body;
+}
+
+function p9ReadBody(fid, offset, count) {
+  const body = Buffer.alloc(16);
+  body.writeUInt32LE(fid, 0);
+  body.writeBigUInt64LE(BigInt(offset), 4);
+  body.writeUInt32LE(count, 12);
+  return body;
+}
+
 async function readP9Frame(reader, label) {
   const header = await within(reader.readExactly(7), `${label} header`);
   const size = header.readUInt32LE(0);
@@ -800,7 +827,7 @@ async function connectP9Session(server, msize = 65_536) {
   return { socket, reader, connection };
 }
 
-async function connectP9HeldFile(server, name, fid, msize = 65_536) {
+async function connectP9HeldFile(server, name, fid, msize = 65_536, flags = 0) {
   const { socket, reader, connection } = await connectP9Session(server, msize);
 
   const walkBody = Buffer.alloc(10);
@@ -819,7 +846,7 @@ async function connectP9HeldFile(server, name, fid, msize = 65_536) {
 
   const lopenBody = Buffer.alloc(8);
   lopenBody.writeUInt32LE(fid, 0);
-  lopenBody.writeUInt32LE(0, 4);
+  lopenBody.writeUInt32LE(flags, 4);
   await p9Request(socket, reader, 12, 3, lopenBody, 13);
 
   return { socket, reader, connection };
@@ -1261,6 +1288,148 @@ async function exerciseP9ServerBoundary() {
       for (const item of [broken, healthy]) {
         if (item?.socket) item.socket.destroy();
         if (item?.connection) await within(item.connection.closed, "9P framing isolation cleanup");
+      }
+      await server.close();
+    }
+  }
+}
+
+async function exerciseP9WireFraming() {
+  {
+    const filesystem = memoryFilesystem();
+    const data = p9Pattern(256 * 1024, 0x9d_1a_2b);
+    await filesystem.writeFile("/big.bin", Buffer.alloc(0));
+    const server = createP9Server(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      maxFrame: 1024 * 1024,
+    });
+    let connection;
+    try {
+      await within(server.listen(), "9P large payload listen");
+      connection = await connectP9HeldFile(server, "big.bin", 700, 8_192, 2);
+
+      const writeSize = 6_000;
+      const writes = [];
+      for (let offset = 0, index = 0; offset < data.length; offset += writeSize, index += 1) {
+        const chunk = data.subarray(offset, Math.min(offset + writeSize, data.length));
+        writes.push({
+          tag: 1_000 + index,
+          length: chunk.length,
+          frame: p9Frame(
+            p9.P9_TWRITE,
+            1_000 + index,
+            p9WriteBody(700, offset, chunk),
+          ),
+        });
+      }
+      await writeSocket(
+        connection.socket,
+        Buffer.concat(writes.map(({ frame }) => frame)),
+        "9P large payload write burst",
+      );
+
+      const expectedWrites = new Map(writes.map(({ tag, length }) => [tag, length]));
+      for (let index = 0; index < writes.length; index += 1) {
+        const response = await readP9Frame(
+          connection.reader,
+          "9P large payload write response",
+        );
+        assert.equal(response[4], p9.P9_RWRITE);
+        const tag = response.readUInt16LE(5);
+        assert.ok(expectedWrites.has(tag), `unexpected large-payload write tag ${tag}`);
+        assert.equal(response.readUInt32LE(7), expectedWrites.get(tag));
+        expectedWrites.delete(tag);
+      }
+      assert.equal(expectedWrites.size, 0);
+
+      const readSize = 4_096;
+      const readBack = Buffer.alloc(data.length);
+      for (let offset = 0, index = 0; offset < data.length; offset += readSize, index += 1) {
+        const count = Math.min(readSize, data.length - offset);
+        const response = await p9Request(
+          connection.socket,
+          connection.reader,
+          p9.P9_TREAD,
+          2_000 + index,
+          p9ReadBody(700, offset, count),
+          p9.P9_RREAD,
+        );
+        const actual = response.readUInt32LE(0);
+        assert.equal(actual, count);
+        assert.equal(response.length, 4 + actual);
+        response.copy(readBack, offset, 4);
+      }
+      assert.deepEqual(readBack, data);
+    } finally {
+      if (connection?.socket) connection.socket.destroy();
+      if (connection?.connection) {
+        await within(connection.connection.closed, "9P large payload connection cleanup");
+      }
+      await server.close();
+    }
+  }
+
+  {
+    const reports = [];
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/too-large.txt", Buffer.alloc(0));
+    await filesystem.writeFile("/still-here.txt", Buffer.alloc(0));
+    const server = createP9Server(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      onTransportError(error, peer) {
+        reports.push({ error, peer });
+      },
+    });
+    let loud;
+    let calm;
+    try {
+      await within(server.listen(), "9P negotiated msize listen");
+      loud = await connectP9HeldFile(server, "too-large.txt", 801, 8_192, 2);
+      calm = await connectP9HeldFile(server, "still-here.txt", 802, 8_192, 2);
+
+      const oversizedData = Buffer.alloc(8_192, 7);
+      const oversized = p9Frame(
+        p9.P9_TWRITE,
+        42,
+        p9WriteBody(801, 0n, oversizedData),
+      );
+      assert.ok(oversized.length > 8_192);
+      await writeSocket(loud.socket, oversized, "9P negotiated msize oversized frame");
+      await within(loud.connection.closed, "9P negotiated msize broken connection");
+      const report = await waitForTransportError(reports, "9P negotiated msize transport error");
+      assert.match(report.error.message, /exceeds the 8192-byte limit/);
+      assert.match(report.peer, /^127\.0\.0\.1:\d+$/);
+      assert.equal(reports.length, 1);
+      assert.equal(server.connections, 1);
+
+      const survivor = Buffer.from("yes");
+      const writeReply = await p9Request(
+        calm.socket,
+        calm.reader,
+        p9.P9_TWRITE,
+        43,
+        p9WriteBody(802, 0n, survivor),
+        p9.P9_RWRITE,
+      );
+      assert.equal(writeReply.readUInt32LE(0), survivor.length);
+      const readReply = await p9Request(
+        calm.socket,
+        calm.reader,
+        p9.P9_TREAD,
+        44,
+        p9ReadBody(802, 0n, survivor.length),
+        p9.P9_RREAD,
+      );
+      assert.equal(readReply.readUInt32LE(0), survivor.length);
+      assert.deepEqual(readReply.subarray(4), survivor);
+    } finally {
+      for (const item of [loud, calm]) {
+        if (item?.socket) item.socket.destroy();
+        if (item?.connection) {
+          await within(item.connection.closed, "9P negotiated msize connection cleanup");
+        }
       }
       await server.close();
     }
@@ -2469,6 +2638,7 @@ await within(
       await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
       await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
       await runPhase("9P server boundary", exerciseP9ServerBoundary);
+      await runPhase("9P wire framing", exerciseP9WireFraming);
       await runPhase("9P Unix listener policy", exerciseP9Unix);
       await runPhase("9P teardown", exerciseP9Teardown);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
@@ -2491,6 +2661,7 @@ await within(
     await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
     await runPhase("9P shared lock table", exerciseP9LockTableNetwork);
     await runPhase("9P server boundary", exerciseP9ServerBoundary);
+    await runPhase("9P wire framing", exerciseP9WireFraming);
     await runPhase("9P Unix listener policy", exerciseP9Unix);
     await runPhase("9P teardown", exerciseP9Teardown);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
