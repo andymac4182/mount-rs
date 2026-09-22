@@ -349,6 +349,12 @@ hosted NFS run `35670927787` passed macOS but failed Ubuntu before its v3
 mount on a parallel-test mountpoint collision; the local correction does
 not turn that failed job into acceptance evidence.
 
+The same forced-crash v4.1 test now removes a seeded host file via wire
+`REMOVE` before terminating the server. A fresh replacement session gets
+`NFS4ERR_NOENT` from wire `LOOKUP`, and the host path remains absent. This
+qualifies one-host process-crash namespace behavior, not directory-fsync,
+power-loss, or durable NFSv4 session/handle recovery; W01-NFS stays NO-GO.
+
 W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
 orderly TCP reconnect: the same cached slot/sequence returns the original
 mutating `REMOVE` reply without removing a changed target, and the next
@@ -1296,6 +1302,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Expanded native mount default-option coverage for source, permissions, frame, and lifecycle timeout policy; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added helper-free privileged and root-auto mount-mode selection coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added directory-handle accounting coverage for `OPENDIR`/`RELEASEDIR`; all 21 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-NFS | Extended the forced-process-restart NFSv4.1 lane with wire `REMOVE` of a seeded host file before termination; replacement-session wire `LOOKUP` returned `NFS4ERR_NOENT`, while the existing `FILE_SYNC4` readback and stale session/handle checks remained green. Direct process restart passed 2/2; the full locked NFS target passed 41 unit and all applicable integrations, including 20 v4 wire; strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | This is one-host process-crash namespace evidence, not directory-fsync or power-loss durability, persistent NFSv4 state, native-client ordering, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
 
 ## Definition of W01 complete
 

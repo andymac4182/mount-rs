@@ -2045,6 +2045,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   process-crash data recovery, not power-loss or durable v4 lease/replay/handle recovery;
   native-client ordering, exact-tip hosted qualification, and W01-NFS
   production acceptance remain open.
+- [x] The same forced-child-process NFSv4.1 lane now also verifies host-backed
+  namespace deletion. A file seeded in the host root is removed through a
+  successful wire `REMOVE`; after the seed process is killed, a replacement
+  session's wire `LOOKUP` returns `NFS4ERR_NOENT`, and the host path remains
+  absent. The direct process-restart target passes 2/2; the full locked NFS
+  target passes 41 unit and all applicable integrations (including 20 v4
+  wire), and warning-denied Clippy, formatting, and diff checks pass. This
+  is one-host process-crash namespace evidence, not a directory-fsync or
+  power-loss guarantee, durable v4 session/lease/replay/handle recovery,
+  native-client ordering, or exact-tip hosted acceptance; W01-NFS is NO-GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second
