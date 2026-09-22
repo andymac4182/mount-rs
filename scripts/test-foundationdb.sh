@@ -39,6 +39,8 @@ server3="mount-rs-foundationdb-server-$run_id-3"
 fdb_servers="$server"
 fdb_volumes=""
 client_container=""
+authority_heartbeat_container=""
+authority_heartbeat_log=""
 probe_key="mount-rs/foundationdb/readiness/$run_id"
 probe_value="ready"
 probe_key_written=0
@@ -89,6 +91,10 @@ cleanup() {
   fi
   if [ -n "$client_container" ] && docker container inspect "$client_container" >/dev/null 2>&1; then
     docker rm --force "$client_container" >/dev/null 2>&1 || cleanup_status=1
+  fi
+  if [ -n "$authority_heartbeat_container" ] \
+    && docker container inspect "$authority_heartbeat_container" >/dev/null 2>&1; then
+    docker rm --force "$authority_heartbeat_container" >/dev/null 2>&1 || cleanup_status=1
   fi
   if [ "${MOUNT_RS_FOUNDATIONDB_KEEP:-0}" = "1" ]; then
     echo "FOUNDATIONDB_KEEP=1 topology=$topology servers=$fdb_servers volumes=${fdb_volumes:-none} network=$network data=$run_dir" >&2
@@ -447,6 +453,77 @@ if [ -n "$rustfs_endpoint" ] || [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq
     fi
   fi
 fi
+
+start_authority_heartbeat() {
+  authority_heartbeat_seconds=${MOUNT_RS_FOUNDATIONDB_AUTHORITY_HEARTBEAT_SECONDS:-1800}
+  case "$authority_heartbeat_seconds" in
+    ''|*[!0-9]*|0)
+      echo "MOUNT_RS_FOUNDATIONDB_AUTHORITY_HEARTBEAT_SECONDS must be a positive integer" >&2
+      exit 2
+      ;;
+  esac
+  if [ "$authority_heartbeat_seconds" -gt 3600 ]; then
+    echo "MOUNT_RS_FOUNDATIONDB_AUTHORITY_HEARTBEAT_SECONDS must not exceed 3600" >&2
+    exit 2
+  fi
+  authority_heartbeat_container="mount-rs-foundationdb-authority-$run_id"
+  authority_heartbeat_log="$run_dir/authority-heartbeat.log"
+  docker run --detach --platform "$docker_platform" \
+    --name "$authority_heartbeat_container" --label "$resource_label" \
+    --network "$network" \
+    --volume "$repo_dir:/workspace:ro" \
+    --volume "$run_dir:/fdb:ro" \
+    --workdir /workspace \
+    --env "MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE=/fdb/fdb.cluster" \
+    --env LIBRARY_PATH=/fdb \
+    --env LD_LIBRARY_PATH=/fdb \
+    --env RUSTFLAGS=-Lnative=/fdb \
+    --env CARGO_TARGET_DIR=/tmp/mount-rs-foundationdb-authority-target \
+    --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX=$authority_prefix" \
+    --env "MOUNT_RS_FOUNDATIONDB_AUTHORITY_HEARTBEAT_SECONDS=$authority_heartbeat_seconds" \
+    "$rust_image" sh -c \
+    'export PATH=/usr/local/cargo/bin:$PATH
+     apt-get update -qq
+     apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
+     exec cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb foundationdb_authority_heartbeat -- --ignored --exact --nocapture' \
+    >/dev/null
+
+  heartbeat_ticks=0
+  while :; do
+    docker logs "$authority_heartbeat_container" >"$authority_heartbeat_log" 2>&1 || true
+    if grep -Fq 'FOUNDATIONDB_AUTHORITY_HEARTBEAT_READY' "$authority_heartbeat_log"; then
+      echo "FOUNDATIONDB_AUTHORITY_HEARTBEAT_RUNNING container=$authority_heartbeat_container interval_seconds=30 max_forward_jump_seconds=120 duration_seconds=$authority_heartbeat_seconds"
+      return 0
+    fi
+    if ! docker inspect --format '{{.State.Running}}' "$authority_heartbeat_container" 2>/dev/null | grep -q '^true$'; then
+      cat "$authority_heartbeat_log" >&2 || true
+      echo "FoundationDB authority heartbeat exited before readiness" >&2
+      exit 1
+    fi
+    if [ "$heartbeat_ticks" -ge 300 ]; then
+      cat "$authority_heartbeat_log" >&2 || true
+      echo "Timed out waiting for the FoundationDB authority heartbeat" >&2
+      exit 1
+    fi
+    sleep 1
+    heartbeat_ticks=$((heartbeat_ticks + 1))
+  done
+}
+
+check_authority_heartbeat() {
+  [ -n "$authority_heartbeat_container" ] || return 0
+  if docker inspect --format '{{.State.Running}}' "$authority_heartbeat_container" 2>/dev/null | grep -q '^true$'; then
+    return 0
+  fi
+  docker logs "$authority_heartbeat_container" >&2 2>&1 || true
+  echo "FoundationDB authority heartbeat is no longer running" >&2
+  return 1
+}
+
+if [ -n "$authority_prefix" ]; then
+  start_authority_heartbeat
+fi
+
 native_mount_args=""
 if [ "$run_native_cli" -eq 1 ]; then
   native_mount_args="--device /dev/fuse --cap-add SYS_ADMIN --security-opt apparmor:unconfined"
@@ -571,7 +648,10 @@ else
     mount-rs-foundationdb-client "$test_command"
 fi
 
+check_authority_heartbeat
+
 if [ "$run_napi" -eq 1 ]; then
+  check_authority_heartbeat
   node_command='node integrations/mount-rs-napi/test/foundationdb.mjs'
   if [ "$run_iops" -eq 1 ]; then
     iops_size_mib=${MOUNT_RS_FOUNDATIONDB_IOPS_SIZE_MIB:-1}
@@ -669,10 +749,12 @@ if [ "$run_napi" -eq 1 ]; then
   if [ "$napi_status" -ne 0 ]; then
     exit "$napi_status"
   fi
+  check_authority_heartbeat
   echo "FOUNDATIONDB_NAPI_PASS image=$node_image"
 fi
 
 if [ -n "$rustfs_endpoint" ]; then
+  check_authority_heartbeat
   restart_timeout=${MOUNT_RS_FOUNDATIONDB_RESTART_TIMEOUT_SECONDS:-120}
   case "$restart_timeout" in
     ''|*[!0-9]*)
@@ -693,6 +775,7 @@ if [ -n "$rustfs_endpoint" ]; then
   fi
   wait_for_foundationdb
   echo "FOUNDATIONDB_SERVICE_RESTART_READY topology=$topology server=$restart_server"
+  check_authority_heartbeat
 
   restart_test_command="cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
   docker run --rm \
@@ -723,6 +806,7 @@ if [ -n "$rustfs_endpoint" ]; then
 fi
 
 if [ -n "$rustfs_endpoint" ]; then
+  check_authority_heartbeat
   echo "FOUNDATIONDB_TEST_PASS topology=$topology manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass soak_rounds=$soak_rounds"
 else
   echo "FOUNDATIONDB_TEST_PASS topology=$topology manifest=$test_manifest platform=$docker_platform soak_rounds=$soak_rounds"

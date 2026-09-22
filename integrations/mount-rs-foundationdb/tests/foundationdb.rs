@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const AUTHORITY_MAX_FORWARD_JUMP: Duration = Duration::from_secs(300);
 
@@ -484,6 +484,54 @@ async fn publish_foundationdb_authority_for_consumers() {
     .expect("FoundationDB authority publication exceeded its bounded timeout")
     .expect("publish FoundationDB consumer-gate authority time");
     assert!(published > 0, "published authority time must be non-zero");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "runs as the bounded authority service in the composed qualification"]
+async fn foundationdb_authority_heartbeat() {
+    let cluster_file = configured_cluster_file()
+        .expect("set MOUNT_RS_FOUNDATIONDB_CLUSTER_FILE for the authority heartbeat");
+    let prefix = env::var("MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX")
+        .expect("set MOUNT_RS_FOUNDATIONDB_AUTHORITY_PREFIX for the authority heartbeat");
+    let duration_seconds = env::var("MOUNT_RS_FOUNDATIONDB_AUTHORITY_HEARTBEAT_SECONDS")
+        .expect("set MOUNT_RS_FOUNDATIONDB_AUTHORITY_HEARTBEAT_SECONDS")
+        .parse::<u64>()
+        .expect("authority heartbeat duration must be an integer");
+    assert!(
+        duration_seconds > 0,
+        "authority heartbeat duration must be positive"
+    );
+
+    let authority =
+        FoundationDbLeaseAuthority::connect(&cluster_file, &prefix, FoundationDbLimits::default())
+            .expect("connect FoundationDB authority heartbeat");
+    let policy = authority_publication_policy();
+    let first = publish_authority_with_bounded_retry(&authority)
+        .await
+        .expect("publish initial FoundationDB authority heartbeat sample");
+    println!(
+        "FOUNDATIONDB_AUTHORITY_HEARTBEAT_READY published_ms={first} interval_ms={} max_forward_jump_ms={} duration_seconds={duration_seconds}",
+        policy.publication_interval.as_millis(),
+        policy.max_forward_jump.as_millis(),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(duration_seconds);
+    let mut publications = 1_u64;
+    while Instant::now() < deadline {
+        tokio::time::sleep(policy.publication_interval).await;
+        if Instant::now() >= deadline {
+            break;
+        }
+        publish_authority_with_bounded_retry(&authority)
+            .await
+            .expect("publish FoundationDB authority heartbeat sample");
+        publications += 1;
+    }
+    println!(
+        "FOUNDATIONDB_AUTHORITY_HEARTBEAT_PASS publications={publications} interval_ms={} max_forward_jump_ms={}",
+        policy.publication_interval.as_millis(),
+        policy.max_forward_jump.as_millis(),
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
