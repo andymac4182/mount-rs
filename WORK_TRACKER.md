@@ -1069,6 +1069,12 @@ peer-qualified `Connection` transport report.
 The public `WebdavRequestBody` documentation now states the corresponding
 contract: only known 413 limit faults are drainable for keep-alive reuse;
 non-recoverable body faults close the connection boundary.
+The exact-tip audit for `c42030c1807f6504660892bf829137897e910c5e` then found
+CI run `35687955166` cancelled with no jobs. Live Cloudflare R2 run
+`35687955189` failed the usage-admission job at `count=309 limit=20`, so its
+live integration job was skipped; no hosted WebDAV or live-provider PASS is
+claimable from that tip, and mainline subsequently advanced to
+`594ad797a67c77daa5d504042d15353da925688a`.
 The current hosted provider audit confirms the external boundary: Live AWS S3
 run `35679010203` failed its protected preflight with
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
