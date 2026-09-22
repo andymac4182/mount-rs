@@ -931,7 +931,8 @@ host-enabled WebDAV network/fault/restart matrix, while the package-wide
 server harness remains blocked in its unrelated NFS phase before WebDAV.
 Hosted network concurrency, power-loss/live-provider durability, and broader
 hosted session/member lifecycle remain open; local NodeFs/SQLite process-crash
-recovery is covered by the dedicated N-API probe. The callable/member packet
+recovery, including in-flight streamed-PUT prefix recovery after independent
+readback, is covered by the dedicated N-API probes. The callable/member packet
 `8f0e74138286a678cbc5868d3cc4a528fb1b9fe9` has exact-SHA CI and release lanes
 pending or queued, so no hosted WebDAV acceptance is claimable from that packet.
 The subsequent 64-pair packet `d391f9b798df455311177f462ab160736ed3ba4c`
@@ -1543,6 +1544,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   local NodeFs process-crash recovery and process-local WebDAV locks only;
   power-loss ordering, live-provider behavior, durable locks, and hosted
   lifecycle remain open.
+- [x] The focused N-API in-flight WebDAV process-crash probe is now part of the
+  package test sequence: three repeated `node
+  test/webdav-inflight-crash.mjs` runs yielded and independently read back a
+  streamed PUT prefix before forced child termination, then recovered the exact
+  prefix through replacement NodeFs and SQLite providers with zero replacement
+  locks. This classifies local in-flight process-crash recovery only; power-loss
+  ordering, live-provider behavior, durable locks, hosted lifecycle, and hosted
+  concurrency remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
