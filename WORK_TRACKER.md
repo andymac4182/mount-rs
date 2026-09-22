@@ -4085,6 +4085,15 @@ reproducible in a production-like environment.
   blocked by `missing_bucket` and current R2 by `count=285 limit=20`; physical
   power-loss durability, broader workload bounds, and native/hosted acceptance
   remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 callback packet forwards per-key driver failures from
+  `DeleteObjects` to `S3SessionHooks.on_error` without changing its 200
+  partial-result response. The focused regression and full Rust 5/6/30/5
+  packet, warning-denied Clippy, release N-API build, callback observability,
+  session differential, 64-way/CAS concurrency, process-restart recovery,
+  typecheck, and distribution checks passed. AWS run `35683716247` remains
+  blocked by `missing_bucket` and R2 run `35683716251` by `count=294 limit=20`;
+  physical power-loss durability, broader workload bounds, and native/hosted
+  acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.

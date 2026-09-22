@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,9 +12,10 @@ use mount_rs_core::{Capabilities, FileHandle, FsDriver, MemoryFs, Result as FsRe
 use mount_rs_s3::{
     CredentialScope, Credentials, EMPTY_PAYLOAD_SHA256, HeaderEntry, MIN_PART_SIZE, PresignRequest,
     S3BindError, S3ErrorClass, S3Request, S3RequestHead, S3Response, S3Server, S3ServerHooks,
-    S3ServerOptions, S3Session, S3SessionOptions, S3TransportErrorKind, STREAMING_PAYLOAD,
-    STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest, canonical_query,
-    format_amz_date, presign_request, sha256_hex, sign_chunk, sign_request, sign_trailer,
+    S3ServerOptions, S3Session, S3SessionHooks, S3SessionOptions, S3TransportErrorKind,
+    STREAMING_PAYLOAD, STREAMING_PAYLOAD_TRAILER, STREAMING_UNSIGNED_PAYLOAD_TRAILER, SignRequest,
+    canonical_query, format_amz_date, presign_request, sha256_hex, sign_chunk, sign_request,
+    sign_trailer,
 };
 use socket2::SockRef;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1133,10 +1134,65 @@ async fn cancelled_streaming_part_preserves_existing_part_and_staging_budget() {
     assert!(session.assertions().is_empty());
 }
 
+#[tokio::test]
+async fn delete_objects_reports_per_key_driver_errors_to_error_hook() {
+    let driver = FaultOnReadFs {
+        inner: MemoryFs::empty(),
+        fail_next_read: Arc::new(AtomicBool::new(false)),
+        fail_unlink: Arc::new(AtomicBool::new(false)),
+        durable_writes: false,
+        sync_calls: Arc::new(AtomicUsize::new(0)),
+        fail_syncfs: Arc::new(AtomicBool::new(false)),
+    };
+    let reports = Arc::new(StdMutex::new(Vec::<(String, String, String)>::new()));
+    let observed = Arc::clone(&reports);
+    let session = S3Session::new_with_options(
+        driver.clone(),
+        S3SessionOptions {
+            hooks: S3SessionHooks {
+                on_error: Some(Arc::new(move |message, head| {
+                    let head = head.expect("per-key driver error head");
+                    observed.lock().expect("error reports lock").push((
+                        message,
+                        head.method,
+                        head.target,
+                    ));
+                })),
+                ..S3SessionHooks::default()
+            },
+            ..S3SessionOptions::default()
+        },
+    );
+
+    let seeded = session
+        .handle(request("PUT", "/mountx/fault.txt", b"retained", &[]))
+        .await;
+    assert_eq!(seeded.status, 200);
+    driver.fail_unlink.store(true, Ordering::SeqCst);
+
+    let deleted = session
+        .handle(request(
+            "POST",
+            "/mountx?delete",
+            b"<Delete><Object><Key>fault.txt</Key></Object></Delete>",
+            &[],
+        ))
+        .await;
+    assert_eq!(deleted.status, 200);
+    assert!(String::from_utf8_lossy(&deleted.body).contains("<Key>fault.txt</Key>"));
+
+    let reports = reports.lock().expect("error reports lock");
+    assert_eq!(reports.len(), 1);
+    assert!(!reports[0].0.is_empty());
+    assert_eq!(reports[0].1, "POST");
+    assert_eq!(reports[0].2, "/mountx?delete");
+}
+
 #[derive(Clone)]
 struct FaultOnReadFs {
     inner: MemoryFs,
     fail_next_read: Arc<AtomicBool>,
+    fail_unlink: Arc<AtomicBool>,
     durable_writes: bool,
     sync_calls: Arc<AtomicUsize>,
     fail_syncfs: Arc<AtomicBool>,
@@ -1226,6 +1282,11 @@ impl FsDriver for FaultOnReadFs {
     }
 
     async fn unlink(&self, path: &str) -> FsResult<()> {
+        if path == "/fault.txt" && self.fail_unlink.swap(false, Ordering::SeqCst) {
+            return Err(
+                mount_rs_core::FsError::new(mount_rs_core::ErrorCode::Eio).with_syscall("unlink")
+            );
+        }
         self.inner.unlink(path).await
     }
 }
@@ -1235,6 +1296,7 @@ async fn failed_multipart_assembly_releases_finalization_claim_for_retry() {
     let driver = FaultOnReadFs {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
+        fail_unlink: Arc::new(AtomicBool::new(false)),
         durable_writes: false,
         sync_calls: Arc::new(AtomicUsize::new(0)),
         fail_syncfs: Arc::new(AtomicBool::new(false)),
@@ -1298,6 +1360,7 @@ async fn durable_mutations_wait_for_and_report_syncfs_barriers() {
     let driver = FaultOnReadFs {
         inner: MemoryFs::empty(),
         fail_next_read: Arc::new(AtomicBool::new(false)),
+        fail_unlink: Arc::new(AtomicBool::new(false)),
         durable_writes: true,
         sync_calls: Arc::new(AtomicUsize::new(0)),
         fail_syncfs: Arc::new(AtomicBool::new(false)),
