@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 18:03 AEST (2026-09-22 08:03 UTC)
+Last updated: 2026-09-22 18:08 AEST (2026-09-22 08:08 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -512,6 +512,14 @@ dispatched, AWS was not dispatched while security issue #3 remains unprovisioned
 and the production-release publisher was deliberately held until the required
 acceptance packet is green. No hosted result is promoted until its run is
 terminal and its artifacts/logs are reviewed.
+
+At 18:06 AEST the candidate's seven primary runs were still queued, with no
+repository-wide Actions run in progress. GitHub's public status endpoint
+reported Actions operational, so this is recorded as hosted runner/queue
+capacity rather than a service outage. The older duplicate push-triggered CI
+run `35700818889` was requested for cancellation at 18:07 AEST; the API still
+reported it queued at the 18:08 capture, so the cancellation is not promoted as
+terminal until GitHub confirms it.
 
 ### W05.45 exact package evidence (2026-09-22 18:03 AEST)
 
@@ -1041,6 +1049,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 08:06–08:08 UTC (18:06–18:08 AEST) | Audited the hosted queue and GitHub Actions status, then requested cancellation of the older duplicate CI run `35700818889` | Hosted capacity / release-control hygiene | Actions reported operational, but the seven primary candidate runs and the duplicate remained queued; no hosted pass or cancellation was inferred. |
 | 2026-09-22 07:59–08:03 UTC (17:59–18:03 AEST) | Rechecked exact-candidate npm package contents and locked workspace licenses; corrected the package-command probe | Local packaging / dependency gate | Both intended npm dry-runs passed; core includes the Darwin arm64 addon and notices, virtual-fs includes declarations/notices, and all 25 workspace packages are Apache-2.0. Cross-platform publication/signing remains open. |
 | 2026-09-22 07:53–07:59 UTC (17:53–17:59 AEST) | Verified the immutable candidate ref, inspected workflow dispatch contracts, dispatched the non-R2 same-SHA hosted packet, and captured run IDs | Hosted release-control coordination | Seven primary runs queued on `87f3cdf0`; Live R2, Live AWS, and production-release publication intentionally held behind their explicit gates. |
 | 2026-09-22 07:35–07:53 UTC (17:35–17:53 AEST) | Built the optimized N-API artifact and ran the complete pinned-oracle Node/N-API suite plus `scripts/test-pglite.sh` on immutable candidate `87f3cdf0` | Local production qualification / SDK-CLI-package gate | Full local packet passed: Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`, and all 40×621 traces. Provider credentials, live R2, TiDB/RustFS, FoundationDB opt-in, and privileged native mounts remained explicit skips or external gates. |

@@ -5,6 +5,47 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, adaptive concurrent mutation batching
+
+This is the newest W26 implementation boundary. The shared chunked coordinator
+now keeps the low-latency local-provider path, but continues collecting only
+while the mutation queue is growing, targets the 64-worker Ozone qualification
+wave, and caps the scheduler window. The change is correctness-preserving: the
+existing fenced single-publication/CAS boundary, queue-capacity limit and
+cancellation fail-closed path are unchanged. A fixed 64-round variant was
+discarded after a local diagnostic latency regression; it is not part of the
+published implementation.
+
+| Field | Current value |
+| --- | --- |
+| Shared build-on tip | `origin/main` = `2dab2386ac86df1256299e0052f81319d1164130` at the current fast-forward before this ledger commit; implementation commit `fe4a6bbf0daf0b5f466536ab8caf864717c74e35` is in its history. Other workstreams added unrelated mainline changes after that implementation push; this ledger publication will advance the shared tip again. |
+| Current implementation chunk | `fe4a6bbf` (`perf(w26): adapt mutation batching to concurrent waves`). The coordinator uses an eight-round initial window, extends only across observed queue growth, stops at two idle rounds or 64 queued requests, and caps at 64 rounds. The 64-way create and replace regressions both prove one fenced publication. |
+| Local implementation evidence | `cargo fmt --all -- --check`, `git diff --check`, all 21 chunked tests, full locked workspace tests (exit 0; all runnable tests passed and service/native rows remained explicit skips), strict workspace Clippy with `-D warnings` (exit 0), shared-target N-API debug build, and the complete pinned-oracle N-API suite all passed. |
+| Diagnostic performance evidence | Local split-SQLite direct-api run `/private/tmp/w26-local-split-sqlite-adaptive.json` (SHA-256 `23246f4a8a6d56ad393713e352967094557ca5fe192744aa6407ef485c632d2c`) completed 400/400 lifecycles with zero timeouts and cleanup failures but measured `631.141356` lifecycle IOPS (`1,901.317334 ms`; p95 write/read/delete `284.050833/96.620334/10.030708 ms`). This is macOS/local split-provider diagnostics, not customer Ozone/R2 acceptance. |
+| Security evidence | Diff scan `b5429807-35af-4978-83d4-ed7bcde2d6f5` is sealed with complete coverage over `integrations/mount-rs-chunked/src/lib.rs` and `transports/mount-rs-fuse/src/mount.rs`, 0 reportable findings, and report `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-MW6oGi/mount-rs/6c868cb487f0ab13359d3fd79fe26737d51db164_20260922T075316Z_bs0_9ffi/report.md`. It is evidence for captured snapshot digest `codex-security-snapshot/v1:sha256:b4dc9c71c4b0465ff0dc9c7e724b099d3a54ef486372fb7c0193379d5a4772dd`; the scanner warned that repository HEAD changed during the run, so the terminal exact-head packet must still carry a matching current-head security result before production acceptance. |
+| Fresh hosted qualification | Manual run `35702188498 <https://github.com/andymac4182/mount-rs/actions/runs/35702188498>` selected shared head `245258d9`. W26 producers were queued at capture: base `ozone` job `106662583505`, compositions `106662583710`, TiDB `106662583344`, FoundationDB `106662583211`; aggregate had not yet produced a terminal packet. |
+| Production decision | **NO-GO / 1 of 4 provider rows passed the last terminal packet; current requalification pending**. The prior exact-SHA packet remains the acceptance boundary: SQLite/R2 `1051.976655` passed, PGlite/R2 `837.779225`, TiDB/R2 `463.080116` and FoundationDB/R2 `450.696578` failed. Tier-1 99.99% reliability, five-minute RPO/RTO, secure customer Ozone topology, backup/DR and release ownership remain explicit external or cross-workstream gates. |
+| Next action | Retrieve the terminal W26 artifacts for run `35702188498`, bind every provider row to its exact head, and decide whether adaptive batching changes PGlite/TiDB/FoundationDB throughput. If any row still misses, continue with provider-specific correctness-preserving optimization; do not lower, average or skip the per-drive 1,000-IOPS target. |
+
+### Current implementation and production-readiness ledger delta
+
+| Work-item impact | Status / completion | Evidence and remaining action | Provisional estimate / external gate |
+| --- | --- | --- | --- |
+| W26.3a–d provider compositions and W26.15 hard IOPS gate | **OPEN / 100% adaptive coordinator implementation; hosted requalification pending** | The published chunk changes only bounded mutation collection. The previous terminal packet remains `1/4` provider rows over target; the new run is queued. Local split-SQLite diagnostics are recorded for regression context only and do not replace Ozone/R2 evidence. | ~0.5–1.5 d per provider remediation/review cycle; hosted runners, Ozone/R2/provider capacity and artifact retention are external gates. |
+| W26.4 end-to-end Rust/Node/CLI/HTTP/N-API path | **PASS locally / hosted current packet pending** | Full workspace and pinned-oracle suites pass, including 64-way protocol/provider concurrency checks; re-read the current W26 producer markers from one terminal run before promoting acceptance. | ~0.5–1 d review; hosted Ozone and provider fixtures remain external. |
+| W26.9–W26.12 verifier, retention and one-revision aggregation | **PASS implementation / current aggregate pending** | Existing verifier remains fail-closed on missing markers, incomplete metrics and hard-target misses. Run `35702188498` must produce one complete exact-head aggregate before this row can close. | ~0.25–1 d review; GitHub scheduling/artifact services are external. |
+| W26.7/W26.13 security and customer rollout contract | **OPEN for production / captured diff scan sealed** | Adaptive diff scan is sealed with 0 findings for its two reviewed surfaces, but it warns that repository HEAD changed while scanning; rebind the security result to the terminal exact head before closing the gate. Customer certificates, IAM, secret rotation, tenant isolation, measured 99.99% SLO, five-minute RPO/RTO and backup/DR evidence remain customer/Ozone-owned. | ~1–2 d review; current-head rescan, secure customer deployment and backup/DR are external or cross-workstream gates. |
+| P14 final integration-readiness review | **NO-GO / 48% provisional** | The code chunk is published and locally tested, but no remote provider gate changed until the new exact-head packet is terminal. | ~1–2 d after W26.15; customer security/SLO/DR, native/provider qualification and release stream remain gates. |
+
+### Session time log — adaptive batching chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — performance isolation | Compared the fixed 64-round window against the eight-round baseline; the fixed variant was discarded after a local split-SQLite diagnostic at `644.073320` IOPS, with all lifecycles successful but materially higher latency. Implemented the adaptive growth/idle/target/cap policy instead. | ~0.75–1.25 h | ~0.25 h local build/benchmark | Published `fe4a6bbf`; no threshold relaxation and no provider skip. |
+| 2026-09-22 — local verification | Ran chunked unit tests, full locked workspace tests, strict Clippy, shared-target N-API build and the complete pinned MountX oracle suite. | ~0.75–1.25 h | ~0.5–1 h shared-target/build wait | All runnable local gates passed; explicit provider/native skips remain external. |
+| 2026-09-22 — publication and hosted requalification | Fetched concurrent mainline work, fast-forwarded, committed/pushed `fe4a6bbf`, dispatched manual run `35702188498`, recorded all W26 job IDs and retained the local diagnostic digest. | ~0.25–0.5 h | pending; CI queue/provider startup and execution | Shared `origin/main` contains the chunk; production remains NO-GO pending terminal exact-head provider evidence. |
+| 2026-09-22 — security closure and ledger refresh | Completed the compact diff review for the adaptive chunk plus the concurrent FUSE teardown diff, persisted the threat model, sealed scan `b5429807-35af-4978-83d4-ed7bcde2d6f5`, and recorded its complete two-surface/zero-finding result with the current-HEAD warning. | ~0.25–0.5 h | ~0.25 h security workbench finalization | Captured security evidence is sealed; a matching current-head result remains part of the exact-head production gate. |
+
 ## Current authority override — 2026-09-22, atomic write path through production wrappers
 
 This is the newest W26 implementation and evidence boundary. The chunk fixes a

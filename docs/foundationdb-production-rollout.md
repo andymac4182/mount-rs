@@ -398,8 +398,11 @@ The W07 hosted workflow now assembles a cross-platform qualification packet
 after the Linux and macOS jobs. The aggregate requires both upstream jobs to be
 terminally successful, downloads both retained artifacts, and runs
 `scripts/verify-w07-platform-evidence.mjs` plus its credential-free regression
-suite. The resulting `W07_PLATFORM_QUALIFICATION_PASS` is still a qualification
-marker: it does not establish a live macOS FoundationDB service or cluster,
+suite. The macOS artifact must also carry run-bound provenance matching the
+Linux schema-2 repository, workflow, ref, source revision, run, attempt and
+runner; mismatches fail closed. The resulting
+`W07_PLATFORM_QUALIFICATION_PASS` is still a qualification marker: it does not
+establish a live macOS FoundationDB service or cluster,
 native mount, clean install, signing/package provenance, or production GO.
 
 ## Credential-free production configuration policy

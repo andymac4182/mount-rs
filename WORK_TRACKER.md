@@ -6,29 +6,32 @@ not release-ready**.
 
 Current W26 implementation/qualification boundary (2026-09-22): the latest
 shared build-on tip before this tracker update is
-`origin/main=8520e362710a4b3fe00fd567cf00fcc13e64c222`,
-with the atomic-write wrapper fix in ancestor commit `116e9ed4`
-(`perf(w26): preserve atomic write path
-through wrappers`). The N-API `DriverSlot`, `MountDriver`, observability and
-persistence wrappers now forward the optimized `FsDriver::write_file` path;
-the focused regression proves one atomic write produces one metadata
-publication. Full locked Rust tests, strict workspace Clippy, the shared-target
-debug N-API build, and the complete pinned-oracle N-API suite passed. Security
-diff scan `2582d7c0-130a-454e-beb3-ffba77169e3e` completed with complete
-changed-file coverage and zero reportable findings. The fresh retained manual
-qualification is GitHub Actions run
-`35698854392 <https://github.com/andymac4182/mount-rs/actions/runs/35698854392>`
-on exact implementation SHA `116e9ed4`; its four W26 producers are now
-terminal and aggregate `106656637297` failed closed. The terminal exact-SHA packet
-measured SQLite/R2 `1051.976655` IOPS, PGlite/R2 `837.779225`, TiDB/R2
-`463.080116` and FoundationDB/R2 `450.696578`; all rows had 400/400
-successful lifecycles and zero timeout/cleanup failures, but only SQLite
-passed the hard target. TiDB and FoundationDB also retained `RUSTFS_COMBO_FAIL`.
-Production is **NO-GO** until a new exact-SHA packet passes all providers,
-end-to-end markers, security, Tier-1 SLO and customer-owned backup/DR gates.
-W26 tracks
-compatibility and qualification for customer-deployed Ozone; it does not
-deploy Ozone, own backup/DR or own releases.
+`origin/main=2dab2386ac86df1256299e0052f81319d1164130`, which contains the
+published adaptive mutation coordinator chunk `fe4a6bbf`
+(`perf(w26): adapt mutation batching to concurrent waves`). It keeps the
+eight-round local fast path, extends only while the queue is growing, targets
+the 64-worker qualification wave, and caps collection at 64 rounds/requests;
+the 64-way create and replace regressions each prove one fenced publication.
+Full locked Rust tests, strict workspace Clippy, the shared-target debug N-API
+build, and the complete pinned-oracle N-API suite passed. A local split-SQLite
+diagnostic completed 400/400 lifecycles with zero timeout/cleanup failures but
+measured `631.141356` IOPS, so it is explicitly not Ozone/R2 acceptance. The
+new manual qualification is GitHub Actions run
+`35702188498 <https://github.com/andymac4182/mount-rs/actions/runs/35702188498>`
+on shared head `245258d9`; W26 base `106662583505`, compositions
+`106662583710`, TiDB `106662583344` and FoundationDB `106662583211` were
+queued at capture. The last terminal exact-SHA packet measured SQLite/R2
+`1051.976655` IOPS, PGlite/R2 `837.779225`, TiDB/R2 `463.080116` and
+FoundationDB/R2 `450.696578`; only SQLite passed and the aggregate failed
+closed. The adaptive diff security scan `b5429807-35af-4978-83d4-ed7bcde2d6f5`
+is now sealed with complete two-surface coverage and zero reportable findings
+for its captured snapshot, but it warned that repository HEAD changed while
+scanning; the terminal exact-head packet must still carry a matching current-
+head security result. Production remains **NO-GO** until the new exact-SHA packet passes all
+providers, end-to-end markers, security, Tier-1 SLO and customer-owned
+backup/DR gates. W26 tracks compatibility and qualification for
+customer-deployed Ozone; it does not deploy Ozone, own backup/DR or own
+releases.
 
 This is the delivery dashboard. [Requirements](REQUIREMENTS.md) define scope;
 [porting evidence](PORTING_STATUS.md) and the [API parity ledger](docs/public-api-parity.md)
@@ -2995,7 +2998,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   That aggregate downloads both platform artifacts, requires both upstream jobs
   to be terminally green, and runs
   `scripts/verify-w07-platform-evidence.mjs` against the Linux schema-2
-  summary/log and the macOS compile marker. This closes the evidence-packet
+  summary/log and the macOS compile marker. The macOS artifact now also carries
+  a run-bound provenance marker, and the verifier requires its repository,
+  workflow, ref, source revision, run, attempt and runner to match the Linux
+  schema-2 provenance before emitting the aggregate pass. This closes the
+  evidence-packet
   integrity gap only: it does not claim a live macOS FoundationDB service or
   cluster, native mount, clean install, signing, or package acceptance. The
   terminal aggregate is green in
