@@ -18,7 +18,8 @@ use mount_rs_webdav::{
     DavLockTableOptions, Depth, LockDepth, WebdavError, WebdavRequestBody, WebdavRequestHead,
     WebdavServer, WebdavServerError, WebdavServerHooks, WebdavServerOptions, WebdavSession,
     WebdavSessionHooks, WebdavSessionOptions, WebdavTransportErrorKind, create_webdav_server,
-    create_webdav_server_with_hooks, status_for_error, status_line, status_text,
+    create_webdav_server_with_hooks, create_webdav_server_with_session_hooks, status_for_error,
+    status_line, status_text,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -1788,6 +1789,58 @@ async fn ranges_conditionals_auth_and_request_limits_are_real_http() {
             .status(),
         200
     );
+
+    server.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn declared_length_limit_reports_session_error_and_stats() {
+    let reports = Arc::new(Mutex::new(Vec::new()));
+    let callback_reports = Arc::clone(&reports);
+    let server = create_webdav_server_with_session_hooks(
+        Arc::new(MemoryFs::empty()),
+        WebdavServerOptions {
+            max_request_bytes: 4,
+            ..WebdavServerOptions::default()
+        },
+        WebdavServerHooks::default(),
+        WebdavSessionHooks {
+            on_error: Some(Arc::new(move |error, head| {
+                callback_reports
+                    .lock()
+                    .expect("WebDAV declared-length report lock")
+                    .push((error, head));
+            })),
+        },
+    )
+    .unwrap();
+    server.listen().await.unwrap();
+
+    let response = reqwest::Client::new()
+        .put(format!("{}/declared-too-large", server.url()))
+        .body("12345")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(response.headers().contains_key("connection"));
+
+    {
+        let reports = reports.lock().expect("WebDAV declared-length reports");
+        assert_eq!(reports.len(), 1);
+        assert!(matches!(
+            &reports[0].0,
+            WebdavError::Fault(fault) if fault.status == 413
+        ));
+        assert_eq!(reports[0].1.method, "PUT");
+        assert_eq!(reports[0].1.target, "/declared-too-large");
+    }
+
+    let stats = server.session.stats();
+    assert_eq!(stats.requests, 1);
+    assert_eq!(stats.replies, 1);
+    assert_eq!(stats.errors, 1);
+    assert_eq!(stats.methods.get("PUT"), Some(&1));
 
     server.close().await.unwrap();
 }

@@ -525,26 +525,29 @@ async fn handle_request(
             }
         }
     }
-    if headers
-        .get("content-length")
-        .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|length| length > max_request_bytes)
-    {
-        let response = crate::protocol::fault_response(&WebdavError::Fault(
-            DavFault::new(413).with_message("the request body exceeds the configured limit"),
-        ));
-        let mut response = response;
-        response
-            .headers
-            .insert("connection".to_owned(), "close".to_owned());
-        return Ok(to_http_response(response, false, &stream_control));
-    }
     let head = WebdavRequestHead {
         method: parts.method.as_str().to_owned(),
         target: parts.uri.to_string(),
         headers,
     };
     let is_head = head.method.eq_ignore_ascii_case("HEAD");
+    if head
+        .headers
+        .get("content-length")
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|length| length > max_request_bytes)
+    {
+        let mut response = session.reject_request(
+            &head,
+            WebdavError::Fault(
+                DavFault::new(413).with_message("the request body exceeds the configured limit"),
+            ),
+        );
+        response
+            .headers
+            .insert("connection".to_owned(), "close".to_owned());
+        return Ok(to_http_response(response, is_head, &stream_control));
+    }
     let body = LimitedRequestBody {
         inner: IncomingRequestBody { body },
         limit: max_request_bytes,

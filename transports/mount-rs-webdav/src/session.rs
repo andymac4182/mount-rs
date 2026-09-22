@@ -305,6 +305,24 @@ impl WebdavSession {
             .await
     }
 
+    /// Record and answer a request rejected by an HTTP adapter before body
+    /// dispatch. This keeps transport-level size preflights on the same
+    /// request, error-hook, and reply-statistics path as session dispatch.
+    pub(crate) fn reject_request(
+        &self,
+        head: &WebdavRequestHead,
+        error: WebdavError,
+    ) -> WebdavResponse {
+        self.count_request(&head.method);
+        self.report_error(&error, head);
+        let mut response = fault_response(&error);
+        if head.method.eq_ignore_ascii_case("HEAD") {
+            response.body = None;
+        }
+        self.count_reply(response.status);
+        response
+    }
+
     /// Answer one request from an asynchronous body stream and never reject.
     ///
     /// `PUT` writes each non-empty chunk before asking the transport for the

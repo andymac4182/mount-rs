@@ -1231,6 +1231,15 @@ confirmed that a locked `PUT` does not mutate the existing resource; the full
 WebDAV target passed 34/34, warning-denied Clippy passed, and formatting/diff
 checks passed. Hosted/provider, power-loss, durable-lock, crash/restart, and
 stronger same-resource ordering remain open.
+Declared Content-Length overflows now route through session rejection
+bookkeeping before the HTTP adapter closes the connection, so request/reply/error
+stats and the request-level on_error hook remain exact-once; a real-loopback
+regression verifies the 413 response, original PUT request head, counters,
+and bodyless HEAD handling in the shared helper. The full WebDAV target passes
+36/36, warning-denied workspace Clippy passes, formatting and diff checks pass,
+and the pinned TypeScript/Rust differential passes all 40 paired cases.
+Hosted/provider, authentication-ordering, power-loss, durable-lock,
+crash/restart, and stronger same-resource ordering remain open.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
@@ -6549,6 +6558,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV declared-length preflight observability | Route declared Content-Length size-limit rejections through session request/reply/error bookkeeping and the request-level error hook before closing the connection; preserve bodyless HEAD responses | Full WebDAV target 36/36, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, authentication-ordering, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV streamed mutation-handle cancellation` | Close mutation-side provider handles when streamed PUT or shared file-transfer futures are cancelled during body polling or provider I/O | Full WebDAV target 35/35, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV poisoned lock-table fail-closed behavior` | Propagate WebDAV lock-table mutex poisoning as a server error across lock-dependent request paths, while retaining poisoned lock state for public snapshots | Full WebDAV target 34/34, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | `2026-09-22 WebDAV transport-neutral body cancellation` | Close the provider file handle when a direct `WebdavBody::into_bytes()` consumer is cancelled during a pending response read | Full WebDAV target 33/33, warning-denied Clippy, formatting, and diff checks pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
