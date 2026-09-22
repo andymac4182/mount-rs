@@ -75,10 +75,14 @@ same-slot request also reaches the server, waits, and then returns the cached
 original body without re-execution. A follow-up active-slot guard now returns
 prompt `NFS4ERR_DELAY` to that retry and `NFS4ERR_SEQ_MISORDERED` to a
 premature next sequence, while the completed reply remains replayable; slot
-sequence wrap to zero is unit-tested. The per-RPC lease-sweep write lock still
-serializes ordinary v4 calls, so overlapping execution on independent slots
-is not qualified. Canceled-operation reply recovery, crash-durable replay,
-native-client ordering, and exact-tip hosted acceptance remain open.
+sequence wrap to zero is unit-tested. A controlled real-TCP test now blocks
+slot 0 in backend `stat` while slot 1 of the same session completes over a
+second connection. The handler takes the exclusive lease-sweep lock only when
+a client has expired; an injected-clock test also proves an expired slot-1
+request waits for the blocked slot-0 call before sweeping and returning
+`NFS4ERR_BADSESSION`. This is bounded same-process independent-slot overlap,
+not canceled-operation reply recovery, crash-durable replay/lease/handle state,
+native-client ordering, or exact-tip hosted acceptance.
 
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
