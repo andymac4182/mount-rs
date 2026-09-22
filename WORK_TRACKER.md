@@ -2242,6 +2242,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   the packet is still `NO-GO` with seven open gates and zero evidence records.
   Deployment-level authority credentials, monitored clock/cadence telemetry
   and failover evidence remain pending, so W07.3 is not marked complete.
+  Current-main requalification
+  [35678679681](https://github.com/andymac4182/mount-rs/actions/runs/35678679681)
+  (job `106590602197`, exact source `94b76d79c1df2f98b4255ffdcb7d16f6bbe970d4`)
+  passed the policy, negative-fixture, build, workload and Node/N-API gates but
+  failed closed in the post-restart consumer-authority publication because the
+  staged qualification clients had no continuously running authority publisher;
+  the persisted authority therefore exceeded the validated 120-second
+  forward-jump bound. This is a real production-shaped cadence gap, not a
+  reason to relax the safety guard. The next correction adds an independent
+  bounded authority heartbeat and checks its liveness across each staged client
+  and service-restart gate; deployment-level credentials, monitored
+  clock/cadence telemetry and failover evidence remain pending.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
