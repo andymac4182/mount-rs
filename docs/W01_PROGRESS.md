@@ -59,7 +59,20 @@ ledger in the same commit as an implementation/evidence chunk.
 | W01-Auto/CLI | Auto selection, mount facade and SDK-backed consumers | Focused option/consumer paths exist; cross-transport native lifecycle remains | Per-transport options/callback ownership and signal/async-dispose evidence |
 | W01-Provider/Native | Providers, hosted CI, FSKit, Windows, crash and concurrency | Local capability-limited packets exist; external lanes remain | Fresh live-provider and hosted/native results with no prerequisite-gated acceptance rows |
 
-The latest W01-9P packet at exact SHA
+The latest W01-9P Unix listener packet was published at exact test SHA
+`dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` and is included in descendant head
+`d43f5ea4e4334912de86ac0db818392531a7d4ec`. Its [Native 9P run
+`35683716217`](https://github.com/andymac4182/mount-rs/actions/runs/35683716217)
+passed N-API job `106606580352` with private/shared-directory policy,
+`0600` Unix socket mode, handshake/peer/path, cleanup, and path/port
+exclusivity, followed by the existing server/attach and automatic/direct/
+structural mounted-I/O cleanup steps. Rust job `106606580326` passed the Linux
+probe plus all four ignored native lifecycle tests. Local elevated execution
+also passed; the direct run at the test SHA was cancelled before jobs
+materialized and is not promoted. This qualifies the Unix listener policy
+slice; broader W01 acceptance remains NO-GO.
+
+The preceding W01-9P packet at exact SHA
 `007e6545d1b25d708abfa10f2120f81fba59a74a` passed [Native 9P run
 `35682638941`](https://github.com/andymac4182/mount-rs/actions/runs/35682638941):
 N-API job `106602684115` passed the isolated server/attached-stream lifecycle
