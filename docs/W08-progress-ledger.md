@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 12:13 AEST**
+Status snapshot: **2026-09-22 12:22 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -9,9 +9,10 @@ pointer synchronization before the live production-boundary audit was
 `f1362442`. The audit documentation was committed as `fd29a297`, reconciled
 with concurrent mainline work and pushed in public merge tip `a40f5b8d`.
 The current tested source base is merged tip
-`ed29016e82c46e23e372f0615916ed3c1608370b`, which passed a fresh full locked
+`f68106cfcc64f3c7e4c90b2c413fcc393824a526`, which passed a fresh full locked
 workspace test and strict Clippy run after the WebDAV mounted-restart
-cleanup correction, N-API provider-network cleanup, RustFS/Ozone lockfile refreshes,
+cleanup correction, S3 conditional-put/session-concurrency gateway coverage,
+N-API provider-network cleanup, RustFS/Ozone lockfile refreshes,
 9P bounded-reader fix, 9P frame-assembler, WebDAV native-concurrency, R2
 upload coalescing, N-API declaration/P9 normalization, 9P codec,
 S3-session-concurrency, session-parity, chunked-durability, FUSE, S3-test and
@@ -26,7 +27,7 @@ The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
 mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
 tip `a921fe76`; the subsequent pointer synchronization was published in
-`ff29dad7`. The current source qualification is merged tip `ed29016e`; the
+`ff29dad7`. The current source qualification is merged tip `f68106cf`; the
 source-equivalent ledger and reconciliation history were published in public
 ancestry through tip `160f831b`.
 Earlier source-health results at `4b9787f9`, `7addaf12`,
@@ -450,11 +451,11 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 12:13 AEST
+### Latest evidence refresh — 2026-09-22 12:22 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
-| Current tested merged source base `ed29016e82c46e23e372f0615916ed3c1608370b` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact merged source; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; `git diff --check` passed. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
+| Current tested merged source base `f68106cfcc64f3c7e4c90b2c413fcc393824a526` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact merged source after the S3 conditional-put/session-concurrency changes; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The changed N-API S3-session-concurrency script passed `node --check`, package JSON parsed successfully, and the four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; `git diff --check` passed. The later typed-reader/W26 merge changed documentation only and is source-equivalent. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
 | Current public publication tip `160f831bec76b8e3bdcbb8915e24a2bbff1d8df9` | PASS — source-equivalent public publication | `git fetch origin`, `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse origin/main`, `git ls-remote origin refs/heads/main` and `git merge-base --is-ancestor HEAD origin/main` all succeeded; local HEAD, `origin/main` and the public ref were identical with an empty `git diff HEAD origin/main`. The public tip adds only reconciled documentation after the exact tested `ef5cd2ca` source; no new W08 Rust/provider/native result is claimed. | Keep the explicit production NO-GO boundary until P01–P09 receive terminal evidence and named approval. |
 | Credential-free production admission fixture controls, 2026-09-22 11:36 AEST | PASS — repository policy controls only | `MOUNT_RS_TIDB_TLS_URL` was supplied out-of-band as a non-secret representative TLS-policy URL; `node scripts/verify-w08-production-config.mjs tests/tidb/production-config-policy.json` passed, while the insecure/inline-secret fixture failed closed as expected. `node scripts/verify-w08-release-manifest.mjs tests/tidb/release-manifest-policy.json` passed pending policy, the strict accepted fixture passed with `--require-release-acceptance`, and the invalid fixture failed closed as expected. No provider connection, artifact signature, SBOM service, canary, rollback or approval was performed. | Keep P01/P02/P07/P09 open until the approved topology, secret manager/IAM, credentialed TLS/security evidence, immutable candidate-tag release, target registry evidence, canary, rollback and named release approval exist. |
 | Current public source-equivalent checkpoint `ff29dad70e5b3d3a832e99ef55f4fce2967448aa` | PASS — publication and source-boundary verification | `git fetch origin`, `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse origin/main`, `git ls-remote origin refs/heads/main` and `git merge-base --is-ancestor HEAD origin/main` all succeeded; local HEAD, tracking ref and public branch are identical. The public checkpoint contains no Rust or W08 implementation source changes after tested `eeb628da`; the W08 policy/evidence validators still pass. No provider/native runtime or production result is claimed. | Preserve the production `NO-GO` boundary until P01–P09 receive terminal evidence and named approval. |
@@ -601,6 +602,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 12:02–12:04 AEST | Merged concurrent public tip `6ccea74f`, reran the full locked workspace test and strict Clippy on merged tip `ef5cd2ca`, reran all W08 policy/evidence suites, and ran diff checks. The expanded WebDAV mounted-restart test remains explicitly host-gated. | ~0.15 engineer-day | ~1.33s test/Clippy/policy execution plus ~9s merge/static verification | The WebDAV restart-recovery source merge is clean; native/provider prerequisites and the fresh P09 API/environment blocker remain external, so production stays NO-GO. |
 | 2026-09-22 12:04–12:07 AEST | Reconciled concurrent W04/W05 documentation-only commits, pushed the validated checkpoint as public tip `160f831b`, and verified exact local/remote equality, public ref, clean tree and ancestry. | ~0.05 engineer-day | ~6s fetch/merge/push verification | The exact tested `ef5cd2ca` source is publicly integrated through a source-equivalent tip; production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 12:07–12:13 AEST | Merged public WebDAV cleanup correction `ed29016e`, reran the full locked workspace test and strict Clippy on that exact source, reran all four W08 rollout/evidence policy suites, and ran `git diff --check`. | ~0.1 engineer-day | ~42s test/Clippy/policy execution plus ~9s merge/static verification | The merged WebDAV correction is test-, lint- and tracking-control clean; provider/native prerequisites and the protected production release boundary remain external. The qualification is ready for normal publication; production remains NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 12:13–12:22 AEST | Reconciled concurrent 9P/N-API/lockfile and S3 conditional-put/session-concurrency updates through tested source `f68106cf`, reran the full locked workspace test and strict Clippy, syntax-checked the changed N-API S3 test, parsed package JSON, reran all four W08 rollout/evidence suites, and merged the later typed-reader/W26 documentation-only tip as source-equivalent. | ~0.25 engineer-day | ~1m30s test/Clippy/policy/static execution plus ~2 min fetch/merge reconciliation | The S3 source merge is test-, lint- and tracking-control clean; native/provider prerequisites and the protected production release boundary remain external. This qualification is ready for normal publication; production remains NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol
