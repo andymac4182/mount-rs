@@ -791,7 +791,9 @@ impl Nfs3Session {
                 self.nfs(call.procedure, args, &credentials, &mut writer)
                     .await?;
             }
-            (NFS_PROGRAM, NFSPROC3_RENAME) => {
+            (NFS_PROGRAM, NFSPROC3_REMOVE | NFSPROC3_RMDIR | NFSPROC3_RENAME) => {
+                // Destructive namespace changes must wait for a stat/bind in
+                // either version, or an unlinked path can be rebound later.
                 let _guard = self.path_lock.write().await;
                 self.nfs(call.procedure, args, &credentials, &mut writer)
                     .await?;

@@ -2496,6 +2496,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   266-pass/18-skip parity, and opt-in macOS native NFSv3 pass locally. Native
   v4.1 client ordering, cross-process state recovery, power-loss durability,
   exact-tip hosted acceptance, and production readiness remain open.
+- [x] W01-NFS now serializes destructive v3/v4 namespace operations against
+  in-flight handle binding. A controlled real-TCP v4 OPEN/v3 REMOVE race first
+  returned a second opaque ID for one unlinked inode; after the fix, REMOVE
+  waits, the original handle and held-stateid read survive, and name LOOKUP
+  reports `NOENT`. An independent OPEN/WRITE/READ still finishes while a
+  separate OPEN is blocked; that regression failed under the initial broad
+  lock and passes with the final REMOVE/RENAME-only gate. Full locked NFS (42
+  unit, 23 v4 wire), strict NFS/N-API Clippy, pinned 266-pass/18-skip parity,
+  and local native macOS NFSv3 pass. Cross-process arbitration, native v4
+  ordering, crash/power-loss durability, exact-tip hosted acceptance, and
+  production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
