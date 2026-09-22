@@ -1216,8 +1216,8 @@ complete.
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
 | W05 | Cloudflare R2 | Current immutable candidate `849c76a2` is code-equivalent to the fully requalified implementation tip `9e756db3`: focused NFS (`43` unit, `25` v4 wire) and chunked (`22`) suites, full locked Rust workspace, strict Clippy, optimized dyld-safe macOS N-API load, full Node SDK/CLI/N-API, diagnostic WebDAV provider concurrency, PGlite, provider-matrix, and CLI paths pass with explicit live-provider skips. Fresh same-SHA CI `35723736254`, Fault `35723733151`, W04 `35723736618`, W07 `35723740111`, W08 policy `35723734639`, W08 targets/attestations `35723735941`, and Native 9P `35723734187` are dispatched and pending. The prior immutable candidate `d1a81ad4` was superseded and its queued packet cancellation-requested. Earlier candidates classified Ozone/TiDB and Ozone/FoundationDB capacity failures plus an artifact-service timeout. Live R2/AWS remain held behind cap/security gates, and hosted/provider/native/package/provenance/scope/W20.6 closure remains required; production is NO-GO | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest current-public-main exact-tip terminal cross-platform qualification packet is green at [run `35712676265`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265) / exact source `ff5cc58188d9783a80de96698a187e1f6416b83e`, Linux job `106696766067`, macOS job `106696766203`, aggregate job `106702286990`; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, authority heartbeat/stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,311µs, p95/p99 37,919µs and 164.77 ops/s, ten-round soak p95/p99 was 9,841–17,582µs at 269.41–330.32 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 716.30 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10688222438`, macOS artifact ID `10688396103` and aggregate artifact ID `10688622703` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. A follow-up cross-platform refresh, run [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938), was dispatched from exact source `e984c2321317e9d93b8db1ec98dc428662b17d34`; Linux job `106707845243` and macOS job `106707844852` remain queued with no terminal result, so it contributes no evidence yet. Later mainline commits have advanced beyond that tested revision and any result must be evaluated against its exact source binding. This remains hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
-| W07 current checkpoint | FoundationDB | Hosted run [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938) at exact source `e984c2321317e9d93b8db1ec98dc428662b17d34` is terminally failed: macOS job `106707844852` passed, but Linux job `106707845243` stopped because `tests/foundationdb/Cargo.lock` could not be updated under `--locked`, and aggregate job `106719306381` failed closed. The lockfile repair is published at `65776be87f954ef65dfdc68d41687666631ddcfb`. Replacement run [35720906902](https://github.com/andymacclenaghan/mount-rs/actions/runs/35720906902) is queued from that exact published source with Linux job `106723334768` and macOS job `106723334336`; it contributes no evidence until terminal. Production remains **NO-GO**; W07.3, W07.5 and W07.7 remain open. | Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest repaired exact-tip terminal cross-platform qualification packet is green at [run `35720906902`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35720906902) / exact source `65776be87f954ef65dfdc68d41687666631ddcfb`, Linux job `106723334768`, macOS job `106723334336`, aggregate job `106728531688`; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, authority heartbeat/stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the aggregate emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 2,376µs, p95/p99 30,578µs and 192.50 ops/s, ten-round soak p95/p99 was 12,074–14,148µs at 218.02–268.12 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 549.87 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10692331759`, macOS artifact ID `10691431754` and aggregate artifact ID `10691923414` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. The prior lockfile failure at run [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938) is retained as a reproducibility checkpoint, not runtime evidence. This remains hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
+| W07 current checkpoint | FoundationDB | Hosted run [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938) at exact source `e984c2321317e9d93b8db1ec98dc428662b17d34` remains a terminal lockfile/reproducibility failure: macOS passed, Linux stopped because `tests/foundationdb/Cargo.lock` could not be updated under `--locked`, and aggregate job `106719306381` failed closed. The repair is published at `65776be87f954ef65dfdc68d41687666631ddcfb`; replacement run [35720906902](https://github.com/andymacclenaghan/mount-rs/actions/runs/35720906902) at that exact source is now terminally green across Linux job `106723334768`, macOS job `106723334336` and aggregate job `106728531688`. It recorded base p50/p95/p99 `2376/30578/30578µs` at 192.50 ops/s, ten-round soak p95/p99 `12074–14148µs` at 218.02–268.12 ops/s and 549.87 bounded lifecycle IOPS with 1,200 successful operations, zero timeouts and zero cleanup failures. Independent provenance, workload, platform, production-packet and rollout-ledger validators passed; the production packet remains **NO-GO** with seven open gates and zero evidence records; W07.3, W07.5 and W07.7 remain open. | Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -4105,17 +4105,30 @@ Evidence landed without closing the remaining W01 acceptance gates:
 
   The next exact-tip refresh, hosted run
   [35716095938](https://github.com/andymacclenaghan/mount-rs/actions/runs/35716095938)
-  at revision `e984c2321317e9d93b8db1ec98dc428662b17d34`, is terminally
-  failed rather than a qualification pass: macOS feature compilation passed,
-  but Linux stopped after compilation because `tests/foundationdb/Cargo.lock`
-  could not be updated with `--locked`, and the aggregate failed closed on
-  the unsuccessful Linux lane. The lockfile repair is published at
-  `65776be87f954ef65dfdc68d41687666631ddcfb`. Replacement run
+  at revision `e984c2321317e9d93b8db1ec98dc428662b17d34`, is retained as a
+  terminal reproducibility failure rather than a qualification pass: macOS
+  feature compilation passed, but Linux stopped after compilation because
+  `tests/foundationdb/Cargo.lock` could not be updated with `--locked`, and
+  the aggregate failed closed on the unsuccessful Linux lane. The lockfile
+  repair is published at `65776be87f954ef65dfdc68d41687666631ddcfb`.
+  Replacement run
   [35720906902](https://github.com/andymacclenaghan/mount-rs/actions/runs/35720906902)
-  is queued from that exact published source with Linux job `106723334768`
-  and macOS job `106723334336`; it contributes no evidence until terminal.
-  This is a reproducibility checkpoint only and leaves the production
-  decision **NO-GO**.
+  at that exact published source completed green across Linux job
+  `106723334768`, macOS job `106723334336` and aggregate job `106728531688`.
+  Linux passed the repaired lock-gated durable FoundationDB/RustFS, Node/N-API,
+  CLI/FUSE, restart, authority, fresh-client, RustFS, heartbeat/stats,
+  ten-round soak and bounded-workload lanes; macOS passed the provider/test,
+  CLI, N-API feature-compile and bound-provenance lanes; and the aggregate
+  emitted `W07_PLATFORM_QUALIFICATION_PASS provenance=bound`. Base composition
+  was p50 2,376µs, p95/p99 30,578µs and 192.50 ops/s; ten-round soak p95/p99
+  was 12,074–14,148µs at 218.02–268.12 ops/s; and the bounded workload
+  recorded 1,200 successful lifecycle operations at 549.87 IOPS with zero
+  timeouts and zero cleanup failures. Artifacts were independently retained
+  and validated: Linux `10692331759`/`63576fd2cd59ac9355672ab9469dc1fc0f6268d7ce84993fc3b208c72b62489f`,
+  macOS `10691431754`/`5f68497ddfa0118fbb022889985b9d9876496b2fc6384878722c6271e9cae867`
+  and aggregate `10691923414`/`0df99a985e2b6aaebadc589f8bb4b5ebd3412c84d8259221085d023006b7a7c4`.
+  The qualification packet remains **NO-GO** with seven open production gates
+  and zero production evidence records.
 
   The local arm64 durable qualification run on 2026-09-21 used the
   `foundationdb-soak-durable` composition name, three pinned FoundationDB
@@ -4981,16 +4994,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     production evidence records.
 
     The latest W07.7 qualification checkpoint is hosted run
-    [35712676265](https://github.com/andymacclenaghan/mount-rs/actions/runs/35712676265)
-    at exact revision `ff5cc58188d9783a80de96698a187e1f6416b83e`, with Linux
-    job `106696766067`, macOS job `106696766203` and aggregate job
-    `106702286990` all terminally green. The independent provenance,
-    workload, summary-replay, platform, production-packet and rollout-ledger
-    validators passed, but the retained packet still has seven open
-    production gates and zero evidence records. This is current-public-main
-    cross-platform qualification, not a production PASS; W07.3, W07.5 and
-    W07.7 remain open pending live credentials, platform/deployment,
-    recovery, observability, capacity and named-owner evidence.
+    [35720906902](https://github.com/andymacclenaghan/mount-rs/actions/runs/35720906902)
+    at exact revision `65776be87f954ef65dfdc68d41687666631ddcfb`, with Linux
+    job `106723334768`, macOS job `106723334336` and aggregate job
+    `106728531688` all terminally green. Linux recorded base composition p50
+    2,376µs, p95/p99 30,578µs at 192.50 ops/s, ten-round soak p95/p99
+    12,074–14,148µs at 218.02–268.12 ops/s and 1,200 successful bounded
+    lifecycle operations at 549.87 IOPS with zero timeouts or cleanup failures.
+    The independent provenance, workload, platform, production-packet and
+    rollout-ledger validators passed; the retained packet still has seven open
+    production gates and zero evidence records. Artifacts are Linux
+    `10692331759`/`63576fd2cd59ac9355672ab9469dc1fc0f6268d7ce84993fc3b208c72b62489f`,
+    macOS `10691431754`/`5f68497ddfa0118fbb022889985b9d9876496b2fc6384878722c6271e9cae867`
+    and aggregate `10691923414`/`0df99a985e2b6aaebadc589f8bb4b5ebd3412c84d8259221085d023006b7a7c4`.
+    This is repaired exact-tip cross-platform qualification, not a production
+    PASS; W07.3, W07.5 and W07.7 remain open pending live credentials,
+    platform/deployment, recovery, observability, capacity and named-owner
+    evidence.
 
   The previous current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
