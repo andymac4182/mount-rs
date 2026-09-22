@@ -421,10 +421,13 @@ but its exact W08 policy run `35696013114` cancelled before job creation with
 control tip `8834abd3`. The reconciled ledger merge `a8c78312` was safely
 pushed to shared `origin/main`; its exact W08 policy run `35696819458` then
 cancelled before job creation with `jobs=[]`. Shared main then advanced
-through W04/W26/site documentation tips to public merge `09b554a1`; the
-current exact public tip is
-`09b554a1409e8790ab057d7ab9ed70a835585428`, and W08 run `35697289516` is
-pending and is not evidence. These scheduling boundaries and
+through W04/W26/site documentation tips to public merge `09b554a1`, then
+through the 9P/N-API audit tip `75c149f8` and reconciled public merge
+`20330a36`. The `75c149f8` W08 run `35697338233` was still `in_progress` at
+observation, while exact current public run `35697637897` for
+`20330a36cfa400540c041a7714b418b8b591b24d` is pending; neither is terminal
+evidence. The current exact public tip is
+`20330a36cfa400540c041a7714b418b8b591b24d`. These scheduling boundaries and
 source-equivalent mainline changes add no provider/native or production
 qualification. The last retained terminal hosted W08 policy pass remains
 `35692664144` / job `106632773424` for source `5a6d6507`. No provider
