@@ -102,6 +102,7 @@ pub const NFS4ERR_BADSESSION: u32 = 10_052;
 pub const NFS4ERR_BADSLOT: u32 = 10_053;
 pub const NFS4ERR_SEQ_MISORDERED: u32 = 10_063;
 pub const NFS4ERR_SEQUENCE_POS: u32 = 10_064;
+pub const NFS4ERR_REP_TOO_BIG_TO_CACHE: u32 = 10_067;
 pub const NFS4ERR_RETRY_UNCACHED_REP: u32 = 10_068;
 pub const NFS4ERR_TOO_MANY_OPS: u32 = 10_070;
 pub const NFS4ERR_OP_NOT_IN_SESSION: u32 = 10_071;
@@ -2257,7 +2258,24 @@ impl Nfs4Session {
         let mut results = vec![sequence_result];
         let mut status = NFS4_OK;
         for operation in operations.iter().skip(1) {
-            let result = self.execute_op(operation, &mut cursor, credentials).await;
+            let mut result = self.execute_op(operation, &mut cursor, credentials).await;
+            if *cachethis && result.status == NFS4_OK && matches!(operation, Op::Readdir { .. }) {
+                // READDIR has no mutation to replay. If its variable-length
+                // result would overflow a required cache, retain the earlier
+                // operation results and cache a bounded error on READDIR.
+                let mut candidate = results.clone();
+                candidate.push(result.clone());
+                if compound_body(NFS4_OK, &tag, &candidate).len() > session.max_cached {
+                    let error = V4OpResult::new(OP_READDIR, NFS4ERR_REP_TOO_BIG_TO_CACHE);
+                    candidate.pop();
+                    candidate.push(error.clone());
+                    if compound_body(NFS4ERR_REP_TOO_BIG_TO_CACHE, &tag, &candidate).len()
+                        <= session.max_cached
+                    {
+                        result = error;
+                    }
+                }
+            }
             status = result.status;
             results.push(result);
             if status != NFS4_OK {

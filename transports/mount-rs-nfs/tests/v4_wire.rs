@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
 use mount_rs_nfs::v4::{
     CLAIM_FH, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FATTR4_LEASE_TIME,
-    NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_RESOURCE,
-    NFS4ERR_RETRY_UNCACHED_REP, NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED,
+    NFS4ERR_BADSESSION, NFS4ERR_DELAY, NFS4ERR_GRACE, NFS4ERR_NOSPC, NFS4ERR_REP_TOO_BIG_TO_CACHE,
+    NFS4ERR_RESOURCE, NFS4ERR_RETRY_UNCACHED_REP, NFS4ERR_SEQ_FALSE_RETRY, NFS4ERR_SEQ_MISORDERED,
     NFS4ERR_SHARE_DENIED, NFS4ERR_TOO_MANY_OPS, NFS4ERR_TOOSMALL, OPEN4_CREATE,
     OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4, UNSTABLE4,
 };
@@ -1801,6 +1801,129 @@ fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
         .expect("spawn oversized replay test thread")
         .join()
         .expect("oversized replay test thread panicked");
+}
+
+#[test]
+fn nfs_v4_cache_required_oversized_readdir_preserves_mutation_reply() {
+    std::thread::Builder::new()
+        .name("nfs-v4-cache-required-oversized-reply-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build cache-required replay runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/cached-first", b"first").await.unwrap();
+                    driver
+                        .write_file("/cached-second", b"second")
+                        .await
+                        .unwrap();
+                    for index in 0..16 {
+                        driver
+                            .write_file(&format!("/cached-entry-{index:02}"), b"entry")
+                            .await
+                            .unwrap();
+                    }
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 128;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1001, b"cache-required-client").await;
+                    let read_dir = op(OP_READDIR, |writer| {
+                        writer.u64(0);
+                        writer.fixed_opaque(&[0; 8], 8);
+                        writer.u32(4096);
+                        writer.u32(4096);
+                        writer.u32(0);
+                    });
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1004,
+                        compound(
+                            "big",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("cached-first")),
+                                read_dir,
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() <= 128, "response must be cacheable");
+                    let mut parsed = XdrReader::new(&original_body);
+                    assert_eq!(
+                        parse_compound_status(&mut parsed, 4),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    consume_sequence_result(&mut parsed, "cache-required original sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    let _ = parsed.bool("remove change atomic").unwrap();
+                    let _ = parsed.u64("remove change before").unwrap();
+                    let _ = parsed.u64("remove change after").unwrap();
+                    assert_eq!(
+                        parse_result_status(&mut parsed, OP_READDIR),
+                        NFS4ERR_REP_TOO_BIG_TO_CACHE
+                    );
+                    parsed.end("cache-required oversized response").unwrap();
+                    assert!(driver.stat("/cached-first").await.is_err());
+                    assert!(driver.stat("/cached-second").await.is_ok());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1005,
+                        compound(
+                            "changed-target",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("cached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(retry.rest(), original_body);
+                    assert!(driver.stat("/cached-second").await.is_ok());
+
+                    client.sequence += 1;
+                    let mut fresh = rpc(
+                        &mut stream,
+                        1006,
+                        compound(
+                            "fresh",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("cached-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut fresh, 3);
+                    consume_sequence_result(&mut fresh, "cache-required fresh sequence");
+                    parse_result_header(&mut fresh, OP_PUTROOTFH);
+                    parse_result_header(&mut fresh, OP_REMOVE);
+                    let _ = fresh.bool("fresh remove change atomic").unwrap();
+                    let _ = fresh.u64("fresh remove change before").unwrap();
+                    let _ = fresh.u64("fresh remove change after").unwrap();
+                    fresh.end("cache-required fresh response").unwrap();
+                    assert!(driver.stat("/cached-second").await.is_err());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn cache-required replay test thread")
+        .join()
+        .expect("cache-required replay test thread panicked");
 }
 
 #[test]
