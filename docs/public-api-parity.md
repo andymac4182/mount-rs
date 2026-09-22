@@ -336,8 +336,16 @@ Current focused behavior:
   `514d2c533382b927c059ccd946f3e566d2c371a9` passed [Native 9P run `35686403815`](https://github.com/andymac4182/mount-rs/actions/runs/35686403815),
   N-API job `106614048924`, with Rust job `106614048722` also green. This
   qualifies the configured shared-lock network slice; remote admission,
-  invalid-port/framing-isolation/large-payload/negotiated-msize cases, and
-  broader server-boundary parity remain separate gates.
+  large-payload/negotiated-msize cases, and broader server-boundary parity
+  remain separate gates.
+- The native TCP listener now has hosted boundary evidence for occupied-port
+  and malformed-frame isolation: a second bind rejects with `EADDRINUSE`, while
+  a size-1 frame reports one transport error and closes only the malformed
+  connection; a healthy session remains able to read. Exact SHA
+  `2a3ccfa9a77cab22d154d041627369d995ba74d5` passed [Native 9P run `35687145769`](https://github.com/andymac4182/mount-rs/actions/runs/35687145769),
+  N-API job `106616293297`, with Rust job `106616293187` also green. This
+  closes the port/framing slice only; remote admission, large payload,
+  negotiated `msize`, and broader server-boundary parity remain separate gates.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

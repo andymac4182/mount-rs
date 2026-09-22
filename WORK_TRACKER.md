@@ -824,6 +824,7 @@ patch):
 | Main | W01 N-API 9P transport teardown under backpressure | `transports/mount-rs-9p/src/server.rs`, `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet fixes the connection task's permit-wait deadlock by retaining a bounded pending-frame queue while continuing to read for peer EOF, and reports a frame transport failure if that queue is exceeded. Real loopback N-API coverage now checks server close with an open fid, paused-peer FIN with a large queued reply burst, silent TCP reset, and orderly client EOF. Local focused Rust tests (36 passed), strict Clippy, addon rebuild, syntax/diff checks, and elevated isolated N-API execution passed. Exact SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed Native 9P run `35685073733`, N-API job `106610049913` with teardown and automatic/direct/structural mounted-I/O cleanup, and Rust job `106610049705` with the Linux probe plus all four ignored native lifecycle tests; process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P TCP connection isolation and dispatch ordering | `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds real loopback coverage for two native listener connections using distinct sessions but the same fid number, survivor service after one client closes, and a slow-open/fast-getattr burst that replies in completion order. Local syntax/diff checks and elevated isolated N-API execution passed. Exact SHA `9870d58cfbed5bcea90972c4b9caaf5db3075cef` passed Native 9P run `35685807744`, N-API job `106612633937` with the full server/attach, teardown, and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106612633771` with the Linux probe plus all four ignored native lifecycle tests; shared lock-table network behavior, remote-admission/interface qualification, remaining framing/payload/port cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P shared network lock table | `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds real loopback coverage for two native TCP sessions sharing one configured `P9LockTable`: the first write lock succeeds, the second receives `P9_LOCK_BLOCKED` and reads the first holder through `Tgetlock`, and closing the first connection releases the range for the second. Local `git diff --check` and elevated isolated N-API execution passed. Exact SHA `514d2c533382b927c059ccd946f3e566d2c371a9` passed Native 9P run `35686403815`, N-API job `106614048924` with the shared-lock, server/attach, teardown, and automatic/direct/structural mounted-I/O cleanup gates, and Rust job `106614048722` with the Linux probe plus all four ignored native lifecycle tests; remote-admission/interface qualification, remaining framing/payload/port cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
+| Main | W01 N-API 9P listener boundary failures | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet maps occupied-port listener failures to Node-compatible `EADDRINUSE` with platform errno/syscall and adds real loopback malformed-frame isolation: a size-1 frame closes only the broken connection while a healthy survivor reads. Local `git diff --check` and elevated isolated N-API execution passed. Exact SHA `2a3ccfa9a77cab22d154d041627369d995ba74d5` passed Native 9P run `35687145769`, N-API job `106616293297` with boundary plus full lifecycle, shared-lock, teardown, and automatic/direct/structural mounted-I/O cleanup, and Rust job `106616293187` with the Linux probe plus all four ignored native lifecycle tests; remote-admission/interface qualification, large-payload/negotiated-msize cases, process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -1014,7 +1015,7 @@ and SQLite HTTP PUT/GET pairs in three repetitions, including streamed bodies.
 The focused Rust concurrent lock regression also passes: two simultaneous
 writes without the submitted token both return `423` against one exclusive
 lock.
-The current-tip Rust WebDAV target passes 21/21 with the shared Cargo wrapper,
+The current-tip Rust WebDAV target passes 28/28 with the shared Cargo wrapper,
 and warning-denied WebDAV Clippy passes; the target now includes a durable
 driver barrier regression covering successful PUT, MKCOL, PROPPATCH, COPY,
 MOVE, DELETE, resource creation by LOCK, and injected barrier failure/retry.
@@ -1030,6 +1031,14 @@ collection COPY/DELETE, provider-reported overflow, adapter rejection of an
 over-large callback result, and the absent-callback `ENOTSUP`/`501` boundary;
 the provider callback remains responsible for enforcing the ceiling before it
 materializes its listing.
+The Rust WebDAV session now treats unread request-body faults as a framing
+boundary: known 413 limit faults are drained for keep-alive reuse, while any
+other drain fault is reported once and adds `Connection: close`, even when the
+request dispatch itself had already produced a response. The focused WebDAV
+target passes 28/28, and the rebuilt N-API/WebDAV-only host phase remains green.
+The response stream has a native loopback fault regression as well: a short
+driver read fails the client body after `200` headers and produces one
+peer-qualified `Connection` transport report.
 The current hosted provider audit confirms the external boundary: Live AWS S3
 run `35679010203` failed its protected preflight with
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
@@ -2152,6 +2161,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   finalized. Current `origin/main` is `5e910e80`; this stale-tip diagnosis does
   not promote W04 or production acceptance. Dispatch a fresh non-cancelling
   qualification from the exact current tip and keep production **NO-GO**.
+
+- Active exact-tip qualification: non-cancelling run `35686870515` was
+  dispatched from the exact published `origin/main` head `6db7a3ca` after the
+  terminal diagnosis above. At the 2026-09-22 14:26 AEST snapshot, Node jobs
+  macOS-15-intel `106615463347`, ARM `106615463353`, and Windows
+  `106615463597` were in progress; macOS-latest `106615463377` and Ubuntu
+  `106615463386` were queued. RustFS, FoundationDB/RustFS, Ozone/TiDB,
+  Ozone/FoundationDB, Ozone compositions, and native WebDAV Ubuntu were in
+  progress; the remaining Rust, native, observability, and provider jobs were
+  queued. No queued or in-progress job is acceptance evidence. The exact
+  PGlite/restart steps, native/package/artifact gates, provider/W26 markers,
+  and production rollout gates remain open; production remains **NO-GO**.
 
 ## W05 — Cloudflare R2
 
@@ -5756,6 +5777,8 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| `2026-09-22 WebDAV streamed-response fault evidence` | Prove that a short driver read fails an HTTP response body and reaches the peer-qualified transport-error hook | Focused WebDAV target 28/28, warning-denied Clippy and formatting pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| `2026-09-22 WebDAV unread-body fault packet` | Preserve framing after drainable 413 limits, but report non-recoverable unread-body faults once and close the HTTP connection | Focused WebDAV target 27/27, warning-denied Clippy, formatting, rebuilt N-API addon, generated typecheck, WebDAV-only host-enabled integration, and structural WebDAV regression pass; hosted/provider, power-loss, durable-lock, crash/restart, and same-resource ordering remain open |
 | `2026-09-22 WebDAV structural bounded-listing packet` | Forward the optional structural N-API `FsDriver.readdirBounded(path, maxEntries)` callback and reject over-large callback results as `EOVERFLOW`; exercise bounded PROPFIND, recursive COPY/DELETE, provider overflow, and the explicit absent-capability boundary | Release addon, generated typecheck, WebDAV-only host-enabled server phase, and focused structural WebDAV regression pass; hosted package/provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and same-resource ordering remain open |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
 | `2026-09-22 FUSE forced-teardown packet` | Make forced native session-task cancellation publish inactive/closed state and wake `wait_closed()` observers | Host FUSE tests, host/Linux-target strict Clippy, Linux-target test check, formatting and diff checks pass; hosted `/dev/fuse` forced-unmount, callback-event, crash/restart and durability gates remain open |

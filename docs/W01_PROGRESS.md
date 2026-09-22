@@ -80,6 +80,17 @@ tests. Local elevated N-API execution passed; remote admission and the
 remaining framing, payload, port, crash/reset, parity, and W01 gates remain
 open, so production remains NO-GO.
 
+The latest W01-9P listener-boundary packet was published at exact SHA
+`2a3ccfa9a77cab22d154d041627369d995ba74d5` and passed [Native 9P run
+`35687145769`](https://github.com/andymac4182/mount-rs/actions/runs/35687145769):
+N-API job `106616293297` passed the occupied-port `EADDRINUSE` case, malformed-
+frame survivor case, full server/attach, shared-lock, and teardown phases, and
+automatic/direct/structural mounted-I/O cleanup. Rust job `106616293187` passed
+the Linux probe plus all four ignored native lifecycle tests. Local elevated
+N-API execution passed; remote admission, large payload/negotiated `msize`,
+crash/reset, broader parity, and W01 gates remain open, so production remains
+NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
@@ -944,6 +955,8 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01.1 / W01.4 | Ran the exact memory-backed macOS CLI native lifecycle on mainline `33d1d1c1991547b4fd0122013755288a61afb2d6`: the latest CLI build passed, auto selected NFS, the real kernel mount appeared at a disposable user-owned path, mounted-path write/read passed, Ctrl-C unmounted cleanly, and post-stop mount/process checks passed before removing the empty mountpoint | — | CLI memory-backed macOS native evidence closed | This closes the exact memory-driver CLI mount gap; Linux FUSE/9P, FSKit/macFUSE, live providers, hosted aggregate release, crash/power-loss durability, and broader W01 gates remain open, so W01 stays NO-GO |
 
 | 2026-09-22 | W01-WebDAV | Added optional structural N-API `FsDriver.readdirBounded(path, maxEntries)` forwarding. The rebuilt release addon, generated typecheck, WebDAV-only host-enabled server phase, and structural-driver regression passed bounded `Depth: 1` PROPFIND, recursive collection COPY/DELETE, provider-reported `EOVERFLOW`, adapter rejection of an over-large callback result, and the absent-callback `501` boundary | — | 77% W01.1 planning view | This qualifies the local structural N-API capability seam only; hosted package/provider qualification, live-provider behavior, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Hardened unread request-body fault handling: non-recoverable drain errors are reported once and add `Connection: close`, including when dispatch already returned a response, while known 413 size-limit faults continue to drain so HTTP/1.1 framing remains reusable; the focused WebDAV target passed 27/27, strict Clippy, formatting, rebuilt N-API addon, typecheck, WebDAV-only host-enabled integration, and structural WebDAV regression | — | 77% W01.1 planning view | This closes a local body-fault/framing boundary only; hosted package/provider qualification, live-provider behavior, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-WebDAV | Added native loopback evidence for streamed response read faults: a driver-reported short file causes the HTTP response body to fail after `200` headers, and exactly one peer-qualified `Connection` transport fault is observed; the focused WebDAV target passed 28/28 with strict Clippy and formatting | — | 77% W01.1 planning view | This confirms local response-stream fault propagation only; hosted lifecycle/provider qualification, live-provider behavior, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open; W01 stays NO-GO |
 
 ## Definition of W01 complete
 
