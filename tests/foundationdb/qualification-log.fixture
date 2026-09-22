@@ -14,4 +14,4 @@ FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse
 FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5
 RUSTFS_COMBO_PASS name=foundationdb-production-qualification
 RUSTFS_INTEGRATION_PASS endpoint=http://127.0.0.1:32769 bucket=mount-rs-rustfs-test prefix=fixture
-FOUNDATIONDB_OZONE_IOPS_PASS provider=mount-rs-foundationdb-r2 target=1000 output=/tmp/foundationdb-ozone-iops.json
+FOUNDATIONDB_W07_WORKLOAD_PASS profile=w07-bounded provider=mount-rs-split-foundationdb-r2 size_mib=1 payload_bytes=4096 iterations=400 concurrency=64 minimum_iops=1 measured_iops=29.13 output=/tmp/foundationdb-ozone-iops.json

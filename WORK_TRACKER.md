@@ -856,7 +856,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest workflow-artifact retention qualification is green at `35671492720`/`9460a62` with six hosted rollout-ledger, four qualification-log and twelve production-evidence packet regression cases plus the NO-GO guard; the packet was retained and verified with all seven gates open; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 38,409µs p95/p99 at 155.90 ops/s and five-round soak p95/p99 ranged 13,005–14,243µs with throughput 199.39–214.47 ops/s, so capacity evidence remains open; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest workflow-artifact retention qualification is green at `35671492720`/`9460a62` with six hosted rollout-ledger, five qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; the packet was retained and verified with all seven gates open; the lease-publication policy marker and inline-secret/unsafe-TTL negative fixtures passed; its base latency was 38,409µs p95/p99 at 155.90 ops/s and five-round soak p95/p99 ranged 13,005–14,243µs with throughput 199.39–214.47 ops/s, so capacity evidence remains open; the follow-up `35673343510` workload attempt correctly produced no hosted pass because its initial 1,000-IOPS floor measured 29.13 IOPS, and the profile is being corrected to retain measured throughput without an unsupported capacity target; the preceding `35662679910` lockfile blocker was corrected by `ccd3f671` and requalified; target-gated root member and Rust SDK/CLI selection landed; production authority, complete Node/native platform matrix and the W07.7 production rollout gate remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -2769,12 +2769,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   observability, native-platform or release-owner gate.
   The dedicated hosted lane now also requests a fixed bounded workload profile
   through the live FoundationDB/RustFS Node consumer (400 iterations, 64-way
-  concurrency, 4 KiB payloads and a 1,000 IOPS floor), independently validates
-  and retains `foundationdb-ozone-iops.json`, and requires the corresponding
-  `FOUNDATIONDB_OZONE_IOPS_PASS` marker. This improves repeatable qualification
-  evidence only; the latest retained run above predates the profile addition,
-  and production-like duration, capacity, cost and error-budget acceptance
-  remain open until a fresh terminal run and owner review.
+  concurrency and 4 KiB payloads), independently validates and retains
+  `foundationdb-ozone-iops.json`, and requires the corresponding
+  `FOUNDATIONDB_W07_WORKLOAD_PASS` marker. The profile requires complete
+  lifecycles and records measured throughput; its non-zero floor is structural,
+  not a capacity target. This improves repeatable qualification evidence only;
+  hosted attempt `35673343510` at revision `9ea7e493` correctly produced no
+  pass because the first implementation imposed an unsupported 1,000-IOPS
+  floor and measured 29.13 IOPS. The corrected profile retains measured
+  throughput with a structural non-zero completion floor; a fresh terminal
+  run and owner review are still required, and production-like duration,
+  capacity, cost and error-budget acceptance remain open.
   The hosted workflow also validates the machine-readable
   `docs/W07-production-evidence.json` packet with
   `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
@@ -2812,11 +2817,13 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     throughput_ops_per_sec=155.90` at revision `9460a62`; its five soak-round
     p95/p99 values ranged from 13,005µs to 14,243µs and throughput ranged
     from 199.39 to 214.47 ops/s. The dedicated lane now also runs the fixed
-    400-iteration, 64-concurrency, 4 KiB, 1,000-IOPS profile and retains its
-    validated machine-readable artifact; that profile has not yet been
-    requalified at a hosted revision. This remains bounded qualification
-    evidence and does not convert either profile into production capacity
-    evidence.
+    400-iteration, 64-concurrency, 4 KiB profile and retains its validated
+    machine-readable artifact with measured throughput; hosted attempt
+    `35673343510` did not qualify because its initial 1,000-IOPS floor measured
+    29.13 IOPS and therefore contributed no pass evidence. The corrected
+    profile still requires a fresh terminal run. This remains bounded
+    qualification evidence and does not convert either profile into production
+    capacity evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.

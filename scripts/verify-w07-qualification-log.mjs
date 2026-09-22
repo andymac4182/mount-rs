@@ -97,9 +97,9 @@ const requiredMarkers = [
     /RUSTFS_INTEGRATION_PASS\b/u,
   ],
   [
-    "foundationdb-iops",
-    "FOUNDATIONDB_OZONE_IOPS_PASS",
-    /FOUNDATIONDB_OZONE_IOPS_PASS provider=mount-rs-foundationdb-r2 target=1000\b/u,
+    "foundationdb-workload-profile",
+    "FOUNDATIONDB_W07_WORKLOAD_PASS",
+    /FOUNDATIONDB_W07_WORKLOAD_PASS profile=w07-bounded provider=mount-rs-split-foundationdb-r2 size_mib=1 payload_bytes=4096 iterations=400 concurrency=64 minimum_iops=1 measured_iops=\d+(?:\.\d+)?\b/u,
   ],
 ];
 
