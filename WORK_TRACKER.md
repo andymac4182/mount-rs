@@ -3449,9 +3449,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `c596c1e64f8562b482e0c2383ee9dab97952a84a` was freshly
-  reverified after concurrent WebDAV native-concurrency, R2 upload coalescing,
-  N-API declaration and P9 normalization, 9P codec, S3-session-concurrency,
+  Merged source base `944c78c602ecd0653d4f5f705f94c8d2f5ff81e6` was freshly
+  reverified after concurrent 9P frame-assembler and WebDAV native-concurrency,
+  R2 upload coalescing, N-API declaration and P9 normalization, 9P codec, S3-session-concurrency,
   session-parity, chunked durability, FUSE, S3-test, WebDAV, lockfile, NFS and
   provider updates with the full locked workspace test suite (exit 0) and
   strict workspace Clippy with `-D warnings` (exit 0).
