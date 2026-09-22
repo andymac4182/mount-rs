@@ -5658,6 +5658,15 @@ reproducible in a production-like environment.
   staging-TTL evidence only; physical power-loss/torn-write ordering, live
   providers, hosted/native lifecycle, and broader workload bounds remain open,
   so W01-S3 stays **NO-GO**.
+- [x] Added the bounded provider-failure regression
+  `streaming_publish_rename_failure_removes_staging_and_preserves_object`:
+  one injected `rename(EIO)` during streamed replacement must return 500,
+  remove private `.mountx-put-*` staging, and preserve the prior object bytes.
+  The focused shared-target gateway target passed 45/45, with formatting,
+  diff checks, and strict warning-denied Clippy also passing. This is bounded
+  local provider-failure evidence only; live AWS/R2 failure handling, physical
+  power-loss/torn-write durability, hosted/native lifecycle, and broader
+  workload bounds remain open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
