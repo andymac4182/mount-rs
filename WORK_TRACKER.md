@@ -2854,6 +2854,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   now also compiles the FoundationDB-enabled CLI lifecycle test; live macOS
   service/cluster acceptance remains open, while the hosted Linux result is
   recorded under W07.6 below.
+  The dedicated production workflow now has an independent macOS native-feature
+  compile job plus an always-run `foundationdb-platform-evidence` aggregate.
+  That aggregate downloads both platform artifacts, requires both upstream jobs
+  to be terminally green, and runs
+  `scripts/verify-w07-platform-evidence.mjs` against the Linux schema-2
+  summary/log and the macOS compile marker. This closes the evidence-packet
+  integrity gap only: it does not claim a live macOS FoundationDB service or
+  cluster, native mount, clean install, signing, or package acceptance. A
+  terminal run of the new aggregate is still required before W07.5 can move.
   The latest hosted platform checkpoint
   [35657842924](https://github.com/andymac4182/mount-rs/actions/runs/35657842924)
   (job
@@ -3818,8 +3827,14 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     1,200 successful lifecycle operations at 110.18 IOPS with zero timeouts or
     cleanup failures. Complete the advertised macOS/Linux build/native matrix
     and any remaining clean-install/package evidence, and record the actual
-    runner, cluster/image, revision and result. Failed, skipped, cancelled or
-    unavailable evidence remains open.
+    runner, cluster/image, revision and result. The production workflow now
+    requires a terminal `foundationdb-platform-evidence` aggregate with both
+    the Linux qualification artifact and the macOS native-feature compile
+    artifact; its credential-free verifier is
+    `scripts/verify-w07-platform-evidence.mjs`. This is a fail-closed
+    qualification control, not production platform, signing, package or live
+    macOS-cluster evidence. Failed, skipped, cancelled or unavailable evidence
+    remains open.
 
   The previous current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace

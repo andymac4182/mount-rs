@@ -221,3 +221,56 @@ jobs:
           name: foundationdb-macos-platform-${{ github.run_id }}-${{ github.run_attempt }}
           path: artifacts/w07-macos-foundationdb-compile.log
           if-no-files-found: warn
+
+  foundationdb-platform-evidence:
+    name: Assemble W07 cross-platform qualification evidence
+    # A green Linux provider job is not enough to claim a platform packet.
+    # Retain both artifacts and fail closed if either job or marker is absent.
+    if: always()
+    needs:
+      - foundationdb-rustfs
+      - foundationdb-macos-platform
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Download Linux W07 qualification evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: foundationdb-production-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/linux
+
+      - name: Download macOS W07 platform evidence
+        if: always()
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: foundationdb-macos-platform-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence/macos
+
+      - name: Verify both W07 platform evidence lanes are terminal
+        if: always()
+        run: |
+          set -eu
+          node scripts/test-w07-platform-evidence.mjs
+          test '${{ needs.foundationdb-rustfs.result }}' = success
+          test '${{ needs.foundationdb-macos-platform.result }}' = success
+          node scripts/verify-w07-platform-evidence.mjs \
+            evidence/linux/foundationdb-production-qualification.log \
+            evidence/linux/foundationdb-production-qualification-summary.json \
+            evidence/macos/w07-macos-foundationdb-compile.log
+
+      - name: Preserve W07 cross-platform qualification packet
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: foundationdb-cross-platform-qualification-${{ github.run_id }}-${{ github.run_attempt }}
+          path: evidence
+          if-no-files-found: warn

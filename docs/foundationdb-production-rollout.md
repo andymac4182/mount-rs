@@ -362,7 +362,7 @@ evidence and cannot close the production gates below.
 | P8 — load, capacity, soak and cost envelope | Harness + extended ten-round local and hosted qualification; corrected fixed workload profile now has terminal published-tip evidence; production evidence open | The opt-in harness supports bounded repeated real FoundationDB/RustFS composition rounds with unique prefixes and cleanup, and emits p50/p95/p99 operation-latency and throughput markers; latest hosted run `35692674674` at exact revision `5a6d6507c6deac160f54a246a2d715c05fc35268` recorded base `operations=15 p50_us=4950 p95_us=439603 p99_us=439603 total_ms=700 throughput_ops_per_sec=21.41`; ten isolated durable composition rounds passed with p95/p99 from 70,204µs to 236,130µs and throughput from 18.19 to 96.22 ops/s. The same run validated the 400-iteration, 64-concurrency, 4 KiB profile: 400 successful writes, reads and deletes, 1,200 successful lifecycle operations, measured 110.18 lifecycle IOPS, zero timeouts and zero cleanup failures. Artifact `foundationdb-production-qualification-35692674674-1` (ID `10679154003`, SHA-256 `44beef451832c307a53571bb86f92293b70c302d0add5104152059ed4c41d2ec`) was retained; the measured rate is extended bounded qualification, not a capacity target. The base/soak variability is qualification telemetry, and production-shaped duration, retry/error budget, resource growth, safe capacity, cost and scaling triggers are still required |
 | P9 — upgrade, rollback and compatibility | Not started | Forward/backward keyspace and configuration compatibility, rolling provider/client upgrade, failed-upgrade rollback, retained-data downgrade boundary, lockfile/image/artifact provenance |
 | P10 — security, privacy, tenancy and audit | Not started | Threat-model review, prefix/tenant isolation, data classification, encryption, audit retention, dependency/image review, abuse/rate limits, closed findings or approved exceptions |
-| P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI/native FUSE evidence is green at `35692674674` for exact revision `5a6d6507c6deac160f54a246a2d715c05fc35268` | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
+| P11 — native client, mount and platform support | Qualification only; hosted Linux Node/CLI/native FUSE evidence is green at `35692674674` for exact revision `5a6d6507c6deac160f54a246a2d715c05fc35268`; the workflow now has an independent macOS native-feature compile lane and fail-closed cross-platform aggregate, with a terminal result still pending | An explicit advertised platform matrix; clean-install, native FDB client, Node/CLI, FUSE/NFS/FSKit lifecycle, concurrent access, restart/recovery and packaging/signing evidence for every advertised platform |
 | P12 — release packaging, CI promotion and canary | Qualification CI plus policy gate | Locked and signed artifacts, SBOM/provenance, protected environment approvals, production-like canary, holdback, promotion checks, rollback automation and retained evidence packet |
 | P13 — incident, failover and recovery rehearsal | Not started | Timed operator exercises for authority loss, cluster loss, stale client, storage exhaustion, bad deploy, credential expiry and restore; paging, runbook, integrity and RTO evidence |
 | P14 — final launch audit and go/no-go | Not started | One-revision audit of P0–P13, known-limitations record, release-owner decision, canary exit evidence and explicit GO or NO-GO |
@@ -391,6 +391,14 @@ No P0–P14 gate is currently terminally accepted. A production gate may move to
 complete only when the exit evidence is from the named production-like
 environment and the owner records the result; implementation tests alone do
 not close operations, security, native, or release gates.
+
+The W07 hosted workflow now assembles a cross-platform qualification packet
+after the Linux and macOS jobs. The aggregate requires both upstream jobs to be
+terminally successful, downloads both retained artifacts, and runs
+`scripts/verify-w07-platform-evidence.mjs` plus its credential-free regression
+suite. The resulting `W07_PLATFORM_QUALIFICATION_PASS` is still a qualification
+marker: it does not establish a live macOS FoundationDB service or cluster,
+native mount, clean install, signing/package provenance, or production GO.
 
 ## Credential-free production configuration policy
 
