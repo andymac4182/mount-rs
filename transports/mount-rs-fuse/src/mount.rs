@@ -3652,6 +3652,19 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn privileged_and_root_auto_modes_do_not_require_a_helper() {
+        assert_eq!(
+            choose_mode(MountMode::Privileged, 1000).expect("privileged mode"),
+            (MountMode::Privileged, None)
+        );
+        assert_eq!(
+            choose_mode(MountMode::Auto, 0).expect("root auto mode"),
+            (MountMode::Privileged, None)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn privileged_mount_data_masks_root_permissions() {
         let data = mount_data(
             &MountOptions::default(),
