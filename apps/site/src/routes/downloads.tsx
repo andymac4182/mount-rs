@@ -89,27 +89,28 @@ function DownloadsPage() {
           </p>
           <p>
             The latest W08 release-target run{' '}
-            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35762896081" {...externalProps()}>
-              35762896081
+            <a href="https://github.com/andymac4182/mount-rs/actions/runs/35769566111" {...externalProps()}>
+              35769566111
             </a>{' '}
-            at source <code>53b47c59</code> completed successfully for
+            at source <code>94eef54a</code> completed successfully for
             package version <code>0.1.0</code> on
             <code>x86_64-unknown-linux-gnu</code> and
             <code>aarch64-apple-darwin</code>. The CI bundles are
-            <code>w08-release-target-linux-x86_64-35762896081</code> and
-            <code>w08-release-target-macos-arm64-35762896081</code>; their
+            <code>w08-release-target-linux-x86_64-35769566111</code> and
+            <code>w08-release-target-macos-arm64-35769566111</code>; their
             verified archives are
             <code>mount-rs-0.1.0-x86_64-unknown-linux-gnu.tar.gz</code>{' '}
-            (8,550,824 bytes; SHA-256{' '}
-            <code>c26cd5966b0776d2932c83ef043921a8d912f5a3be24f2392618b06e264cb499</code>)
+            (8,550,825 bytes; SHA-256{' '}
+            <code>58aeb09d3d329657c26138efa82daf94fc0a08d4829fa095124058aaf36341f9</code>)
             and <code>mount-rs-0.1.0-aarch64-apple-darwin.tar.gz</code>{' '}
             (7,119,463 bytes; SHA-256{' '}
-            <code>49cf4bcf1215a5d1cd8613d088dd7a686ca859467bf509616e182bb5c6ccdcfd</code>).
+            <code>b1724016b36a056a7bdf4eedd60a2c78c4215780753218763450f01932a26764</code>).
             Each CI bundle passed its <code>SHA256SUMS</code> check; the
             <code>SHA256SUMS</code> files themselves are
-            <code>70fdb65b5c96dd2e875cd42203d0745057f05fb756813183d18caed84a177f46</code>{' '}
-            (Linux) and <code>a9f55f175f07fd345fa638744b532a5c5e12ff1a1a906e93835aef34a0484c94</code>{' '}
-            (macOS). Attestation jobs were skipped and the manifests record
+            <code>fc1e2222b3bf5284ea29f7f82ba695ac21294b5a276828964ff96e430e26ed7b</code>{' '}
+            (Linux) and <code>61f1fab1eba21fe4c6bf7002f553b3fd89f2a33db5cdd7f072de4d5f5ef40079</code>{' '}
+            (macOS). Both downloaded-asset verification jobs passed, but the
+            attestation job was skipped and the manifests record
             signature/SBOM as pending and canary as not run, so these remain
             CI evidence rather than public GitHub Release downloads. The
             public release below is still the only claimable download.
