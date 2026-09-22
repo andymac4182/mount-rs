@@ -4,6 +4,62 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 stable hosted qualification dispatch (2026-09-22)
+
+The current shared tip is
+[`73534bce21368b976e0bcfb06a61fd62da853128`](https://github.com/andymac4182/mount-rs/commit/73534bce21368b976e0bcfb06a61fd62da853128),
+which contains the published active-preparation regression commit
+`bd28cf46` and the W26 ledger/tracker update. Manual workflow-dispatch run
+[`35723306179`](https://github.com/andymac4182/mount-rs/actions/runs/35723306179)
+was dispatched from `main` with exact workflow head `73534bce`. Its W26 jobs
+`ozone-tidb`, `ozone-foundationdb`, `ozone-compositions`, `ozone`, `tidb`,
+`tidb-rustfs` and `foundationdb-rustfs` were all queued at capture. This is
+the stable hosted evidence boundary; queued state is not a provider or
+performance result. The older exact-head run `35720016370` remains queued on
+the preceding runtime source and is not promoted for this current ledger
+state.
+
+W26.15, W26.14 and P14 remain open/NO-GO pending four terminal provider rows
+at the hard 1,000 IOPS/drive target, the complete aggregate/end-to-end packet,
+customer/Ozone security and Tier-1 99.99% reliability evidence, five-minute
+RPO/RTO evidence, and customer/Ozone-owned backup/DR evidence. W26 owns
+compatibility and qualification only; customers deploy Ozone and another
+stream owns releases.
+
+## Current W26 active-preparation regression boundary (2026-09-22)
+
+Test commit
+[`bd28cf46569ec94a481f97eab1dbf8e2b27d0515`](https://github.com/andymac4182/mount-rs/commit/bd28cf46569ec94a481f97eab1dbf8e2b27d0515)
+(`test(w26): cover active mutation preparation window`) is published at
+`origin/main`. It adds a focused regression for the bounded mutation-runner
+window: a queued unlink remains pending while a peer whole-file operation is
+still preparing immutable blocks beyond the initial adaptive idle window, and
+publishes once that preparation is released. It does not change the runtime
+implementation or weaken the existing fenced publication, lease, revision/CAS,
+flush-ordering, conflict or fail-closed boundaries.
+
+Local evidence is complete for this chunk: the focused chunked suite is
+22 passed/0 failed, focused strict Clippy passes, the full locked workspace
+all-target test matrix exits 0, and full workspace strict Clippy with
+`-D warnings` exits 0. Explicitly opt-in native/live provider tests remain
+separate gates. Security diff scan
+`d72a974f-0b62-4b30-a6d2-dbd848a37b38` has complete changed-file coverage and
+zero findings. The detailed work-item status, evidence, provisional estimates,
+external blockers and session time log are in
+[docs/w26-progress-ledger.md](docs/w26-progress-ledger.md).
+
+Hosted evidence is not yet terminal for this test descendant. Manual run
+[`35720016370`](https://github.com/andymac4182/mount-rs/actions/runs/35720016370)
+is bound to the preceding runtime commit `9f6041db` and remains queued; push
+run [`35722832900`](https://github.com/andymac4182/mount-rs/actions/runs/35722832900)
+has exact head `bd28cf46` and was pending at 21:41 AEST. Neither queued state
+is a provider, performance or aggregate result. Production remains **NO-GO**:
+all four feasible providers must pass the hard 1,000 IOPS/drive target, the
+complete end-to-end packet must pass, and customer/Ozone security, Tier-1
+99.99% reliability, five-minute RPO/RTO and customer-owned backup/DR evidence
+must close. W26 owns compatibility and qualification; customers deploy Ozone,
+Ozone/customer owns backup/DR, and another stream owns releases.
+
 ## Current W26 bounded preparation-wave scheduling boundary (2026-09-22)
 
 Source commit
@@ -2529,6 +2585,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   exact 782 MB disposable target was removed after checking for open handles.
   Cross-process arbitration, native v4 ordering, crash/power-loss durability,
   exact-tip hosted acceptance, and production readiness remain open.
+- [x] W01-NFS rename-overwrite now preserves a destination handle pinned by
+  NFSv4 OPEN. The unit regression first returned `ESTALE` after replacing the
+  pinned name; the fix keeps its identity pathless, detaches its inode key, and
+  retires it on final unpin. A real-TCP v4 OPEN/v3 RENAME-over test reads the
+  original bytes while fresh v3 LOOKUP obtains a distinct replacement handle.
+  Ten wire reruns, full locked NFS (43 unit, 25 v4 wire), warning-denied
+  NFS/N-API Clippy, and formatting pass locally. Native v4 ordering,
+  cross-process recovery, crash/power-loss durability, exact-tip hosted
+  acceptance, and production readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -2886,6 +2951,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   compilation passed, and formatting/diff checks passed. This is local
   implementation evidence only; hosted Linux Rust/native-FUSE rerun and all
   remaining production gates are still open.
+- [x] W04 production-support follow-up: the Windows WebDAV provider-network
+  test now reports the provider, phase, request index, and elapsed time for
+  its bounded 10-second requests, with a temporary bounded timeout override
+  for hosted diagnosis. Default 32-pair and 64-pair NodeFs/SQLite loopback
+  runs, `node --check`, and `git diff --check` passed locally. The change is
+  published at `d096930a`; hosted Windows confirmation remains open and does
+  not change the production **NO-GO** decision.
+- A non-cancelling manual exact-main qualification run
+  [35723080355](https://github.com/andymac4182/mount-rs/actions/runs/35723080355)
+  targets published `d096930a`. Its 27 materialized jobs were queued at the
+  latest capture, including all Node platforms, Windows Node, native FUSE, and
+  Ubuntu Rust. The push-triggered CI/policy runs for the same publication were
+  cancelled before usable jobs because of mainline concurrency and are
+  excluded from evidence; no current-tip W04 or production claim is promoted.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer
@@ -3423,19 +3502,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   assertions, Ozone/TiDB and Ozone/FoundationDB hard-IOPS misses, W26 dirty
   provenance, and cancelled native FUSE; the exact evidence and estimates are
   in `docs/w05-progress-ledger.md`. No production release is authorized.
-  A new immutable current-tip candidate `d1a81ad4` is now published with a
-  fresh same-SHA packet: CI `35721887870`, Fault `35721895670`, W04
-  `35721891003`, W07 `35721892642`, W08 policy `35721891447`, W08 targets
-  with attestations `35721892593`, and Native 9P `35721891380`. These runs are
-  pending terminal evidence; R2 remains cap-closed and AWS remains security-
-  gated.
-  Remaining actions are to let the exact packet reach terminal status, repair
-  any actionable failure on a new immutable candidate, close Ozone capacity
-  and native-FUSE or record approved scope exclusions, obtain AWS protected
-  inputs and OIDC trust through security, rotate R2 credentials after the
-  UTC-month reset, close package/provenance/provider/scope gates, and run
-  W20.6 for a written GO/NO-GO decision. No credential value was read,
-  stored, printed, or placed in Keychain.
+  The immutable `d1a81ad4` packet was superseded after shared mainline added
+  the FUSE destroy cancellation fix and expanded NFS v3/v4 race coverage;
+  cancellation was requested for its queued CI `35721887870`, Fault
+  `35721895670`, W04 `35721891003`, W07 `35721892642`, W08 policy `35721891447`,
+  W08 targets `35721892593`, and Native 9P `35721891380` runs, so none is
+  release evidence. Current shared main `1f8dcd41` is locally green through
+  the full locked Rust workspace, strict Clippy, focused NFS/FUSE regressions,
+  complete Node SDK/CLI/N-API/oracle/distribution/restart coverage, and the
+  PGlite matrix (`Rust 6/3/0`, `Node 5/3/0`, `CLI 12/2`).
+  Remaining actions are to publish the current-main ledger update, freeze and
+  host-qualify a new immutable candidate, close Ozone capacity and native-FUSE
+  or record approved scope exclusions, obtain AWS protected inputs and OIDC
+  trust through security, rotate R2 credentials after the UTC-month reset,
+  close package/provenance/provider/scope gates, and run W20.6 for a written
+  GO/NO-GO decision. No credential value was read, stored, printed, or placed
+  in Keychain.
 
 ## W06 — RustFS integration service
 

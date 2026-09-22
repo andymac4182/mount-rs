@@ -271,10 +271,15 @@ impl FileHandleTable {
     /// Release one NFSv4 pin without allowing the count to underflow.
     pub fn unpin(&self, id: u64) {
         let mut state = self.state.lock().expect("handle table lock");
+        let mut retire = false;
         if let Some(entry) = state.by_id.get_mut(&id)
             && entry.pins > 0
         {
             entry.pins -= 1;
+            retire = entry.pins == 0 && entry.paths.is_empty();
+        }
+        if retire {
+            drop_entry_locked(&mut state, id);
         }
         enforce_limit_locked(&mut state, self.max_handles, ROOT_HANDLE_ID);
     }
@@ -353,7 +358,7 @@ impl FileHandleTable {
             .map(|(path, id)| (path.clone(), *id))
             .collect();
         for (path, id) in destinations {
-            detach_locked(&mut state, id, &path);
+            detach_replaced_locked(&mut state, id, &path);
         }
         for (path, id) in affected {
             let suffix = path.strip_prefix(old_path).unwrap_or_default();
@@ -456,6 +461,25 @@ fn detach_locked(state: &mut HandleState, id: u64, path: &str) {
         .is_some_and(|entry| entry.paths.is_empty() && entry.id != ROOT_HANDLE_ID);
     if remove && id != ROOT_HANDLE_ID {
         drop_entry_locked(state, id);
+    }
+}
+
+fn detach_replaced_locked(state: &mut HandleState, id: u64, path: &str) {
+    detach_preserve_locked(state, id, path);
+    let Some(entry) = state.by_id.get(&id) else {
+        return;
+    };
+    if !entry.paths.is_empty() || id == ROOT_HANDLE_ID {
+        return;
+    }
+    if entry.pins == 0 {
+        drop_entry_locked(state, id);
+    } else if let Some(key) = entry.key.clone()
+        && state.by_key.get(&key) == Some(&id)
+    {
+        // A replaced inode can outlive its name through OPEN, but a new
+        // object must not inherit that orphan's identity via the inode key.
+        state.by_key.remove(&key);
     }
 }
 
@@ -711,6 +735,31 @@ mod tests {
 
         assert_eq!(table.resolve(&handle).unwrap(), "/b");
         assert_eq!(table.at("/b").unwrap().id, entry.id);
+    }
+
+    #[test]
+    fn rename_replacing_a_pinned_destination_keeps_its_handle_pathless() {
+        let table = FileHandleTable::default();
+        let source = table.bind("/source", &stats(11));
+        let destination = table.bind("/destination", &stats(12));
+        let held_handle = table.encode(&destination);
+        table.pin(destination.id);
+
+        table.remap("/source", "/destination");
+
+        assert_eq!(table.at("/destination").unwrap().id, source.id);
+        assert_eq!(table.decode(&held_handle).unwrap().id, destination.id);
+        assert_eq!(
+            table.resolve(&held_handle).unwrap_err().code,
+            ErrorCode::Estale
+        );
+        let replacement = table.bind("/other-name", &stats(12));
+        assert_ne!(replacement.id, destination.id);
+        table.unpin(destination.id);
+        assert_eq!(
+            table.decode(&held_handle).unwrap_err().code,
+            ErrorCode::Estale
+        );
     }
 
     #[test]

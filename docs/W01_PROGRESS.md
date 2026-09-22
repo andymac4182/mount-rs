@@ -1463,6 +1463,8 @@ spent waiting for a hosted job or credential approval.
 
 | 2026-09-22 | W01-NFS | Added the symmetric real-TCP v3 LOOKUP/v4 REMOVE ordering gate: LOOKUP pauses after backend stat; v4 REMOVE stays pending, then succeeds only after the v3 handle is bound. The old handle becomes `NFS3ERR_STALE` and a fresh name lookup returns `NFS3ERR_NOENT`. The new case passes ten reruns; full locked NFS passes 42 unit and 24 v4 wire, with strict NFS Clippy green in a dedicated target. An initial shared-target binary selected 0 tests and was not counted; the exact disposable 782 MB target was removed after verification | — | Same-server reverse cross-version namespace ordering evidenced | Cross-process arbitration, native v4 ordering, crash/power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
 
+| 2026-09-22 | W01-NFS | Fixed rename-overwrite dropping a pinned destination handle: the pre-fix unit case returned `ESTALE` for a still-open opaque handle. A pathless pinned identity now survives replacement and is retired on final unpin; a real-TCP v4 OPEN/v3 RENAME-over case reads the original held bytes while a fresh v3 LOOKUP gets a distinct replacement handle. Focused wire 10/10 reruns, full locked NFS 43 unit and 25 v4 wire, strict NFS/N-API Clippy, and formatting passed in an isolated target | — | Same-process cross-version rename-over-open lifetime passed | Native v4 ordering, cross-process state, crash/power-loss durability, exact-tip hosted acceptance, and W01 production readiness remain open; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:

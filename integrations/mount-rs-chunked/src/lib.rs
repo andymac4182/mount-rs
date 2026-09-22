@@ -3575,6 +3575,46 @@ mod tests {
     }
 
     #[test]
+    fn mutation_runner_waits_for_active_preparation_past_initial_idle_window() {
+        let metadata = CountingMetadataStore {
+            inner: MemoryMetadataStore::new(),
+            publishes: Arc::new(AtomicUsize::new(0)),
+        };
+        let filesystem = block_on(ChunkedFs::open(
+            metadata.clone(),
+            MemoryBlockStore::new(),
+            options("mutation-preparation-window"),
+        ))
+        .unwrap();
+        block_on(filesystem.write_file("/file", b"old")).unwrap();
+        let before = metadata.publishes.load(Ordering::SeqCst);
+
+        // Model a peer whole-file operation that has finished its metadata
+        // snapshot but is still preparing immutable blocks. The runner must
+        // not publish the queued unlink merely because the initial adaptive
+        // idle window has elapsed; the preparation counter is deliberately
+        // held across that window.
+        let preparation = filesystem.begin_mutation_preparation();
+        let mut unlink = Box::pin(filesystem.unlink("/file"));
+        let waker = Waker::from(Arc::new(NoopWaker));
+        let mut context = Context::from_waker(&waker);
+        let polls =
+            (MUTATION_BATCH_INITIAL_YIELD_ROUNDS + MUTATION_BATCH_IDLE_YIELD_ROUNDS + 1) * 2;
+        for _ in 0..polls {
+            assert!(matches!(
+                Future::poll(unlink.as_mut(), &mut context),
+                Poll::Pending
+            ));
+            assert_eq!(metadata.publishes.load(Ordering::SeqCst), before);
+        }
+
+        preparation.release();
+        assert!(block_on(unlink).is_ok());
+        assert_eq!(metadata.publishes.load(Ordering::SeqCst), before + 1);
+        block_on(filesystem.shutdown()).unwrap();
+    }
+
+    #[test]
     fn concurrent_whole_file_creates_rebase_inodes_in_one_publication() {
         const PARTICIPANTS: usize = MUTATION_BATCH_REQUEST_TARGET;
         let metadata = CountingMetadataStore {

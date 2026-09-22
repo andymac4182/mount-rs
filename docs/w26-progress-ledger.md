@@ -5,6 +5,88 @@ workstream. It distinguishes repository implementation, local evidence, and
 hosted/native/provider acceptance. Estimates are provisional and are intended
 for engineering planning, not a commitment.
 
+## Current authority override — 2026-09-22, stable manual hosted qualification dispatch
+
+At the 21:46 AEST recheck, `origin/main` and the detached checkout were both
+at [`73534bce21368b976e0bcfb06a61fd62da853128`](https://github.com/andymac4182/mount-rs/commit/73534bce21368b976e0bcfb06a61fd62da853128)
+(`docs(w26): record preparation-window regression coverage`). This tip contains
+the published active-preparation regression commit `bd28cf46` and the full
+W26 ledger/tracker update. A new workflow-dispatch run
+[`35723306179`](https://github.com/andymac4182/mount-rs/actions/runs/35723306179)
+was dispatched from `main` and reports exact workflow head
+`73534bce21368b976e0bcfb06a61fd62da853128`. It is now the stable hosted
+qualification boundary for this W26 state; unlike push-triggered descendants,
+it is not being treated as disposable concurrency noise.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Published source and ledger ancestry | **PASS** | `HEAD == origin/main == 73534bce`; the runtime source and regression test are present, and the ledger/tracker are published for other threads. | Continue from this shared tip; no source change is implied by the dispatch. |
+| Stable manual W26 hosted run | **PENDING — run `35723306179`** | Exact-head workflow-dispatch run `35723306179` is queued. W26 jobs `ozone-tidb` (`106730959495`), `ozone-foundationdb` (`106730959622`), `ozone-compositions` (`106730959643`), `ozone` (`106730959647`), `tidb` (`106730959786`), `tidb-rustfs` (`106730959954`) and `foundationdb-rustfs` (`106730959371`) were all queued at capture. | Wait for every provider/base/aggregate job to reach terminal state; accept only complete artifacts from this exact run. |
+| Hosted runner/provider capacity | **BLOCKED — external scheduling gate** | The stable run has no provider, performance or aggregate result yet. The older exact-head run `35720016370` also remains queued; that run is bound to the preceding runtime head and is not the acceptance boundary for this ledger state. | Allow hosted capacity and provider services to execute; do not cancel or substitute unrelated runs. |
+| W26.15 hard IOPS / aggregate / end-to-end | **OPEN — no percentage change** | No metric or aggregate artifact exists for `35723306179` yet. Require four finite provider rows at or above 1,000 IOPS/drive plus all functional, restart, cleanup, authority and lease markers. | Retrieve and classify each artifact; no averaging, skipping or queued-result promotion. |
+| Production readiness | **NO-GO** | Local gates are green, but hosted Ozone/provider evidence is non-terminal. Tier-1 99.99% reliability, five-minute RPO/RTO, customer-deployed Ozone security, customer/Ozone backup/DR and separate release-stream evidence remain open. | Continue W26 compatibility/qualification only; customers deploy Ozone and Ozone/customer owns backup/DR. |
+
+### Session time log — stable manual hosted qualification dispatch
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — hosted status recheck (21:42–21:46 AEST) | Inspected run `35720016370`; its exact-head provider/base/aggregate jobs remain queued. | ~0.1 h | Hosted capacity pending | No older queued result was promoted. |
+| 2026-09-22 — stable dispatch (21:46 AEST) | Dispatched manual run `35723306179` from current `origin/main` `73534bce`; verified exact head and all seven W26 provider/base/aggregate jobs queued. | ~0.1 h | CI/provider queue pending | The new manual run is the authoritative hosted boundary for the current ledger state. |
+| 2026-09-22 — next gate | Poll `35723306179` with bounded waits; download exact artifacts only after terminal completion, classify each provider against 1,000 IOPS/drive, then update W26.15/W26.14/P14. | ~0.5–1.5 d provisional | ~0.5–2 h provisional hosted wait | Keep production **NO-GO** until the complete packet and customer gates close. |
+
+## Current authority override — 2026-09-22, active-preparation regression-coverage chunk
+
+This is the newest published W26 boundary. Source commit
+[`bd28cf46569ec94a481f97eab1dbf8e2b27d0515`](https://github.com/andymac4182/mount-rs/commit/bd28cf46569ec94a481f97eab1dbf8e2b27d0515)
+(`test(w26): cover active mutation preparation window`) is at both the detached
+checkout and `origin/main`. It adds a focused regression test proving that the
+mutation runner remains pending after the initial adaptive idle window while a
+peer whole-file operation is still preparing immutable blocks, then publishes
+the queued mutation once that preparation is released. This is test coverage
+only; the preceding bounded-preparation implementation and its fenced
+metadata-publication, lease, revision/CAS and fail-closed boundaries are
+unchanged. The commit was rebased over the concurrent shared-mainline tip
+`1f8dcd4197a5f6cd36a519f19026d4d57d34a556` before the push.
+
+| Gate / item | Current result | Evidence | Remaining action / ownership |
+| --- | --- | --- | --- |
+| Source/test implementation | **PUBLISHED / 100% for this chunk** | `bd28cf46` is verified at `origin/main`; the change is one 40-line regression test in `integrations/mount-rs-chunked/src/lib.rs`. `cargo fmt --all` and `git diff --check` pass. | Keep the runtime implementation boundary unchanged; hosted provider qualification remains required. |
+| Chunked Rust focused test gate | **PASS** | `./scripts/cargo-shared test -p mount-rs-chunked --lib --locked`: 22 passed, 0 failed, 0 ignored; this includes `mutation_runner_waits_for_active_preparation_past_initial_idle_window`. | Retain the focused regression in the hosted CI path; do not promote local tests to Ozone/provider acceptance. |
+| Chunked strict Clippy gate | **PASS** | `./scripts/cargo-shared clippy -p mount-rs-chunked --lib --locked -- -D warnings` completed successfully. | No local action; hosted qualification remains open. |
+| Full locked Rust workspace test gate | **PASS** | `./scripts/cargo-shared test --workspace --all-targets --locked` exited 0; executed workspace suites passed. Explicitly opt-in native/live provider tests remained ignored because their external services or host privileges were not configured. | Hosted Ozone/provider execution remains required; ignored native/provider cases are not promoted as passes. |
+| Full workspace strict Clippy gate | **PASS** | `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. | No local action; retain the hosted/provider evidence boundary. |
+| Security diff scan | **PASS — 0 findings / complete coverage** | Scan `d72a974f-0b62-4b30-a6d2-dbd848a37b38` covered the one changed source file with complete coverage and zero findings; snapshot digest `codex-security-snapshot/v1:sha256:4f16f3f630af339c7d6131db71d24c5755ac8d4efeb4884c5cf0002e245631b8`. The sealed report is retained under the security-scan temporary report directory. | Customer certificate/IAM, secret rotation, tenant isolation and provider-native controls remain separate production gates. |
+| Prior exact-head Ozone qualification | **PENDING — run `35720016370`** | Manual CI run [`35720016370`](https://github.com/andymac4182/mount-rs/actions/runs/35720016370) is bound to exact workflow head `9f6041db2f8aba9301507bad24664015890295f9`, the preceding runtime source commit. Its SQLite/base, PGlite, TiDB, FoundationDB and aggregate-related jobs remain queued at the latest recheck; it does not contain this test-only descendant commit. | Wait for terminal all-provider/base/aggregate artifacts; accept no queued result and do not mislabel this source-test commit as having hosted execution until an exact descendant run is terminal. |
+| New automatic descendant CI | **PENDING — run `35722832900`** | Push-triggered run [`35722832900`](https://github.com/andymac4182/mount-rs/actions/runs/35722832900) has exact workflow head `bd28cf46569ec94a481f97eab1dbf8e2b27d0515` and was pending at 21:41 AEST. It is a queue observation only; later documentation pushes may supersede/cancel push-triggered runs through repository concurrency. | After the ledger publication, use a manually dispatched descendant as the stable hosted evidence boundary if the queued W26 provider jobs have not reached terminal state. |
+| Production readiness | **NO-GO** | Local implementation, full workspace tests/Clippy and the complete source-diff security scan are positive, but no terminal exact-descendant Ozone/provider packet exists. The 1,000 IOPS/drive gate, aggregate/e2e packet, Tier-1 99.99% reliability, five-minute RPO/RTO and customer-deployed Ozone security evidence remain open; backup/DR and release execution remain external. | Continue W26-owned compatibility and qualification until every feasible provider and the end-to-end packet pass. Customers deploy Ozone; Ozone/customer owns backup/DR; another stream owns releases. |
+
+### Work-item delta and provisional estimates
+
+The complete W26.1–W26.15/P14 itemized table below remains the ledger of
+every work item. This test-only chunk advances regression evidence without
+changing hosted acceptance percentages or production-gate ownership.
+
+| Work item | Status / completion after this chunk | Evidence and remaining action | Provisional engineering time / external blocker |
+| --- | --- | --- | --- |
+| W26.1/W26.2 — base Ozone and immutable-block contract | **OPEN / 100% implementation and local regression coverage; hosted acceptance pending** | The new test exercises the active-preparation scheduling boundary while preserving the existing fenced publication contract. Run `35720016370` is still queued on the preceding runtime source; run `35722832900` is pending on `bd28cf46`. | 0.25–0.75 d per hosted qualification/remediation cycle; Ozone topology and CI capacity are external. |
+| W26.3a–d — SQLite, PGlite, TiDB and FoundationDB compositions | **OPEN / 100% implementation; hosted acceptance unchanged and pending** | The test prevents a queue-idle race in the shared chunked layer, but it supplies no provider performance result. Require terminal finite rows for all four providers at or above 1,000 IOPS/drive. | 0.5–1.5 d per qualification/remediation cycle; provider startup, Ozone/R2 latency and hosted runners are external. |
+| W26.4/W26.8 — end-to-end and requested-provider/no-skip qualification | **OPEN / 100% verifier; exact descendant packet pending** | Local focused and workspace tests pass; queued/pending CI is not acceptance. Preserve the no-skip rule and require functional, restart, cleanup, authority, lease and provider markers on one accepted workflow revision. | 0.25–0.75 d review; CI scheduling and provider startup are external. |
+| W26.11/W26.14 — aggregate and end-to-end packet | **OPEN / 100% fail-closed verifier; aggregate pending** | No aggregate result is promoted from run `35720016370` or `35722832900` while jobs are non-terminal. | 0.5–1.5 d review; GitHub artifacts, native runners and Ozone topology are external. |
+| W26.15 — per-drive hard IOPS gate | **OPEN / 100% verifier; current acceptance remains 1/4 from the last terminal packet** | The regression does not alter performance claims. The next accepted packet must show four finite provider rows at or above 1,000 IOPS/drive; no averaging, lowering or skipping is permitted. | 1.5–4 d per cycle plus queue; provider/Ozone performance and artifact retention are external. |
+| W26.7/W26.10/W26.13 — security, retention and customer rollout contract | **OPEN for production / local source gate positive** | The one-file scan is clean, but customer TLS/IAM/rotation/tenant controls, artifact retention, customer-run deployment evidence and operational ownership remain open. | 0.5–2 d review; customer/Ozone controls and deployment environment are external. |
+| P14 — final integration-readiness review | **NO-GO / 50% provisional** | This chunk strengthens regression coverage only. Production remains blocked by hosted provider/performance/aggregate evidence and customer production gates. | 1–2 d after W26.15; customer SLO/RPO/RTO, security, backup/DR and release-stream gates are external. |
+
+### Session time log — active-preparation regression-coverage chunk
+
+| Date / phase | Activity | Engineering time | External wait / gate time | Result |
+| --- | --- | ---: | ---: | --- |
+| 2026-09-22 — regression implementation | Added a deterministic no-waker regression that holds an active whole-file preparation across the adaptive idle window, proves the queued unlink is still pending, then releases the preparation and verifies one publication. | ~0.25–0.5 h | 0 h | The race boundary is now directly covered without changing production behavior. |
+| 2026-09-22 — local validation | Ran formatting/diff checks, the focused 22-test library suite, focused strict Clippy, the full locked workspace all-target test matrix and full workspace strict Clippy. | ~0.5–0.75 h | ~0.1–0.25 h shared Cargo target wait | All local Rust gates exited successfully; opt-in native/live provider tests remain separate. |
+| 2026-09-22 — source security review | Ran the configured security diff workflow for the one changed file; scan `d72a974f-0b62-4b30-a6d2-dbd848a37b38` sealed with complete coverage and zero findings. | ~0.25–0.5 h | ~0.1–0.25 h security workbench finalization | No security candidate survived; customer/provider controls remain separately tracked. |
+| 2026-09-22 — source publication (21:35–21:40 AEST) | Committed `3754eac9`, fetched the concurrent `origin/main` tip `1f8dcd41`, rebased, pushed published `bd28cf46`, and verified local `HEAD == origin/main` with a clean worktree. | ~0.25–0.5 h | ~0.1–0.25 h mainline reconciliation | Other threads can build from the published test chunk. |
+| 2026-09-22 — hosted recheck (21:41 AEST) | Queried the CI queue after publication: automatic descendant run `35722832900` has exact head `bd28cf46` and is pending; the prior manually dispatched provider run remains queued on `9f6041db`. | ~0.1 h | Hosted runner/provider capacity pending | No provider, performance or aggregate result is promoted. |
+| 2026-09-22 — ledger publication | Update this ledger and `WORK_TRACKER.md`, commit and push them as a separate docs chunk; then dispatch/recheck a stable manual descendant if the hosted queue remains non-terminal. | ~0.25–0.5 h provisional | ~0.5–2 h provisional CI/provider wait | Keep production **NO-GO** until the complete packet and customer gates close. |
+
 ## Current authority override — 2026-09-22, bounded remote preparation-wave scheduling chunk
 
 This is the newest implementation and qualification boundary. Source commit
