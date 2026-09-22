@@ -309,6 +309,13 @@ SQL`,
         packet. The provider remains a Preview/NO-GO deployment boundary until
         persistent production storage, restore RPO/RTO, observability,
         ownership, and release approval are recorded.
+        A newer current-main run <code>35713659406</code> at source
+        <code>c87adf7b</code> has terminal success on ARM, macOS-latest, and
+        macOS Intel Node lanes, including exact fragmented-request rejection,
+        PGlite integration/restart recovery, rollback, N-API, and
+        <code>providersFailed: 0</code> markers. The Ubuntu Node lane remains
+        queued, so this is 3/4 current-tip Unix recovery evidence only; native,
+        package, provider, W26, Rust, and production gates remain open.
       </>
     ),
     sources: [
@@ -318,6 +325,7 @@ SQL`,
       { label: 'PGlite progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w04-progress-ledger.md' },
       { label: 'Hosted W04 qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635114595' },
       { label: 'Current W04 exact-tip qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673738166' },
+      { label: 'Current-main W04 recovery qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35713659406' },
       { label: 'PGlite production rollout', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W04-production-rollout.md' },
     ],
   },
