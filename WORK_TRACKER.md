@@ -2141,6 +2141,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   pass. Other oversized results, prefixes too large for even the error,
   crash-durable replay, native-client ordering, power-loss durability, and
   exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
+- [x] A distinct oversized `READLINK` tail is now covered by that bounded
+  cache-required error path. The new real-TCP regression failed before the
+  fix because a 512-byte symlink target made the response exceed a 256-byte
+  cache; after the fix the successful `REMOVE` prefix and
+  `NFS4ERR_REP_TOO_BIG_TO_CACHE` on `READLINK` fit. A changed-target retry
+  returns identical bytes without a second deletion, and the next sequence
+  succeeds. The full locked NFS target passes (41 unit, 1 mountpoint claim
+  with 1 native mount ignored, 2 restart, 1 rootless wire, 3 concurrency,
+  4 errors, 5 lifecycle, 1 v4 barrier, 17 v4 wire); direct v4 wire 17/17,
+  warning-denied Clippy, formatting, and diff checks pass. Other oversized
+  results, prefixes too large for even the error, crash-durable replay,
+  native-client ordering, power-loss durability, and exact-tip hosted
+  acceptance remain open; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.
