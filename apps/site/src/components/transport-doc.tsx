@@ -268,6 +268,15 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
         test compilation and formatting/diff checks passed, but hosted Linux
         Rust/native-FUSE confirmation remains required; this is local
         implementation evidence, not a new hosted acceptance claim.
+        The subsequent FUSE fix at source <code>40a9a3d8</code> addresses the
+        rootless <code>fusermount3</code> <code>EBUSY</code> blocked-read path by
+        draining the serving task before lazy detach and recognizing a
+        successful handoff; native and automatic test mountpoints also use
+        unique suffixes. Lima requalification at <code>65776be</code> passed
+        native 3/3, automatic concurrent 2/2, CLI 3/3, SQLite restart 2/2,
+        fault 1/1, native PGlite reopen 1/1, and PGlite compositions 1/1 with
+        no stale mounts or processes. This remains local Linux evidence; no
+        hosted <code>/dev/fuse</code> result is promoted.
       </>
     ),
     sources: [
@@ -287,6 +296,7 @@ MOUNT_RS_CLI_NATIVE_FUSE=1 \
       { label: 'Lima shipped-CLI FUSE smoke', href: 'https://github.com/andymac4182/mount-rs/commit/32b8596' },
       { label: 'Candidate native FUSE sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },
       { label: 'FUSE teardown/read control-plane hardening', href: 'https://github.com/andymac4182/mount-rs/commit/85362348e9dd294e0547c3f36268facddc7194c8' },
+      { label: 'FUSE blocked-read unmount and lazy-detach fix', href: 'https://github.com/andymac4182/mount-rs/commit/40a9a3d83d881c28bb1eed2c8e131470c86d907e' },
     ],
   },
   nfs: {
@@ -512,6 +522,14 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
         same-process cross-version handle lifetime, not native v4 ordering,
         cross-process recovery, crash/power-loss durability, hosted acceptance,
         or production readiness.
+        The current HostFs requalification at source <code>6aa043b4</code>
+        upgrades that case to a real backing directory: v3 RENAME replaces the
+        destination bytes, the held v4 OPEN still reads the original bytes,
+        CLOSE retires the old pathless handle, and the replacement handle stays
+        valid. The focused case passed ten reruns, the locked target remained
+        green at 43 unit and 25 v4-wire cases, and the opt-in macOS native NFSv3
+        loopback passed 1/1. The preceding exact-tip hosted run was cancelled
+        before jobs, so native v4.1 ordering and hosted acceptance remain open.
       </>
     ),
     sources: [
@@ -527,6 +545,7 @@ MOUNT_RS_NFS_NATIVE_V4_TEST=1 \
       { label: 'Latest NFS credential validation', href: 'https://github.com/andymac4182/mount-rs/commit/ff4b091ccfcea5bc197ccfe79d978c19661a166a' },
       { label: 'NFSv3 LOOKUP/v4 REMOVE ordering qualification', href: 'https://github.com/andymac4182/mount-rs/commit/3884c194e705bf672d3d94a4aab5fc548908c9b3' },
       { label: 'NFS cross-version rename-over-open lifetime', href: 'https://github.com/andymac4182/mount-rs/commit/350c035783198f5a6ef256717373e6ecdd40d16c' },
+      { label: 'HostFs rename-over-open requalification', href: 'https://github.com/andymac4182/mount-rs/commit/6aa043b4a6e08313e075614689b99e4a5f6002fd' },
       { label: 'macOS CLI host-backed NFS smoke', href: 'https://github.com/andymac4182/mount-rs/commit/be382691822327b41bffb9823cd3b235630698b2' },
       { label: 'NFSv4.1 OPEN access-upgrade fix', href: 'https://github.com/andymac4182/mount-rs/commit/512ef9588426d4b84b420bc5634bb043e40ac448' },
       { label: 'Candidate macOS native NFS sub-gate', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714144497' },
