@@ -12,6 +12,24 @@ they do not prove that a production data directory is persistent, that a
 backup can be restored, that a previous artifact can be rolled back safely, or
 that an operator will receive and act on the relevant signals.
 
+## Machine-readable release gate summary
+
+This compact table is the authoritative release-control surface for the
+repository policy check. It tracks the production decision separately from
+the W04 implementation checkboxes: a closed recovery or package gate does not
+close the deployment, provider, operations, ownership, or release gates.
+
+| Gate | Status | Boundary |
+| --- | --- | --- |
+| Production rollout | **NO-GO** | No production release or customer deployment is authorized |
+| P01 hosted recovery qualification | CLOSED | Required Node recovery and restart evidence is terminal and exact-step verified |
+| P02 artifact/package validation | CLOSED | Native package aggregation and clean-consumer smoke are terminally green |
+| P03 persistent deployment and version policy | OPEN | The real volume, compatibility policy, and restart behavior are not recorded |
+| P04 backup, restore, and rollback | OPEN | Production backup identity, isolated restore, RPO/RTO, and rollback drill are not executed |
+| P05 provider scope and durability | OPEN | Launch scope and real provider evidence are not approved for every advertised provider |
+| P06 observability and runbook | OPEN | Collector, alerts, limits, pager path, and operational drills are not connected and evidenced |
+| P07 ownership and release approval | OPEN | Named data/operator/release owners and written GO/NO-GO review are pending |
+
 ## Scope and launch boundary
 
 Record the advertised launch scope before executing the gates. A provider or

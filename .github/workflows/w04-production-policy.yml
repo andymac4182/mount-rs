@@ -48,3 +48,9 @@ jobs:
             echo 'W04 PGlite production config policy accepted a missing lease TTL fixture' >&2
             exit 1
           fi
+      - name: Verify W04 rollout ledger remains fail-closed
+        run: |
+          node --check scripts/verify-w04-rollout-ledger.mjs
+          node --check scripts/test-w04-rollout-ledger.mjs
+          node scripts/verify-w04-rollout-ledger.mjs
+          node scripts/test-w04-rollout-ledger.mjs

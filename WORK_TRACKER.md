@@ -2138,6 +2138,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   fail-closed negative markers. This closes the credential-free configuration
   shape check only; it does not close persistent deployment, backup/restore,
   provider, observability, ownership, or release approval gates.
+- The rollout packet now has a structured seven-gate summary and a fail-closed
+  repository check in `scripts/verify-w04-rollout-ledger.mjs`, with temporary-
+  document coverage in `scripts/test-w04-rollout-ledger.mjs`. The existing
+  policy workflow runs both checks so an implementation-only W04 closure cannot
+  be promoted to production GO while P03–P07 remain open. Local policy and
+  mutation cases pass; hosted execution and all deployment/provider/operator
+  evidence remain external, so production stays **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
