@@ -49,7 +49,8 @@ direct `./9p` facade now owns the bounded `signals` teardown option.
 The local N-API member-boundary regression now records the serializable option
 snapshot and attached-stream representations; the first hosted direct-mount
 attempt exposed an incorrect `peer: null` expectation for Unix sockets, so a
-corrected rerun is pending for native `stream: undefined` and its
+corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P
+run `35670279904`, qualifying native `stream: undefined` and its
 transport-source peer string.
 The `./9p` constants/message-name/default barrel is now complete against the
 pinned upstream surface, with all 124 constants and all 274 runtime barrel
@@ -89,6 +90,8 @@ client objects with peer/shared-session views plus abort-safe close/wait state,
 including cancellation while a queued request waits for an in-flight slot and
 serialized concurrent listen/close lifecycle calls. Rust server close is
 terminal, and a later `listen()` rejects rather than returning a stale address.
+Connection close waiters register before checking completion, removing the
+lost-wakeup interval around `wait_closed()`.
 The focused Rust/N-API checks pass; rootless tests also prove process-lifetime
 NFSv4.1 session continuity across an orderly TCP reconnect and eight pipelined
 NFSv3 calls under bounded in-flight dispatch, and a blocked NFSv3 RPC does not
@@ -784,7 +787,7 @@ patch):
 | Main | W01 hosted N-API 9P native lifecycle gate | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/package.json`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: run `35664614270`, N-API job `106547449823`, at exact SHA `1dcf4dee4d01fb5e3807335579659b54efd74351` passed `9p`/`9pnet_fd` probing, addon build, automatic and direct `./9p` mounted I/O/cleanup, and structural-driver mounted I/O/cleanup; the Rust `native-9p` job `106547449501` also passed; automatic cross-transport signal ownership, remaining mount controls, and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P return-shape and direct-option parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: `P9Mount.source` is declared as `string`, compile-time checked, and asserted non-empty by the hosted direct mount; generated typecheck, syntax, helper, and diff checks passed locally. Exact SHA `3c884bd8c0d0199a17e4c355c36d45f660c7c786` passed Native 9P run `35665824215`, N-API job `106552944097`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106552944349` passed all four ignored native tests; the pinned direct `MountP9Options` audit found no additional unrepresented fields. Automatic cross-transport signal ownership and supervisor-owned crash/reset/half-close recovery remain outside this acceptance slice, so production remains NO-GO |
 | Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
-| Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` passed Rust and automatic N-API but exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact-SHA direct rerun remains required, so production remains NO-GO |
+| Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P run `35670279904` with N-API job `106565351978` and Rust job `106565352174`, so this representation boundary is hosted-qualified; production remains NO-GO for the broader outstanding gates |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -848,7 +851,7 @@ complete.
 | W23 | Physical copy-on-write | Future requirement | Unassigned |
 | W24 | Domain and marketing site | TanStack Start site deployed; `mount-rs.com` and `www.mount-rs.com` live on Vercel | Meitner (complete slice) / Main |
 | W25 | Actual AWS S3 integration | Qualification complete for the myroot test bucket and scoped live Rust gate; production rollout NO-GO with W25.5-W25.9 open | Main |
-| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; current `origin/main` `f10dbf22` includes lazy-atime/EOF reduction, R2 content-addressing/cache, metadata batching, queue cancellation safety, same-revision concurrent-create inode rebasing, lease-renewal caching with forced validation at explicit metadata/destructive boundaries, the corrected Ozone content-addressed contract and deduplicated cleanup. The customer-deployed Ozone integration track remains NO-GO after terminal run `35655276021` missed the hard 1,000-IOPS-per-drive target for SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2; fresh hosted run `35669685204` targets exact SHA `f10dbf22`, with TiDB in progress, FoundationDB/compositions/base queued and no aggregate yet. Final lease-renewal security scan `4265d7aa-1425-46dc-8620-b37a60ebf97a` has zero reportable findings with complete coverage; secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
+| W26 | Apache Ozone S3 backend | W26 qualification harness and local controls are implemented; current `origin/main` `c2670fe3` includes W26 lease-renewal implementation SHA `f10dbf22`, lazy-atime/EOF reduction, R2 content-addressing/cache, metadata batching, queue cancellation safety, same-revision concurrent-create inode rebasing, lease-renewal caching with forced validation at explicit metadata/destructive boundaries, the corrected Ozone content-addressed contract and deduplicated cleanup. The customer-deployed Ozone integration track remains NO-GO after terminal run `35655276021` missed the hard 1,000-IOPS-per-drive target for SQLite/R2, PGlite/R2, TiDB/R2 and FoundationDB/R2; fresh hosted run `35669685204` targets exact SHA `f10dbf22`, with TiDB in progress, FoundationDB/compositions/base queued and no aggregate yet. Final lease-renewal security scan `4265d7aa-1425-46dc-8620-b37a60ebf97a` has zero reportable findings with complete coverage; secure customer topology, 99.99%/5-minute objective evidence, native/end-to-end coverage and Ozone-owned DR/release gates remain explicit | Main |
 | W27 | Native Windows support and CI | HostFs symlink, read-only create/unlink and hard-link packets landed; hosted runtime and mount qualification pending | Main |
 | W28 | Deterministic fault injection | Implementing | Main integration |
 | W29 | User-configurable lifecycle hooks | Deferred for later | Unassigned |
@@ -930,6 +933,8 @@ and the focused direct-session concurrency probe passes 256 concurrent PUT/GET
 requests, while the network-concurrency/auth test passes 256 concurrent HTTP
 PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
+provider-backed direct-session matrix also passes 128 concurrent NodeFs and
+SQLite PUT/GET pairs in three repetitions with exact byte readback. The
 opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide
@@ -1447,6 +1452,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   v4 barrier 1, and v4 wire 7; strict Clippy, formatting, and diff checks pass.
   Native-client ordering, cross-process concurrency, and crash/durability
   qualification remain open.
+- [x] NFS connection close waiters now register with `Notify` before checking
+  the completion flag, eliminating the lost-wakeup interval. A focused unit
+  test passed 32 concurrent waiters plus a late waiter; the complete locked
+  NFS target passed 40 unit tests and all applicable integration targets, with
+  warning-denied NFS Clippy, formatting, and diff checks green. Native-client
+  ordering, cross-process concurrency, and crash/durability remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
@@ -1573,6 +1584,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   locks. This classifies local in-flight process-crash recovery only; power-loss
   ordering, live-provider behavior, durable locks, hosted lifecycle, and hosted
   concurrency remain open.
+- [x] The focused N-API provider-backed WebDAV concurrency probe is now part of
+  the package test sequence: three repetitions at
+  `MOUNT_RS_WEBDAV_PROVIDER_CONCURRENCY=128 node
+  test/webdav-provider-concurrency.mjs` passed 128 concurrent direct-session
+  PUT/GET pairs for both NodeFs and SQLite with exact bytes and matching method
+  counters. This is local provider evidence only; hosted remote-provider,
+  network, power-loss, durable-lock, and wider ordering gates remain open.
 - [x] Direct JavaScript peer-fault qualification now drives abortive Node
   socket resets against both S3 and WebDAV after session-reply readiness. Each
   N-API callback delivered exactly once with the accepted peer, repeated
