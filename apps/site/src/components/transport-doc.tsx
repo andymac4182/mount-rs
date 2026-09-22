@@ -1056,6 +1056,7 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'Latest hosted WebDAV/provider audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35687955189' },
       { label: 'Current WebDAV N-API package qualification', href: 'https://github.com/andymac4182/mount-rs/commit/c57e2ea3' },
       { label: 'Queued current-package WebDAV run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714570430' },
+      { label: 'Current WebDAV oracle parity', href: 'https://github.com/andymac4182/mount-rs/commit/72011a0' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
