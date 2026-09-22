@@ -1592,6 +1592,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   crash-durable replay/lease/handle
   state, native-client ordering, power-loss durability, or exact-tip hosted
   acceptance; W01-NFS remains NO-GO.
+- [x] An oversized completed NFSv4.1 reply with `SEQUENCE.cachethis=false`
+  now stores a compact retry marker when it fits the negotiated cache limit.
+  A real-TCP `REMOVE` plus large `READDIR` exceeded a 128-byte limit; before
+  the fix a changed-target retry got `NFS4ERR_SEQ_MISORDERED`, but now it
+  receives successful `SEQUENCE` plus `NFS4ERR_RETRY_UNCACHED_REP` on the
+  original second operation. A repeated retry returns identical marker bytes
+  without deleting the changed target, and the next sequence progresses.
+  The full locked NFS target passes (41 unit, 1 mountpoint claim with 1 native
+  mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 14 v4 wire); direct v4 wire, warning-denied
+  Clippy, formatting, and diff checks pass. `cachethis=true` oversized
+  replies, limits below the marker size, crash-durable replay/lease/handle
+  state, native-client ordering, power-loss durability, and exact-tip hosted
+  acceptance remain NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

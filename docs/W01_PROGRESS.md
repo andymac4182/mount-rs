@@ -88,24 +88,33 @@ unfinished session:
 retrying with a changed target gets `NFS4ERR_BADSESSION` without a second
 deletion, and the same client can create a replacement session and continue.
 The replacement `CREATE_SESSION` reply now echoes its noninitial request
-sequence. Exact-reply recovery for a canceled request, oversized completed-reply
-handling, persistent replay, native-client ordering, and exact-tip hosted
-acceptance remain open.
+sequence. Exact-reply recovery for a canceled request, cache-required
+oversized-reply handling, persistent replay, native-client ordering, and
+exact-tip hosted acceptance remain open.
 
 For completed cached NFSv4.1 replies, a real-TCP `AUTH_SYS` regression now
 rejects a same-slot retry from a different effective user with
 `NFS4ERR_SEQ_FALSE_RETRY`. The original user can still receive the cached
 mutating reply without a second execution and advance the slot. This is
 replay-user consistency for decoded credentials, not cryptographic `AUTH_SYS`
-authentication, oversized reply recovery, durable replay, or native-client
-ordering; W01-NFS remains NO-GO.
+authentication, cache-required oversized reply recovery, durable replay, or
+native-client ordering; W01-NFS remains NO-GO.
 
 A new NFSv4.1 wire regression covers a completed, small `REMOVE` reply whose
 `SEQUENCE.cachethis` hint is false. The server now keeps the full bounded
 reply anyway, so a same-slot retry returns the original body without
 executing a changed target; the next sequence still progresses. This closes
-one live-process replay gap, not oversized or crash-durable reply recovery,
-native-client ordering, or hosted acceptance; W01-NFS remains NO-GO.
+one live-process replay gap, not cache-required oversized or crash-durable
+reply recovery, native-client ordering, or hosted acceptance; W01-NFS remains
+NO-GO.
+
+For a larger completed reply with `SEQUENCE.cachethis=false`, a new real-TCP
+`REMOVE` plus `READDIR` regression now receives a bounded cached
+`NFS4ERR_RETRY_UNCACHED_REP` marker on retry, rather than
+`NFS4ERR_SEQ_MISORDERED`. Repeated retries cannot delete a changed target,
+and a fresh sequence progresses. This remains same-process evidence; the
+`cachethis=true` oversized path, tiny cache bounds, crash-durable state,
+native-client ordering, and hosted acceptance are still NO-GO.
 
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
