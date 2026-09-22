@@ -376,9 +376,16 @@ SQL`,
         gateway, and 5 public-API Rust tests, 64-way direct-session/CAS
         concurrency, process restart, structural-factory parity, and the
         40-case S3/WebDAV HTTP differential. It remains local/oracle evidence;
-        the latest AWS admission <code>35679010203</code> stopped at
-        <code>missing_bucket</code> and R2 admission <code>35679010292</code>
-        stopped at <code>count=281 limit=20</code>, so neither produced a live
+        the follow-up local hook packet at <code>d43f5ea</code> also wires Rust
+        <code>S3SessionHooks</code> and the N-API <code>now</code>,
+        <code>requestId</code>, <code>onError</code>, and
+        <code>onAssertion</code> controls with callback keepalive/release;
+        its callback-observability, package, Rust, and strict-Clippy checks
+        passed. These remain local controls, not live-provider acceptance. The
+        latest AWS admission <code>35679010203</code> stopped at
+        <code>missing_bucket</code> and the latest R2 admission
+        <code>35680542993</code> stopped at <code>count=285 limit=20</code>, so
+        neither produced a live
         service PASS.
       </>
     ),
@@ -475,7 +482,8 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
-      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35679010292' },
+      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35680542993' },
+      { label: 'S3 session-hook change', href: 'https://github.com/andymac4182/mount-rs/commit/d43f5ea4' },
     ],
   },
   rustfs: {
@@ -1227,9 +1235,16 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         measured only 637.01 IOPS for SQLite/R2, 457.65 for PGlite/R2,
         147.31 for TiDB/R2, and 126.50 for FoundationDB/R2 against the hard
         1,000-IOPS target; its aggregate failed closed without pass markers.
-        Fresh run <code>35678993571</code> now targets exact SHA
-        <code>4b4fe43a</code> and remains queued, so it is not acceptance
-        evidence.
+        The newer manual run <code>35683158821</code> targeted exact SHA
+        <code>14dbf2c6</code> and is now terminal but diagnostic: SQLite/R2
+        measured <code>754.59</code> IOPS, PGlite/R2 <code>817.10</code>,
+        TiDB/R2 <code>143.04</code>, and FoundationDB/R2 <code>345.17</code>
+        against the unchanged 1,000-IOPS target. Each provider completed
+        1,200/1,200 lifecycle operations with zero timeouts and cleanup
+        failures, but the provider jobs failed the hard threshold and the
+        aggregate job <code>106606577835</code> failed closed on missing
+        <code>OZONE_IOPS_PASS</code> markers. No acceptance or production
+        claim is made from this run.
       </>
     ),
     sources: [
@@ -1239,9 +1254,9 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Durable FoundationDB composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
-      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
+      { label: 'Historical hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
       { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
-      { label: 'Current publication-barrier qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35678993571' },
+      { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683158821' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>

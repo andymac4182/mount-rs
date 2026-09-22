@@ -510,7 +510,16 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
         <code>readRread</code>, <code>readTwrite</code>, and
         <code>readRreaddir</code>; exact SHA <code>4ecdb63</code> passed run
         <code>35678757675</code> with bounded success and oversized-body error
-        coverage. These are scoped native/API qualifications, not broader
+        coverage. The follow-up packets also export the direct
+        <code>P9Platform</code> type alias and preserve <code>P9User.uid</code>
+        as an own <code>undefined</code> field when no numeric uid is
+        available. Hosted run <code>35683716217</code> at exact SHA
+        <code>d43f5ea4</code> passed the isolated server/attached-stream
+        lifecycle and Unix-listener policy checks, including private-directory
+        refusal, explicit shared-directory opt-in, <code>0600</code> socket
+        mode, peer/path reporting, socket removal, and path/port exclusivity,
+        alongside the Linux mounted-I/O and cleanup checks. These are scoped
+        native/API qualifications, not broader
         upstream parity or crash/reset recovery; overall production status
         remains NO-GO.
       </>
@@ -520,7 +529,7 @@ sudo mount -t 9p -o trans=tcp,version=9p2000.L,port=<PORT> \
       { label: 'W01 9P progress tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_9P_PROGRESS.md' },
       { label: 'Porting status', href: 'https://github.com/andymac4182/mount-rs/blob/main/PORTING_STATUS.md' },
       { label: 'Hosted Linux 9P lifecycle CI', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35616832528' },
-      { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35628187344' },
+      { label: 'Current hosted Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35683716217' },
       { label: 'Hosted N-API Native 9P qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35671509538' },
       { label: 'Latest hosted 9P stats qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35673543701' },
       { label: 'Latest hosted 9P fid qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35674581481' },
@@ -860,8 +869,18 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
         and post-restart round-trip harness on both macOS and Ubuntu native
         WebDAV jobs. The aggregate remained nonterminal on unrelated jobs, so
         live-provider durability, power-loss ordering, durable locks, and
-        wider ordering remain open. The current maturity therefore remains
-        Preview.
+        wider ordering remain open. The follow-up local hardening now requires
+        the oracle/RFC space after <code>Basic</code>, bounds <code>Depth: 1</code>
+        enumeration at 4,096 entries with overflow mapped to
+        <code>413</code> and connection close, and rejects child-stat or
+        short-source failures during recursive <code>COPY</code>; focused
+        tests and warning-denied Clippy passed, but these are local contract
+        checks. The exact-tip hosted queue run <code>35681063238</code> was
+        canceled when successor tip <code>2bcd9aa4</code> arrived, and its
+        replacement <code>35681127696</code> was later canceled before jobs
+        materialized. No newer hosted WebDAV result is claimable, so
+        <code>35678488755</code> remains the latest terminal native result and
+        the current maturity remains Preview.
       </>
     ),
     sources: [
@@ -874,6 +893,9 @@ MOUNT_RS_WEBDAV_NATIVE_TEST=1 \
       { label: 'WebDAV durable-barrier change', href: 'https://github.com/andymac4182/mount-rs/commit/4e19f226' },
       { label: '256-request concurrency change', href: 'https://github.com/andymac4182/mount-rs/commit/efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6' },
       { label: 'Same-resource ordering boundary', href: 'https://github.com/andymac4182/mount-rs/commit/475c9b3a14a0f96862242463a7f1ebf861c33a61' },
+      { label: 'WebDAV Basic-auth hardening', href: 'https://github.com/andymac4182/mount-rs/commit/8e23ca0' },
+      { label: 'WebDAV bounded enumeration and copy failures', href: 'https://github.com/andymac4182/mount-rs/commit/8e08ac4' },
+      { label: 'Latest hosted WebDAV queue audit', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35681127696' },
     ],
   },
 } as const satisfies Record<string, TransportSpec>
