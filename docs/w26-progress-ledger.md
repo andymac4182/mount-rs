@@ -38,7 +38,7 @@ The newest W26 source/test boundary is published as
 (`test(w26): cover serialized lease renewals`) at both the detached checkout
 and the `origin/main` history; W26 docs commits `625bd0f1` and `a82800c1`
 are ancestors of the current docs-only shared tip `HEAD == origin/main`
-`1a0e09ad`. The test-only chunk adds a metadata-store wrapper that
+`db8e8ec6`. The test-only chunk adds a metadata-store wrapper that
 counts in-flight provider renewals and a 16-way regression proving concurrent
 operation-lease checks make one provider renewal and never overlap. It does
 not change the production runtime; the preceding runtime scan remains the
@@ -46,7 +46,7 @@ production-code security boundary.
 
 | Gate / item | Current result | Evidence | Remaining action / ownership |
 | --- | --- | --- | --- |
-| Source/test chunk | **PUBLISHED / 100% for this chunk** | `a7e459e6` is an ancestor of current `HEAD == origin/main` `1a0e09ad`; `cargo fmt --all -- --check` and `git diff --check` pass. | Keep the exact source tip `a7e459e6` as the hosted qualification input. |
+| Source/test chunk | **PUBLISHED / 100% for this chunk** | `a7e459e6` is an ancestor of current `HEAD == origin/main` `db8e8ec6`; `cargo fmt --all -- --check` and `git diff --check` pass. | Keep the exact source tip `a7e459e6` as the hosted qualification input. |
 | Lease serialization regression | **PASS** | Focused test passed; the complete `mount-rs-chunked` library suite is 23 passed, 0 failed, 0 ignored. The test asserts exactly one renewal and maximum in-flight renewal depth of one across 16 concurrent callers. | Hosted provider execution remains separate. |
 | Full local Rust gates | **PASS** | `./scripts/cargo-shared test --workspace --all-targets --locked` and strict workspace Clippy with `-D warnings` both exited 0. Explicitly opt-in native/live provider tests remain ignored where services or host privileges are unavailable. | Do not promote local passes or ignored tests to Ozone acceptance. |
 | Security diff for this chunk | **PASS — 0 findings / complete coverage** | Scan `ce953fbe-71f3-44a0-8090-11d4dd502e08` reviewed the one changed test surface with complete coverage and zero findings; report `/private/var/folders/qx/1pyrtldd3nb1l0p44xbmd97h0000gn/T/codex-security-scans-7kSFBv/mount-rs/a7e459e6a9749384d409e4f53d6938df9a4414b9_20260922T121622Z_jpxtatob/report.md`. The prior production-runtime scan `86a4e46e-caef-4d9b-8ab7-aeba21571d80` is also complete with zero findings. | Customer certificate/IAM, secret rotation, tenant isolation and provider-native security remain production gates. |
