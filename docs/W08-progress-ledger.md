@@ -1,6 +1,6 @@
 # W08 TiDB workstream progress ledger
 
-Status snapshot: **2026-09-22 13:19 AEST**
+Status snapshot: **2026-09-22 13:27 AEST**
 Repository: `andymac4182/mount-rs`  
 Publication snapshot: W08.36 implementation commit `0855e2ab` was reconciled
 with concurrent mainline work and pushed in merge tip `e0ab07d6`. The W08.36
@@ -28,21 +28,31 @@ S3-session-concurrency, session-parity, chunked-durability, FUSE, S3-test and
 WebDAV updates. This is source-health evidence only; provider/native rows
 remain explicit opt-in skips. Changed N-API JavaScript files and package JSON
 also passed static checks, while full local N-API runtime remains blocked by
-absent optional binding artifacts. The current reconciled `HEAD`
-`c9df268902335934dbe2c369de881803ca376bcd` is the exact tested tip; the
-FoundationDB, 9P, W07 and N-API source changes were requalified rather than
+absent optional binding artifacts. The source-tested tip
+`c9df268902335934dbe2c369de881803ca376bcd` remains the exact tested tip; the
+current reconciled `HEAD` `bdd87108e003a83a01cf9aa479a3e145dbd7cbe3` contains
+only the concurrent W04 documentation update after that source and is
+source-equivalent. The FoundationDB, 9P, W07 and N-API source changes were
+requalified rather than promoted from documentation-only evidence. The 9P
+workflow and server-lifecycle source changes were requalified rather than
 promoted from documentation-only evidence.
-The current reconciled `HEAD` is that exact tested tip; the 9P workflow and
-server-lifecycle source changes were requalified rather than promoted from
-documentation-only evidence.
 Hosted W08 policy run `35681936375` at source `e7be3769dd7c6722ce096c481f30d042d7895dbe`,
 job `106600554617`, completed successfully in 2m48s. The rollout-ledger
 policy and release-identity/provenance policy passed; the run is hosted
 implementation/static evidence only and does not close any production gate.
 The subsequent public documentation-only merges through
-`66442a5057085267a15a2fb688f0f44f12b490f1` are source-equivalent to that
+`bdd87108e003a83a01cf9aa479a3e145dbd7cbe3` are source-equivalent to that
 hosted result.
 This does not close any production gate.
+Latest hosted W08 policy run `35682838216` at source
+`1eef1d9df6c9b05350c1857a72237bb7e5603fac`, job `106603416051`, completed
+successfully in 2m47s. The rollout-ledger and release-identity/provenance
+policy passed. Latest hosted native-9P workflow run `35682638941` at source
+`007e6545d1b25d708abfa10f2120f81fba59a74a` also completed successfully, with
+the `native-9p` job `106602683880` and the `N-API native 9P lifecycle` job
+`106602684115` both green. These are hosted implementation/native functional
+qualification only; they do not create provider, production-candidate,
+canary, rollback or owner-approval evidence.
 The ledger checkpoint commit `2a99acdd` was reconciled with concurrent
 mainline work and published in public merge tip `056e7a15`. The latest FUSE
 qualification commit `052dc184` was reconciled and published in public merge
@@ -472,13 +482,16 @@ the evidence counted here.
   recorded as external/provider/hosted gates rather than fabricated local
   passes.
 
-### Latest evidence refresh — 2026-09-22 13:19 AEST
+### Latest evidence refresh — 2026-09-22 13:27 AEST
 
 | Evidence item | Status | Evidence and boundary | Remaining action / blocker |
 | --- | --- | --- | --- |
 | Hosted W08 policy run `35681936375`, source `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617` | PASS — hosted implementation/static qualification; production remains NO-GO | The pushed checkpoint completed the W08 rollout-ledger policy and release-identity/provenance policy in terminal `success` in 2m48s. The run had no provider credentials, production deployment, candidate tag, canary, rollback or owner approval; GitHub emitted only Node 20/Ubuntu 26 informational annotations. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
+| Hosted W08 policy run `35682838216`, source `1eef1d9df6c9b05350c1857a72237bb7e5603fac`, job `106603416051` | PASS — hosted implementation/static qualification; production remains NO-GO | The pushed checkpoint completed the W08 rollout-ledger policy and release-identity/provenance policy in terminal `success` in 2m47s. No provider credentials, production deployment, candidate tag, canary, rollback or owner approval was involved. | Retain this as hosted policy evidence only. P01–P09 still require terminal production-like evidence, named ownership and explicit GO approval. |
+| Hosted native-9P workflow run `35682638941`, source `007e6545d1b25d708abfa10f2120f81fba59a74a`, jobs `106602683880` and `106602684115` | PASS — hosted/native functional qualification; production remains NO-GO | The `native-9p` job and `N-API native 9P lifecycle` job both completed in terminal `success`. This qualifies the hosted native functional path only; it does not establish provider, production topology, candidate release, canary, rollback or owner-approval evidence. | Retain as hosted/native qualification only; keep P01–P09 open. |
 | Current tested merged source base `874aca5750ac3c4557ed6d3903a8c1d9e02fe5a9`, reconciled docs-only `HEAD` `66442a5057085267a15a2fb688f0f44f12b490f1` | PASS — full local source-health and W08 tracking verification; production remains NO-GO | After merging the WebDAV bounded propfind/copy failure fix, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing; the WebDAV test group reported 24 passing tests and native host rows remained explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0. Changed N-API JavaScript paths, package JSON, all four W08 validators/tests and `git diff --check` also passed. The later 9P/W26 merge changed documentation only, so `66442a50` is source-equivalent. | Push this reconciled checkpoint normally; retain the explicit P01–P09 blockers and do not promote this source-health result to provider/native or production acceptance. |
 | Current tested merged source base `c9df268902335934dbe2c369de881803ca376bcd` | PASS — full local source-health and W08 tracking verification; production remains NO-GO | After merging the 9P N-API server-lifecycle gate isolation, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing; the WebDAV test group reported 24 passing tests and provider/native host rows remained explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0. Changed N-API JavaScript paths, package JSON, `native-9p.yml` YAML parsing, all four W08 validators/tests and `git diff --check` also passed. This is source-health, workflow-shape and tracking-control evidence only; it does not close P01–P09. | Push this reconciled checkpoint normally; retain the explicit P01–P09 blockers and do not promote this result to provider/native or production acceptance. |
+| Current reconciled public docs-only checkpoint `bdd87108e003a83a01cf9aa479a3e145dbd7cbe3` | PASS — source-equivalent publication; production remains NO-GO | `git fetch origin` and a fast-forward merge reconciled the concurrent W04 documentation update after tested source `c9df2689`; no W08 implementation source changed, so no new source-health result is inferred. | Continue normal W08 publication; keep the tested-source boundary and all P01–P09 blockers explicit. |
 | Current tested merged source base `c6d6778517f854ac678a80920fe4fb8afd204808` | PASS — full local source-health and W08 tracking verification; production remains NO-GO | After merging the FoundationDB storage/test qualification changes, 9P undefined-UID preservation, W07 lease-authority telemetry, N-API postbuild/session-metadata changes and the prior W26/9P sources, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing; provider/native cases remained explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0. Changed N-API JavaScript/type declaration paths, package JSON, all four W08 validators/tests and `git diff --check` also passed. The machine-readable packet remains `decision=NO-GO gates=9 closed=0 evidence_records=0`. | Push this reconciled ledger checkpoint normally, then retain the explicit P01–P09 blockers: provider services/credentials, native hosts, production topology, secret/IAM, DR, capacity, security, drills, protected candidate release, canary, rollback and named approval. |
 | Current tested merged source base `f68106cfcc64f3c7e4c90b2c413fcc393824a526` | PASS — full local source-health and W08 tracking verification | `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 on the exact merged source after the S3 conditional-put/session-concurrency changes; all executed tests passed and provider/native cases remained explicit opt-in skips. `./scripts/cargo-shared clippy --workspace --all-targets --locked -- -D warnings` exited 0. The changed N-API S3-session-concurrency script passed `node --check`, package JSON parsed successfully, and the four W08 rollout/evidence commands returned `W08_ROLLOUT_LEDGER_POLICY_PASS decision=NO-GO functional_items=36 production_gates=9`, `W08_ROLLOUT_LEDGER_TEST_PASS cases=7`, `W08_PRODUCTION_EVIDENCE_POLICY_PASS decision=NO-GO gates=9 closed=0 evidence_records=0 require_go=false` and `W08_PRODUCTION_EVIDENCE_TEST_PASS cases=11`; `git diff --check` passed. The later typed-reader/W26 merge changed documentation only and is source-equivalent. This confirms current source health and tracking controls only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; keep provider/native and production-like gates separate until the required TiDB/RustFS services, native hosts, credentials, owners and protected release environment are available. Keep the packet NO-GO with zero evidence records. |
 | Current tested merged source base `541365432f4400a2309002a138cfbea75f26d44b` | PASS — full local source-health and W08 tracking verification | After merging the chunked lease-release and 9P synchronous mount-inspection changes, `./scripts/cargo-shared test --workspace --all-targets --locked --quiet` exited 0 with all executed tests passing and provider/native rows remaining explicit opt-in skips. Strict workspace Clippy with `-D warnings` exited 0; changed N-API 9P files passed `node --check`, package JSON parsed, all four W08 rollout/evidence commands passed, and `git diff --check` passed. The subsequent WebDAV hosted-result merge changed documentation only and is source-equivalent to this tested tree. This is source-health and tracking-control evidence only; it does not close P01–P09. | Publish this qualification through the next normal mainline push; retain the provider/native and production-like boundaries until their required services, credentials, owners and protected release environment exist. |
@@ -648,6 +661,7 @@ provisional and should be revised when the next terminal CI result is known.
 | 2026-09-22 13:04–13:09 AEST | Pushed the W08 source-requalification checkpoint, followed hosted policy run `35681936375` / job `106600554617` to terminal success, refreshed the read-only production boundary, and merged the subsequent W26 documentation-only public tip `8c8f678a`. | ~0.1 engineer-day | ~2m48s hosted policy execution plus public-ref/API observation and mainline reconciliation | Hosted implementation/static policy passed. No production candidate workflow run, protected environment, candidate tag, registry acceptance, canary, rollback or named approval exists; production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 13:09–13:14 AEST | Merged the WebDAV bounded propfind/copy failure fix, reran the full locked workspace test and strict Clippy on exact merged source `874aca57`, syntax-checked the changed N-API paths, parsed package JSON, reran all four W08 rollout/evidence validators/tests, and merged the subsequent 9P/W26 documentation-only public tip `66442a50`. | ~0.2 engineer-day | ~1m test/Clippy/static/policy execution plus mainline reconciliation | The exact WebDAV-merged source is test-, lint- and tracking-control clean; provider/native prerequisites and all P01–P09 production gates remain external. Production remains NO-GO with nine open gates and zero evidence records. |
 | 2026-09-22 13:14–13:19 AEST | Merged the 9P N-API server-lifecycle gate isolation, reran the full locked workspace test and strict Clippy on exact merged source `c9df2689`, syntax-checked the changed N-API paths, parsed package JSON, parsed `.github/workflows/native-9p.yml`, reran all four W08 rollout/evidence validators/tests, and ran diff checks. | ~0.15 engineer-day | ~1m test/Clippy/static/policy execution plus mainline reconciliation | The exact 9P-merged source is test-, lint-, workflow-shape- and tracking-control clean; provider/native prerequisites and all P01–P09 production gates remain external. Production remains NO-GO with nine open gates and zero evidence records. |
+| 2026-09-22 13:19–13:27 AEST | Pushed the 9P qualification checkpoint, followed hosted W08 policy run `35682838216` / job `106603416051` to terminal success, recorded hosted native-9P run `35682638941` / jobs `106602683880` and `106602684115` as terminal success, and fast-forwarded the concurrent W04 documentation tip to `bdd87108`. | ~0.1 engineer-day | ~2m47s hosted policy execution plus native-run/public-ref observation and mainline reconciliation | Hosted implementation/static and native functional qualification passed. No production candidate, protected environment, registry acceptance, canary, rollback or named approval exists; production remains NO-GO with nine open gates and zero evidence records. |
 | Prior goal phase before this ledger request | TiDB/RustFS harness hardening, native process-identity fix, TiDB/TiKV descriptor and bootstrap fixes, hosted-log analysis and repeated CI queue monitoring. | **Substantial; exact active split not instrumented** | Goal telemetry previously reported roughly 2 h 41 min elapsed, including tool/CI waits | Implementation chunks were committed and pushed; W08 functional acceptance is complete and production gates remain open. |
 
 ## Update protocol

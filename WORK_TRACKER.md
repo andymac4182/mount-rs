@@ -3768,6 +3768,17 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   checks are hosted implementation/static evidence only; they do not create
   provider, candidate-release, canary, rollback or owner-approval evidence.
 
+  The later hosted W08 policy run `35682838216` at source
+  `1eef1d9df6c9b05350c1857a72237bb7e5603fac`, job `106603416051`, completed
+  successfully in 2m47s with the rollout-ledger and release-identity/provenance
+  checks green. The hosted native-9P workflow run `35682638941` at source
+  `007e6545d1b25d708abfa10f2120f81fba59a74a` also completed successfully; its
+  `native-9p` job `106602683880` and `N-API native 9P lifecycle` job
+  `106602684115` were both green. These are hosted implementation/native
+  functional qualification only. They do not supply production topology,
+  provider, candidate-release, registry, canary, rollback or owner-approval
+  evidence, so P01–P09 remain open and the decision remains NO-GO.
+
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed
   on the insecure/inline-secret fixture, passed the pending and strict accepted
