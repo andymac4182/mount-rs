@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 15:57 AEST (2026-09-22 05:57 UTC)
+Last updated: 2026-09-22 15:59 AEST (2026-09-22 05:59 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -10,9 +10,10 @@ hosted or native gate.
 ## Overall position
 
 Current moving boundary: fetched `origin/main` is now
-`b72d02f4ed9b91b14149a621deb68daab2af8957` (`b72d02f4`), the W05 ledger
-successor rebased over concurrent S3 test coverage `d4f43b28` and W04
-documentation `cf0ed708`. The underlying W05 runtime surface is the
+`13f17162438e8be24608660e2fafe085ecd6128d` (`13f17162`), the W05 ledger
+successor rebased over concurrent W01/W07/W26 documentation and CI changes.
+The exact W05 hosted-status candidate recorded below is `b72d02f4`; the
+underlying W05 runtime surface is the
 rejected-request-body drain fix `d870f900` plus the structural-driver N-API,
 PGlite autocommit, S3 pipelining, and HTTP framing-boundary changes. Its
 changed-surface qualification passed the direct-9P structural-driver and
@@ -878,6 +879,7 @@ shown separately from active engineering time.
 | 2026-09-22 15:43–15:48 | Rebased/pushed the W05 structural-9P ledger over the S3 HTTP-framing successor and ran the full current gateway suite | Local release qualification / release engineering | Pushed tip `7440a68` is exactly synchronized with `origin/main`. The current S3 gateway suite passed `37/37`, including Expect/Continue, transfer-encoding refusal, HEAD framing, pipelined responses, short-response framing, multipart/CAS, interop, and lifecycle coverage. Production remains NO-GO; hosted/provider/native/package/scope/final-audit gates remain open. |
 | 2026-09-22 15:48–15:52 | Reconciled the rejected-request-body drain fix, rebased over concurrent W07/9P documentation, rebuilt the N-API artifact, and reran the complete Node/N-API suite plus 37-test S3 gateway packet | Changed-surface integration qualification / release engineering | Runtime `d870f900` and current docs tip `2278f32b` passed the S3 gateway packet and rebuilt Node suite. The direct/structural 9P, WebDAV, S3, FUSE/NFS, differential, distribution, and artifact phases passed; provider/native opt-ins remained explicit skips. Production remains NO-GO. |
 | 2026-09-22 15:52–15:57 | Committed and pushed the W05 ledger/tracker successor as `b72d02f4` after rebasing over concurrent `d4f43b28` and `cf0ed708`; refreshed exact-SHA hosted Actions and waited for the fault run to terminate | Release engineering / hosted evidence | `HEAD == origin/main == b72d02f4`. W04 policy `35692639780` succeeded; fault `35692639786`, W08 policy `35692639797`, CI `35692639806`, and W08 targets `35692639831` completed cancelled. No hosted release acceptance is promoted; production remains NO-GO. |
+| 2026-09-22 15:57–15:59 | Rebased the hosted-status ledger over concurrent W01/W07/W26 changes and published the final documentation tip `13f17162` | Release engineering / documentation | `HEAD == origin/main == 13f17162`; the exact W05 hosted-status evidence remains tied to candidate `b72d02f4`, with no terminal release acceptance promoted. Production remains NO-GO. |
 
 Estimated active engineering time for the completed W05 continuation before
 this production program plus the current qualification checkpoints: **about
