@@ -610,9 +610,9 @@ impl MetadataStore for PgliteMetadataStore {
     }
 
     fn publish_includes_flush_barrier(&self) -> bool {
-        // `publish` awaits the PostgreSQL transaction COMMIT. The provider
-        // flush is only a post-commit acknowledgement/dead-connection probe;
-        // explicit syncfs still performs it.
+        // `publish` awaits the successful PostgreSQL statement acknowledgement.
+        // The provider flush is only a post-commit acknowledgement/dead-
+        // connection probe; explicit syncfs still performs it.
         true
     }
 
@@ -748,13 +748,12 @@ impl MetadataStore for PgliteMetadataStore {
         let namespace = serde_json::to_string(&namespace).map_err(backend_error)?;
 
         let mut client = self.0.lock_client().await?;
-        let tx = client
-            .as_mut()
-            .ok_or_else(connection_closed)?
-            .transaction()
-            .await
-            .map_err(postgres_error)?;
-        let changed = match tx
+        let client = client.as_mut().ok_or_else(connection_closed)?;
+        // A single PostgreSQL DML statement is an atomic autocommit
+        // transaction. Keep the common successful CAS to one server round
+        // trip; only a zero-row result needs the explicit locked read below
+        // to retain the stale-versus-revision classification.
+        let changed = client
             .execute_typed(
                 &format!(
                     "UPDATE mount_rs_metadata SET revision=$2, namespace=$3
@@ -773,18 +772,13 @@ impl MetadataStore for PgliteMetadataStore {
                 ],
             )
             .await
-        {
-            Ok(changed) => changed,
-            Err(error) => {
-                let _ = tx.rollback().await;
-                return Err(postgres_error(error));
-            }
-        };
+            .map_err(postgres_error)?;
         if changed != 1 {
             // The conditional update is the successful-path CAS. Only the
             // exceptional path needs a locked read to preserve the exact
             // stale-versus-revision-conflict classification that callers
             // receive from the former preflight SELECT.
+            let tx = client.transaction().await.map_err(postgres_error)?;
             let state = match tx
                 .query_typed_opt(
                     &format!(
@@ -826,7 +820,6 @@ impl MetadataStore for PgliteMetadataStore {
             let _ = tx.rollback().await;
             return Err(error);
         }
-        tx.commit().await.map_err(postgres_error)?;
         Ok(next as u64)
     }
 
