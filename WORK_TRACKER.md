@@ -99,8 +99,9 @@ session with `NFS4ERR_BADSESSION`, and a pre-crash v4 root handle with
 avoid the observed replacement alias. Two independent v4 sessions also
 complete concurrent distinct-file OPEN/WRITE/READ round trips. Multiple server
 processes sharing one backend remain explicitly outside the supported scope.
-The pinned current-tip NFS conformance refresh passed 266 tests with 18
-explicit capability/root skips and zero mismatches. The opt-in macOS native
+The pinned oracle at published terminal-close commit `90e130b8` passed 266
+tests with 18 explicit capability/root skips and zero mismatches. CI run
+`35670416469` cancelled both native-NFS jobs before any steps ran. The opt-in macOS native
 NFSv3 loopback mount gate passed 1/1 in 0.11s, and hosted run
 `35658285441` passed the named macOS and Ubuntu native-NFS jobs; the overall
 workflow was not green because unrelated jobs failed. Production remains
