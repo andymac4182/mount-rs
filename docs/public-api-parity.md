@@ -283,6 +283,16 @@ Current focused behavior:
   in [Native 9P run `35674581481`](https://github.com/andymac4182/mount-rs/actions/runs/35674581481);
   Rust job `106578252700` also passed the Linux probe and all four ignored
   native lifecycle tests.
+- `P9DirentPacker.maxSize` now follows the pinned oracle declaration at the
+  native N-API boundary. The Rust getter reports the packer's fixed byte
+  budget, and the 44-case codec differential asserts that it remains stable
+  after packing a dirent and equals `size + remaining`; generated typecheck,
+  fid/runtime, syntax, formatting, strict Clippy, and focused Rust tests pass.
+  Exact SHA `b3757fd288e6f52888873838946343e7cd37f953` passed [Native 9P run
+  `35675876913`](https://github.com/andymac4182/mount-rs/actions/runs/35675876913),
+  with N-API job `106582464900` and Rust job `106582465059` successful. This
+  closes the identified packer declaration/representation mismatch only;
+  broader upstream member parity and production acceptance remain open.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested
