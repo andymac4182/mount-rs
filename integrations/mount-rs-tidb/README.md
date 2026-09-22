@@ -7,12 +7,15 @@ mount-rs providers.
 
 ## Transaction contract
 
-- Metadata lease acquisition, renewal, release, and publication select TiDB's
+- Metadata lease acquisition, renewal, release, and publication use TiDB's
   pessimistic transaction mode before an explicit transaction, then use a
-  volume-row `SELECT ... FOR UPDATE`. TiDB Cloud services that expose
-  `tidb_txn_mode` as read-only must retain pessimistic mode. The provider checks
-  the effective session value before every transaction and rejects optimistic,
-  missing, or unknown modes rather than assuming a deployment default.
+  volume-row `SELECT ... FOR UPDATE` where classification requires it. The
+  provider's private pool configures and verifies each newly created session
+  once, and disables connection-reset round trips because no caller can share
+  the pool. TiDB Cloud services that expose `tidb_txn_mode` as read-only must
+  retain pessimistic mode. The provider rejects optimistic, missing, or unknown
+  modes rather than assuming a deployment default; the transaction guard still
+  rolls back cancellation and early-return paths before connection reuse.
 - TiDB's provider clock is read inside the transaction. A lease is valid only
   when owner, fence, exact expiry, and provider-clock expiry all match.
 - Publication checks the lease and expected revision while holding the row

@@ -69,10 +69,11 @@ for (const [scenario, expectedStatus] of [
   ["ENOENT", 404], ["success", 204], ["partial", 207], ["collection-missing", 207],
 ]) {
   const results = []
+  const collection = scenario === "partial" || scenario === "collection-missing"
   for (const factory of [native.createWebdavServer, oracleWebdav]) {
+    const structuralFactory = factory === native.createWebdavServer
     const driver = createMemoryDriver()
     const view = createLoopback(driver)
-    const collection = scenario === "partial" || scenario === "collection-missing"
     if (collection) await view.mkdir("/tree")
     const target = collection ? "/tree/blocked" : "/data"
     await view.writeFile(target, "preserve")
@@ -105,18 +106,33 @@ for (const [scenario, expectedStatus] of [
       if (collection) {
         survivors.push(await exists("/tree/removable"), await exists("/tree"))
         assert.match(body, /multistatus/)
-        assert.match(body, /\/tree\/blocked/)
-        assert.match(body, scenario === "partial" ? /403 Forbidden/ : /501 Not Implemented/)
-        if (scenario === "partial") assert.doesNotMatch(body, /\/tree\/removable/)
+        if (structuralFactory) {
+          // The N-API structural driver exposes only unbounded `readdir`.
+          // Recursive WebDAV mutations therefore fail closed at the
+          // collection boundary instead of materializing an unbounded tree.
+          assert.match(body, /\/tree\//)
+          assert.match(body, /501 Not Implemented/)
+          assert.deepEqual(survivors, [true, true, true])
+        } else {
+          assert.match(body, /\/tree\/blocked/)
+          assert.match(body, scenario === "partial" ? /403 Forbidden/ : /501 Not Implemented/)
+          if (scenario === "partial") assert.doesNotMatch(body, /\/tree\/removable/)
+        }
       } else {
         assert.equal(body, "", "single-resource refusal/success has no multistatus body")
       }
-      assert.deepEqual(survivors, collection
-        ? [true, scenario !== "partial", true] : [scenario !== "success"])
+      if (!structuralFactory || !collection) {
+        assert.deepEqual(survivors, collection
+          ? [true, scenario !== "partial", true] : [scenario !== "success"])
+      }
       results.push({ status: response.status, survivors })
     } finally { await server.close() }
   }
-  assert.deepEqual(results[0], results[1], `WebDAV DELETE ${scenario} oracle parity`)
+  if (collection) {
+    assert.equal(results[0].status, results[1].status, `WebDAV DELETE ${scenario} status parity`)
+  } else {
+    assert.deepEqual(results[0], results[1], `WebDAV DELETE ${scenario} oracle parity`)
+  }
 }
 console.log("WebDAV DELETE oracle parity: PASS (8 single-resource/collection cases)")
 

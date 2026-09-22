@@ -32,8 +32,10 @@ use crate::protocol::{
 /// The WebDAV session consumes `PUT` bodies incrementally and only buffers the
 /// bounded XML grammars. HTTP adapters implement this trait for their native
 /// body stream; callers that already have bytes can continue using
-/// [`WebdavSession::handle_request`]. After an error, an implementation may
-/// yield more chunks while the session drains the request before replying.
+/// [`WebdavSession::handle_request`]. A known 413 size-limit fault may be
+/// followed by more chunks while the session drains the request for HTTP/1.1
+/// reuse; a non-recoverable body fault closes the connection boundary instead
+/// of requiring a further drain.
 pub trait WebdavRequestBody {
     fn poll_next_chunk(
         self: Pin<&mut Self>,
@@ -250,8 +252,9 @@ impl WebdavSession {
     ///
     /// `PUT` writes each non-empty chunk before asking the transport for the
     /// next one. XML request grammars remain bounded and buffered. Any body
-    /// left after dispatch is drained so persistent HTTP/1.1 connections stay
-    /// correctly framed.
+    /// left after dispatch is drained while its framing remains trustworthy;
+    /// a non-recoverable body fault is reported and closes the connection
+    /// boundary instead of being treated as reusable EOF.
     pub async fn handle_request_stream<B>(
         &self,
         head: WebdavRequestHead,
