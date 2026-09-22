@@ -2439,6 +2439,36 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn completed_unmount_is_idempotent_for_later_callers() {
+        let state = Arc::new(MountState::new(
+            MountMode::Rootless,
+            PathBuf::from("/tmp/mount-rs-fuse-idempotent-unmount-test"),
+            MountOptions {
+                mode: MountMode::Rootless,
+                ..MountOptions::default()
+            },
+            Some(PathBuf::from("/bin/true")),
+            FuseMountHooks::default(),
+        ));
+        let mount = FuseMount {
+            state: Arc::clone(&state),
+            mountpoint: PathBuf::from("/tmp/mount-rs-fuse-idempotent-unmount-test"),
+        };
+
+        mount
+            .unmount()
+            .await
+            .expect("initial unmount should succeed");
+        mount
+            .unmount()
+            .await
+            .expect("later unmount should remain idempotent");
+        assert!(state.closed.load(Ordering::Acquire));
+        assert!(!state.mounted.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
     struct PanicDriver {
         inner: Arc<mount_rs_core::MemoryFs>,
     }
