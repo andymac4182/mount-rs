@@ -171,6 +171,15 @@ implementation/control slice of P01 only; it does not prove that the selected
 staging or production topology exists, has quorum, meets capacity, or has
 provider/owner approval. P01 therefore remains open.
 
+The W08.37 implementation commit `263be2f4` was reconciled with concurrent
+mainline changes and published in exact public merge `fab2a0cb`. Shared-wrapper
+workspace check and strict Clippy passed on that merged tree, while hosted W08
+policy run `35709828967` was still pending at the 2026-09-22 19:21 AEST audit;
+the pending run is not evidence. The read-only production boundary remained
+unchanged: no production-release workflow runs, HTTP 404 for `w08-production`,
+preview-only release and no production-candidate tag. Production remains
+NO-GO.
+
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
 tests and strict Clippy with `-D warnings` using a bounded external Cargo

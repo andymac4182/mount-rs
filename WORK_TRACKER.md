@@ -5050,6 +5050,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   `single-node-smoke-not-replicated-acceptance` remains a separate smoke
   boundary. The credential-free policy and test are wired into both the
   dedicated W08 release-policy workflow and protected production admission.
+  Implementation commit `263be2f4` was reconciled with concurrent mainline
+  changes and published in exact public merge `fab2a0cb`; hosted W08 policy
+  run `35709828967` targets that publication and was pending at the ledger
+  refresh, so it is not evidence.
   This is a P01 implementation/control boundary only; it does not prove a
   deployed topology, quorum, provider durability, capacity or production
   approval. *(Implementation/static qualification; provider and production
