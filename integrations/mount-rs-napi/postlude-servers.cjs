@@ -11,9 +11,11 @@ const P9_SERVER_WRAPPED = Symbol("mountRsP9ServerWrapped")
 const P9_SESSION_SHAPES_WRAPPED = Symbol("mountRsP9SessionShapesWrapped")
 const P9_LOCK_TABLE_SHAPES_WRAPPED = Symbol("mountRsP9LockTableShapesWrapped")
 const P9_LOCK_CLIENT_SHAPES_WRAPPED = Symbol("mountRsP9LockClientShapesWrapped")
+const MOUNTED_VIEWS_WRAPPED = Symbol("mountRsMountedViewsWrapped")
 const SERVER_STATE = new WeakMap()
 const CONNECTION_STATE = new WeakMap()
 const P9_SESSION_STATE = new WeakMap()
+const MOUNTED_VIEW_STATE = new WeakMap()
 const MOUNT_CLOSED_STATE = new WeakMap()
 const FACTORIES_WRAPPED = Symbol("mountRsStructuralFactoriesWrapped")
 const S3_STREAM_WRAPPED = Symbol("mountRsS3StreamWrapped")
@@ -483,8 +485,38 @@ function wrapP9Server(P9Server) {
     state.attachments ??= new Set()
     state.attachedStreams ??= new Map()
     state.nativeConnections ??= new Map()
+    state.clientOrder ??= []
     state.nextAttachedId ??= 1_000_000_000_000
     return state
+  }
+
+  function observeNativeClients(server, state) {
+    const clients = typeof nativeClientsGetter === "function"
+      ? nativeClientsGetter.call(server)
+      : nativeClients.call(server)
+    const live = new Set()
+    const known = new Set(
+      state.clientOrder
+        .filter((entry) => entry.type === "native")
+        .map((entry) => entry.id),
+    )
+    for (const client of clients) {
+      const id = client.id
+      live.add(id)
+      if (!state.nativeConnections.has(id)) {
+        state.nativeConnections.set(id, client)
+      }
+      if (!known.has(id)) {
+        state.clientOrder.push({ type: "native", id })
+        known.add(id)
+      }
+    }
+    for (const id of state.nativeConnections.keys()) {
+      if (!live.has(id)) state.nativeConnections.delete(id)
+    }
+    state.clientOrder = state.clientOrder.filter((entry) =>
+      entry.type !== "native" || live.has(entry.id),
+    )
   }
 
   Object.defineProperty(prototype, "attach", {
@@ -500,6 +532,10 @@ function wrapP9Server(P9Server) {
       if (state.attachedStreams.has(stream)) {
         throw new Error("mount-rs: that stream is already attached to this 9P server")
       }
+      // Observe accepted native clients before appending this attached stream.
+      // Otherwise a native connection accepted before attach() would be
+      // reported after it merely because the facade has two backing stores.
+      observeNativeClients(this, state)
       const sessionFactory = this._createAttachedSession
       if (typeof sessionFactory !== "function") {
         throw new Error("mount-rs: 9P attached streams are unavailable in this native build")
@@ -514,6 +550,7 @@ function wrapP9Server(P9Server) {
       )
       state.attachedStreams.set(stream, connection)
       state.attachments.add(connection)
+      state.clientOrder.push({ type: "attached", connection })
       return connection
     },
   })
@@ -523,22 +560,14 @@ function wrapP9Server(P9Server) {
     enumerable: false,
     get() {
       const state = stateFor(this)
-      const clients = typeof nativeClientsGetter === "function"
-        ? nativeClientsGetter.call(this)
-        : nativeClients.call(this)
-      const live = new Set()
-      const stable = clients.map((client) => {
-        const id = client.id
-        live.add(id)
-        const cached = state.nativeConnections.get(id)
-        if (cached !== undefined) return cached
-        state.nativeConnections.set(id, client)
-        return client
+      observeNativeClients(this, state)
+      return state.clientOrder.flatMap((entry) => {
+        if (entry.type === "native") {
+          const connection = state.nativeConnections.get(entry.id)
+          return connection === undefined ? [] : [connection]
+        }
+        return state.attachments.has(entry.connection) ? [entry.connection] : []
       })
-      for (const id of state.nativeConnections.keys()) {
-        if (!live.has(id)) state.nativeConnections.delete(id)
-      }
-      return [...stable, ...state.attachments]
     },
   })
 
@@ -569,6 +598,15 @@ function connectionState(connection) {
   if (state === undefined) {
     state = {}
     CONNECTION_STATE.set(connection, state)
+  }
+  return state
+}
+
+function mountedViewState(mounted) {
+  let state = MOUNTED_VIEW_STATE.get(mounted)
+  if (state === undefined) {
+    state = {}
+    MOUNTED_VIEW_STATE.set(mounted, state)
   }
   return state
 }
@@ -668,6 +706,28 @@ function wrapP9Connection(P9Connection) {
   const prototype = P9Connection.prototype
   if (typeof prototype.waitClosed !== "function") return
 
+  const nativeClose = prototype.close
+  if (typeof nativeClose === "function") {
+    Object.defineProperty(prototype, "close", {
+      configurable: true,
+      enumerable: false,
+      writable: true,
+      value() {
+        const state = connectionState(this)
+        if (state.close === undefined) {
+          state.close = cachedPromise(
+            () => nativeClose.call(this),
+            () => undefined,
+          ).catch((error) => {
+            state.close = undefined
+            throw error
+          })
+        }
+        return state.close
+      },
+    })
+  }
+
   const nativeSession = Object.getOwnPropertyDescriptor(prototype, "session")
   if (nativeSession && typeof nativeSession.get === "function") {
     Object.defineProperty(prototype, "session", {
@@ -707,6 +767,52 @@ function wrapP9Connection(P9Connection) {
     })
   }
   Object.defineProperty(prototype, CONNECTION_WRAPPED, { value: true })
+}
+
+function wrapMounted(Mounted) {
+  if (!Mounted || !Mounted.prototype || Mounted.prototype[MOUNTED_VIEWS_WRAPPED]) return
+  const prototype = Mounted.prototype
+  const nativeServer = Object.getOwnPropertyDescriptor(prototype, "server")
+  const nativeConnection = Object.getOwnPropertyDescriptor(prototype, "connection")
+  if (typeof nativeServer?.get !== "function" && typeof nativeConnection?.get !== "function") return
+
+  if (typeof nativeServer?.get === "function") {
+    Object.defineProperty(prototype, "server", {
+      configurable: true,
+      enumerable: nativeServer.enumerable,
+      get() {
+        const state = mountedViewState(this)
+        if (state.server === undefined) state.server = nativeServer.get.call(this)
+        return state.server
+      },
+    })
+  }
+
+  if (typeof nativeConnection?.get === "function") {
+    Object.defineProperty(prototype, "connection", {
+      configurable: true,
+      enumerable: nativeConnection.enumerable,
+      get() {
+        const state = mountedViewState(this)
+        if (state.connection !== undefined) return state.connection
+        const connection = nativeConnection.get.call(this)
+        if (connection === null || connection === undefined) {
+          state.connection = connection
+          return connection
+        }
+
+        // `Mounted.server` and `Mounted.connection` are two views over the
+        // same transport. Reuse the server's cached client wrapper when the
+        // stable transport id is present, so close/closed/session identity is
+        // preserved across both public access paths.
+        const server = this.server
+        const cached = server?.clients?.find((candidate) => candidate.id === connection.id)
+        state.connection = cached ?? connection
+        return state.connection
+      },
+    })
+  }
+  Object.defineProperty(prototype, MOUNTED_VIEWS_WRAPPED, { value: true })
 }
 
 function wrapP9Session(P9Session, binding) {
@@ -1023,6 +1129,7 @@ module.exports = function installServers(binding) {
   wrapNfsConnection(binding && binding.NfsConnection)
   wrapS3Session(binding && binding.S3Session)
   wrapWebdavSession(binding && binding.WebdavSession)
+  wrapMounted(binding && binding.Mounted)
   installStructuralFactories(binding)
   return binding
 }

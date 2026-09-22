@@ -201,6 +201,32 @@ passed: N-API job `106652302954` passed the new identity step and all hosted
 N-API lifecycle gates, while Rust job `106652303250` passed the Linux probe plus
 all four ignored native lifecycle tests. Production remains NO-GO.
 
+The mixed native/attached client-order packet at exact SHA
+`a3554b105be58cc5ff6cacc03de53f09c0461419` adds one JS arrival ledger for the
+two `P9Server.clients` backing stores. Its real-TCP regression covers both
+native-first and attached-first order, stable native wrappers, and cleanup.
+Local syntax, focused order/identity/member checks, metadata/session/
+observability/type checks, and the elevated `p9` server selector passed.
+Hosted verification is pending publication, so production remains NO-GO.
+
+The native connection close-idempotence packet at exact SHA
+`3260f84e26c2a78e9d10d66c7eb997477130f695` memoizes the native
+`P9Connection.close()` promise at the JavaScript boundary. Its real-TCP
+regression covers concurrent/repeated/post-closure calls, `closed`/
+`waitClosed()`, terminal `isClosed`, client removal, and cleanup. Local focused
+checks passed; hosted verification is pending publication, so production
+remains NO-GO.
+
+The mounted-view identity packet at exact SHA
+`1a18c7b82285ea557956cb35d15f1af189803d4d` caches the N-API
+`Mounted.server` and `Mounted.connection` wrappers and reuses the matching
+`P9Server.clients` wrapper by stable transport id. The direct native-mount
+regression checks repeated getter identity and cross-view connection identity,
+alongside the existing native stream/peer/session views and cleanup. Local
+syntax, focused lifecycle checks, metadata/session/observability/type checks,
+and the elevated 9P selector passed; hosted verification is pending
+publication, so production remains NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):

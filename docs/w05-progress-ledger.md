@@ -1,6 +1,6 @@
 # W05 Cloudflare R2 progress ledger
 
-Last updated: 2026-09-22 18:11 AEST (2026-09-22 08:11 UTC)
+Last updated: 2026-09-22 18:16 AEST (2026-09-22 08:16 UTC)
 
 This is the working ledger for the W05 Cloudflare R2 workstream. Percentages
 and time estimates are provisional. They separate implementation work from
@@ -499,7 +499,7 @@ the non-R2 release packet runs. The primary dispatch IDs are:
 | CI | `35702348089` | queued | Rust/Node/provider-composition and W26 evidence packet |
 | Native 9P | `35702349894` | queued | Linux native 9P probe, addon, Rust and mounted-I/O lifecycle |
 | Fault injection | `35702350927` | queued | Cross-platform failure and cleanup matrix |
-| W04 production policy | `35702351026` | queued | PGlite policy and release-control checks |
+| W04 production policy | `35702351026` | terminal success | PGlite policy and release-control checks |
 | W07 FoundationDB production qualification | `35702352395` | queued | FoundationDB/RustFS durable provider and platform packet |
 | W08 release targets (`attest=true`) | `35702352896` | queued | Linux/macOS CLI artifacts, SBOM, provenance and attestation |
 | W08 release policy | `35702353241` | queued | Release manifest, SBOM, rollout and policy checks |
@@ -526,6 +526,11 @@ in-progress runs; the oldest queued run was CI `35700399264` created at
 07:35:51 UTC on `f94b53d8`. This confirms a shared hosted-capacity backlog,
 not a candidate-specific missing workflow or input. A queued Live R2 run from
 another workstream is not touched or treated as W05 provider evidence.
+
+At 18:16 AEST the same-SHA W04 policy run `35702351026` completed
+successfully. W08 release policy `35702353241` is in progress; CI, Fault,
+W07 FoundationDB, Native 9P, and W08 release targets remain queued. This
+partial result does not close the hosted release packet.
 
 ### W05.45 exact package evidence (2026-09-22 18:03 AEST)
 
@@ -1055,6 +1060,7 @@ shown separately from active engineering time.
 
 | UTC time | Activity | Classification | Result / next state |
 | --- | --- | --- | --- |
+| 2026-09-22 08:16 UTC (18:16 AEST) | Re-polled the immutable packet after hosted scheduling began | Hosted release-control evidence | W04 policy `35702351026` passed; W08 policy `35702353241` started; CI/Fault/W07/Native 9P/W08 targets remain queued. Full production packet remains open. |
 | 2026-09-22 08:10–08:11 UTC (18:10–18:11 AEST) | Counted repository-wide queued/in-progress Actions runs and checked the public GitHub status | Hosted capacity evidence | 21 queued, 0 in progress; oldest queued run `35700399264` dates to 07:35:51 UTC. Candidate remains queued; this is a hosted-capacity gate. |
 | 2026-09-22 08:06–08:08 UTC (18:06–18:08 AEST) | Audited the hosted queue and GitHub Actions status, then requested cancellation of the older duplicate CI run `35700818889` | Hosted capacity / release-control hygiene | Actions reported operational, but the seven primary candidate runs and the duplicate remained queued; no hosted pass or cancellation was inferred. |
 | 2026-09-22 07:59–08:03 UTC (17:59–18:03 AEST) | Rechecked exact-candidate npm package contents and locked workspace licenses; corrected the package-command probe | Local packaging / dependency gate | Both intended npm dry-runs passed; core includes the Darwin arm64 addon and notices, virtual-fs includes declarations/notices, and all 25 workspace packages are Apache-2.0. Cross-platform publication/signing remains open. |
