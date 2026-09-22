@@ -1,5 +1,7 @@
 W07_PRODUCTION_CONFIG_POLICY_PASS config_shape=splitstore metadata=foundationdb durable_metadata=true durable_blocks=true lease_authority=shared-provider lease_ttl=explicit-bounded blocks_tls=https secrets=external
 W07_PRODUCTION_CONFIG_POLICY_FAIL reason=config.driver.storage.blocks.secret_access_key-must-not-be-inline
+W07_PRODUCTION_CONFIG_POLICY_FAIL reason=storage.lease_ttl_ms-must-be-positive-safe-integer-at-most-24h
+FOUNDATIONDB_LEASE_PUBLICATION_POLICY_PASS lease_ttl_ms=120000 publication_interval_ms=30000 max_forward_jump_ms=120000
 FOUNDATIONDB_RUSTFS_NETWORK_READY alias=mount-rs-rustfs container=mount-rs-rustfs-fixture
 FOUNDATIONDB_BLOCK_ENDPOINT_REACHABLE status=403
 FOUNDATIONDB_LATENCY_PASS workload=composition operations=11 p50_us=9990 p95_us=85061 p99_us=85061 total_ms=167 throughput_ops_per_sec=65.76
@@ -12,3 +14,4 @@ FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse
 FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=5
 RUSTFS_COMBO_PASS name=foundationdb-production-qualification
 RUSTFS_INTEGRATION_PASS endpoint=http://127.0.0.1:32769 bucket=mount-rs-rustfs-test prefix=fixture
+FOUNDATIONDB_OZONE_IOPS_PASS provider=mount-rs-foundationdb-r2 target=1000 output=/tmp/foundationdb-ozone-iops.json

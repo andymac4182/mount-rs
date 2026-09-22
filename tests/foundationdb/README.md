@@ -57,6 +57,14 @@ not a production capacity, cost, or multi-day soak claim; the production
 workload and duration must still be defined and accepted in
 `docs/foundationdb-production-rollout.md`.
 
+The dedicated W07 hosted lane also runs the fixed bounded workload profile
+through the live FoundationDB/RustFS Node consumer: 400 iterations, 64-way
+concurrency, 4 KiB payloads, and a minimum of 1,000 IOPS. It validates and
+retains the machine-readable `foundationdb-ozone-iops.json` artifact and emits
+`FOUNDATIONDB_OZONE_IOPS_PASS` only after that validation succeeds. This is a
+repeatable qualification profile, not a production capacity SLO; production
+load, duration, cost and error-budget targets remain an explicit rollout gate.
+
 The dedicated hosted workflow also writes a schema-versioned summary artifact.
 When it runs in GitHub Actions, the validator requires the summary to include
 the repository, workflow, ref, full source revision, runner, run ID and run

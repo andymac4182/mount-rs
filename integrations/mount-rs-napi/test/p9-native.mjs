@@ -58,6 +58,8 @@ try {
   assert.ok(mounted.connection.peer.length > 0)
   assert.equal(typeof mounted.connection.session.msize, "number")
   assert.equal(mounted.connection.session.version, "9P2000.L")
+  assert.ok(mounted.connection.session.stats.messages instanceof Map)
+  assert.equal(mounted.connection.session.stats.messages.get("Tversion"), 1)
   assert.equal(mounted.connection.session.userFor(0xffff_fffe), undefined)
   assert.equal(mounted.connection.session.locks.getlock({
     path: "/no-such-lock",

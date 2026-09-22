@@ -96,6 +96,11 @@ const requiredMarkers = [
     "RUSTFS_INTEGRATION_PASS",
     /RUSTFS_INTEGRATION_PASS\b/u,
   ],
+  [
+    "foundationdb-iops",
+    "FOUNDATIONDB_OZONE_IOPS_PASS",
+    /FOUNDATIONDB_OZONE_IOPS_PASS provider=mount-rs-foundationdb-r2 target=1000\b/u,
+  ],
 ];
 
 const found = Object.fromEntries(

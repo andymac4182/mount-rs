@@ -2577,7 +2577,7 @@ export interface P9SessionStats {
   dropped: number
   flushed: number
   assertions: number
-  messages: Record<string, number>
+  messages: Map<string, number>
 }
 
 export interface P9StatsLike {

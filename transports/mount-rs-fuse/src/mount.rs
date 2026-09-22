@@ -278,13 +278,24 @@ impl FuseMount {
     /// operation; a failed graceful unmount leaves the mount live and permits
     /// a later retry.
     pub async fn unmount(&self) -> Result<(), MountError> {
+        // The result of a failed attempt is intentionally retained until the
+        // caller that joined that attempt observes it. Do not start another
+        // attempt after the notification wakes this caller: doing so resets
+        // the result to `None` and can leave every waiter spinning forever.
+        // A later invocation starts a fresh attempt because it gets its own
+        // `started_or_joined` flag and `start_unmount()` clears the old result
+        // when the previous operation has made the mount retryable.
+        let mut started_or_joined = false;
         loop {
             let notified = self.state.unmount_notify.notified();
             tokio::pin!(notified);
             // Register before checking the result. `notify_waiters()` does not
             // retain a permit for a future created after the notification.
             notified.as_mut().enable();
-            self.start_unmount();
+            if !started_or_joined {
+                self.start_unmount();
+                started_or_joined = true;
+            }
             if let Some(result) = self
                 .state
                 .unmount_result
@@ -670,7 +681,24 @@ impl MountState {
         let timeout = self.options.unmount_timeout;
         let mut forced_deadline = None;
         let mut forced_mount_present = None;
-        let result = match attempt_unmount(&self, timeout).await {
+        // A helper waiting for an in-flight kernel request cannot make
+        // progress until the serving task's descriptor is closed. Give a
+        // graceful helper a short opportunity to finish normally, then stop
+        // the session while the helper remains pending so a blocked backend
+        // read cannot consume the entire public unmount timeout.
+        let graceful = attempt_unmount(&self, timeout);
+        tokio::pin!(graceful);
+        let stop_grace = tokio::time::sleep(FORCED_STOP_GRACE);
+        tokio::pin!(stop_grace);
+        let graceful_attempt = tokio::select! {
+            attempt = &mut graceful => attempt,
+            _ = &mut stop_grace => {
+                self.request_stop();
+                self.abort_task();
+                graceful.await
+            }
+        };
+        let result = match graceful_attempt {
             UnmountAttempt::Done => Ok(()),
             UnmountAttempt::TimedOut => {
                 // A graceful native unmount can wait for an in-flight kernel

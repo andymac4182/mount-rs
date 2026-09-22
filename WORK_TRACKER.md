@@ -65,7 +65,12 @@ The next helper-parity slice adds the oracle's optional platform arguments to
 the direct `./9p` probe functions: `p9ClientProbe(platform?)` now produces
 deterministic override facts without attempting a mount, and
 `p9Platform(platform?)` maps the requested platform to `"linux" | undefined`;
-the host-only zero-argument probe remains native-backed.
+the host-only zero-argument probe remains native-backed. Exact SHA
+`9da45327a9e09a9f827a9630869d1a32119674e3` also passed Native 9P run
+`35672845113`, with N-API job `106573050491` passing automatic/direct/structural
+mounted I/O and cleanup and Rust job `106573049500` passing all four ignored
+native tests; the synthetic override branches remain covered by the local
+host-independent helper regression.
 The `./9p` constants/message-name/default barrel is now complete against the
 pinned upstream surface, with all 124 constants and all 274 runtime barrel
 exports differentially checked. The transport
@@ -805,7 +810,7 @@ patch):
 | Main | W01 N-API 9P public barrel/default parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/postlude-p9-codec.cjs`, `integrations/mount-rs-napi/test/p9-constants.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `docs/W01_9P_PROGRESS.md` | Current bounded packet: the direct facade, postlude binding, and generated declarations expose the six pinned oracle defaults; the runtime parity test passes all 124 constants and all 274 upstream 9P barrel exports, with local typecheck, syntax, helper, and diff checks green. Exact SHA `0ad4928e86af89163c8c87d08fea53ccf7f5f89b` passed Native 9P run `35668145703`, N-API job `106558367429`, with automatic/direct/structural mounted I/O and cleanup, and Rust job `106558367006` passed all four ignored native tests; automatic cross-transport signal ownership, native listener `stream: undefined`, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain explicit, so production remains NO-GO |
 | Main | W01 N-API 9P member representation boundaries | `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: local metadata checks prove effective callback hooks are omitted from serializable option snapshots while attached connections retain the supplied Node `Duplex`, peer, closed state, and string/null server views; the direct native test now asserts the native listener's `stream: undefined` and transport-source peer string. Local typecheck, metadata, mount-helper, syntax, and diff checks passed. Hosted run `35669536706` at exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` exposed the test's incorrect native-Unix `peer: null` expectation; corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed Native 9P run `35670279904` with N-API job `106565351978` and Rust job `106565352174`, so this representation boundary is hosted-qualified; production remains NO-GO for the broader outstanding gates |
 | Main | W01 N-API 9P optional absence-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/p9-locks.mjs`, `integrations/mount-rs-napi/test/p9-native.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the JavaScript facade converts native `null` absence results to oracle-compatible `undefined` for session `msize`/`version`/`userFor` and table/session `getlock`; declarations and focused runtime/type/syntax/diff checks pass locally. Exact SHA `0d520a1d0a9af44e08e65c5f0638a640bb3c08db` passed Native 9P run `35671509538`, N-API job `106569412372` with automatic/direct/structural mounted I/O and cleanup plus direct native session/lock assertions, and Rust job `106569412047` with all four ignored tests; production remains NO-GO for the broader open gates |
-| Main | W01 N-API 9P platform-probe argument parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the direct `./9p` facade accepts oracle-compatible optional platform arguments for `p9ClientProbe(platform?)` and `p9Platform(platform?)`; the no-argument probe remains native-backed, while override calls report deterministic Linux/non-Linux facts without attempting a mount. Typecheck and the host-independent mount-helper regression are the exact local gates; native Linux lifecycle evidence is unchanged and production remains NO-GO |
+| Main | W01 N-API 9P platform-probe argument parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md` | Current bounded packet: the direct `./9p` facade accepts oracle-compatible optional platform arguments for `p9ClientProbe(platform?)` and `p9Platform(platform?)`; the no-argument probe remains native-backed, while override calls report deterministic Linux/non-Linux facts without attempting a mount. Typecheck and the host-independent mount-helper regression pass locally. Exact SHA `9da45327a9e09a9f827a9630869d1a32119674e3` also passed Native 9P run `35672845113`, N-API job `106573050491` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106573049500` with all four ignored native tests; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
 (Windows host), Epicurus (CLI), Maxwell (FoundationDB), Newton/Astra (R2
@@ -1123,6 +1128,19 @@ read-only hosted snapshot found CI `35672738319` and W08 release targets/policy
 S3 `35672738306` in progress, and Live Cloudflare R2 `35672738332` failed; W04
 policy `35672738331` succeeded and unrelated Native 9P `35672738401` was in
 progress. No hosted WebDAV PASS is claimable from that snapshot.
+The barrier-enabled tree was then requalified through the rebuilt release
+N-API addon: generated typecheck, the isolated host-enabled WebDAV server
+phase, lifecycle, 64-pair direct-session and network/auth/streaming probes,
+NodeFs/SQLite orderly reopen, provider direct/network concurrency, and
+NodeFs/SQLite crash plus in-flight streamed-PUT recovery all passed. This is
+local rebuilt N-API/provider evidence only and does not close hosted
+session/lifecycle/concurrency, live remote-provider, power-loss, or durable-lock
+gates.
+At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
+`35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
+Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
+Live AWS S3 or Live Cloudflare R2 run was listed. No hosted WebDAV PASS is
+claimable from the final published tip.
 
 For the published 256-request packet `efd6ed33cf33e65fd1c86cd6fe3cec6783d610e6`,
 the exact-SHA CI run `35669390058`, W08 release targets `35669390013`, and W08
@@ -2736,13 +2754,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
   complete-GO states; these cases validate the tracking control only.
   The hosted workflow also runs `scripts/test-w07-qualification-log.mjs` with
-  four credential-free verifier cases. The qualification log verifier now
+  five credential-free verifier cases. The qualification log verifier now
   requires the exact accepted configuration shape, both expected negative
   fixtures and a parsed lease-publication policy whose cadence is shorter
   than the TTL, whose forward-jump bound is no larger than the TTL and whose
   TTL is at most 24 hours. These checks harden evidence integrity only; they
   do not close any production identity, failover, recovery, capacity,
   observability, native-platform or release-owner gate.
+  The dedicated hosted lane now also requests a fixed bounded workload profile
+  through the live FoundationDB/RustFS Node consumer (400 iterations, 64-way
+  concurrency, 4 KiB payloads and a 1,000 IOPS floor), independently validates
+  and retains `foundationdb-ozone-iops.json`, and requires the corresponding
+  `FOUNDATIONDB_OZONE_IOPS_PASS` marker. This improves repeatable qualification
+  evidence only; the latest retained run above predates the profile addition,
+  and production-like duration, capacity, cost and error-budget acceptance
+  remain open until a fresh terminal run and owner review.
   The hosted workflow also validates the machine-readable
   `docs/W07-production-evidence.json` packet with
   `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
@@ -2779,9 +2805,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     `operations=15 p50_us=3846 p95_us=38409 p99_us=38409 total_ms=96
     throughput_ops_per_sec=155.90` at revision `9460a62`; its five soak-round
     p95/p99 values ranged from 13,005µs to 14,243µs and throughput ranged
-    from 199.39 to 214.47 ops/s. This remains bounded
-    qualification evidence and does not convert the five-round result into
-    production capacity evidence.
+    from 199.39 to 214.47 ops/s. The dedicated lane now also runs the fixed
+    400-iteration, 64-concurrency, 4 KiB, 1,000-IOPS profile and retains its
+    validated machine-readable artifact; that profile has not yet been
+    requalified at a hosted revision. This remains bounded qualification
+    evidence and does not convert either profile into production capacity
+    evidence.
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
