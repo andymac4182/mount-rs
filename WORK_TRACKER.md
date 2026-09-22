@@ -4721,6 +4721,13 @@ reproducible in a production-like environment.
   and diff checks passed; this is bounded local cancellation cleanup only, so
   live providers, power-loss durability, broader workload bounds, and
   native/hosted acceptance remain open and W01-S3 stays **NO-GO**.
+- [x] The automatic provider runs for published packet `09eca17b` were
+  refreshed: AWS run `35693316456` stopped at
+  `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693316400`
+  stopped at `R2 CI monthly run cap already exceeded: count=326` before live
+  admission. No service PASS is claimable; protected AWS configuration, the R2
+  budget reset, physical power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `d4f43b28` were
   refreshed: AWS run `35692509801` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35692509869`
