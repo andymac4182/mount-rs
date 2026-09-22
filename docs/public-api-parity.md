@@ -266,6 +266,13 @@ Current focused behavior:
   with N-API job `106569412372` passing automatic/direct/structural mounted
   I/O and cleanup plus direct native session/lock assertions, and Rust job
   `106569412047` passing all four ignored native tests.
+- `P9Session.stats.messages` now follows the oracle's `Map<string, number>`
+  shape instead of exposing the native binding's object/hash-map representation.
+  The attached-session observability test and hosted direct mount both assert
+  the `Tversion` count through `Map#get`; exact SHA
+  `e8c6043827e6cd0232a28f94b8fc665e25985f76` passed [Native 9P run
+  `35673543701`](https://github.com/andymac4182/mount-rs/actions/runs/35673543701),
+  with N-API job `106575123928` and Rust job `106575123716` successful.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested
