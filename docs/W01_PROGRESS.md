@@ -161,6 +161,17 @@ is queued with N-API job `106639369581` and Rust job `106639369868`; it is
 pending evidence, not a hosted PASS. Broader session/protocol parity,
 crash/reset scope, and W01 gates remain open, so production remains NO-GO.
 
+The attached-connection API parity packet was published at exact SHA
+`1c791cf67861efdfe8e5da223048904c88c6b168`. It adds the declared
+`P9Connection.waitClosed()` method to the `server.attach()` wrapper, and the
+metadata teardown regression awaits it after `close()`. Local metadata,
+direct-session, observability, fid, mount-helper, generated typecheck, syntax,
+diff, and elevated `MOUNT_RS_SERVER_PHASE=p9` server-selector checks passed.
+The exact hosted [Native 9P run `35696071202`](https://github.com/andymac4182/mount-rs/actions/runs/35696071202)
+is still pending with no materialized jobs (`jobs: []`), so it is not hosted
+PASS evidence. Broader session/protocol parity, crash/reset scope, and W01
+gates remain open, so production remains NO-GO.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
