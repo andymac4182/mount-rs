@@ -1073,6 +1073,14 @@ release policy `35669389968` were pending; Fault injection `35669390039` and
 W04 production policy `35669390028` were queued, and no Live Cloudflare R2
 run was listed. No hosted WebDAV PASS is claimable from this tip.
 
+For the published in-flight-crash packet
+`4719eb50a6e2d48e4539c10f0638fa2f493301c1`, exact-SHA CI `35670254510`, Fault
+injection `35670254549`, W08 release targets `35670254488`, and W08 release
+policy `35670254485` were cancelled; W04 production policy `35670254554`
+succeeded, while Live Cloudflare R2 `35670254473` and unrelated Native 9P
+`35670254618` were in progress. No hosted WebDAV PASS is claimable from that
+packet.
+
 Evidence landed without closing the remaining W01 acceptance gates:
 
 - [x] `0de1832` plus `6ba3d62` now provide a mount-free core parity harness:
