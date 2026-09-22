@@ -311,6 +311,17 @@ Current focused behavior:
   `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose [Native 9P run `35683716217`](https://github.com/andymac4182/mount-rs/actions/runs/35683716217)
   passed N-API job `106606580352` and Rust job `106606580326`; the direct run
   at the test commit was cancelled before jobs materialized and is not promoted.
+- The selector now also covers the applicable teardown cases on the public
+  native-listener surface: closing a server with an open fid destroys the
+  session, a paused peer that has sent FIN cannot strand the connection behind
+  the in-flight bound, TCP reset is silent, and orderly client EOF destroys the
+  session and removes the live connection. The transport keeps a bounded
+  pending-frame queue while it continues observing EOF, and tears down with a
+  frame transport error if that queue is exceeded. Local focused Rust tests,
+  strict Clippy, addon rebuild, and elevated N-API execution passed. Exact SHA
+  `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed [Native 9P run `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733),
+  N-API job `106610049913`, with Rust job `106610049705` also green; process
+  crash and arbitrary kernel-reset recovery remain supervisor-owned.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and

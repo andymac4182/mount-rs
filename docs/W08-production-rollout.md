@@ -217,6 +217,16 @@ N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
 This is source-health evidence only and does not close P01–P09 or change the
 NO-GO decision.
 
+After origin/main advanced with the WebDAV listener restart/backpressure and
+bounded recursive-mutation fixes, duplicate-header handling and related N-API
+changes, exact merged source
+`7752dd2e26ab5f423dfd984c1f9e5887465fd9c9` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; all runnable tests
+passed, the WebDAV test group reported 26 passing tests, provider/native rows
+remained explicit opt-in skips, and affected N-API/package, W08 policy/evidence
+and native-9P workflow-shape checks passed. This is source-health evidence only
+and does not close P01–P09 or change the NO-GO decision.
+
 Hosted W08 policy run `35681936375` at source
 `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
 successfully in 2m48s. Its rollout-ledger and release-identity/provenance
@@ -252,6 +262,23 @@ public-source-equivalent run `35684400799` at source `9563d2db`, job
 green. The cancellation is a hosted scheduling boundary, not evidence of a
 source or production failure; the successful run remains implementation/static
 evidence only and P01–P09 remain open.
+
+The current public source-equivalent checkpoint
+`1626d5381625d81696fa28624342f07087593760` passed hosted W08 release-policy
+run `35684975387`, job `106609795509`, which completed successfully in 2m46s
+with both hosted policy steps green. This remains hosted implementation/static
+evidence only; it does not provide production topology, provider,
+candidate-release, registry, canary, rollback or owner-approval evidence, so
+P01–P09 remain open and the decision remains NO-GO.
+
+After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
+N-API test expansion and site component updates, exact merged source
+`d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; all runnable tests
+passed, provider/native rows remained explicit opt-in skips, and affected
+N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
+This is source-health evidence only and does not close P01–P09 or change the
+NO-GO decision.
 
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied

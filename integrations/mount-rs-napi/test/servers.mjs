@@ -733,6 +733,64 @@ async function p9Request(socket, reader, type, tag, body, expectedType) {
   return response.subarray(7);
 }
 
+async function connectP9Session(server, msize = 65_536) {
+  const { socket, reader } = await connectLoopback(server.port);
+  const versionMsize = Buffer.alloc(4);
+  versionMsize.writeUInt32LE(msize, 0);
+  await p9Request(
+    socket,
+    reader,
+    100,
+    0xffff,
+    Buffer.concat([versionMsize, p9String("9P2000.L")]),
+    101,
+  );
+
+  const attachBody = Buffer.alloc(12);
+  attachBody.writeUInt32LE(1, 0);
+  attachBody.writeUInt32LE(0xffff_ffff, 4);
+  attachBody.writeUInt32LE(0xffff_ffff, 8);
+  await p9Request(
+    socket,
+    reader,
+    104,
+    1,
+    Buffer.concat([attachBody.subarray(0, 8), p9String("node"), p9String(""), attachBody.subarray(8)]),
+    105,
+  );
+
+  const connection = server.clients.at(-1);
+  assert.ok(connection);
+  assert.equal(connection.stream, undefined);
+  assert.equal(connection.session.msize, msize);
+  return { socket, reader, connection };
+}
+
+async function connectP9HeldFile(server, name, fid, msize = 65_536) {
+  const { socket, reader, connection } = await connectP9Session(server, msize);
+
+  const walkBody = Buffer.alloc(10);
+  walkBody.writeUInt32LE(1, 0);
+  walkBody.writeUInt32LE(fid, 4);
+  walkBody.writeUInt16LE(1, 8);
+  const walkReply = await p9Request(
+    socket,
+    reader,
+    110,
+    2,
+    Buffer.concat([walkBody, p9String(name)]),
+    111,
+  );
+  assert.equal(walkReply.readUInt16LE(0), 1);
+
+  const lopenBody = Buffer.alloc(8);
+  lopenBody.writeUInt32LE(fid, 0);
+  lopenBody.writeUInt32LE(0, 4);
+  await p9Request(socket, reader, 12, 3, lopenBody, 13);
+
+  return { socket, reader, connection };
+}
+
 async function exerciseP9() {
   const filesystem = memoryFilesystem();
   const original = Buffer.from("before-9p");
@@ -901,6 +959,110 @@ async function exerciseP9() {
   }
 }
 
+async function exerciseP9TcpConcurrency() {
+  {
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/one.txt", Buffer.from("1"));
+    await filesystem.writeFile("/two-again.txt", Buffer.from("2222"));
+    const server = createP9Server(filesystem, { host: "127.0.0.1", port: 0 });
+    let first;
+    let second;
+    try {
+      await within(server.listen(), "9P TCP isolation listen");
+      first = await connectP9HeldFile(server, "one.txt", 500);
+      second = await connectP9HeldFile(server, "two-again.txt", 500);
+      assert.notStrictEqual(first.connection.session, second.connection.session);
+      assert.equal(server.connections, 2);
+
+      const readBody = (fid) => {
+        const body = Buffer.alloc(16);
+        body.writeUInt32LE(fid, 0);
+        body.writeBigUInt64LE(0n, 4);
+        body.writeUInt32LE(16, 12);
+        return body;
+      };
+      const [one, two] = await Promise.all([
+        p9Request(first.socket, first.reader, 116, 4, readBody(500), 117),
+        p9Request(second.socket, second.reader, 116, 4, readBody(500), 117),
+      ]);
+      assert.equal(one.readUInt32LE(0), 1);
+      assert.equal(one.subarray(4, 5).toString(), "1");
+      assert.equal(two.readUInt32LE(0), 4);
+      assert.equal(two.subarray(4, 8).toString(), "2222");
+
+      await closeSocket(first.socket, "9P first isolated client close");
+      await within(first.connection.closed, "9P first isolated connection");
+      assert.equal(server.connections, 1);
+      const stillServing = await p9Request(second.socket, second.reader, 116, 5, readBody(500), 117);
+      assert.equal(stillServing.readUInt32LE(0), 4);
+      assert.equal(stillServing.subarray(4, 8).toString(), "2222");
+    } finally {
+      for (const item of [first, second]) {
+        if (item?.socket) item.socket.destroy();
+        if (item?.connection) await within(item.connection.closed, "9P isolated connection cleanup");
+      }
+      await server.close();
+    }
+  }
+
+  {
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/slow.txt", Buffer.from("opening this file takes a while"));
+    const driver = {
+      stat: (...args) => filesystem.stat(...args),
+      readdir: (...args) => filesystem.readdir(...args),
+      async open(path, flags, mode) {
+        if (path === "/slow.txt") {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+        }
+        return filesystem.open(path, flags, mode);
+      },
+    };
+    const server = createP9Server(driver, { host: "127.0.0.1", port: 0 });
+    let connection;
+    try {
+      await within(server.listen(), "9P TCP concurrency listen");
+      connection = await connectP9Session(server);
+
+      const walkBody = Buffer.alloc(10);
+      walkBody.writeUInt32LE(1, 0);
+      walkBody.writeUInt32LE(600, 4);
+      walkBody.writeUInt16LE(1, 8);
+      await p9Request(
+        connection.socket,
+        connection.reader,
+        110,
+        2,
+        Buffer.concat([walkBody, p9String("slow.txt")]),
+        111,
+      );
+
+      const slowBody = Buffer.alloc(8);
+      slowBody.writeUInt32LE(600, 0);
+      slowBody.writeUInt32LE(0, 4);
+      const quickBody = Buffer.alloc(12);
+      quickBody.writeUInt32LE(1, 0);
+      quickBody.writeBigUInt64LE(0x0000_07ffn, 4);
+      await writeSocket(
+        connection.socket,
+        Buffer.concat([p9Frame(12, 11, slowBody), p9Frame(24, 12, quickBody)]),
+        "9P TCP concurrent request burst",
+      );
+
+      const first = await readP9Frame(connection.reader, "9P TCP concurrent first reply");
+      const second = await readP9Frame(connection.reader, "9P TCP concurrent second reply");
+      assert.equal(first[4], 25);
+      assert.equal(first.readUInt16LE(5), 12);
+      assert.equal(second[4], 13);
+      assert.equal(second.readUInt16LE(5), 11);
+    } finally {
+      if (connection?.socket) connection.socket.destroy();
+      if (connection?.connection) await within(connection.connection.closed, "9P TCP concurrency cleanup");
+      await server.close();
+    }
+  }
+}
+
 async function exerciseP9Unix() {
   if (process.platform === "win32") return;
 
@@ -978,6 +1140,134 @@ async function exerciseP9Unix() {
     );
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+async function exerciseP9Teardown() {
+  {
+    markPhase("9P teardown server close");
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/held.txt", Buffer.from("held across server close"));
+    const server = createP9Server(filesystem, { host: "127.0.0.1", port: 0 });
+    let socket;
+    let connection;
+    try {
+      await within(server.listen(), "9P teardown server-close listen");
+      ({ socket, connection } = await connectP9HeldFile(server, "held.txt", 300));
+      await within(server.close(), "9P teardown server close");
+      await within(connection.closed, "9P teardown server-close connection");
+      assert.equal(connection.session.destroyed, true);
+      assert.equal(server.connections, 0);
+      assert.equal(server.address(), null);
+      assert.throws(() => server.attach(new Duplex({ read() {}, write(_chunk, _encoding, callback) { callback(); } })), /closed/);
+    } finally {
+      if (socket) socket.destroy();
+      await server.close();
+    }
+  }
+
+  {
+    markPhase("9P teardown half-close");
+    const filesystem = memoryFilesystem();
+    const bigMsize = 256 * 1024;
+    await filesystem.writeFile("/big.bin", Buffer.alloc(bigMsize - 1024, 0x61));
+    const server = createP9Server(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      maxFrame: 1024 * 1024,
+    });
+    let socket;
+    let connection;
+    try {
+      markPhase("9P teardown half-close listen");
+      await within(server.listen(), "9P teardown half-close listen");
+      markPhase("9P teardown half-close connect");
+      ({ socket, connection } = await connectP9HeldFile(server, "big.bin", 800, bigMsize));
+      socket.pause();
+
+      const readBody = Buffer.alloc(16);
+      readBody.writeUInt32LE(800, 0);
+      readBody.writeBigUInt64LE(0n, 4);
+      readBody.writeUInt32LE(bigMsize - 24, 12);
+      const burst = Buffer.concat(
+        Array.from({ length: 300 }, (_, index) => p9Frame(116, 100 + index, readBody)),
+      );
+      markPhase("9P teardown half-close burst");
+      await writeSocket(socket, burst, "9P teardown half-close burst");
+      markPhase("9P teardown half-close queue");
+      await waitUntil(
+        () => connection.session.stats.requests > 3 && connection.session.stats.replies > 0,
+        "9P teardown half-close queued replies",
+      );
+
+      markPhase("9P teardown half-close EOF");
+      await within(
+        new Promise((resolve, reject) => {
+          socket.once("error", reject);
+          socket.end(resolve);
+        }),
+        "9P teardown half-close EOF",
+      );
+      markPhase("9P teardown half-close connection");
+      await within(connection.closed, "9P teardown half-close connection");
+      assert.equal(connection.session.destroyed, true);
+      assert.equal(server.connections, 0);
+      const started = performance.now();
+      markPhase("9P teardown half-close server close");
+      await within(server.close(), "9P teardown half-close server close");
+      assert.ok(performance.now() - started < 5000);
+    } finally {
+      if (socket) socket.destroy();
+      await server.close();
+    }
+  }
+
+  {
+    markPhase("9P teardown reset");
+    const reports = [];
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/held.txt", Buffer.from("held across reset"));
+    const server = createP9Server(filesystem, {
+      host: "127.0.0.1",
+      port: 0,
+      onTransportError(error, peer) {
+        reports.push({ error, peer });
+      },
+    });
+    let socket;
+    let connection;
+    try {
+      await within(server.listen(), "9P teardown reset listen");
+      ({ socket, connection } = await connectP9HeldFile(server, "held.txt", 302));
+      socket.resetAndDestroy();
+      await within(connection.closed, "9P teardown reset connection");
+      assert.deepEqual(reports, []);
+      assert.equal(connection.session.destroyed, true);
+      assert.equal(server.connections, 0);
+    } finally {
+      if (socket) socket.destroy();
+      await server.close();
+    }
+  }
+
+  {
+    markPhase("9P teardown EOF");
+    const filesystem = memoryFilesystem();
+    await filesystem.writeFile("/held.txt", Buffer.from("held across EOF"));
+    const server = createP9Server(filesystem, { host: "127.0.0.1", port: 0 });
+    let socket;
+    let connection;
+    try {
+      await within(server.listen(), "9P teardown EOF listen");
+      ({ socket, connection } = await connectP9HeldFile(server, "held.txt", 301));
+      socket.end();
+      await within(connection.closed, "9P teardown EOF connection");
+      assert.equal(connection.session.destroyed, true);
+      assert.equal(server.connections, 0);
+    } finally {
+      if (socket) socket.destroy();
+      await server.close();
+    }
   }
 }
 
@@ -1972,7 +2262,9 @@ await within(
   (async () => {
     if (requestedServerPhase === "p9") {
       await runPhase("9P exercise", exerciseP9);
+      await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
       await runPhase("9P Unix listener policy", exerciseP9Unix);
+      await runPhase("9P teardown", exerciseP9Teardown);
       await runPhase("9P attached stream", exerciseP9AttachedStream);
       await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
       await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);
@@ -1990,7 +2282,9 @@ await within(
     await runPhase("NFS exercise", exerciseNfs);
     await runPhase("NFS session destroy", exerciseNfsSessionDestroy);
     await runPhase("9P exercise", exerciseP9);
+    await runPhase("9P TCP concurrency", exerciseP9TcpConcurrency);
     await runPhase("9P Unix listener policy", exerciseP9Unix);
+    await runPhase("9P teardown", exerciseP9Teardown);
     await runPhase("9P attached stream", exerciseP9AttachedStream);
     await runPhase("9P attached duplex", exerciseP9AttachedDuplex);
     await runPhase("9P attached backpressure", exerciseP9AttachedBackpressure);

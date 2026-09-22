@@ -5,7 +5,7 @@
 //! [`P9Session`] remains independent of the socket type so its wire behavior is
 //! testable on every host supported by this crate.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
@@ -852,8 +852,16 @@ async fn run_connection(runtime: ConnectionRuntime) {
     };
     let mut tasks = JoinSet::new();
     let mut buffer = vec![0_u8; 64 * 1024];
+    // Keep reading while request work is at the in-flight bound so a peer's
+    // EOF can still terminate a connection whose replies are backpressured.
+    // The previous per-delivery permit wait could stop before the next read:
+    // a paused peer then left the connection task waiting forever for a permit
+    // that only a readable peer could release.
+    let pending_limit = max_frame.saturating_mul(max_in_flight).max(buffer.len());
+    let mut pending_frames: VecDeque<Vec<u8>> = VecDeque::new();
+    let mut pending_bytes = 0_usize;
 
-    'read: loop {
+    loop {
         if server_shutdown_requested.load(Ordering::Acquire) {
             break;
         }
@@ -880,6 +888,48 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     break;
                 }
             }
+            permit = permits.clone().acquire_owned(), if !pending_frames.is_empty() => {
+                let permit = match permit {
+                    Ok(permit) => permit,
+                    Err(_) => break,
+                };
+                let Some(frame) = pending_frames.pop_front() else {
+                    drop(permit);
+                    continue;
+                };
+                pending_bytes = pending_bytes.saturating_sub(frame.len());
+                let session = session.clone();
+                let writer = Arc::clone(&writer);
+                let control = Arc::clone(&control);
+                let hooks = hooks.clone();
+                let reported = Arc::clone(&reported);
+                let peer = connection.peer.clone();
+                tasks.spawn(async move {
+                    let reply = session.handle_call(&frame).await;
+                    if let Some(reply) = reply {
+                        let mut writer = writer.lock().await;
+                        let result = match writer.write_all(&reply).await {
+                            Ok(()) => writer.flush().await,
+                            Err(error) => Err(error),
+                        };
+                        if let Err(error) = result {
+                            if !is_expected_disconnect(&error) {
+                                report_once(
+                                    &hooks,
+                                    &reported,
+                                    P9TransportError::from_io(
+                                        P9TransportErrorKind::Write,
+                                        peer,
+                                        &error,
+                                    ),
+                                );
+                            }
+                            control.stop();
+                        }
+                    }
+                    drop(permit);
+                });
+            }
             read = reader.read(&mut buffer) => {
                 let count = match read {
                     Ok(count) => count,
@@ -899,6 +949,21 @@ async fn run_connection(runtime: ConnectionRuntime) {
                     }
                 };
                 if count == 0 {
+                    break;
+                }
+                if pending_bytes >= pending_limit {
+                    report_once(
+                        &hooks,
+                        &reported,
+                        P9TransportError::from_message(
+                            P9TransportErrorKind::Frame,
+                            connection.peer.clone(),
+                            format!(
+                                "9P pending request queue exceeds {} bytes",
+                                pending_limit
+                            ),
+                        ),
+                    );
                     break;
                 }
                 if let Some(msize) = session.msize()
@@ -930,56 +995,24 @@ async fn run_connection(runtime: ConnectionRuntime) {
                         break;
                     }
                 };
-                for frame in frames {
-                    let control_shutdown = control.shutdown.notified();
-                    tokio::pin!(control_shutdown);
-                    control_shutdown.as_mut().enable();
-                    let permit_shutdown = server_shutdown.notified();
-                    tokio::pin!(permit_shutdown);
-                    permit_shutdown.as_mut().enable();
-                    if server_shutdown_requested.load(Ordering::Acquire) {
-                        break 'read;
-                    }
-                    let permit = tokio::select! {
-                        _ = control_shutdown => break 'read,
-                        _ = permit_shutdown => break 'read,
-                        permit = permits.clone().acquire_owned() => match permit {
-                            Ok(permit) => permit,
-                            Err(_) => break 'read,
-                        },
-                    };
-                    let session = session.clone();
-                    let writer = Arc::clone(&writer);
-                    let control = Arc::clone(&control);
-                    let hooks = hooks.clone();
-                    let reported = Arc::clone(&reported);
-                    let peer = connection.peer.clone();
-                    tasks.spawn(async move {
-                        let reply = session.handle_call(&frame).await;
-                        if let Some(reply) = reply {
-                            let mut writer = writer.lock().await;
-                            let result = match writer.write_all(&reply).await {
-                                Ok(()) => writer.flush().await,
-                                Err(error) => Err(error),
-                            };
-                            if let Err(error) = result {
-                                if !is_expected_disconnect(&error) {
-                                    report_once(
-                                        &hooks,
-                                        &reported,
-                                        P9TransportError::from_io(
-                                            P9TransportErrorKind::Write,
-                                            peer,
-                                            &error,
-                                        ),
-                                    );
-                                }
-                                control.stop();
-                            }
-                        }
-                        drop(permit);
-                    });
+                let incoming_bytes = frames.iter().map(Vec::len).sum::<usize>();
+                if incoming_bytes > pending_limit.saturating_sub(pending_bytes) {
+                    report_once(
+                        &hooks,
+                        &reported,
+                        P9TransportError::from_message(
+                            P9TransportErrorKind::Frame,
+                            connection.peer.clone(),
+                            format!(
+                                "9P pending request queue exceeds {} bytes",
+                                pending_limit
+                            ),
+                        ),
+                    );
+                    break;
                 }
+                pending_bytes += incoming_bytes;
+                pending_frames.extend(frames);
             }
         }
     }

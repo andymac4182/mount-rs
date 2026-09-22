@@ -52,6 +52,13 @@ advertising durable writes without that callback still fails closed as
 - Keep Basic authentication strict at the HTTP grammar boundary: the scheme
   must be followed by one or more spaces before the canonical base64 payload;
   the live regression rejects the previously accepted `Basic<base64>` form.
+- Keep the listener lifecycle state honest after an accept-loop failure: a
+  finished listener task is not a running server, so the next serialized
+  `listen()` can bind again instead of returning a false success. The focused
+  regression covers both finished and pending Tokio listener-task handles.
+- Preserve repeated request fields at every WebDAV boundary: duplicate `If`
+  lines are combined with grammar-safe whitespace, while other repeated fields
+  are retained for strict downstream parsing rather than silently overwritten.
 - Keep the durable-driver mutation-barrier regression green: successful PUT,
   MKCOL, PROPPATCH, COPY, MOVE, DELETE, and resource creation by LOCK await
   `syncfs`, while injected barrier failure is surfaced and retry remains
@@ -82,12 +89,14 @@ advertising durable writes without that callback still fails closed as
 - Keep the pinned pure oracle differential green; the full supported
   server/session prototype-member and direct-method differential plus the
   pinned TypeScript-vs-Rust loopback HTTP differential are evidenced below.
-- Keep `Depth: 1` PROPFIND directory materialization bounded at 4,096 child
-  resources through `FsDriver::readdir_bounded`; a driver-reported overflow
-  fails closed as `413` with `Connection: close`, and child-stat failures remain
-  visible as per-resource multistatus errors. COPY also fails closed for
-  premature source EOF or child-stat errors instead of returning a successful
-  incomplete tree.
+- Keep WebDAV directory walks bounded at 4,096 child resources per visited
+  directory through `FsDriver::readdir_bounded`; a driver-reported overflow in
+  `Depth: 1` PROPFIND fails closed as `413` with `Connection: close`, while
+  recursive COPY and DELETE surface the bounded-listing failure as a per-resource
+  multistatus error without continuing the affected directory. Child-stat
+  failures and premature COPY source EOF remain visible instead of becoming a
+  successful incomplete tree; drivers without the bounded seam retain an
+  explicit `ENOTSUP`/`501` supported-capability boundary.
 - Qualify supported provider/hosted paths and remaining native environments;
   the local NodeFs and SQLite provider/reopen classifications are recorded
   below, while crash/power-loss and live-provider behavior remain separate;
@@ -103,6 +112,11 @@ advertising durable writes without that callback still fails closed as
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | WebDAV duplicate-header preservation | The Rust HTTP listener and N-API request-head adapter now retain repeated field values instead of silently taking the last one; `If` fields use whitespace joining so multiple state lists remain valid RFC 4918 syntax. A raw loopback request with one true and one false duplicate `If` list returns `200` and the exact body | Live-provider qualification, hosted lifecycle/concurrency, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV bounded recursive mutation traversal | Recursive COPY and DELETE now use the driver-enforced 4,096-entry directory seam instead of unbounded `readdir`; overflow or unsupported enumeration returns a per-resource `207 Multi-Status` failure without traversing that directory. A focused regression verifies COPY leaves only its created destination and DELETE leaves the source intact when bounded enumeration returns `EOVERFLOW`; formatting, warning-denied WebDAV Clippy, and the focused target remain green | Live-provider qualification, hosted lifecycle/concurrency, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | Current exact-tip hosted/provider audit after bounded traversal publication | Exact-SHA [CI run 35685409287](https://github.com/andymac4182/mount-rs/actions/runs/35685409287) for `baf19664` was cancelled with no jobs, so it provides no hosted WebDAV result. The protected [Live Cloudflare R2 run 35685409328](https://github.com/andymac4182/mount-rs/actions/runs/35685409328) failed its usage-admission step with `R2 CI monthly run cap already exceeded: count=297 limit=20`, and its live integration job was skipped; the unrelated W04 policy run succeeded while Fault injection and Native 9P were still in progress | No hosted WebDAV PASS is claimable from this exact tip; the R2 usage envelope is an external blocker, and live AWS/provider configuration, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | WebDAV listener-task lifecycle recovery | `listen()` now treats a finished accept-loop task as stopped, allowing a subsequent serialized bind after an accept failure instead of falsely reporting an existing server; focused task-state regressions cover finished and pending handles, and the full WebDAV target remains green | A deterministic socket-level accept-failure injection is not exposed by the portable listener; hosted lifecycle, live-provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
+| 2026-09-22 | Current exact-tip hosted WebDAV queue audit | Exact-tip CI run `35682524510` at published packet `8e23ca06` was cancelled before GitHub materialized any jobs, so it supplies no hosted WebDAV result; prior terminal hosted native runs remain the latest accepted hosted evidence | No hosted result is claimable from this cancelled run; live-provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV Basic authentication grammar hardening | Basic credentials now require the oracle/RFC `Basic +<base64>` separator; the live authenticated HTTP test rejects `Basic<base64>` and still accepts the configured pair. Focused WebDAV tests, all package targets, warning-denied Clippy, formatting, and `git diff --check` remain green | Live-provider qualification, current hosted queue, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open |
 | 2026-09-22 | WebDAV bounded directory and recursive-copy failure hardening | `Depth: 1` PROPFIND now calls the driver's bounded enumeration seam with a fixed 4,096-entry ceiling and maps `EOVERFLOW` to `413 Connection: close`; recursive COPY now reports child-stat failures and rejects premature or over-reported source reads instead of silently returning an incomplete success. Focused WebDAV tests passed 24/24, all package targets passed with the native mount test still explicitly ignored, warning-denied WebDAV Clippy passed, formatting passed, and `git diff --check` passed | Live-provider qualification, current hosted queue, power-loss ordering, durable locks, crash/power-loss restart, and the explicit same-resource ordering boundary remain open; drivers without `readdir_bounded` retain an explicit `ENOTSUP`/`501` supported-capability boundary |
 | 2026-09-22 | Current exact-tip hosted WebDAV queue audit | CI run `35681063238` at published tip `7282bce8` began, but its macOS native-WebDAV job `106597988170` and Ubuntu native-WebDAV job `106597988268` were cancelled when successor mainline tip `2bcd9aa4` arrived; replacement CI `35681127696` at that newer tip was pending at the audit snapshot | No fresh hosted WebDAV result is claimable from the superseded run; the previously passed hosted native run remains the latest terminal WebDAV evidence, while live-provider and power-loss gates remain external |

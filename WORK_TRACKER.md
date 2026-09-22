@@ -821,6 +821,7 @@ patch):
 | Main | W01 N-API 9P direct probe absence-shape parity | `integrations/mount-rs-napi/p9.cjs`, `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `integrations/mount-rs-napi/test/p9-mount-helpers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: direct `./9p` `p9ClientProbe()` now always owns `platform` and `reason`, normalizing native `null`/omitted values to `undefined`; the direct declaration requires `platform: "linux" | undefined` and `reason: string | undefined`, while the root automatic `JsP9ClientProbe` boundary remains unchanged. Local addon/generated build, helper, required-field typecheck, syntax, and diff checks passed. Exact SHA `7389be4d5ea4930075cf5278032614e931054620` passed Native 9P run `35680542975`, N-API job `106596362070` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106596362200` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P direct `P9Platform` type export parity | `integrations/mount-rs-napi/types/p9-codec.d.ts`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: direct `./9p` now exports the oracle's type-only `P9Platform = "linux"` alias and uses it in `P9ClientProbe` and `p9Platform()`; runtime behavior is unchanged. The direct type-import/use check, helper, syntax, and diff checks passed. Exact SHA `2bcd9aa4b0d25f284d8ae9fc4ad3de0a5cbbfeff` passed Native 9P run `35681127657`, N-API job `106598109004` with the Linux probe, addon build, automatic/direct/structural mounted I/O and cleanup, and Rust job `106598109187` with the Linux probe plus all four ignored native lifecycle tests; production remains NO-GO |
 | Main | W01 N-API 9P `P9User.uid` object-shape parity | `integrations/mount-rs-napi/postlude-servers.cjs`, `integrations/mount-rs-napi/postbuild.mjs`, `integrations/mount-rs-napi/index.d.ts`, `integrations/mount-rs-napi/test/p9-session-metadata.mjs`, `integrations/mount-rs-napi/test/servers.mjs`, `integrations/mount-rs-napi/test/types.test.ts`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet: the direct/root N-API `P9User` facade preserves the oracle-required own `uid` property, using `undefined` when native identity has no numeric uid; generated direct declarations use `uid: number | undefined`. Local `pnpm build:debug`, session metadata, generated typecheck, syntax, and diff checks passed. Exact SHA `1c43f66ec570be35444055ab6adb0f841628fef6` passed Native 9P run `35681672318`, N-API job `106599754171` with automatic/direct/structural mounted I/O and cleanup, and Rust job `106599753872` with all four ignored native lifecycle tests; the broad `node test/servers.mjs` script remains separately blocked by the Darwin NFS relisten sandbox `Operation not permitted` before 9P, so production remains NO-GO |
+| Main | W01 N-API 9P transport teardown under backpressure | `transports/mount-rs-9p/src/server.rs`, `integrations/mount-rs-napi/test/servers.mjs`, `.github/workflows/native-9p.yml`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet fixes the connection task's permit-wait deadlock by retaining a bounded pending-frame queue while continuing to read for peer EOF, and reports a frame transport failure if that queue is exceeded. Real loopback N-API coverage now checks server close with an open fid, paused-peer FIN with a large queued reply burst, silent TCP reset, and orderly client EOF. Local focused Rust tests (36 passed), strict Clippy, addon rebuild, syntax/diff checks, and elevated isolated N-API execution passed. Exact SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed Native 9P run `35685073733`, N-API job `106610049913` with teardown and automatic/direct/structural mounted-I/O cleanup, and Rust job `106610049705` with the Linux probe plus all four ignored native lifecycle tests; process-crash and arbitrary kernel-reset recovery, broader parity, and W01 acceptance remain open, so production remains NO-GO |
 | Main | W01 N-API 9P Unix listener policy and lifecycle | `.github/workflows/native-9p.yml`, `integrations/mount-rs-napi/test/servers.mjs`, `docs/W01_9P_PROGRESS.md`, `docs/public-api-parity.md`, `docs/W01_PROGRESS.md` | Current bounded packet adds the Unix-domain listener phase to `MOUNT_RS_SERVER_PHASE=p9`, independently exercising private-directory refusal, explicit `allowSharedDirectory` opt-in, `0600` socket mode, protocol handshake, native Unix peer/path and `stream: undefined` representation, socket removal on close, and path/port exclusivity. Local syntax/diff checks and elevated isolated N-API execution passed. Exact test commit `dd10ac0564446c9143f8b5f68b2fed51c7eaf57f` was included in descendant head `d43f5ea4e4334912de86ac0db818392531a7d4ec`, whose Native 9P run `35683716217` passed N-API job `106606580352` with Unix policy, server/attach, and automatic/direct/structural mounted I/O/cleanup, and Rust job `106606580326` with the Linux probe plus all four ignored native lifecycle tests. The direct run at the test commit was cancelled before jobs materialized and is not evidence; production remains NO-GO |
 
 Closed packets already integrated this cycle include Mendel (FUSE), Lagrange
@@ -866,7 +867,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest telemetry-qualified terminal qualification is green at [run `35681642584`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35681642584) / exact source `113b13751acc4885ca5916a7f70fe109e1dbadd4`, with six rollout-ledger, five qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the validated 30-second bounded authority heartbeat stayed live with a 120-second forward-jump bound and the hosted shared-authority path emitted `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3 publication_successes=3 publication_failures=0 reader_attempts=5 reader_successes=4 reader_failures=1 last_published_time_ms=2030001 last_observed_time_ms=2030001`; the base composition marker was p95/p99 321,472µs at 30.29 ops/s and five-round soak passed with p95/p99 10,229–10,887µs and 257.61–295.85 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 441.76 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35681642584-1` (ID `10675750181`, SHA-256 `5305418e1b253bdc621815311eaf58f80234ef193253fe4b9f23e3c0d938b23c`) was retained with the seven-gate packet still NO-GO; the stats and heartbeat are not production collector, deployment-credential, failover, capacity or owner evidence, and production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest telemetry-verifier terminal qualification is green at [run `35683503910`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35683503910) / exact source `0e0327535fbcda0b1544400c00e938911a8ed6ad`, with six rollout-ledger, seven qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the validated 30-second bounded authority heartbeat stayed live with a 120-second forward-jump bound and the hosted shared-authority path emitted `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3 publication_successes=3 publication_failures=0 reader_attempts=5 reader_successes=4 reader_failures=1 last_published_time_ms=2030001 last_observed_time_ms=2030001`; the base composition marker was p95/p99 29,220µs at 185.99 ops/s and five-round soak passed with p95/p99 13,491–22,635µs and 176.18–210.55 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 368.57 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35683503910-1` (ID `10675579408`, SHA-256 `ebe4ef52c09fa50e1395a0d672e1db715c9d60deb120f43c85499750ba6c6362`) was retained with the seven-gate packet still NO-GO; the stricter telemetry verifier, stats and heartbeat are not production collector, deployment-credential, failover, capacity or owner evidence, and production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -1731,20 +1732,41 @@ Evidence landed without closing the remaining W01 acceptance gates:
   against one exclusive lock and both receive `423` without its submitted
   token; clients coordinate shared-resource writes through WebDAV lock/`If`
   state. Provider, power-loss, and durable-lock acceptance remain separate.
-- [x] The WebDAV remote-response and recursive-copy failure boundary is now
-  fail-closed: `Depth: 1` `PROPFIND` asks `FsDriver::readdir_bounded` for at
-  most 4,096 child resources and maps provider `EOVERFLOW` to `413` with
-  `Connection: close`; recursive `COPY` reports child-stat failures and
-  rejects premature or over-reported source reads instead of silently
-  returning incomplete success. The focused WebDAV target passed 24/24,
-  package targets and warning-denied Clippy passed, and the native mount test
-  remains explicitly ignored. Provider/native/hosted qualification,
-  power-loss durability, durable locks, and broader ordering remain open.
+- [x] The WebDAV remote-response and recursive-mutation failure boundary is
+  now fail-closed: `Depth: 1` `PROPFIND`, recursive `COPY`, and recursive
+  `DELETE` ask `FsDriver::readdir_bounded` for at most 4,096 child resources
+  per visited directory. `PROPFIND` maps provider `EOVERFLOW` to `413` with
+  `Connection: close`; recursive mutations surface overflow or unsupported
+  enumeration as per-resource `207` failures without traversing that
+  directory. COPY also reports child-stat failures and rejects premature or
+  over-reported source reads instead of silently returning incomplete success.
+  The focused WebDAV target, package targets, warning-denied Clippy, and
+  formatting pass; the native mount test remains explicitly ignored.
+  Provider/native/hosted qualification, power-loss durability, durable locks,
+  and broader ordering remain open.
+- [x] The exact published-tip WebDAV audit remains externally gated: CI run
+  `35685409287` for `baf19664` was cancelled with no jobs, while protected
+  Live Cloudflare R2 run `35685409328` failed usage admission at
+  `R2 CI monthly run cap already exceeded: count=297 limit=20` and skipped
+  its integration job. No hosted WebDAV PASS is promoted; the R2 usage
+  envelope, live provider configuration, power-loss durability, durable
+  locks, and broader ordering remain open.
 - [x] The WebDAV Basic parser now requires the oracle/RFC `Basic +<base64>`
   separator instead of accepting a scheme concatenated directly with the
   payload. The live authenticated HTTP regression rejects `Basic<base64>` and
   still accepts the configured credentials; provider/native/hosted lifecycle,
   power-loss durability, durable locks, and broader ordering remain open.
+- [x] The WebDAV listener lifecycle now distinguishes a finished accept-loop
+  task from a running server, allowing a serialized relisten to recover after
+  an accept failure instead of returning false success. Focused Tokio task-state
+  regressions cover finished and pending handles; deterministic socket-level
+  accept-failure injection and hosted/provider/power-loss qualification remain
+  open.
+- [x] The WebDAV HTTP and N-API request-head adapters now preserve repeated
+  header fields instead of silently taking the last value. Duplicate `If`
+  fields join with grammar-safe whitespace, and a raw loopback regression proves
+  one true plus one false state list still authorizes the request; hosted and
+  provider qualification remain open.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
@@ -2078,6 +2100,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
   required and production remains **NO-GO**.
 
+- Active current-tip qualification checkpoint: non-cancelling run
+  `35684808019` was dispatched from exact published head `4cd57723` before
+  concurrent mainline advanced to `87d5eb27`. At the 14:06 AEST snapshot,
+  Windows Node, RustFS, native WebDAV/NFS/9P, observability, Ozone base,
+  TiDB/RustFS, and TiDB had completed successfully; ARM Node `106609248954`,
+  Ubuntu Node `106609249118`, macOS-latest Node `106609248932`, Ubuntu Rust
+  `106609249086`, Ozone/TiDB `106609249034`, and Ozone compositions
+  `106609249144` had failed; macOS-15-intel Node `106609248961`, native FUSE
+  `106609249088`, FoundationDB/RustFS `106609249058`, and
+  Ozone/FoundationDB `106609249069` remained non-terminal. GitHub had not
+  exposed terminal logs while the workflow was still running, so no failure
+  cause, exact PGlite/restart PASS, or W04 acceptance is claimed. Production
+  remains **NO-GO** pending terminal diagnosis and all deployment/provider/
+  operational gates.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -2408,6 +2445,28 @@ Evidence landed without closing the remaining W01 acceptance gates:
   qualification evidence, not deployment-level credentials, production
   collector/cadence monitoring or failover evidence, so W07.3 remains open.
 
+  Telemetry-verifier current-tip requalification
+  [35683503910](https://github.com/andymacclenaghan/mount-rs/actions/runs/35683503910)
+  (job `106606452492`, exact revision
+  `0e0327535fbcda0b1544400c00e938911a8ed6ad`) completed green in 12m44s on
+  Ubuntu 24.04/Linux `amd64`. The stricter seven-case qualification-log
+  verifier passed, including the 30-second/120-second authority heartbeat
+  policy and reconciled shared-authority stats marker; durable
+  FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart,
+  five-round soak, fresh-client and RustFS integration paths passed. The
+  base composition marker was p95/p99 29,220µs at 185.99 ops/s; five-round
+  soak p95/p99 ranged from 13,491µs to 22,635µs with throughput from 176.18
+  to 210.55 ops/s. The retained workload artifact records 1,200 successful
+  lifecycle operations, 368.57 measured IOPS, zero timeouts and zero cleanup
+  failures. Artifact `foundationdb-production-qualification-35683503910-1`
+  (ID `10675579408`, SHA-256
+  `ebe4ef52c09fa50e1395a0d672e1db715c9d60deb120f43c85499750ba6c6362`)
+  remains qualification evidence; the packet is still **NO-GO** with seven
+  open gates and zero evidence records. The stricter verifier, heartbeat and
+  stats are implementation qualification evidence, not production collector,
+  deployment credentials, failover, capacity or owner evidence, so W07.3
+  remains open.
+
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -2562,6 +2621,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   capacity/observability/recovery and production owner gates remain open; the
   telemetry API and test heartbeat are not production monitoring or
   deployment-credential evidence.
+
+  Telemetry-verifier current-tip requalification
+  [35683503910](https://github.com/andymacclenaghan/mount-rs/actions/runs/35683503910)
+  (job `106606452492`, exact revision
+  `0e0327535fbcda0b1544400c00e938911a8ed6ad`) completed green in 12m44s and
+  passed live Node/N-API, Linux CLI/FUSE mount and reopen, durable
+  FoundationDB/RustFS service restart/authority republish, fresh-client
+  reopen and RustFS integration on Ubuntu 24.04/Linux `amd64`. It also
+  enforced the independent 30-second authority heartbeat and shared-authority
+  stats marker, and retained the corrected 400-iteration workload artifact
+  with 1,200 successful lifecycle operations, 368.57 measured IOPS, zero
+  timeouts and zero cleanup failures. Live macOS service/cluster acceptance,
+  the complete advertised platform/package matrix, production
+  capacity/observability/recovery and production owner gates remain open; the
+  telemetry API, test heartbeat and stricter verifier are not production
+  monitoring, deployment-credential or failover evidence.
 
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
@@ -3206,14 +3281,32 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     budget, resource growth, safe capacity, cost and scaling triggers remain
     required.
 
+    The telemetry-verifier current-tip run
+    [35683503910](https://github.com/andymacclenaghan/mount-rs/actions/runs/35683503910)
+    at exact revision `0e0327535fbcda0b1544400c00e938911a8ed6ad` (job
+    `106606452492`) completed green on Ubuntu 24.04/Linux `amd64` in 12m44s.
+    Its stricter seven-case qualification-log verifier required the bounded
+    30-second/120-second authority heartbeat and reconciled stats marker.
+    The base composition run recorded p50 3,281µs, p95/p99 29,220µs and
+    185.99 ops/s; five-round soak p95/p99 ranged from 13,491µs to 22,635µs
+    with throughput from 176.18 to 210.55 ops/s. The retained workload
+    artifact passed 400 writes, reads and deletes, 1,200 successful lifecycle
+    operations, 368.57 measured IOPS, zero timeouts and zero cleanup failures.
+    The packet remains **NO-GO** with all seven production gates open; this is
+    stronger hosted implementation qualification, not production capacity,
+    collector, failover, recovery or owner evidence.
+
   - [ ] **Observability and operations:** expose and alert on cluster health,
     authority publication age/errors, reader failures, lease-fence/ESTALE,
     transaction retries/maybe-committed EIO and cleanup/space pressure.
     The FoundationDB authority and shared-reader handles now expose bounded
     process-local `stats()` snapshots for publication/read attempts,
     successes/failures, last provider-time observations and local diagnostic
-    timestamps; the hosted shared-authority path asserts the success/failure
-    accounting and emits `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
+    timestamps, and each publication/read attempt emits a bounded structured
+    `tracing` event with fixed event names and no cluster paths, prefixes,
+    credentials or provider error text; the hosted shared-authority path
+    asserts the success/failure accounting and emits
+    `FOUNDATIONDB_AUTHORITY_STATS_PASS`; the
     qualification-log verifier now fails closed unless the bounded heartbeat
     and stats markers are present and their counters/policy values reconcile.
     Map these snapshots into the approved collector and pager, publish dashboards,
@@ -3227,19 +3320,25 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
     Node, CLI/native Linux checkpoint is green for exact revision
-    `113b13751acc4885ca5916a7f70fe109e1dbadd4` in run `35681642584` (job
-    `106599666288`) on `ubuntu-24.04`/Linux `amd64`, with the retained
-    `foundationdb-production-qualification-35681642584-1` artifact (ID
-    `10675750181`, SHA-256
-    `5305418e1b253bdc621815311eaf58f80234ef193253fe4b9f23e3c0d938b23c`).
-    The run emitted the 30-second/120-second heartbeat marker and
-    `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3
+    `0e0327535fbcda0b1544400c00e938911a8ed6ad` in run `35683503910` (job
+    `106606452492`) on `ubuntu-24.04`/Linux `amd64`, with the retained
+    `foundationdb-production-qualification-35683503910-1` artifact (ID
+    `10675579408`, SHA-256
+    `ebe4ef52c09fa50e1395a0d672e1db715c9d60deb120f43c85499750ba6c6362`).
+    The run emitted the 30-second/120-second heartbeat marker and the
+    reconciled `FOUNDATIONDB_AUTHORITY_STATS_PASS publication_attempts=3
     publication_successes=3 publication_failures=0 reader_attempts=5
     reader_successes=4 reader_failures=1 last_published_time_ms=2030001
-    last_observed_time_ms=2030001`; complete the advertised macOS/Linux
-    build/native matrix and any remaining clean-install/package evidence, and
-    record the actual runner, cluster/image, revision and result. Failed,
-    skipped, cancelled or unavailable evidence remains open.
+    last_observed_time_ms=2030001`; its retained artifact provenance records
+    runner `GitHub Actions 1000025458`, Node 24.21.0, RustFS
+    `1.0.0@sha256:8cc9801755448b71a786705ce76692c77e14936cccd87cf2fc31842e58f4d1ff`,
+    FoundationDB image
+    `sha256:0d19ffb2aa154259f2da0f8941e1549b4c331f47008af5755a83f6247edeabf1`
+    and split-store provider `mount-rs-split-foundationdb-r2`. Complete the
+    advertised macOS/Linux build/native matrix and any remaining
+    clean-install/package evidence, and record the actual runner, cluster/image,
+    revision and result. Failed, skipped, cancelled or unavailable evidence
+    remains open.
 
   The previous current-main source gate on 2026-09-22 tested revision `3cd4377` and
   passed `./scripts/cargo-shared fmt --all -- --check`, strict workspace
@@ -3818,6 +3917,16 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   This is source-health evidence only and does not close P01–P09 or change the
   NO-GO decision.
 
+  After origin/main advanced with the WebDAV listener restart/backpressure and
+  bounded recursive-mutation fixes, duplicate-header handling and related N-API
+  changes, exact merged source
+  `7752dd2e26ab5f423dfd984c1f9e5887465fd9c9` was freshly requalified. The full
+  locked workspace test and strict workspace Clippy exited 0; all runnable tests
+  passed, the WebDAV test group reported 26 passing tests, provider/native rows
+  remained explicit opt-in skips, and affected N-API/package, W08 policy/evidence
+  and native-9P workflow-shape checks passed. This is source-health evidence only
+  and does not close P01–P09 or change the NO-GO decision.
+
   Hosted W08 policy run `35681936375` at source
   `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
   successfully in 2m48s. Its rollout-ledger and release-identity/provenance
@@ -3853,6 +3962,23 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   green. The cancellation is a hosted scheduling boundary, not evidence of a
   source or production failure; the successful run remains implementation/static
   evidence only and P01–P09 remain open.
+
+  The current public source-equivalent checkpoint
+  `1626d5381625d81696fa28624342f07087593760` passed hosted W08 release-policy
+  run `35684975387`, job `106609795509`, which completed successfully in 2m46s
+  with both hosted policy steps green. This remains hosted implementation/static
+  evidence only; it does not provide production topology, provider,
+  candidate-release, registry, canary, rollback or owner-approval evidence, so
+  P01–P09 remain open and the decision remains NO-GO.
+
+  After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
+  N-API test expansion and site component updates, exact merged source
+  `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
+  locked workspace test and strict workspace Clippy exited 0; all runnable tests
+  passed, provider/native rows remained explicit opt-in skips, and affected
+  N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
+  This is source-health evidence only and does not close P01–P09 or change the
+  NO-GO decision.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed

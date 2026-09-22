@@ -6,7 +6,8 @@ Portable WebDAV (RFC 4918) request/reply session and HTTP server for an
 The implementation follows the WebDAV source oracle at mountx revision
 `85361a8212ff9bff8e69f62fa8993ef2c2ec51e8`. It implements the class-1 resource
 methods `OPTIONS`, `GET`, `HEAD`, `PUT`, `MKCOL`, `DELETE`, `COPY`, `MOVE`, and
-bounded `PROPFIND` (at most 4,096 child resources for `Depth: 1`), with
+bounded directory walks with at most 4,096 child resources per visited
+directory, with
 RFC-style path decoding, bounded XML/request bodies,
 ETags, dates, byte ranges, recursive transfer/delete, and errno-to-HTTP mapping.
 Class-2 locking and `PROPPATCH` are implemented for the driver properties that
