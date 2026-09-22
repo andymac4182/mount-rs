@@ -2182,6 +2182,52 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn invalid_device_read_reports_one_owned_read_error() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+
+        let mut pipe = [0; 2];
+        assert_eq!(unsafe { libc::pipe(pipe.as_mut_ptr()) }, 0);
+        // SAFETY: pipe returned two owned descriptors and each is transferred
+        // exactly once into an OwnedFd.
+        let read_end = unsafe { OwnedFd::from_raw_fd(pipe[0]) };
+        let write_end = unsafe { OwnedFd::from_raw_fd(pipe[1]) };
+        let device = FuseDevice::from_owned_fd(write_end, DEFAULT_MAX_FRAME)
+            .expect("write-only pipe should satisfy the device boundary");
+        drop(read_end);
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_callback = Arc::clone(&observed);
+        let state = Arc::new(MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-read-error-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |error| {
+                    observed_callback
+                        .lock()
+                        .expect("callback observation lock")
+                        .push(error);
+                })),
+            },
+        ));
+        let task = tokio::spawn(run_session(
+            FuseSession::new(Arc::new(mount_rs_core::MemoryFs::empty())),
+            device,
+            Arc::clone(&state),
+        ));
+
+        task.await
+            .expect("session task should finish after device read failure");
+        let observed = observed.lock().expect("callback observation lock");
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].kind, FuseTransportErrorKind::Read);
+        assert!(!state.active.load(Ordering::Acquire));
+        assert!(state.closed.load(Ordering::Acquire));
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn panicking_transport_error_hook_isolated_and_reported_once() {
         use std::sync::atomic::{AtomicUsize, Ordering};
