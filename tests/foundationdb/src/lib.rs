@@ -5,6 +5,8 @@
 //! FoundationDB owns the fenced namespace and `R2BlockStore` owns immutable
 //! blocks in RustFS. No in-memory or fake provider is accepted by this gate.
 
+#![cfg(test)]
+
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::driver::FsDriver;
