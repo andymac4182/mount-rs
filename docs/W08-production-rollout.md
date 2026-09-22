@@ -14,7 +14,7 @@ does not authorize a production rollout.
 | Functional qualification | Complete for the defined hosted scope: durable 3PD/3TiKV restart, provider fencing and ambiguous commit, live Linux TiDB/RustFS Node/CLI/FUSE, ARM Node, Ubuntu NFS and macOS native-NFS rows passed in retained terminal jobs |
 | Production rollout | **NO-GO** |
 | Provisional production baseline | **15%**; planning only, not a release-readiness measurement |
-| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, an explicit replicated-durable P01 topology policy, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, a machine-readable nine-gate production-evidence packet/validator, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, evidence-shape, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
+| Current implementation capability | TLS-capable provider, Rust SDK, CLI, N-API, guarded TLS and production-config policy verifiers, explicit replicated-durable P01 topology and external-secret-manager P02 policies, the W08 rollout-ledger consistency verifier/test, a fail-closed `--require-go` admission guard before protected production-candidate builds, a machine-readable nine-gate production-evidence packet/validator, artifact-manifest and locked-Cargo CycloneDX SBOM tooling wired into release policy, three-asset `SHA256SUMS` coverage, a dedicated non-cancelling hosted release-policy gate, a hosted Linux x86_64/macOS arm64 target-package/download/attestation matrix, protected production-candidate release admission, and bounded HTTP `/healthz`/`/readyz` probes are implemented; local unit/Clippy, CLI-schema, policy, tracking-control, evidence-shape, real-artifact, SBOM, asset-integrity, target-matrix, workflow-shape and hosted compile/guard checks are tracked separately |
 | Primary reason | No approved production topology, credential/IAM policy, backup/restore drill, upgrade/rollback rehearsal, production collector/SLOs, capacity envelope, security sign-off, named on-call ownership, executed incident drills, canary or release-owner approval is recorded |
 | Evidence rule | Every production result must name the revision, provider/image versions, topology, environment identity, test/run/job ID, terminal status, owner, cleanup result and rollback outcome |
 
@@ -31,7 +31,7 @@ planning result.
 | Gate | Status | Required exit evidence |
 | --- | --- | --- |
 | P01 — deployment scope, topology and support matrix | Open — 25% | Approved managed/self-hosted TiDB/PD/TiKV and block-store topology, regions, HA/quorum, network/TLS policy, resource limits, supported versions, tenancy, IaC and a production-like staging smoke/restart result; the checked-in `verify-w08-production-topology.mjs` policy now requires a replicated-durable shape with 3 PD, 3 TiKV, 2 SQL frontends, majority quorum, pinned coherent versions, private TLS networking and the durable resource floor. This is repository shape control only. A fresh local single-node v8.5.7 smoke attempt entered PD startup but exited 125 on `Bad response from Docker engine`; the preceding durable attempt failed closed below the 10 GiB Docker floor. Neither produced `TIDB_ACCEPTANCE` or production evidence. |
-| P02 — secrets, IAM, rotation and audit | Open — 20% | Secret-manager injection, least-privilege metadata/block identities, rotation and revocation without data loss, break-glass procedure, audit and redaction evidence; the policy gate rejects inline secret strings and requires external env references only |
+| P02 — secrets, IAM, rotation and audit | Open — 20% | Secret-manager injection, least-privilege metadata/block identities, rotation and revocation without data loss, break-glass procedure, audit and redaction evidence; the checked-in P02 policy now requires an external secret manager, workload/managed identity, exactly the three production references, bounded rotation with overlap/revocation, redacted access auditing and a two-person break-glass procedure reference. This is shape control only; the existing production-config gate rejects inline secret strings and requires external env references. |
 | P03 — backup, restore and disaster recovery | Open — 10% | Defined RPO/RTO and retention, encrypted backups/versioning, clean-environment restore, metadata/block consistency, corruption/partial-object handling and recovery sign-off |
 | P04 — upgrade, compatibility and rollback | Open — 10% | Rehearsed TiDB/RustFS/client version matrix, schema/config migration, rolling upgrade, interrupted-upgrade recovery, retained-data rollback and compatibility sign-off |
 | P05 — observability, SLOs and alerting | Open — 15% gate weight; local/hosted HTTP contract passed | The HTTP transport's unauthenticated `/healthz` and `/readyz` contract, `Cache-Control: no-store` and `X-Content-Type-Options: nosniff` are locally tested and passed in terminal hosted job `106340034907`; exit still requires provider-aware checks where applicable, production collector, dashboards, SLO/error-budget thresholds, paging, retention/redaction and an exercised alert route |
@@ -182,6 +182,20 @@ checks; this is hosted implementation/static evidence only. The read-only
 production boundary remained unchanged: no production-release workflow runs,
 HTTP 404 for `w08-production`, preview-only release and no
 production-candidate tag. Production remains NO-GO.
+
+W08.38 adds the credential-free P02 secret/IAM contract in
+`tests/tidb/production-secrets-policy.json`, enforced by
+`scripts/verify-w08-production-secrets.mjs` and its eight-case regression
+suite. The policy requires an external secret manager, workload or managed
+identity, exactly the three production references (`MOUNT_RS_TIDB_TLS_URL`,
+`R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`), bounded rotation with overlap
+and revocation-on-failure, redacted access auditing with retention, and a
+two-person break-glass procedure reference. Inline values, static identity,
+missing/duplicate references, unsafe rotation and unredacted audit fixtures
+fail closed. The checks are wired into both W08 release workflows. This is a
+repository implementation/control slice of P02 only; it does not prove a
+secret-manager binding, IAM grant, rotation event, audit record or production
+approval. P02 remains open.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace

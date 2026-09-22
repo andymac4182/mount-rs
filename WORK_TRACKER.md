@@ -5084,6 +5084,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   approval. *(Implementation/static qualification; provider and production
   evidence remain external.)*
 
+- [x] W08.38 **External secret-manager rotation and audit policy:** added
+  `scripts/verify-w08-production-secrets.mjs` and its eight-case
+  `scripts/test-w08-production-secrets.mjs` control over
+  `tests/tidb/production-secrets-policy.json`. The credential-free contract
+  requires an external secret manager, workload/managed identity, exactly the
+  three production secret references, bounded rotation with overlap and
+  revocation-on-failure, redacted access auditing, retained audit records and
+  a two-person break-glass procedure reference. Inline secret values, static
+  identity, missing/duplicate references, unsafe rotation and unredacted audit
+  fixtures fail closed. The checks are wired into both W08 release workflows.
+  This is a P02 implementation/control boundary only; it does not prove a
+  configured secret manager, IAM grants, credential rotation, audit events or
+  production approval. *(Implementation/static qualification; provider and
+  production evidence remain external.)*
+
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
   bounded propfind/copy failure fix, the
