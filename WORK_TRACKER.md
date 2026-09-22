@@ -1488,6 +1488,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   tests and all applicable integration targets, with strict Clippy, formatting,
   and diff checks green. Socket write backpressure and native-client ordering
   remain separate gates.
+- [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
+  native job, while Ubuntu passed native v4.1 and then failed before its v3
+  mount because parallel tests collided on a timestamp-only mountpoint.
+  Native mountpoints now use an atomic per-process claim with collision retry;
+  a 32-way rootless claim test and the macOS native v3 mount pass. A separate
+  local full-suite run exposed a `server.close()` worker-drain race, now
+  addressed by a shared 200 ms graceful drain before abort fallback. The
+  complete locked NFS target, 20 focused lifecycle reruns, warning-denied
+  Clippy, formatting, and diff checks pass. The failed Ubuntu job does not
+  count as native-v3 acceptance; a corrected exact-SHA hosted rerun is needed,
+  and W01-NFS remains production NO-GO.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case

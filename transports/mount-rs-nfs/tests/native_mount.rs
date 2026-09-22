@@ -14,6 +14,7 @@ use std::fs::{self, OpenOptions};
 #[cfg(target_os = "linux")]
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mount_rs_core::{MemoryFs, MemoryOptions};
@@ -25,6 +26,7 @@ const MOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 // cancelled by Tokio, so cleanup must not wait for its JoinHandle indefinitely.
 const IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+static NEXT_MOUNTPOINT_ID: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "linux")]
 const V4_PAGED_ENTRY_COUNT: usize = 256;
 
@@ -173,6 +175,27 @@ fn exercise_namespace(mountpoint: &std::path::Path) -> std::io::Result<NativeChe
     })
 }
 
+fn create_empty_mountpoint() -> std::io::Result<PathBuf> {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    loop {
+        // Two native tests run in parallel in CI. The clock alone can return
+        // the same nanosecond in both threads, so claim each path atomically.
+        let sequence = NEXT_MOUNTPOINT_ID.fetch_add(1, Ordering::Relaxed);
+        let mountpoint = std::env::temp_dir().join(format!(
+            "mount-rs-nfs-native-{}-{timestamp}-{sequence}",
+            std::process::id()
+        ));
+        match fs::create_dir(&mountpoint) {
+            Ok(()) => return Ok(mountpoint),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn exercise_v4_namespace(mountpoint: &std::path::Path) -> std::io::Result<NativeChecks> {
     let mut checks = exercise_namespace(mountpoint)?;
@@ -247,15 +270,7 @@ async fn run_native_case(version: NfsVersion, opt_in: &str) -> NativeChecks {
         );
     }
 
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock")
-        .as_nanos();
-    let mountpoint = std::env::temp_dir().join(format!(
-        "mount-rs-nfs-native-{}-{unique}",
-        std::process::id()
-    ));
-    fs::create_dir(&mountpoint).expect("create empty mountpoint");
+    let mountpoint = create_empty_mountpoint().expect("create empty mountpoint");
 
     let driver = MemoryFs::new(MemoryOptions {
         root_mode: 0o777,
@@ -380,6 +395,29 @@ fn assert_v4_expanded_checks(checks: &NativeChecks) {
         .map(|index| format!("f{index:03}"))
         .collect::<BTreeSet<_>>();
     assert_eq!(expanded.paged_entries, expected);
+}
+
+#[test]
+fn parallel_native_cases_claim_distinct_empty_mountpoints() {
+    let mountpoints = std::thread::scope(|scope| {
+        let threads = (0..32)
+            .map(|_| scope.spawn(|| create_empty_mountpoint().expect("claim mountpoint")))
+            .collect::<Vec<_>>();
+        threads
+            .into_iter()
+            .map(|thread| thread.join().expect("mountpoint thread"))
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(mountpoints.iter().collect::<BTreeSet<_>>().len(), 32);
+    for mountpoint in mountpoints {
+        assert!(
+            fs::read_dir(&mountpoint)
+                .expect("read empty mountpoint")
+                .next()
+                .is_none()
+        );
+        fs::remove_dir(mountpoint).expect("clean up mountpoint");
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

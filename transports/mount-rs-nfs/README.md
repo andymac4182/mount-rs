@@ -152,6 +152,9 @@ an implicit pass. This NFS validation does not establish SQLite hosting or
 other storage support on macOS.
 
 The normal crate tests remain rootless and do not invoke `mount(8)`.
+Both native cases may run concurrently on Linux: the harness claims a distinct
+empty temporary mountpoint for each case, including when the clock returns the
+same timestamp to both test threads.
 
 ## Deliberate scope gaps
 
