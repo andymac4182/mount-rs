@@ -2304,10 +2304,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration PASS, and
   `providersFailed: 0`. macOS-15-intel Node `106658534854` also passed both
   exact steps, and Ubuntu Node `106658535160` has now passed both exact steps
-  as well. Native FUSE `106658535119` failed `Exercise actual rootless kernel
+  as well. macOS-latest Node `106658535116` has now passed both exact steps
+  and its mounted I/O cleanup. Native FUSE `106658535119` failed `Exercise actual rootless kernel
   file operations`, skipped mounted follow-on checks, and remained in its
-  completion hook; macOS-latest is still building and package/provider/W26
-  gates are not terminal. This is partial current-tip evidence only;
+  completion hook; package/provider/W26 gates are not terminal. This is
+  partial current-tip evidence only;
   W04 and production rollout remain open/NO-GO until the full matrix is
   inspected and the seven production gates close.
 - The same run then recorded a Windows Node timing failure and a provider
