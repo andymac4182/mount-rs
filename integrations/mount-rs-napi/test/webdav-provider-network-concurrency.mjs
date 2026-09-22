@@ -110,7 +110,11 @@ try {
     open: async () => Filesystem.sqlite(join(sqliteDirectory, "webdav.sqlite")),
   })
 } finally {
-  await rm(root, { recursive: true, force: true })
+  // Native SQLite can finish unlinking its journal/WAL sidecars in the final
+  // close turn after the last HTTP response has been drained. Retry only the
+  // temporary-tree cleanup so this regression does not turn a harmless late
+  // directory transition into a hosted-platform failure.
+  await rm(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
 }
 
 console.log(`mount-rs N-API WebDAV provider network concurrency: PASS (NodeFs + SQLite, ${concurrency} HTTP PUT/GET pairs each)`)
