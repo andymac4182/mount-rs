@@ -995,7 +995,14 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
         read version, lease/fence validation, revision CAS, and fail-closed
         ambiguous-commit handling. Feature compile/test-target checks and
         strict Clippy pass, but the focused native tests remain blocked by the
-        missing <code>fdb_c</code> linker library. Exact-head run
+        missing <code>fdb_c</code> linker library.
+        The immutable W05 candidate also completed W07 run
+        <code>35714147247</code> with bound provenance: Linux was terminal while
+        macOS was feature-compile-only and the assembly artifact was retained.
+        This is a candidate sub-gate rather than a current-public-main refresh,
+        and it does not close live macOS service/mount, production capacity,
+        recovery, identity, or release approval.
+        Exact-head run
         <code>35715790619</code> at workflow head <code>af7e73df</code> includes
         this source as an ancestor but remains queued, so no new performance
         or provider qualification is promoted from this optimization yet.
@@ -1013,6 +1020,7 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       { label: 'Current-public-main W07 FoundationDB qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35712676265' },
       { label: 'FoundationDB publication read-overlap source', href: 'https://github.com/andymac4182/mount-rs/commit/fba61979f1f6c9858026cd5ebc4c5d3d357f366b' },
       { label: 'Queued exact-head read-overlap qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35715790619' },
+      { label: 'Candidate W07 assembly qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35714147247' },
     ],
   },
   'aws-s3': {
