@@ -2288,8 +2288,9 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `106658534683` failed `actual_tidb_commit_outcome_is_ambiguous_and_not_replayed`
   because a dropped publication response was reported as success, with a
   `[kv:9007]` optimistic write conflict; Windows Rust `106658535184` passed
-  format, strict Clippy, and locked workspace tests. Production remains
-  **NO-GO**.
+  format, strict Clippy, and locked workspace tests. TLS compile/policy
+  `106658534528` and Ubuntu native NFS `106658534834` also passed their
+  terminal support gates. Production remains **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
