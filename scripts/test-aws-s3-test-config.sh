@@ -14,7 +14,7 @@ run_validator() {
   region=ap-southeast-2
   prefix=mount-rs-tests/aws-s3/ci/123-1
   role=
-  expected=
+  expected=123456789012
   access_key=
   secret_key=
   session_token=
@@ -33,7 +33,11 @@ run_validator() {
       expected=123456789012
       profile=synthetic-profile
       ;;
-    missing_expected_account) role=arn:aws:iam::123456789012:role/mount-rs-aws-s3-ci ;;
+    missing_expected_account) expected= ;;
+    missing_expected_profile)
+      expected=
+      profile=synthetic-profile
+      ;;
     role_account_mismatch)
       role=arn:aws:iam::210987654321:role/mount-rs-aws-s3-ci
       expected=123456789012
@@ -100,6 +104,7 @@ expect_blocked() {
 }
 
 expect_blocked missing_expected_account missing_expected_account_id
+expect_blocked missing_expected_profile missing_expected_account_id
 expect_blocked role_account_mismatch role_account_mismatch
 expect_blocked incomplete_access incomplete_access_credentials
 expect_blocked incomplete_session incomplete_session_credentials
@@ -107,4 +112,4 @@ expect_blocked ambiguous_sources ambiguous_credential_sources
 expect_blocked endpoint_override endpoint_override_detected
 expect_blocked unsafe_prefix unsafe_prefix
 
-echo "AWS_S3_TEST_CONFIG_TEST_PASS cases=10"
+echo "AWS_S3_TEST_CONFIG_TEST_PASS cases=11"

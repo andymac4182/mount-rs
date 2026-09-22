@@ -363,11 +363,19 @@ export AWS_S3_TEST_PREFIX="$prefix"
 export AWS_S3_RESTART_FIXTURE="$fixture_file"
 export AWS_S3_METADATA_FIXTURE="$metadata_file"
 
-if ! AWS_EC2_METADATA_DISABLED=true aws sts get-caller-identity \
-  --region "$region" >/dev/null 2>/dev/null; then
+if ! caller_account=$(AWS_EC2_METADATA_DISABLED=true aws sts get-caller-identity \
+  --region "$region" \
+  --query Account \
+  --output text 2>/dev/null); then
   echo "AWS_S3_TEST_BLOCKED reason=local_cli_identity_unavailable" >&2
   exit 3
 fi
+if ! AWS_S3_TEST_CALLER_ACCOUNT_ID="$caller_account" \
+  "$repo_dir/scripts/validate-aws-s3-test-identity.sh" >/dev/null 2>/dev/null; then
+  echo "AWS_S3_TEST_BLOCKED reason=caller_account_mismatch" >&2
+  exit 3
+fi
+echo "AWS_S3_IDENTITY_PASS account=${AWS_S3_TEST_EXPECTED_ACCOUNT_ID}"
 
 # Prove the assumed role cannot list a sibling namespace. This is a
 # non-mutating authorization check: the role is expected to fail before any

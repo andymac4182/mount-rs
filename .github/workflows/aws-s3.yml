@@ -27,11 +27,13 @@ on:
       - 'scripts/test-aws-s3-ci-config.sh'
       - 'scripts/test-aws-s3-ci-environment.sh'
       - 'scripts/test-aws-s3-test-config.sh'
+      - 'scripts/test-aws-s3-test-identity.sh'
       - 'scripts/test-aws-s3-production-template.rb'
       - 'scripts/test-aws-s3-pglite.sh'
       - 'scripts/test-s3-provider-workflow-paths.sh'
       - 'scripts/validate-aws-s3-ci-config.sh'
       - 'scripts/validate-aws-s3-test-config.sh'
+      - 'scripts/validate-aws-s3-test-identity.sh'
       - 'tests/aws/**'
   workflow_dispatch:
 
@@ -56,6 +58,7 @@ jobs:
     env:
       AWS_S3_TEST_BUCKET: ${{ vars.MOUNT_RS_AWS_S3_TEST_BUCKET }}
       AWS_S3_TEST_REGION: ${{ vars.MOUNT_RS_AWS_S3_TEST_REGION }}
+      AWS_S3_TEST_EXPECTED_ACCOUNT_ID: ${{ vars.MOUNT_RS_AWS_S3_ACCOUNT_ID }}
       AWS_S3_CI_EXPECTED_ACCOUNT_ID: ${{ vars.MOUNT_RS_AWS_S3_ACCOUNT_ID }}
       AWS_S3_TEST_VERSIONING_STATUS: ${{ vars.MOUNT_RS_AWS_S3_TEST_VERSIONING_STATUS }}
       AWS_DEFAULT_REGION: ${{ vars.MOUNT_RS_AWS_S3_TEST_REGION }}
@@ -89,7 +92,9 @@ jobs:
             scripts/test-aws-s3-ci-config.sh \
             scripts/test-aws-s3-ci-environment.sh \
             scripts/test-aws-s3-test-config.sh \
+            scripts/test-aws-s3-test-identity.sh \
             scripts/validate-aws-s3-test-config.sh \
+            scripts/validate-aws-s3-test-identity.sh \
             scripts/check-aws-s3-bucket-policy.jq \
             scripts/test-aws-s3-bucket-policy.sh \
             scripts/test-aws-s3-production-template.rb \
@@ -118,6 +123,9 @@ jobs:
 
       - name: Test AWS S3 harness credential/configuration contract
         run: ./scripts/test-aws-s3-test-config.sh
+
+      - name: Test AWS S3 caller-account binding contract
+        run: ./scripts/test-aws-s3-test-identity.sh
 
       - name: Validate protected AWS S3 CI configuration
         env:
