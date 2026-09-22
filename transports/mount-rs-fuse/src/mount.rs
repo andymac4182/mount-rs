@@ -3562,6 +3562,32 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn invalid_mountpoints_fail_before_native_side_effects() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before Unix epoch")
+            .as_nanos();
+        let file = std::env::temp_dir().join(format!(
+            "mount-rs-fuse-invalid-mountpoint-{}-{suffix}",
+            std::process::id()
+        ));
+        std::fs::write(&file, b"not a directory").expect("write regular-file fixture");
+
+        let regular_file = validate_mountpoint(&file);
+        assert!(matches!(
+            regular_file,
+            Err(MountError::InvalidMountpoint { .. })
+        ));
+
+        let missing = file.with_extension("missing");
+        let absent = validate_mountpoint(&missing);
+        assert!(matches!(absent, Err(MountError::InvalidMountpoint { .. })));
+
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn privileged_mount_data_masks_root_permissions() {
         let data = mount_data(
             &MountOptions::default(),
