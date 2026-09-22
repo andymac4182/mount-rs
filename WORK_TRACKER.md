@@ -2218,6 +2218,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   this tracker/ledger update, then dispatch a fresh non-cancelling run from
   the resulting `origin/main`; production remains **NO-GO**.
 
+- Fresh exact-tip qualification: manual run `35688367152` was dispatched from
+  published `origin/main` `3c90ccb9` after the `d34ccfee` correction and its
+  first snapshot contained all materialized Node, native, Rust,
+  observability, and provider jobs in `queued` state. macOS-15-intel Node is
+  `106619929088`, macOS-latest Node `106619929119`, ARM Node `106619929058`,
+  Ubuntu Node `106619929260`, Windows Node `106619929057`, native FUSE
+  `106619929163`, native WebDAV `106619929108`, native NFS `106619928997`,
+  native 9P `106619929076`, Ubuntu Rust `106619929128`, and observability
+  `106619929196`. Queue state is not acceptance; continue monitoring and
+  classify exact PGlite/restart, native/package/provider/W26, and production
+  gates only from terminal evidence. Production remains **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -2315,6 +2327,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   lease during shutdown and includes a regression test; runs `35577687152` and
   `35579757447` then passed. Remaining actions are secret rotation before
   expiry and separate Linux FUSE, Windows, and signed/activated FSKit gates.
+- [x] W05.8 Requalify the current successor's bounded WebDAV structural-driver
+  boundary and local end-to-end packet. On 2026-09-22 at `63a969eb`, the
+  focused structural-factory/oracle suite, complete Node CLI/SDK/N-API suite,
+  real PGlite lifecycle/provider/CLI/SDK gate, upstream `1200 passed/82
+  skipped`, and all `40 × 621` seeded differential lanes passed. R2,
+  privileged native mounts, and hosted platform/provider gates remained
+  explicit skips or separate acceptance boundaries; this local packet does
+  not replace terminal same-SHA production evidence.
 
 ## W06 — RustFS integration service
 
