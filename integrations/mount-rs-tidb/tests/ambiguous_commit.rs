@@ -12,7 +12,7 @@ use mount_rs_core::{FsDriver, MemoryFs, S_IFDIR};
 use mount_rs_tidb::{TidbMetadataStore, TidbStorageOptions};
 use mysql_async::Pool;
 use mysql_async::prelude::Queryable;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::io::{Error, ErrorKind, Result as IoResult};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -146,7 +146,7 @@ fn is_commit_query(packet: &MysqlPacket) -> bool {
 }
 
 fn is_publication_update_query(packet: &MysqlPacket) -> bool {
-    packet.payload.first() == Some(&0x03)
+    matches!(packet.payload.first(), Some(0x03 | 0x16))
         && std::str::from_utf8(&packet.payload[1..]).is_ok_and(|query| {
             let normalized = query.split_whitespace().collect::<Vec<_>>().join(" ");
             let normalized = normalized.to_ascii_uppercase();
@@ -156,20 +156,46 @@ fn is_publication_update_query(packet: &MysqlPacket) -> bool {
         })
 }
 
-fn is_publication_ack_query(packet: &MysqlPacket) -> bool {
-    is_commit_query(packet) || is_publication_update_query(packet)
+fn prepared_statement_id(packet: &MysqlPacket) -> Option<u32> {
+    (packet.payload.first() == Some(&0x00) && packet.payload.len() >= 5).then(|| {
+        u32::from_le_bytes([
+            packet.payload[1],
+            packet.payload[2],
+            packet.payload[3],
+            packet.payload[4],
+        ])
+    })
+}
+
+fn is_publication_execute(packet: &MysqlPacket, publication_statements: &HashSet<u32>) -> bool {
+    packet.payload.first() == Some(&0x17)
+        && packet.payload.len() >= 5
+        && publication_statements.contains(&u32::from_le_bytes([
+            packet.payload[1],
+            packet.payload[2],
+            packet.payload[3],
+            packet.payload[4],
+        ]))
 }
 
 async fn relay_until_publication_response(client: TcpStream, upstream: TcpStream) -> IoResult<()> {
     let (mut client_reader, mut client_writer) = client.into_split();
     let (mut upstream_reader, mut upstream_writer) = upstream.into_split();
+    let mut publication_prepare_pending = false;
+    let mut publication_statements = HashSet::new();
 
     loop {
         tokio::select! {
             packet = read_packet(&mut client_reader) => {
                 let packet = packet?;
-                let drops_acknowledgement = is_publication_ack_query(&packet);
+                let is_publication_prepare = is_publication_update_query(&packet)
+                    && packet.payload.first() == Some(&0x16);
+                let drops_acknowledgement = is_commit_query(&packet)
+                    || (is_publication_update_query(&packet)
+                        && packet.payload.first() == Some(&0x03))
+                    || is_publication_execute(&packet, &publication_statements);
                 write_packet(&mut upstream_writer, &packet).await?;
+                publication_prepare_pending = is_publication_prepare;
                 if drops_acknowledgement {
                     // Reading the response proves TiDB has finished processing
                     // the publication. Drop both sockets before forwarding its
@@ -181,9 +207,51 @@ async fn relay_until_publication_response(client: TcpStream, upstream: TcpStream
             }
             packet = read_packet(&mut upstream_reader) => {
                 let packet = packet?;
+                if publication_prepare_pending {
+                    publication_prepare_pending = false;
+                    if let Some(statement_id) = prepared_statement_id(&packet) {
+                        publication_statements.insert(statement_id);
+                    }
+                }
                 write_packet(&mut client_writer, &packet).await?;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod packet_classification_tests {
+    use super::*;
+
+    #[test]
+    fn prepared_publication_ack_packets_are_classified() {
+        let prepare = MysqlPacket {
+            sequence: 0,
+            payload: b"\x16UPDATE mount_rs_tidb_metadata\nSET revision=?, namespace=?".to_vec(),
+        };
+        assert!(is_publication_update_query(&prepare));
+
+        let prepare_ok = MysqlPacket {
+            sequence: 1,
+            payload: vec![0x00, 0x78, 0x56, 0x34, 0x12],
+        };
+        let statement_id = prepared_statement_id(&prepare_ok).expect("statement id");
+        assert_eq!(statement_id, 0x1234_5678);
+
+        let execute = MysqlPacket {
+            sequence: 0,
+            payload: vec![
+                0x17,
+                (statement_id & 0xff) as u8,
+                ((statement_id >> 8) & 0xff) as u8,
+                ((statement_id >> 16) & 0xff) as u8,
+                ((statement_id >> 24) & 0xff) as u8,
+            ],
+        };
+        assert!(is_publication_execute(
+            &execute,
+            &HashSet::from([statement_id])
+        ));
     }
 }
 
