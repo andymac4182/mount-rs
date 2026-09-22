@@ -320,12 +320,17 @@ Automatic cross-transport signal
 ownership, supervisor-owned crash/reset/half-close recovery, and other W01 gates remain open, so the
 overall W01 production decision remains **NO-GO**.
 
-The next 9P packet normalizes the oracle's optional absence shapes at the N-API
-boundary: pre-version `msize`/`version`, unknown `userFor(fid)`, and
+The latest 9P packet normalizes the oracle's optional absence shapes at the
+N-API boundary: pre-version `msize`/`version`, unknown `userFor(fid)`, and
 conflict-free table/session `getlock()` now return `undefined` rather than the
-native binding's internal `null`. Local generated typecheck and focused runtime
-checks pass; the current-revision hosted direct mount still needs to qualify the
-new native session/lock assertions.
+native binding's internal `null`. Exact SHA
+`0d520a1d0a9af44e08e65c5f0638a640bb3c08db` passed [Native 9P run
+`35671509538`](https://github.com/andymac4182/mount-rs/actions/runs/35671509538),
+N-API job `106569412372` with automatic/direct/structural mounted I/O and
+cleanup plus direct native session/lock assertions, and Rust job `106569412047`
+with all four ignored tests. Broader upstream member parity, automatic
+cross-transport signal ownership, supervisor-owned crash/reset/half-close
+recovery, and broader W01 gates remain open; W01 remains NO-GO.
 
 ## Detailed work items
 
@@ -622,7 +627,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-9P | Added focused N-API representation-boundary checks: effective `onError`/`onAssertion` hooks are omitted from serializable option snapshots, attached connections retain their supplied Node `Duplex` and peer, and the direct native test asserts native listener `stream: undefined` plus a transport-source peer string; local metadata, mount-helper, typecheck, syntax, and diff checks passed | — | 65% W01.1 planning view | Automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and W01 gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-9P | Hosted exact SHA `03529cf30985c2be6503c2909b94e646565cf6fe` in [Native 9P run `35669536706`](https://github.com/andymac4182/mount-rs/actions/runs/35669536706) passed Rust job `106562666985` and automatic N-API mounted I/O, but the direct N-API check failed only because the new test expected native Unix `peer: null` while the transport correctly returned its socket path; the test and supported-scope wording now require `stream: undefined` with a non-empty transport-source peer string | — | 65% W01.1 planning view | Corrected exact-SHA hosted rerun required; automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and broader W01 gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-9P | Corrected exact SHA `81cc6596c2c9562c3405df50126239a7bcb44f63` passed [Native 9P run `35670279904`](https://github.com/andymac4182/mount-rs/actions/runs/35670279904): N-API job `106565351978` passed automatic/direct/structural mounted I/O and cleanup, and Rust job `106565352174` passed all four ignored native tests; this qualifies native `stream: undefined` with the transport-source Unix peer string after the prior test-oracle correction | — | 65% W01.1 planning view | Automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and broader W01 gates remain open; W01 stays NO-GO |
-| 2026-09-22 | W01-9P | Normalized the N-API 9P optional absence shapes to the oracle: pre-version `msize`/`version`, unknown `userFor(fid)`, and conflict-free `P9LockTable`/`P9LockClient.getlock` now return `undefined`; generated declarations, metadata/lock runtime checks, syntax, typecheck, and diff checks pass locally | — | 65% W01.1 planning view | Current-revision hosted direct-mount qualification of the native session/lock shapes remains required; automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and broader W01 gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-9P | Normalized the N-API 9P optional absence shapes to the oracle: pre-version `msize`/`version`, unknown `userFor(fid)`, and conflict-free `P9LockTable`/`P9LockClient.getlock` now return `undefined`; generated declarations, metadata/lock runtime checks, syntax, typecheck, and diff checks pass locally. Exact SHA `0d520a1d0a9af44e08e65c5f0638a640bb3c08db` passed [Native 9P run `35671509538`](https://github.com/andymac4182/mount-rs/actions/runs/35671509538): N-API job `106569412372` passed automatic/direct/structural mounted I/O and cleanup plus direct native session/lock assertions, and Rust job `106569412047` passed all four ignored native tests | Automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and broader W01 gates remain open; W01 stays NO-GO |
 
 | 2026-09-22 | W01-FUSE | Added fail-closed validation for caller-supplied native FUSE mount option tokens and transport-owned overrides; focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS | — | 35% W01.4 planning view | Hosted Linux `/dev/fuse`, callback-event, crash/concurrency/durability, and signed/activated FSKit evidence remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Added active NFS socket-task accounting with abort-safe close draining and read-only sorted BigInt shared-handle snapshots on both the v3 and v4 N-API views. Rust NFS tests passed 31 unit, rootless wire 1, transport errors 4, v4 barrier 1, and v4 wire 2; the release addon, generated typecheck, and live N-API server integration passed | — | 72% W01.1 planning view | Full v3/v4 stateful matrix, remaining upstream session/member parity, hosted lifecycle, Linux NFSv4.1 and crash/durability gates remain open; W01 stays NO-GO |
