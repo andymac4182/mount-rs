@@ -320,6 +320,23 @@ owners. Weak controls fail closed. This is a repository implementation/control
 slice of P07 only; it does not execute a credentialed handshake or provide
 production security sign-off.
 
+The W08.43 implementation was committed as `d5d99e2d` and reconciled and
+published in merge `be86fd30cd8221fe0a14813288b0c9f99faa8e14`. Concurrent
+mainline work then advanced the exact public tip to
+`a7e459e6a9749384d409e4f53d6938df9a4414b9`, which contains W08.43. The local
+P07 policy/test passed with
+`W08_PRODUCTION_SECURITY_POLICY_PASS tls=1.3 rotation_max_days=90 zones=3
+identity=workload-identity scan_retention_days=90 audit_retention_days=90
+handshake=credentialed` and
+`W08_PRODUCTION_SECURITY_TEST_PASS cases=8`; shared-wrapper Cargo check and
+strict Clippy also passed on the reconciled public source. Hosted run
+`35725892916` for exact `be86fd30` ended cancelled with `jobs=[]`; current-tip
+run `35725961204` for `a7e459e6` was pending at the latest observation, so no
+current-tip terminal hosted qualification exists. P07 remains open until
+credentialed TLS and certificate-rotation, network/authz/tenant isolation,
+supply-chain, threat-model, immutable-audit and security-sign-off evidence is
+executed in the approved environment.
+
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
 tests and strict Clippy with `-D warnings` using a bounded external Cargo

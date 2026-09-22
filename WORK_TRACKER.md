@@ -5736,6 +5736,21 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   sign-off. *(Implementation/static qualification; provider and production
   evidence remain external.)*
 
+  Implementation commit `d5d99e2d` was reconciled and published in merge
+  `be86fd30cd8221fe0a14813288b0c9f99faa8e14`; concurrent mainline work then
+  advanced the exact public tip to
+  `a7e459e6a9749384d409e4f53d6938df9a4414b9`, which contains W08.43. The local
+  controls passed with
+  `W08_PRODUCTION_SECURITY_POLICY_PASS tls=1.3 rotation_max_days=90 zones=3
+  identity=workload-identity scan_retention_days=90 audit_retention_days=90
+  handshake=credentialed` and
+  `W08_PRODUCTION_SECURITY_TEST_PASS cases=8`; shared-wrapper Cargo check and
+  strict Clippy also passed on the reconciled public source. Hosted run
+  `35725892916` for `be86fd30` ended cancelled with `jobs=[]`; current-tip run
+  `35725961204` for `a7e459e6` was pending at the latest observation, so no
+  current-tip terminal hosted qualification exists. P07 provider/security
+  evidence and production sign-off remain open.
+
   Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
   reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
   bounded propfind/copy failure fix, the
