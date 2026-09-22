@@ -380,6 +380,18 @@ publication. No provider credentials, production deployment, candidate tag,
 canary, rollback or owner approval exists. P01–P09 remain open and the
 decision remains NO-GO.
 
+The current public source `5e3680117c26f5b7bb1b9280eec65a350b3dd2f7` added
+the FoundationDB lease-authority transaction change. Its exact W08 policy run
+`35694753920`, job `106639089448`, remained `queued` at observation and is not
+hosted evidence. The exact local merge
+`6f64f6a6686a38c6009c4cdf913285b7ff2e1e1f` includes that source plus the W08
+ledger and passed the full locked workspace test, strict Clippy, seven
+workflow YAML parses, N-API/package checks, W07/W08 tracking validators/tests
+and `git diff --check`. The post-publication hosted retest for this merge is
+pending. No provider credentials, production deployment, candidate tag,
+canary, rollback or owner approval exists. P01–P09 remain open and the
+decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
