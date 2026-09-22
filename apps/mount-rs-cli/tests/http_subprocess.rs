@@ -75,7 +75,9 @@ impl HttpChild {
     fn ready(&self) -> (SocketAddr, String) {
         let line = self
             .stdout
-            .recv_timeout(Duration::from_secs(5))
+            // A freshly linked CLI can take longer to start on hosted macOS.
+            // Keep the subprocess startup bound separate from request deadlines.
+            .recv_timeout(Duration::from_secs(30))
             .unwrap_or_else(|error| {
                 let stderr = self.stderr.try_iter().collect::<Vec<_>>();
                 panic!("HTTP subprocess did not announce readiness: {error}; stderr={stderr:?}");
