@@ -2108,20 +2108,24 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
   required and production remains **NO-GO**.
 
-- Active current-tip qualification checkpoint: non-cancelling run
-  `35684808019` was dispatched from exact published head `4cd57723` before
-  concurrent mainline advanced to `87d5eb27`. At the 14:06 AEST snapshot,
-  Windows Node, RustFS, native WebDAV/NFS/9P, observability, Ozone base,
-  TiDB/RustFS, and TiDB had completed successfully; ARM Node `106609248954`,
-  Ubuntu Node `106609249118`, macOS-latest Node `106609248932`, Ubuntu Rust
-  `106609249086`, Ozone/TiDB `106609249034`, and Ozone compositions
-  `106609249144` had failed; macOS-15-intel Node `106609248961`, native FUSE
-  `106609249088`, FoundationDB/RustFS `106609249058`, and
-  Ozone/FoundationDB `106609249069` remained non-terminal. GitHub had not
-  exposed terminal logs while the workflow was still running, so no failure
-  cause, exact PGlite/restart PASS, or W04 acceptance is claimed. Production
-  remains **NO-GO** pending terminal diagnosis and all deployment/provider/
-  operational gates.
+- Terminal diagnosis for current-tip qualification run `35684808019`: it was
+  dispatched from exact published head `4cd57723` before later mainline WebDAV
+  changes and ended **cancelled** after native-FUSE job `106609249088` failed
+  `Exercise actual rootless kernel file operations` and its hosted `Complete
+  job` hook remained in progress. ARM `106609248954`, Ubuntu `106609249118`,
+  macOS-latest `106609248932`, and macOS-15-intel `106609248961` all failed
+  `webdav/propfind-links mismatch` before the exact PGlite/restart step, with
+  TypeScript HTTP 207 XML versus Rust HTTP 501 and an empty response. Ubuntu
+  Rust `106609249086` failed the saturated-read timing assertion `Elapsed(())`.
+  Ozone/TiDB `106609249034` measured `59.76` IOPS, Ozone/FoundationDB
+  `106609249069` measured `339.24`, and Ozone compositions `106609249144`
+  measured `837.80` and `789.33` against the hard `1000` target; W26
+  `106611498619` failed closed without `OZONE_IOPS_PASS`, and aggregate-native
+  was skipped. Windows Node `106609248992` passed package/N-API sub-gates only.
+  The native-FUSE failure log was not retrievable because hosted cleanup never
+  finalized. Current `origin/main` is `5e910e80`; this stale-tip diagnosis does
+  not promote W04 or production acceptance. Dispatch a fresh non-cancelling
+  qualification from the exact current tip and keep production **NO-GO**.
 
 ## W05 — Cloudflare R2
 
