@@ -208,6 +208,15 @@ passed, provider/native rows remained explicit opt-in skips, and the affected
 N-API, W07 and W08 static/policy checks also passed. This is source-health
 evidence only and does not close P01–P09 or change the NO-GO decision.
 
+After origin/main advanced with the S3 delete-error source fix `d5c3f672` and
+its gateway coverage, exact merged source
+`6f8548a9179083ee088d4c1f66ded8d4c3b5b87e` was freshly requalified. The full
+locked workspace test and strict workspace Clippy exited 0; all runnable tests
+passed, provider/native rows remained explicit opt-in skips, and affected
+N-API/package, W08 policy/evidence and native-9P workflow-shape checks passed.
+This is source-health evidence only and does not close P01–P09 or change the
+NO-GO decision.
+
 Hosted W08 policy run `35681936375` at source
 `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
 successfully in 2m48s. Its rollout-ledger and release-identity/provenance
