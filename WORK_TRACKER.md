@@ -2050,6 +2050,22 @@ Evidence landed without closing the remaining W01 acceptance gates:
   persistence/backup/rollback, observability/runbook, ownership, and release
   approval.
 
+- Latest pre-fix exact-tip qualification: non-cancelling run `35683216317` was
+  dispatched at `bdd87108e003a83a01cf9aa479a3e145dbd7cbe3`, before the
+  deterministic WebDAV partial-request plus `resetAndDestroy()` correction
+  `de78011a` reached `origin/main`. ARM `106604465303`, Ubuntu
+  `106604465117`, macOS-latest `106604465439`, macOS-15-intel `106604465281`,
+  and Windows `106604465193` all failed the same old WebDAV peer-reset
+  assertion before the exact PGlite/restart step; no current-tip W04 Node
+  acceptance is claimed. Native FUSE `106604465075` passed rootless,
+  SQLite-fault, and mounted-PGlite checks, FoundationDB/RustFS `106604465204`
+  passed its durable/restart markers, aggregate-native was skipped because the
+  Node matrix failed, Ozone/TiDB measured `103.09`, Ozone/FoundationDB
+  `354.51`, and Ozone compositions `779.82` IOPS against the hard `1000`
+  target, and W26 `106607355160` failed closed without `OZONE_IOPS_PASS`.
+  Current `origin/main` is `9563d2db`; a fresh exact-tip qualification is
+  required and production remains **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
@@ -4113,6 +4129,12 @@ reproducible in a production-like environment.
   blocked by `missing_bucket` and R2 run `35683716251` by `count=294 limit=20`;
   physical power-loss durability, broader workload bounds, and native/hosted
   acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The published S3 packet's automatic provider runs were refreshed:
+  AWS run `35684677320` stopped at `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`,
+  while R2 run `35684677273` stopped at `count=295 limit=20` before live
+  admission. No service PASS is claimable; protected AWS configuration, the
+  R2 budget reset, physical power-loss durability, broader workload bounds,
+  and native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.
