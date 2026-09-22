@@ -1974,6 +1974,19 @@ Evidence landed without closing the remaining W01 acceptance gates:
   behavior, package/artifact provenance, provider gates, and production-owner
   approvals remain open and the rollout stays **NO-GO**.
 
+- Current failed-publication shutdown recovery: hosted native-FUSE job
+  `106588864049` in run `35678123095` exposed a pending-atime flush attempting
+  to publish after a metadata-publish fault had correctly fail-closed the
+  filesystem. The fix now preserves that fail-closed state while releasing
+  the provider lease during shutdown. Focused regression, full
+  `mount-rs-chunked` library tests (21/21), package Clippy, formatting, and
+  diff checks passed locally; rebased commit `3de49e33` is published to
+  `origin/main`. Exact-tip Fault injection run `35679778367` passed all three
+  operating-system jobs, and W04 policy run `35679778395` passed. Push CI run
+  `35679778373` targets `3de49e33` but is pending with no jobs materialized;
+  current hosted Node/native/package/provider evidence is still required and
+  production remains **NO-GO**.
+
 ## W05 — Cloudflare R2
 
 - [x] Land object-store/R2 driver code and configurable endpoint support.
