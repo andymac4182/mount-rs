@@ -919,7 +919,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
-| W05 | Cloudflare R2 | Functional slice complete; production closure active on immutable candidate `25e275ab`; hosted W07/W08/CI/Fault, AWS security/OIDC, R2 cap reset/rotation, native/platform, package, scope, and W20.6 gates remain open | Main |
+| W05 | Cloudflare R2 | Functional slice complete; production closure active after terminal candidate CI failure classification and repair commit `f94b53d8`; hosted rerun, AWS security/OIDC, R2 cap reset/rotation, Ozone performance, native-FUSE, platform, package, scope, and W20.6 gates remain open | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest terminal cross-platform qualification packet is green at [run `35698630720`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35698630720) / exact source `a19d37b61fdbb769102df15714cc88a3ff5eea91`, Linux job `106651101783`, macOS job `106651102065`, aggregate job `106654577928`; Linux run-bound provenance, durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen and RustFS integration paths passed, as did the 30-second heartbeat with 120-second bound and reconciled stats; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS`; the aggregate downloaded both artifacts and emitted `W07_PLATFORM_QUALIFICATION_PASS`; base composition was p50 2,469µs, p95/p99 25,063µs and 208.39 ops/s, ten-round soak p95/p99 was 13,399–13,906µs at 225.29–258.64 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 467.15 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact `foundationdb-production-qualification-35698630720-1` (ID `10682020359`, SHA-256 `0b8ead4a8cf548322f71cf2a391b036f65ebf8412e52fc7720042487f61fcb11`), macOS artifact ID `10680694836` (SHA-256 `19a86b0d050cdcb792e5c83e925ba0e79f9c3c72f073c21329600ed637c5b241`) and aggregate artifact ID `10681589806` (SHA-256 `a6666fe8afd143d6b525b95f917332dff6af54c1d65f913bfab44c3cc05632f8`) were retained and independently revalidated; the seven-gate packet remains NO-GO with zero production evidence records. This is terminal hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
@@ -2633,31 +2633,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  The current pushed tip `13f17162` is the W05 documentation successor rebased
-  over concurrent W01/W07/W26 documentation and CI changes, and remains
-  documentation-only over the
-  rejected-request-body drain fix `d870f900` and the direct-9P, PGlite
-  autocommit, S3 pipelining, structural-driver, and HTTP framing-boundary
-  changes:
-  the full locked Rust workspace, strict Clippy, optimized N-API build,
-  complete Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix pass
-  with Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
-  and all `40 × 621` trace lanes green. Direct and structural N-API 9P
-  sessions pass, the rebuilt Node artifact passes its complete integration
-  suite, and the S3 gateway has `37/37` passing tests, including
-  Expect/Continue, transfer-encoding refusal, HEAD framing, and pipelined
-  response ordering. The exact W05 hosted-status candidate is `b72d02f4`;
-  for that candidate, W04 policy run `35692639780`
-  succeeded, while fault `35692639786`, W08 policy `35692639797`, CI
-  `35692639806`, and W08 targets `35692639831` completed cancelled; no
-  terminal hosted release acceptance is claimed for this moving tip. R2
-  remains fail-closed at the monthly cap. Remaining production actions are to select
-  a settled final SHA, obtain terminal same-SHA hosted CI/fault/W04/W07/W08
-  and package/provenance evidence, request security to provision AWS protected
-  inputs and immutable OIDC trust through the approved path, rotate R2
-  credentials after the UTC-month reset, close advertised-provider/native/
-  platform/scope gates, and run W20.6 for a written GO/NO-GO decision. No
-  credential value was read, stored, printed, or placed in Keychain.
+  Shared `origin/main` is now `f94b53d8`, which contains the TiDB
+  publication-ack failure-injection repair and the W26 staged N-API build that
+  preserves a clean source checkout. The prior immutable candidate
+  `25e275ab` has terminal CI `failure`: TiDB/TiDB-RustFS stale harness
+  assertions, Ozone/TiDB and Ozone/FoundationDB hard-I/Ops misses, W26 dirty
+  provenance, and cancelled native FUSE; the exact evidence and estimates are
+  in `docs/w05-progress-ledger.md`. Local Rust/Node/SDK/CLI/PGlite/package
+  evidence remains green where exercised, but no production release is
+  authorized. Remaining actions are to create a new settled candidate, run the
+  complete same-SHA CI/fault/W04/W07/W08/Native 9P/attestation packet, close
+  Ozone capacity and native-FUSE or record explicit scope exclusions, obtain
+  AWS protected inputs and OIDC trust through security, rotate R2 credentials
+  after the UTC-month reset, close package/provenance/provider/scope gates, and
+  run W20.6 for a written GO/NO-GO decision. No credential value was read,
+  stored, printed, or placed in Keychain.
 
 ## W06 — RustFS integration service
 
