@@ -22,6 +22,46 @@ upstream stream/attach contract or hosted native mount behavior.
 | Linux native 9P | Hosted PASS for the supported Rust and N-API Linux lifecycle scope; process-crash and arbitrary kernel-reset recovery remain outside the library guarantee | Dedicated [Native 9P run `35628187344`](https://github.com/andymac4182/mount-rs/actions/runs/35628187344), job `106427627397`, at `431affd660391a0b8ed99815e389ffe12ad229c2`, passed `9p`/`9pnet_fd` probing and all four ignored Rust native tests: concurrent file I/O/unmount, server-close/kernel-connection release, ordinary mount/unmount, and external umount. Exact SHA `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` passed [Native 9P run `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733): Rust job `106610049705` passed the Linux probe plus all four ignored native lifecycle tests, and N-API job `106610049913` passed addon build, TCP/Unix/attached server lifecycle, orderly EOF, reset, paused-peer half-close teardown, and automatic/direct/structural mounted I/O/cleanup. Earlier exact-SHA runs remain below as history |
 | Errors, cancellation, concurrency, crash and cleanup | Local deterministic PASS; supported hosted transport and mount lifecycle PASS; process-crash and arbitrary kernel-reset recovery remain supervisor-owned | Focused Rust/N-API lifecycle and fault tests cover broadcast shutdown, accept-loop close races, shutdown-aware in-flight permit waits, bounded pending-frame reaping, transport faults, orderly EOF, TCP reset, paused-peer half-close teardown, session destruction that wakes and drains `Tflush` waiters, version-reset invalidation returning `EIO`, and destroy invalidation returning `ENODEV` even when a late provider error is available; the hosted native harness now passes eight concurrent mounted file write/read/rename/read workers plus server-close, kernel-connection-close, external umount, bounded-unmount cleanup, and the new N-API transport teardown cases. Automatic recovery after process crash or arbitrary kernel reset remains explicitly outside the library contract |
 
+## Current supported-scope closure audit
+
+This is the current 9P scope decision, not a release approval. The supported
+slice is evidenced by the local focused suites and the published exact-SHA
+hosted run below:
+
+- **PASS:** the 9P codec/constants/barrel surface, direct `P9Session` over
+  native or structural drivers, its 14-member semantic session view, the
+  server/connection members, attached Node `Duplex` lifecycle, native and
+  attached client identity/order/close behavior, direct and automatic mount
+  option mapping, and mounted server/connection identity are covered by local
+  tests and generated declarations.
+- **PASS:** the Linux native Rust lifecycle (kernel probe, concurrent I/O,
+  server-close/kernel-connection release, ordinary unmount, and external
+  umount) and the N-API Linux lifecycle (TCP/Unix/attached server paths,
+  direct-session audit, member/identity/order/close checks, and
+  automatic/direct/structural mounted I/O and cleanup) passed in published
+  SHA `86b88c329d64bcc2a8e7b9d97993fca657458986`, [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373),
+  N-API job `106667799214`, and Rust job `106667799016`.
+- **Explicitly outside the advertised contract:** `Tauth`, extended
+  attributes, the legacy `Topen`/`Tcreate`/`Tstat`/`Twstat` family, legacy
+  error messages, and unknown message types remain deliberate `ENOTSUP`
+  boundaries; `Tstatfs` without driver support remains `ENOSYS`. The upstream
+  oracle's additional protocol/session members that are not in the current
+  declarations are likewise not silently claimed as supported. The detailed
+  rationale is in the transport README's deliberate-boundaries section.
+- **Explicitly outside the library guarantee:** native-listener connections
+  expose `stream: undefined` and callers needing a Node stream use `attach`;
+  root automatic cross-transport signal ownership is not promised; process
+  crash and arbitrary kernel-reset/half-close recovery is supervisor-owned;
+  and macOS provides rootless wire/attached verification rather than a native
+  kernel 9P mount.
+
+The parity ledger therefore remains partial relative to the broader upstream
+oracle by design, while the supported mount-rs 9P contract has no unclassified
+omitted operation in this audit. Overall W01 and release status remain
+**NO-GO** until the other W01 gates and any separately required broader parity
+decision are closed.
+
 ## Current queue
 
 - Retain the dedicated hosted Linux `Native 9P` workflow as the stable
@@ -594,6 +634,7 @@ so it is not promoted as a 9P result; production remains NO-GO.
 
 | Date | Chunk | Result | Remaining blocker |
 | --- | --- | --- | --- |
+| 2026-09-22 | 9P supported-scope closure audit | Consolidated the current supported 9P contract and deliberate exclusions: implemented codec/session/server/connection/attach/mount surfaces are qualified by local evidence and current hosted run `35703805373`; legacy/auth/xattr protocol families, unadvertised upstream object members, native-listener Node-stream identity, root automatic cross-transport signal ownership, process-crash/arbitrary kernel-reset recovery, and non-Linux native kernel mounts are explicit boundaries rather than silent gaps | Broader upstream parity remains partial by design, and the overall W01/release decision remains NO-GO |
 | 2026-09-22 | N-API 9P server/connection member-surface audit | Added an oracle-backed runtime audit for the ten semantic `P9Server` members and the declared attached-connection surface, including `waitClosed()`; the oracle's non-interface `drop()` helper is explicitly excluded. Local direct/oracle execution, adjacent metadata/typecheck checks, syntax, and diff checks passed. Exact SHA `75c149f857f6056a7435a80a1493a9dfc8e53f59` passed [Native 9P run `35697338227`](https://github.com/andymac4182/mount-rs/actions/runs/35697338227): N-API job `106647016617` passed the new member-surface step plus all hosted N-API lifecycle gates, and Rust job `106647016767` passed the Linux probe plus all four ignored native lifecycle tests | Broader upstream session/protocol parity, automatic cross-transport signal ownership, supervisor-owned crash/reset recovery, and W01 acceptance remain open; production remains NO-GO |
 | 2026-09-22 | N-API 9P native server client identity | Exact SHA `15cb940988913c666d8d592a583e7eb3d2d82241` caches native `P9Connection` wrappers by stable transport id, preserving repeated `P9Server.clients` connection/session/closed identity and pruning wrappers after transport removal. The real-TCP regression covers registration, stable views, `close()`/`waitClosed()`, and cleanup. [Native 9P run `35698924766`](https://github.com/andymac4182/mount-rs/actions/runs/35698924766) passed: N-API job `106652302954` passed the new identity step plus all hosted N-API lifecycle gates, and Rust job `106652303250` passed the Linux probe plus all four ignored native lifecycle tests | Broader upstream session/protocol parity, automatic cross-transport signal ownership, supervisor-owned crash/reset recovery, and W01 acceptance remain open; production remains NO-GO |
 | 2026-09-22 | N-API 9P mixed native/attached client arrival order | Exact SHA `a3554b105be58cc5ff6cacc03de53f09c0461419` adds one JS arrival ledger for native and attached `P9Server` clients, observes already-accepted native clients before `attach()`, preserves native wrapper identity, and prunes closed entries. The real-TCP regression exercises native-first and attached-first order plus cleanup. Local syntax, focused order/identity/member checks, metadata/session/observability/type checks, and the elevated `p9` server selector passed. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373): N-API job `106667799214` passed the mixed arrival-order check and all adjacent lifecycle gates, and Rust job `106667799016` passed the Linux probe plus all four ignored native lifecycle tests | Broader upstream session/protocol parity, automatic cross-transport signal ownership, supervisor-owned crash/reset recovery, and W01 acceptance remain open; production remains NO-GO |

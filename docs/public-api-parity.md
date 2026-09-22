@@ -475,6 +475,21 @@ Current focused behavior:
   passed all four ignored native lifecycle tests; the historical failure is
   superseded for the current supported slice. Broader protocol/session behavior
   remains a separate gate.
+- The current W01-9P scope audit makes the supported boundary explicit. The
+  advertised slice is the implemented codec/constants/barrel, direct native or
+  structural `P9Session`, `P9Server`/`P9Connection`/`attach` contracts, direct
+  and automatic mount option mapping, mounted identity, and the hosted Linux
+  Rust/N-API lifecycle. The current published SHA
+  `86b88c329d64bcc2a8e7b9d97993fca657458986` passed [Native 9P run
+  `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373),
+  N-API job `106667799214`, and Rust job `106667799016`. Deliberate
+  non-claims are the README's legacy/auth/xattr protocol boundaries,
+  unadvertised upstream object members, native-listener `stream: undefined`,
+  root automatic cross-transport signal ownership, supervisor-owned
+  crash/reset recovery, and non-Linux native kernel mounts. The parity state
+  remains **PARTIAL** relative to the broader oracle, but these omissions are
+  now classified scope rather than untracked gaps; overall W01/release status
+  remains NO-GO.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations (TCP
   `host:port`, or the configured Unix socket path; TCP is `null` before binding

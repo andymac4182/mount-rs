@@ -239,6 +239,19 @@ N-API job `106667799214` passed direct mounted-I/O/cleanup and all adjacent
 lifecycle gates, while Rust job `106667799016` passed the Linux probe plus all
 four ignored native lifecycle tests. Production remains NO-GO.
 
+The current W01-9P supported-scope audit is explicit: the implemented
+codec/constants/barrel, direct native-or-structural session, server/connection
+and attached-stream contracts, mounted identity, and Linux native lifecycle
+are qualified for the advertised slice. Deliberate boundaries are the
+documented legacy/auth/xattr protocol families, unadvertised upstream object
+members, native-listener `stream: undefined`, root automatic cross-transport
+signal ownership, supervisor-owned crash/reset recovery, and non-Linux native
+kernel mounts. Published SHA `86b88c329d64bcc2a8e7b9d97993fca657458986`
+passed [Native 9P run `35703805373`](https://github.com/andymac4182/mount-rs/actions/runs/35703805373),
+N-API job `106667799214`, and Rust job `106667799016`; the detailed decision
+is recorded in [`W01_9P_PROGRESS.md`](./W01_9P_PROGRESS.md). This narrows the
+9P claim without changing the overall W01/release **NO-GO** decision.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):
@@ -326,6 +339,111 @@ The preceding W01-9P typed-reader packet at exact SHA
 N-API job `106590841909` and Rust job `106590841982` both passed their Linux
 probes and supported lifecycle gates. The native typed-reader maximums are
 recorded in the detailed W01-9P ledger; broader W01 acceptance remains NO-GO.
+
+The W01-NFS forced-process-restart lane also passes host-backed NFSv4.1
+`FILE_SYNC4` write/reopen/readback: a replacement process rejects the old
+session and both old root/file handles, then a fresh session recovers the
+exact bytes by path. This is one-host process-crash data evidence, not
+power-loss durability or persistent lease/replay/handle recovery. The manual
+hosted NFS run `35670927787` passed macOS but failed Ubuntu before its v3
+mount on a parallel-test mountpoint collision; the local correction does
+not turn that failed job into acceptance evidence.
+
+W01-NFS also passes a rootless NFSv4.1 completed-request replay across an
+orderly TCP reconnect: the same cached slot/sequence returns the original
+mutating `REMOVE` reply without removing a changed target, and the next
+sequence advances normally. A blocked-backend retry of an in-flight
+same-slot request also reaches the server, waits, and then returns the cached
+original body without re-execution. A follow-up active-slot guard now returns
+prompt `NFS4ERR_DELAY` to that retry and `NFS4ERR_SEQ_MISORDERED` to a
+premature next sequence, while the completed reply remains replayable; slot
+sequence wrap to zero is unit-tested. A controlled real-TCP test now blocks
+slot 0 in backend `stat` while slot 1 of the same session completes over a
+second connection. The handler takes the exclusive lease-sweep lock only when
+a client has expired; an injected-clock test also proves an expired slot-1
+request waits for the blocked slot-0 call before sweeping and returning
+`NFS4ERR_BADSESSION`. This is bounded same-process independent-slot overlap,
+not crash-durable replay/lease/handle state or native-client ordering. A new
+real-TCP canceled-`REMOVE` case now stops a request after its backend deletion
+but before COMPOUND completion and reply caching. The server invalidates that
+unfinished session:
+retrying with a changed target gets `NFS4ERR_BADSESSION` without a second
+deletion, and the same client can create a replacement session and continue.
+The replacement `CREATE_SESSION` reply now echoes its noninitial request
+sequence. Exact-reply recovery for a canceled request, general cache-required
+oversized-reply handling, persistent replay, native-client ordering, and
+exact-tip hosted acceptance remain open.
+
+For completed cached NFSv4.1 replies, a real-TCP `AUTH_SYS` regression now
+rejects a same-slot retry from a different effective user with
+`NFS4ERR_SEQ_FALSE_RETRY`. The original user can still receive the cached
+mutating reply without a second execution and advance the slot. This is
+replay-user consistency for decoded credentials, not cryptographic `AUTH_SYS`
+authentication, general cache-required oversized reply recovery, durable
+replay, or native-client ordering; W01-NFS remains NO-GO.
+
+A new NFSv4.1 wire regression covers a completed, small `REMOVE` reply whose
+`SEQUENCE.cachethis` hint is false. The server now keeps the full bounded
+reply anyway, so a same-slot retry returns the original body without
+executing a changed target; the next sequence still progresses. This closes
+one live-process replay gap, not general cache-required oversized or
+crash-durable reply recovery, native-client ordering, or hosted acceptance;
+W01-NFS remains NO-GO.
+
+For a larger completed reply with `SEQUENCE.cachethis=false`, a new real-TCP
+`REMOVE` plus `READDIR` regression now receives a bounded cached
+`NFS4ERR_RETRY_UNCACHED_REP` marker on retry, rather than
+`NFS4ERR_SEQ_MISORDERED`. Repeated retries cannot delete a changed target,
+and a fresh sequence progresses. This remains same-process evidence; the
+other `cachethis=true` oversized paths, tiny cache bounds, crash-durable state,
+native-client ordering, and hosted acceptance are still NO-GO.
+
+A separate `cachethis=true` oversized `READDIR` tail after a successful
+`REMOVE` now yields a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` result while
+preserving the earlier mutation result. A real-TCP retry returns the exact
+bounded reply and does not delete a changed target. Other variable-size
+results, prefixes too large for even the error, crash-durable replay,
+native-client ordering, and hosted acceptance remain NO-GO.
+
+The same bounded handling now covers an oversized `READ` tail after `REMOVE`:
+the 512-byte read is replaced with a cacheable error under a 256-byte limit,
+while a changed-target retry returns the exact response without another
+deletion. The locked NFS target and direct 16-case v4 wire suite pass;
+remaining oversized classes, too-small cache bounds, crash-durable replay,
+native-client ordering, and hosted acceptance remain NO-GO.
+
+It also covers an oversized `READLINK` tail: a 512-byte symlink target under
+a 256-byte reply-cache limit now produces a cacheable error after `REMOVE`,
+and a changed-target retry cannot delete again. The full locked NFS target
+and direct 17-case v4 wire suite pass. Other oversized results, too-small
+cache bounds, crash-durable replay, native-client ordering, and exact-tip
+hosted acceptance remain NO-GO.
+
+A broad `GETATTR` tail after `REMOVE` now has the same bounded behavior under
+a 160-byte cache limit. A changed-target retry replays the successful
+mutation prefix and cacheable error without another deletion; the direct
+18-case v4 wire suite passes. Other oversized replies, too-small cache
+bounds, crash-durable replay, native-client ordering, and exact-tip hosted
+acceptance remain NO-GO.
+
+A fixed-size `GETFH` tail after `REMOVE` now also returns a cacheable error
+when its successful reply would exceed a 112-byte limit. The changed-target
+retry replays the earlier successful mutation without another deletion;
+the direct 19-case v4 wire suite passes. Other oversized replies, too-small
+cache bounds, crash-durable replay, native-client ordering, and exact-tip
+hosted acceptance remain NO-GO.
+
+A completed mutating NFSv4.1 COMPOUND with no cacheable reply now fences its
+session. Under a 96-byte reply-cache limit, a real-TCP `REMOVE` reply is
+oversized; a changed-target retry gets `NFS4ERR_BADSESSION` rather than the
+prior `NFS4ERR_SEQ_MISORDERED`, and does not delete again. The read-only
+state-limit case still advances normally. This is fail-closed same-process
+behavior, not durable replay or native/hosted acceptance; W01-NFS is NO-GO.
+
+The pinned NFSv3/MOUNT and NFSv4.1 TCP parity gate also passes 266 tests with
+18 explicit capability/root skips. The originally divergent NFS series was
+rebased onto refreshed `origin/main`; publication still requires a live
+fast-forward ancestry check and adds no hosted/native acceptance evidence.
 
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
@@ -1039,6 +1157,12 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-NFS | Refreshed the pinned oracle at published terminal-close commit `90e130b8`: 266 NFSv3/MOUNT and NFSv4.1 cases passed, 18 capability/root cases were explicitly skipped, and zero mismatches were reported. CI run `35670416469` cancelled both native-NFS jobs before any steps ran | — | 75% W01.1 planning view | The oracle confirms userspace TCP behavior at this commit; the cancelled jobs add no hosted native evidence. Full state/member scope, native-client ordering, crash/durability qualification, and production acceptance remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Refreshed the pinned NFS oracle after listen/close serialization at the current published tip: 266 NFSv3/MOUNT and NFSv4.1 TCP cases passed, 18 capability/root cases remained explicit skips, and zero mismatches were reported | — | 75% W01.1 planning view | This confirms no conformance regression from the lifecycle serialization fix; the explicit capability boundary, full upstream state/member scope, native-client ordering, crash/durability qualification, and production acceptance remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-NFS | Refreshed the pinned NFS oracle after the queued-request cancellation fix at the current published tip: 266 NFSv3/MOUNT and NFSv4.1 TCP cases passed, 18 capability/root cases remained explicit skips, and zero mismatches were reported | — | 75% W01.1 planning view | This confirms no conformance regression from the lifecycle fix; the explicit capability boundary, full upstream state/member scope, native-client ordering, crash/durability qualification, and production acceptance remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Cache-required oversized `READ` after successful `REMOVE` now becomes a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` when the prefix plus error fits. A real-TCP changed-target retry returns the exact bounded reply without repeating deletion. The complete locked NFS target passed 41 unit tests and all applicable integration targets, direct v4 wire passed 16/16, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | Other oversized result classes, too-small cache bounds, crash-durable replay/handles, native-client ordering, power-loss durability, and exact-tip hosted acceptance remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Cache-required oversized `READLINK` after a successful `REMOVE` now becomes a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` when the prefix plus error fits. The real-TCP regression failed before the fix and now proves an exact changed-target replay without repeated deletion. The complete locked NFS target passed 41 unit tests and all applicable integration targets, direct v4 wire passed 17/17, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | Other oversized result classes, too-small cache bounds, crash-durable replay/handles, native-client ordering, power-loss durability, and exact-tip hosted acceptance remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Cache-required oversized `GETATTR` after a successful `REMOVE` now becomes a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` when the prefix plus error fits. The real-TCP regression failed before the fix and now proves exact changed-target replay without repeated deletion. The complete locked NFS target passed 41 unit tests and all applicable integration targets, direct v4 wire passed 18/18, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | Other oversized results, too-small cache bounds, crash-durable replay/handles, native-client ordering, power-loss durability, and exact-tip hosted acceptance remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | Cache-required `GETFH` after a successful `REMOVE` now becomes a cacheable `NFS4ERR_REP_TOO_BIG_TO_CACHE` when its successful reply would exceed a 112-byte limit. The real-TCP regression failed before the fix and now proves exact changed-target replay without repeated deletion. The complete locked NFS target passed 41 unit tests and all applicable integration targets, direct v4 wire passed 19/19, and strict Clippy, formatting, and diff checks passed | — | 75% W01.4 planning view | Other oversized results, too-small cache bounds, crash-durable replay/handles, native-client ordering, power-loss durability, and exact-tip hosted acceptance remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | A completed `SEQUENCE(cachethis=true)` mutation whose reply cannot fit a 96-byte cache now fences its session. The real-TCP test failed before the fix with `NFS4ERR_SEQ_MISORDERED` on a changed-target retry; it now gets `NFS4ERR_BADSESSION` without another deletion. The full locked NFS target passed 41 unit tests and all applicable integration targets, direct v4 wire passed 20/20, and warning-denied Clippy passed using installed Command Line Tools | — | 75% W01.4 planning view | Same-process fail-closed behavior is not exact reply recovery, crash-durable state, native-client ordering, power-loss durability, exact-tip hosted acceptance, or production acceptance; W01 stays NO-GO |
+| 2026-09-22 | W01-NFS | The pinned NFSv3/MOUNT and NFSv4.1 upstream TCP parity gate passed 266 tests with 18 explicit capability/root skips, 0 failures, using the shared Cargo target and installed Command Line Tools. The originally divergent NFS series was rebased onto refreshed `origin/main` for a separate fast-forward publication check | — | 75% W01.1 planning view | This is local userspace parity, not native/hosted, crash-durable, or production acceptance; W01 stays NO-GO |
 | 2026-09-22 | W01-S3 | Exposed the Rust S3 streaming request/response boundary through the N-API session: async-iterable/`ReadableStream` request bodies, incremental response iteration, cancellation, generator-failure mapping, `S3Server.session`, and async metrics snapshots; the generated release package build, package typecheck, direct release binding load, and host-enabled `node test/servers.mjs` passed, while N-API Rust check/Clippy, formatting, the strict TypeScript fixture check, and the locked S3 Rust target remained green | — | 72% W01.1 planning view | Direct JavaScript peer-fault evidence, complete S3 member parity, live AWS/R2, and broader fault/restart/durability/concurrency/native gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Added pull-based N-API WebDAV request/response bodies with async-iterable and Web ReadableStream input, positional response chunks, cancellation cleanup, and request-body failure mapping. The isolated N-API check, release addon/declaration build, generated typecheck, and direct stream probe passed three-chunk PUT, multi-chunk GET, early iterator return, and deliberate body failure | — | 72% W01.1 planning view | `MOUNTX_SOURCE` oracle differential, loopback N-API listener on this sandbox, complete session/member parity, peer-fault injection, provider/native/hosted lifecycle, restart, concurrency, and durability remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-WebDAV | Added `WebdavSession.locks` with generated `WebdavLockView` records; the host-enabled `node test/servers.mjs` direct N-API LOCK/UNLOCK check observed token/path/depth/exclusive/timeout state and post-UNLOCK zero records, while `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-lock-test-target ./scripts/cargo-shared test -p mount-rs-webdav --locked` passed 13/13 with the native mount probe explicitly ignored, the affected N-API check, release build, generated typecheck, formatting, and warning-denied Clippy passed | — | 72% W01.1 planning view | `MOUNTX_SOURCE` oracle differential, loopback N-API listener on this sandbox, complete session/member parity, peer-fault injection, provider/native/hosted lifecycle, restart, concurrency, and durability remain open; W01 stays NO-GO |
