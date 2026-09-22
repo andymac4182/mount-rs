@@ -4,6 +4,31 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+Current W26 PGlite implementation boundary (2026-09-22): commit
+`c791ab318af4c5253dbe3e9e4d1d2f7a2026fa4c`
+(`perf(w26): compute PGlite block IDs locally`) is published and verified on
+`origin/main`. PGlite now computes the exact existing PostgreSQL
+`md5(encode($1, 'hex'))` identity locally, removing one provider round trip on
+the unique-block put path while retaining conditional insert, duplicate
+read-back, byte-for-byte collision, volume-scope and fail-closed disappearance
+checks. Formatting, diff checks and locked workspace metadata passed. Focused
+compile, library-test and strict-Clippy commands reached the native macOS
+linker and were blocked at exit 69 because this host has not accepted the
+Xcode license; this remains an explicit native-host gate, not a project pass.
+Security scan `2b2a12cd-0984-4dfb-9d89-2139055afb3d` sealed complete changed-
+file coverage over the two PGlite surfaces with zero reportable findings; the
+captured snapshot digest is
+`codex-security-snapshot/v1:sha256:d5536ab709e2b857bb5190686ba0056cd14ce798da886616241aa9a68a332833`.
+Exact-head manual W26 run
+`35706390612 <https://github.com/andymac4182/mount-rs/actions/runs/35706390612>`
+targets `c791ab31`; at capture its base `106676249167`, compositions
+`106676249209`, TiDB `106676248986` and FoundationDB `106676249267` jobs were
+queued, so no result is promoted. The latest terminal packet remains 1/4
+providers above the hard 1,000-IOPS/drive target. Production remains
+**NO-GO**: W26 owns Ozone compatibility and qualification, while customer
+deployment, security/SLO/RPO/RTO evidence, backup/DR and the separate release
+stream remain explicit external or cross-workstream gates.
+
 Current W26 TiDB implementation boundary (2026-09-22): commit
 `2ce6f753a588628593baf1000ae75330780dabd3`
 (`perf(w26): skip TiDB block readback on confirmed insert`) is published on
@@ -1348,6 +1373,14 @@ The full 39/39 WebDAV target, warning-denied workspace Clippy, formatting, diff
 checks, and 40-case TypeScript/Rust differential pass. Hosted/provider,
 power-loss, durable-lock, crash/restart, and stronger same-resource ordering
 remain open.
+The public HTTP-date parser now accepts RFC 9110 leap seconds in the same way
+as the pinned oracle: a valid seconds field of `:60` is read as `:59`, while
+invalid minutes and other malformed dates remain rejected. The focused
+regression covers IMF-fixdate, RFC 850, asctime, leap-second, and invalid-minute
+forms; the full 40/40 WebDAV target, warning-denied workspace Clippy,
+formatting, diff checks, and the 40-case TypeScript/Rust differential pass.
+Hosted/provider, power-loss, durable-lock, crash/restart, and stronger
+same-resource ordering remain open.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
@@ -2012,6 +2045,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   process-crash data recovery, not power-loss or durable v4 lease/replay/handle recovery;
   native-client ordering, exact-tip hosted qualification, and W01-NFS
   production acceptance remain open.
+- [x] The same forced-child-process NFSv4.1 lane now also verifies host-backed
+  namespace deletion. A file seeded in the host root is removed through a
+  successful wire `REMOVE`; after the seed process is killed, a replacement
+  session's wire `LOOKUP` returns `NFS4ERR_NOENT`, and the host path remains
+  absent. The direct process-restart target passes 2/2; the full locked NFS
+  target passes 41 unit and all applicable integrations (including 20 v4
+  wire), and warning-denied Clippy, formatting, and diff checks pass. This
+  is one-host process-crash namespace evidence, not a directory-fsync or
+  power-loss guarantee, durable v4 session/lease/replay/handle recovery,
+  native-client ordering, or exact-tip hosted acceptance; W01-NFS is NO-GO.
 - [x] The rootless NFSv4.1 replay-reconnect lane now completes a mutating
   `REMOVE`, disconnects, and retries its cached slot/sequence with a changed
   target. The exact old COMPOUND body returns without removing the second
@@ -7067,6 +7110,7 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV HTTP-date leap-second compatibility | Accept RFC 9110 `:60` seconds by normalizing only the valid seconds field to `:59`, matching the pinned oracle while preserving rejection of invalid minutes and malformed dates | Focused date-form regression and full WebDAV target 40/40, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV If-parser UTF-8 boundary safety | Probe the public `Not` grammar with UTF-8-safe access so malformed non-ASCII input such as `(éé)` returns `None` instead of panicking at a code-point boundary | Focused regression reproduced the pre-fix panic and now passes; full WebDAV target 39/39, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV XML parser character validation | Reject invalid UTF-8 and raw XML-invalid characters before tree construction, matching the pinned `invalid-character` refusal instead of preserving controls in `XmlNode` text | Focused raw-NUL parser regression and full WebDAV target 38/38, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV XML serializer safety/parity | Escape CR as `&#13;` and replace XML-invalid controls with U+FFFD in text and namespace values, matching the pinned XML codec while retaining markup escaping | Focused serializer fixture and full WebDAV target 37/37, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |

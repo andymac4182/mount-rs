@@ -725,13 +725,39 @@ pub fn format_http_date_ms(ms: i64) -> String {
 }
 
 pub fn parse_http_date_ms(value: &str) -> Option<i64> {
-    let time = parse_http_date(value).ok()?;
+    let time = match parse_http_date(value) {
+        Ok(time) => time,
+        Err(_) => parse_http_date(&normalize_leap_second(value)?).ok()?,
+    };
     match time.duration_since(UNIX_EPOCH) {
         Ok(duration) => i64::try_from(duration.as_millis()).ok(),
         Err(error) => i64::try_from(error.duration().as_millis())
             .ok()
             .map(|value| -value),
     }
+}
+
+fn normalize_leap_second(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    for index in 0..bytes.len().saturating_sub(2) {
+        if bytes[index..].first_chunk::<3>() != Some(b":60")
+            || index < 5
+            || !bytes[index - 5].is_ascii_digit()
+            || !bytes[index - 4].is_ascii_digit()
+            || bytes[index - 3] != b':'
+            || !bytes[index - 2].is_ascii_digit()
+            || !bytes[index - 1].is_ascii_digit()
+            || bytes
+                .get(index + 3)
+                .is_some_and(|byte| byte.is_ascii_digit())
+        {
+            continue;
+        }
+        let mut normalized = value.to_owned();
+        normalized.replace_range(index..index + 3, ":59");
+        return Some(normalized);
+    }
+    None
 }
 
 pub fn format_iso_date_ms(ms: i64) -> String {

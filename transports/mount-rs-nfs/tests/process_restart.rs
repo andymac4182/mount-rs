@@ -27,7 +27,8 @@ use mount_rs_nfs::protocol::{
 use mount_rs_nfs::rpc::{RPC_SUCCESS, RecordAssembler, decode_reply, encode_call, frame_record};
 use mount_rs_nfs::v4::{
     ACCESS4_READ, CLAIM_NULL, CREATE_SESSION4_FLAG_CONN_BACK_CHAN, FILE_SYNC4, NFS4ERR_BADSESSION,
-    NFS4ERR_STALE, OPEN4_CREATE, OPEN4_NOCREATE, OPEN4_SHARE_ACCESS_BOTH, UNCHECKED4,
+    NFS4ERR_NOENT, NFS4ERR_STALE, OPEN4_CREATE, OPEN4_NOCREATE, OPEN4_SHARE_ACCESS_BOTH,
+    UNCHECKED4,
 };
 use mount_rs_nfs::xdr::{XdrReader, XdrWriter, encode_xdr};
 use mount_rs_nfs::{NFS_V4, NFS4_PROGRAM, NfsServer, NfsServerOptions};
@@ -43,16 +44,19 @@ const V4_TEST_NAME: &str = "nfs_v4_session_and_handles_are_process_local_after_p
 static NEXT_ROOT_ID: AtomicU64 = AtomicU64::new(0);
 
 const OP_GETFH: u32 = 10;
+const OP_LOOKUP: u32 = 15;
 const OP_OPEN: u32 = 18;
 const OP_PUTFH: u32 = 22;
 const OP_PUTROOTFH: u32 = 24;
 const OP_READ: u32 = 25;
+const OP_REMOVE: u32 = 28;
 const OP_WRITE: u32 = 38;
 const OP_EXCHANGE_ID: u32 = 42;
 const OP_CREATE_SESSION: u32 = 43;
 const OP_SEQUENCE: u32 = 53;
 const OP_RECLAIM_COMPLETE: u32 = 58;
 const V4_RECOVERY_FILE: &str = "v4-crash-recovered.txt";
+const V4_REMOVED_FILE: &str = "v4-crash-removed.txt";
 
 struct TestRoot(PathBuf);
 
@@ -568,6 +572,67 @@ async fn v4_read_file(
     data
 }
 
+async fn v4_remove_file(stream: &mut TcpStream, session: &[u8; 16]) {
+    let record = exchange(
+        stream,
+        encode_call(
+            107,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-remove",
+                &[
+                    v4_sequence(session, 5),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    v4_op(OP_REMOVE, |writer| writer.string(V4_REMOVED_FILE)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 3), 0);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_REMOVE), 0);
+    let _ = response.bool("NFSv4 remove cinfo atomic").unwrap();
+    let _ = response.u64("NFSv4 remove cinfo before").unwrap();
+    let _ = response.u64("NFSv4 remove cinfo after").unwrap();
+    response.end("NFSv4 remove response").unwrap();
+}
+
+async fn v4_assert_removed_after_restart(stream: &mut TcpStream, session: &[u8; 16]) {
+    let record = exchange(
+        stream,
+        encode_call(
+            217,
+            NFS4_PROGRAM,
+            NFS_V4,
+            1,
+            None,
+            None,
+            &v4_compound(
+                "crash-removed-lookup",
+                &[
+                    v4_sequence(session, 7),
+                    v4_op(OP_PUTROOTFH, |_| {}),
+                    v4_op(OP_LOOKUP, |writer| writer.string(V4_REMOVED_FILE)),
+                ],
+            ),
+        ),
+    )
+    .await;
+    let mut response = v4_reader(&record);
+    assert_eq!(v4_compound_status(&mut response, 3), NFS4ERR_NOENT);
+    v4_consume_sequence(&mut response);
+    assert_eq!(v4_result_status(&mut response, OP_PUTROOTFH), 0);
+    assert_eq!(v4_result_status(&mut response, OP_LOOKUP), NFS4ERR_NOENT);
+    response.end("NFSv4 removed file lookup response").unwrap();
+}
+
 async fn mount_root(stream: &mut TcpStream, xid: u32) -> Vec<u8> {
     let call = encode_call(
         xid,
@@ -759,14 +824,15 @@ async fn nfs_v3_host_backend_survives_process_crash_and_restart() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
+async fn v4_crash_recovery_body() {
     if std::env::var_os(CHILD_ENV).is_some() {
         child_server().await;
         return;
     }
 
     let root = TestRoot::new();
+    std::fs::write(root.0.join(V4_REMOVED_FILE), b"removed before crash")
+        .expect("seed NFSv4 namespace removal target");
     let seed = start_child_for(&root.0, "seed", V4_TEST_NAME).await;
     let mut first = TcpStream::connect(seed.address)
         .await
@@ -777,6 +843,8 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
     let (stateid, file_handle) = v4_open_file(&mut first, 105, clientid, &session, 3, true).await;
     let payload = b"FILE_SYNC4 survives an NFSv4 server process crash";
     v4_write_file(&mut first, &session, 4, &stateid, &file_handle, payload).await;
+    v4_remove_file(&mut first, &session).await;
+    assert!(!root.0.join(V4_REMOVED_FILE).exists());
     first.shutdown().await.expect("close seed NFSv4 connection");
     drop(first);
     seed.crash().await;
@@ -797,7 +865,7 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
             1,
             None,
             None,
-            &v4_compound("stale-session", &[v4_sequence(&session, 5)]),
+            &v4_compound("stale-session", &[v4_sequence(&session, 6)]),
         ),
     )
     .await;
@@ -881,6 +949,7 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
         .await,
         payload
     );
+    v4_assert_removed_after_restart(&mut second, &replacement_session).await;
     second
         .shutdown()
         .await
@@ -891,4 +960,24 @@ async fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
         std::fs::read(root.0.join(V4_RECOVERY_FILE)).expect("read NFSv4 host file after crashes"),
         payload
     );
+    assert!(!root.0.join(V4_REMOVED_FILE).exists());
+}
+
+#[test]
+fn nfs_v4_session_and_handles_are_process_local_after_process_crash() {
+    std::thread::Builder::new()
+        .name("nfs-v4-process-restart-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build NFSv4 restart runtime")
+                .block_on(v4_crash_recovery_body());
+        })
+        .expect("spawn NFSv4 restart test thread")
+        .join()
+        .expect("NFSv4 restart test thread panicked");
 }

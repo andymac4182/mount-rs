@@ -10,9 +10,9 @@ use mount_rs_core::{
     Result as FsResult, Stats,
 };
 use mount_rs_webdav::protocol::{
-    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_if, parse_lock_info,
-    parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
-    xml_document,
+    RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_http_date_ms, parse_if,
+    parse_lock_info, parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml,
+    status_of_error, xml_document,
 };
 use mount_rs_webdav::{
     ALLOW_HEADER, DAV_COMPLIANCE, DAV_NS, DavFault, DavLockGrant, DavLockRequest, DavLockTable,
@@ -1598,6 +1598,28 @@ fn if_parser_rejects_non_ascii_grammar_without_panicking() {
         "invalid UTF-8 boundary must not panic the parser"
     );
     assert_eq!(result.expect("parser did not panic"), None);
+}
+
+#[test]
+fn http_date_parser_accepts_rfc9110_wire_forms() {
+    let expected = Some(784_111_777_000);
+    for value in [
+        "Sun, 06 Nov 1994 08:49:37 GMT",
+        "Sunday, 06-Nov-94 08:49:37 GMT",
+        "Sun Nov  6 08:49:37 1994",
+    ] {
+        assert_eq!(parse_http_date_ms(value), expected, "date form: {value}");
+    }
+    assert_eq!(
+        parse_http_date_ms("Sun, 06 Nov 1994 08:49:60 GMT"),
+        Some(784_111_799_000),
+        "RFC 9110 leap seconds are read as the preceding second"
+    );
+    assert_eq!(
+        parse_http_date_ms("Sun, 06 Nov 1994 08:60:60 GMT"),
+        None,
+        "an invalid minute must not be normalized as a leap second"
+    );
 }
 
 #[tokio::test]

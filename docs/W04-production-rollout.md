@@ -137,6 +137,28 @@ Windows Node, native FUSE, and provider/package support jobs were all queued at
 the first snapshot; no current-tip result is acceptance evidence until the
 exact recovery, package, native, provider, and W26 steps are terminal.
 
+The same run has since produced a mixed terminal boundary. ARM
+[106658534921](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106658534921),
+macOS-15-intel
+[106658534854](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106658534854),
+Ubuntu
+[106658535160](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106658535160),
+and macOS-latest
+[106658535116](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106658535116)
+all passed the exact fragmented-request and `Verify PGlite integration and
+restart recovery` steps. This is four-platform Unix recovery evidence for the
+retained candidate, not full W04 acceptance: Windows Node
+[106658534774](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106658534774)
+timed out in the WebDAV provider-network test before recovery, native FUSE
+[106658535119](https://github.com/andymac4182/mount-rs/actions/runs/35700938192/job/106658535119)
+failed its rootless-kernel operation step, and the TiDB, Ozone/TiDB,
+TiDB/RustFS, Ozone/FoundationDB, and W26 lanes are not green acceptance
+evidence. The Ubuntu Rust workspace test was still in progress at the latest
+inspection, while the package aggregate was skipped after the Windows failure.
+The run therefore remains a qualification diagnostic and production remains
+**NO-GO**; terminal job metadata is not promoted to a provider or production
+pass when the run logs are unavailable or a prerequisite is skipped.
+
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
 
