@@ -131,6 +131,18 @@ upstream stream/attach contract or hosted native mount behavior.
   object/hash-map representation. The attached-session observability test and
   the direct hosted mount test both assert the `Tversion` count through
   `Map#get`; the generated declaration and typecheck cover the same shape.
+- The direct `./9p` fid-view declaration now follows the native N-API
+  representation: `DirCursor.offsets` is an array of `{ offset: bigint,
+  index: number }` records, while `Fid.iounit` and `Fid.cursor` are writable.
+  This is an explicit serializable N-API boundary from the oracle's internal
+  offset map, not a claim that the native wire adapter exposes that `Map`.
+  `node test/p9-fids.mjs` proves the runtime array and mutation behavior, and
+  `node test/typecheck.mjs` proves the declaration; syntax and diff checks are
+  also green. Exact SHA `ba20d29d7e8ad00b3c4b5270dc21cf6ab913e4c2` passed the
+  N-API job `106578252549` in [Native 9P run `35674581481`](https://github.com/andymac4182/mount-rs/actions/runs/35674581481),
+  including the Linux probe and automatic/direct/structural mounted-I/O
+  checks; the companion Rust `native-9p` job `106578252700` remains queued, so
+  this packet does not claim a new full hosted Rust qualification.
 - Graceful server close, external unmount, and retryable unmount are in scope;
   the dedicated hosted run above verifies those Linux lifecycle paths.
   Automatic recovery after process crash or arbitrary kernel reset/half-close
@@ -157,6 +169,14 @@ Rust job `106575123716` passed all four ignored native tests, and N-API job
 mounted-I/O and cleanup checks. The direct test includes the `stats.messages`
 `Map` assertion; hosted success qualifies the native facade at this revision,
 not the local synthetic platform-override branch.
+
+The latest implementation packet at exact SHA
+`ba20d29d7e8ad00b3c4b5270dc21cf6ab913e4c2` passed the N-API job
+`106578252549` in [Native 9P run `35674581481`](https://github.com/andymac4182/mount-rs/actions/runs/35674581481),
+including the Linux probe, addon build, and automatic/direct/structural
+mounted-I/O/cleanup checks. Its companion Rust `native-9p` job
+`106578252700` is still queued; the local `p9-fids.mjs` runtime test remains
+the direct evidence for the array-shaped fid cursor and writable fid fields.
 
 ## Evidence ledger
 
@@ -197,6 +217,7 @@ not the local synthetic platform-override branch.
 | 2026-09-22 | N-API P9 direct-facade signal teardown | The direct `./9p` mount helper now supports `signals` (default `true`) with one process-wide `SIGINT`/`SIGTERM` pair, unmount-all dispatch, handler removal after opted-in mounts close, and default-signal re-raise when no other listener remains; the signal lifecycle regression, mount-helper regression, syntax and diff checks passed | Automatic cross-transport signal ownership, remaining mount controls, and hosted N-API native-mount lifecycle evidence remain open; the release build was not completed because the isolated target exhausted `/private/tmp`; production remains NO-GO |
 
 | 2026-09-22 | N-API 9P session message-statistics shape parity | The N-API postlude now converts the native `P9Session.stats.messages` object to the oracle's `Map<string, number>` shape, with generated declarations plus local attached-session observability, session-metadata, typecheck, syntax, and diff checks passing. The direct native test also asserts `Map#get("Tversion")`; `node test/p9-native.mjs` is an expected host-gated skip locally. Exact SHA `e8c6043827e6cd0232a28f94b8fc665e25985f76` passed [Native 9P run `35673543701`](https://github.com/andymac4182/mount-rs/actions/runs/35673543701): N-API job `106575123928` passed automatic/direct/structural mounted I/O and cleanup, and Rust job `106575123716` passed all four ignored native tests | Automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, broader upstream member parity, and W01 acceptance remain open; production remains NO-GO |
+| 2026-09-22 | N-API 9P fid-view declaration and representation parity | The direct `./9p` declaration now matches the native N-API fid view: cursor offsets are an array of `{ offset: bigint, index: number }` records, and `Fid.iounit`/`Fid.cursor` are writable. `node test/p9-fids.mjs`, `node test/typecheck.mjs`, `node --check p9.cjs`, and `git diff --check` passed locally. Exact SHA `ba20d29d7e8ad00b3c4b5270dc21cf6ab913e4c2` passed N-API job `106578252549` in [Native 9P run `35674581481`](https://github.com/andymac4182/mount-rs/actions/runs/35674581481), including the Linux probe and automatic/direct/structural mounted-I/O/cleanup checks; Rust job `106578252700` remains queued, so no new full hosted Rust qualification is claimed | The native job must complete before this revision has a full hosted Linux result; broader upstream member parity, automatic cross-transport signal ownership, supervisor-owned crash/reset/half-close recovery, and W01 acceptance remain open; production remains NO-GO |
 
 ## Completion rule
 

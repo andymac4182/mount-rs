@@ -273,6 +273,15 @@ Current focused behavior:
   `e8c6043827e6cd0232a28f94b8fc665e25985f76` passed [Native 9P run
   `35673543701`](https://github.com/andymac4182/mount-rs/actions/runs/35673543701),
   with N-API job `106575123928` and Rust job `106575123716` successful.
+- The direct `./9p` fid declaration follows the native N-API representation:
+  `DirCursor.offsets` is an array of `{ offset: bigint, index: number }`
+  records, and `Fid.iounit`/`Fid.cursor` are writable as they are at runtime.
+  This records the serializable boundary from the oracle's internal offset map;
+  it does not claim a native `Map` at the N-API boundary. Local `p9-fids.mjs`
+  and generated typecheck pass, and exact SHA
+  `ba20d29d7e8ad00b3c4b5270dc21cf6ab913e4c2` passed N-API job `106578252549`
+  in [Native 9P run `35674581481`](https://github.com/andymac4182/mount-rs/actions/runs/35674581481);
+  Rust job `106578252700` remains queued.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested
