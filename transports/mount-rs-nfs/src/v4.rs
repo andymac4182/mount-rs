@@ -1354,6 +1354,34 @@ impl V4OpResult {
 }
 
 impl Op {
+    fn may_mutate(&self) -> bool {
+        !matches!(
+            self,
+            Self::Access(_)
+                | Self::Getattr(_)
+                | Self::Getfh
+                | Self::Lookup(_)
+                | Self::Lookupp
+                | Self::Lockt { .. }
+                | Self::Nverify(_)
+                | Self::Putfh(_)
+                | Self::Putrootfh
+                | Self::Putpubfh
+                | Self::Read(..)
+                | Self::Readdir { .. }
+                | Self::Readlink
+                | Self::Restorefh
+                | Self::Savefh
+                | Self::Secinfo(_)
+                | Self::SecinfoNoName(_)
+                | Self::Sequence { .. }
+                | Self::TestStateid(_)
+                | Self::Verify(_)
+                | Self::BackchannelCtl
+                | Self::Unsupported(_)
+        )
+    }
+
     fn opnum(&self) -> u32 {
         match self {
             Self::Access(_) => OP_ACCESS,
@@ -2257,7 +2285,9 @@ impl Nfs4Session {
         );
         let mut results = vec![sequence_result];
         let mut status = NFS4_OK;
+        let mut may_have_mutated = false;
         for operation in operations.iter().skip(1) {
+            may_have_mutated |= operation.may_mutate();
             let mut result = self.execute_op(operation, &mut cursor, credentials).await;
             if *cachethis
                 && result.status == NFS4_OK
@@ -2327,6 +2357,7 @@ impl Nfs4Session {
         } else {
             None
         };
+        let reply_was_cached = cached_body.is_some();
         if let Some(cached_body) = cached_body {
             let mut state = self.state.lock().expect("NFSv4 state lock");
             if let Some(session) = state.sessions.get_mut(sessionid) {
@@ -2340,7 +2371,12 @@ impl Nfs4Session {
                 }
             }
         }
-        in_flight.complete();
+        if reply_was_cached || !may_have_mutated {
+            in_flight.complete();
+        }
+        // An attempted mutation without a cacheable reply cannot be replayed
+        // safely. Keep the slot incomplete so its drop fences the session,
+        // including when the negotiated cache is too small for an error.
         Ok(body)
     }
 

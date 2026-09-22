@@ -2179,6 +2179,20 @@ Evidence landed without closing the remaining W01 acceptance gates:
   replies, prefixes too large even for the error, crash-durable replay,
   native-client ordering, power-loss durability, and exact-tip hosted
   acceptance remain open; W01-NFS is NO-GO.
+- [x] A completed `SEQUENCE(cachethis=true)` mutation whose reply cannot fit
+  the negotiated cache now fences its session rather than advancing an
+  uncached slot. A real-TCP `REMOVE` under a 96-byte cache previously
+  returned an oversized success then `NFS4ERR_SEQ_MISORDERED` on a
+  changed-target retry; the retry now receives `NFS4ERR_BADSESSION` and
+  cannot delete the second file. Read-only oversized results retain their
+  existing sequence behavior, as the state-limit wire case verifies. The
+  full locked NFS target passes (41 unit, 1 mountpoint claim with 1 native
+  mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors,
+  5 lifecycle, 1 v4 barrier, 20 v4 wire); direct v4 wire 20/20 and strict
+  Clippy pass. The pinned NFS parity gate passes 266 with 18 explicit
+  capability/root skips. This is same-process fail-closed replay, not exact-reply
+  recovery, durable session/handle state, native-client ordering, power-loss
+  durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

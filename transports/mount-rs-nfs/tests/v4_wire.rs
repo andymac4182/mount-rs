@@ -1806,6 +1806,77 @@ fn nfs_v4_oversized_uncached_reply_retries_without_repeating_mutation() {
 }
 
 #[test]
+fn nfs_v4_tiny_cache_fences_uncacheable_completed_mutation() {
+    std::thread::Builder::new()
+        .name("nfs-v4-tiny-cache-fence-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build tiny-cache runtime")
+                .block_on(async {
+                    let driver = MemoryFs::empty();
+                    driver.write_file("/tiny-first", b"first").await.unwrap();
+                    driver.write_file("/tiny-second", b"second").await.unwrap();
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.max_cached_response_size = 96;
+                    let server = NfsServer::new(driver.clone(), options);
+                    let address = server.listen().await.expect("listen NFS server");
+                    let (mut stream, client) =
+                        connect_v4_client(address, 1501, b"tiny-cache-client").await;
+
+                    let mut original = rpc(
+                        &mut stream,
+                        1504,
+                        compound(
+                            "tiny-cache",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("tiny-first")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    let original_body = original.rest();
+                    assert!(original_body.len() > 96, "reply exceeds tiny cache");
+                    let mut parsed = XdrReader::new(&original_body);
+                    parse_compound_header(&mut parsed, 3);
+                    consume_sequence_result(&mut parsed, "tiny-cache sequence");
+                    parse_result_header(&mut parsed, OP_PUTROOTFH);
+                    parse_result_header(&mut parsed, OP_REMOVE);
+                    assert!(driver.stat("/tiny-first").await.is_err());
+
+                    let mut retry = rpc(
+                        &mut stream,
+                        1505,
+                        compound(
+                            "tiny-retry",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("tiny-second")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    assert_eq!(parse_compound_status(&mut retry, 0), NFS4ERR_BADSESSION);
+                    retry.end("tiny-cache retry").unwrap();
+                    assert!(driver.stat("/tiny-second").await.is_ok());
+
+                    stream.shutdown().await.expect("close NFS transport");
+                    server.close().await.expect("close NFS server");
+                });
+        })
+        .expect("spawn tiny-cache test thread")
+        .join()
+        .expect("tiny-cache test thread panicked");
+}
+
+#[test]
 fn nfs_v4_cache_required_oversized_getfh_preserves_mutation_reply() {
     std::thread::Builder::new()
         .name("nfs-v4-cache-required-oversized-getfh-test".into())
