@@ -219,8 +219,11 @@ restore, second region, provider recovery drill or production approval. P03
 remains open. The implementation was published as `896330af` in reconciled
 public merge `924009af061d119404b2ee1f59e86506f7b1cbd2`; shared-wrapper Cargo
 check and strict Clippy passed on that merge. Push-triggered hosted run
-`35716566398` ended cancelled with `jobs=[]`, while dispatched run
-`35716709958` remains queued, so no terminal hosted P03 evidence is claimed.
+`35716566398` ended cancelled with `jobs=[]`. Dispatched run `35716709958` /
+job `106709806523` eventually completed `success` at stale source
+`32b85965deef60c84d90f5fb353f45fb6001a303`; this is hosted policy/static
+evidence for the repository control only, not a provider restore or production
+result, so P03 remains open.
 
 W08.40 adds the credential-free P04 upgrade, compatibility and rollback
 contract in `tests/tidb/production-upgrade-policy.json`, enforced by
@@ -239,8 +242,10 @@ prove a live upgrade, rollback, provider compatibility or production approval.
 P04 remains open. The implementation was published as `016052b7` in
 reconciled public merge `66164b78e03309bf9c36ae01ab7e98fc61925373`; shared-
 wrapper Cargo check and strict Clippy passed on that merge. Push-triggered
-hosted run `35718296219` ended cancelled with `jobs=[]`; the queued dispatched
-run predates W08.40, so no terminal hosted P04 evidence is claimed.
+hosted run `35718296219` ended cancelled with `jobs=[]`. Dispatched run
+`35716709958` / job `106709806523` completed `success` at stale source
+`32b85965deef60c84d90f5fb353f45fb6001a303`, but that source predates W08.40;
+no terminal hosted P04 qualification is claimed and P04 remains open.
 
 W08.41 adds the credential-free P05 observability, SLO and alerting contract in
 `tests/tidb/production-observability-policy.json`, enforced by
@@ -255,6 +260,19 @@ acknowledgement and invalid health paths fail closed. The checks are wired
 into both W08 release workflows. This is a repository implementation/control
 slice of P05 only; it does not prove a live collector, dashboard, pager
 delivery, alert acknowledgement or production approval. P05 remains open.
+
+The W08.41 implementation was committed as `c0782e3c` and published in
+reconciliation merge `e04c28a3058690d08eff4bd7dc528808d57d35cd`; concurrent
+mainline work then fast-forwarded the exact public tip to
+`65776be87f954ef65dfdc68d41687666631ddcfb`, which contains W08.41. The local
+P05 policy/test, shared-wrapper Cargo check, strict Clippy, all P01–P05
+policy/test pairs, rollout/evidence controls, workflow parses and diff check
+passed. Hosted run `35720816013` for `e04c28a3` and follow-on run
+`35720853772` for `65776be8` both ended cancelled before job creation
+(`jobs=[]`), so neither is hosted qualification evidence. P05 remains open:
+the live collector, dashboards/error budget, alert delivery and acknowledgement,
+named on-call ownership, provider-aware staging evidence and production
+approval are still required.
 
 The subsequent public-tip source verification at
 `76c2b1a863c23afe71c0591d0a480433e1b9078d` passed the locked offline workspace
