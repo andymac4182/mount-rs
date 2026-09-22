@@ -3071,7 +3071,12 @@ Evidence landed without closing the remaining W01 acceptance gates:
   `35723080355`, after which macOS observability job `106730232595` started and
   completed successfully with its locked tests and strict Clippy. Twenty-one
   jobs in the active run remain queued or non-terminal; production remains
-  NO-GO.
+  NO-GO. macOS native NFS job `106730232625` then completed successfully with
+  loopback, CLI persistence/cleanup, and SQLite reopen evidence
+  (`sqlite=3.53.4`, `journal=DELETE`; WAL explicitly unsupported on that path),
+  while Ozone/FoundationDB job `106730232411` entered progress without a
+  terminal provider result. The remaining Node/native/Rust/package/provider/
+  W26 gates are still not complete.
 - [x] W04.2 current-tip revalidation: replacement qualification run
   [35692153251](https://github.com/andymac4182/mount-rs/actions/runs/35692153251)
   ran from exact published `d870f900`. macOS-latest
