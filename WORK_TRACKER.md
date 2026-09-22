@@ -13,7 +13,9 @@ but the hard per-drive performance gate is currently `1/4`: PGlite/R2 passed
 at `1340.137102` IOPS; SQLite/R2 failed at `781.576517`, TiDB/R2 at
 `492.510872`, and FoundationDB/R2 at `306.794117`. The three failures are
 hard IOPS failures with complete lifecycle metrics, not skipped or missing
-tests. Aggregate job `106685891954` is still queued, so no aggregate result is
+tests. Aggregate job `106685891954` completed with a fail-closed
+`W26_OZONE_EVIDENCE_PACKET_FAIL` because the compositions log lacked
+`OZONE_IOPS_PASS` for the SQLite/PGlite provider set; no aggregate result is
 promoted. The latest docs-only mainline tip is
 `58fc18c0a3d62dc92108a2be4efff81eb023950a`; it does not alter the tested
 source/lockfile SHA. Production remains **NO-GO** until all providers pass the
