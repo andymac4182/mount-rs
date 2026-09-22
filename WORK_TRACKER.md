@@ -3798,6 +3798,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider, candidate-release, registry, canary, rollback or owner-approval
   evidence, so P01–P09 remain open and the decision remains NO-GO.
 
+  The public source-equivalent checkpoint
+  `62e86dc092dfe9816ef54ca681872ff9f51d8895` passed hosted W08 release-policy
+  run `35683936652`, job `106607017325`, which completed successfully in
+  approximately 2m47s. Its rollout-ledger and release-identity/provenance steps
+  were green. This is hosted implementation/static evidence only; it does not
+  provide production topology, provider, candidate-release, registry, canary,
+  rollback or owner-approval evidence, so P01–P09 remain open and the decision
+  remains NO-GO.
+
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed
   on the insecure/inline-secret fixture, passed the pending and strict accepted

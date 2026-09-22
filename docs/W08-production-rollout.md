@@ -225,6 +225,15 @@ functional qualification only. They do not supply production topology,
 provider, candidate-release, registry, canary, rollback or owner-approval
 evidence, so P01–P09 remain open and the decision remains NO-GO.
 
+The public source-equivalent checkpoint
+`62e86dc092dfe9816ef54ca681872ff9f51d8895` passed hosted W08 release-policy
+run `35683936652`, job `106607017325`, which completed successfully in
+approximately 2m47s. Its rollout-ledger and release-identity/provenance steps
+were green. This is hosted implementation/static evidence only; it does not
+provide production topology, provider, candidate-release, registry, canary,
+rollback or owner-approval evidence, so P01–P09 remain open and the decision
+remains NO-GO.
+
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
 out of band; the insecure/inline-secret fixture failed closed as expected. The
