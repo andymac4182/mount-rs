@@ -5450,6 +5450,14 @@ tip (or a later exact descendant), and no provider may be skipped or averaged.
 | W26.15 / P8 1,000 IOPS per drive | **OPEN / NO-GO** / 95% implementation, 44% hosted qualification | Terminal run is diagnostic: SQLite, TiDB and FoundationDB below target; PGlite just above; no accepted all-provider packet | Dispatch fresh exact-SHA matrix after this push; do not lower target or convert failure to skip | 1.5–4 d per cycle plus external queue | Ozone/provider capacity and hosted CI |
 | P14 integration-readiness review | **NO-GO** / 40% | Aggregate failed closed; current code/local/security evidence is not production acceptance | Re-audit terminal end-to-end packet, then state explicit readiness decision | 1–2 d after W26.15 | Customer secure Ozone topology, 99.99%/5-minute RPO/RTO, DR and release stream |
 
+Current hosted dispatch after the published SQLite chunk: manual run
+`35689474986` selected exact SHA
+`1891c36375296bc3695a9d71233c624cad46445c`. At capture, base Ozone job
+`106623193674` and compositions `106623193668` were queued; TiDB
+`106623193474` and FoundationDB `106623193564` were in progress; the
+aggregate was not yet created. This packet is **NO-GO / not evidence** until
+all producers and the aggregate are terminally successful on that one SHA.
+
 The current W26 source of truth is the detailed [progress ledger](docs/w26-progress-ledger.md).
 `origin/main` is `1626d5381625d81696fa28624342f07087593760`, including the
 published W26 publication-barrier implementation `c7f0e6d0`, bounded mutation
