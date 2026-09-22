@@ -6338,8 +6338,8 @@ listing a source does not mean it has been reviewed or its code can be reused.
   inputs, role/account binding, missing or mismatched expected accounts,
   incomplete or ambiguous credential sources, endpoint overrides, unsafe
   prefixes, and secret-safe output. The local live harness now runs this guard
-  before AWS CLI access and requires `AWS_S3_TEST_EXPECTED_ACCOUNT_ID` whenever
-  an optional role ARN is supplied.
+  before AWS CLI access and requires `AWS_S3_TEST_EXPECTED_ACCOUNT_ID` for
+  every live run, matching an optional role ARN when one is supplied.
 - [x] The hosted AWS workflow now triggers and hashes the harness validator
   and its offline test, and runs the 10-case contract preflight before
   authentication. Existing credential-free rollout fixtures also passed in
@@ -6349,6 +6349,23 @@ listing a source does not mean it has been reviewed or its code can be reused.
   `AWS_S3_TEMPLATE_CONTRACT_PASS statements=5`. These are fail-closed
   safeguards only; they do not replace live W25.3 service acceptance or
   production deployment approval.
+- [x] The follow-up offline acceptance audit tightened account binding for
+  W25.2/W25.3: every local or hosted harness run now requires the reviewed
+  `AWS_S3_TEST_EXPECTED_ACCOUNT_ID`, and the live harness compares the actual
+  STS caller account before claiming any prefix. Credential-free regressions
+  passed as `AWS_S3_TEST_CONFIG_TEST_PASS cases=11` and
+  `AWS_S3_TEST_IDENTITY_TEST_PASS cases=6`; no AWS CLI, Cargo, or provider was
+  contacted by these tests. The source audit also confirmed cleanup remains
+  ownership-gated before deletion and verifies both current objects and all
+  versions/delete markers after cleanup.
+- [ ] Hosted W25.3 PGlite pairing remains a separate open acceptance row. The
+  current `.github/workflows/aws-s3.yml` runs the base AWS harness but does not
+  install `tests/pglite` dependencies or set
+  `MOUNT_RS_RUN_AWS_S3_PGLITE=1`; the local authorized packet has passed the
+  PGlite pairing, writer-fencing, backup/restore, and fresh-server reopen rows,
+  but hosted PGlite acceptance still requires user-authorized AWS OIDC/test
+  bucket access plus the pinned Node dependency setup. No hosted PGlite pass is
+  claimed from this offline audit.
 - [ ] W25.5 Define and approve the production rollout contract: AWS account,
   region and bucket ownership; IaC or an equivalent reviewable change; bucket
   policy, Block Public Access, Object Ownership, encryption/KMS, versioning,

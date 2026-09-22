@@ -19,6 +19,12 @@ expected_account=${AWS_S3_TEST_EXPECTED_ACCOUNT_ID:-}
 [ -n "$bucket" ] || fail missing_bucket
 [ -n "$region" ] || fail missing_region
 [ -n "$prefix" ] || fail missing_prefix
+[ -n "$expected_account" ] || fail missing_expected_account_id
+
+case "$expected_account" in
+  ''|*[!0-9]*) fail invalid_expected_account_id_shape ;;
+esac
+[ "${#expected_account}" -eq 12 ] || fail invalid_expected_account_id_length
 
 case "$bucket" in
   ''|*[!a-z0-9.-]*) fail invalid_bucket_shape ;;
@@ -89,28 +95,13 @@ if [ -n "$role_arn" ]; then
     *[!A-Za-z0-9:/_.+=,@-]*) fail invalid_role_arn_characters ;;
   esac
 
-  [ -n "$expected_account" ] || fail missing_expected_account_id
   role_account=${role_arn#arn:aws:iam::}
   role_account=${role_account%%:role/*}
   case "$role_account" in
     ''|*[!0-9]*) fail invalid_role_account_shape ;;
   esac
   [ "${#role_account}" -eq 12 ] || fail invalid_role_account_length
-  case "$expected_account" in
-    ''|*[!0-9]*) fail invalid_expected_account_id_shape ;;
-  esac
-  [ "${#expected_account}" -eq 12 ] || fail invalid_expected_account_id_length
   [ "$role_account" = "$expected_account" ] || fail role_account_mismatch
-elif [ -n "$expected_account" ]; then
-  case "$expected_account" in
-    ''|*[!0-9]*) fail invalid_expected_account_id_shape ;;
-  esac
-  [ "${#expected_account}" -eq 12 ] || fail invalid_expected_account_id_length
 fi
 
-if [ -n "$role_arn" ]; then
-  account="$expected_account"
-else
-  account=unbound
-fi
-echo "AWS_S3_TEST_CONFIG_PASS bucket=$bucket region=$region account=$account role=redacted"
+echo "AWS_S3_TEST_CONFIG_PASS bucket=$bucket region=$region account=$expected_account role=redacted"

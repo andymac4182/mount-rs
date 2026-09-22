@@ -41,20 +41,22 @@ repository is:
 - incomplete multipart uploads aborted after one day; and
 - no access-key creation as part of this test setup.
 
-The test credential must already be authenticated outside the repository. A
-narrow role/user policy needs, at minimum, `sts:GetCallerIdentity`,
+The test credential must already be authenticated outside the repository. Set
+`AWS_S3_TEST_EXPECTED_ACCOUNT_ID` to the approved 12-digit account for every
+live run; the harness compares the authenticated STS caller account with it
+before claiming a prefix. A narrow role/user policy needs, at minimum,
+`sts:GetCallerIdentity`,
 `s3:ListBucket` restricted by prefix to `mount-rs-tests/aws-s3/*`, and
 `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` restricted to the same
 object ARN prefix. The bucket and prefix must be owned by the test account;
 the harness does not create or discover resources.
 
 For a short-lived least-privilege role, set `AWS_S3_TEST_ROLE_ARN` alongside
-`AWS_PROFILE` (or explicit base credentials) and set
-`AWS_S3_TEST_EXPECTED_ACCOUNT_ID` to the approved 12-digit account. The
-harness obtains temporary role credentials with `sts:AssumeRole` before the
-preflight, requires the role ARN account to match that expected account, and
-uses the resulting credentials for the Rust tests and cleanup. It never creates
-or modifies the role, policy, bucket, or access keys.
+`AWS_PROFILE` (or explicit base credentials). The harness obtains temporary
+role credentials with `sts:AssumeRole` before the preflight, requires the role
+ARN account and the authenticated caller account to match the expected account,
+and uses the resulting credentials for the Rust tests and cleanup. It never
+creates or modifies the role, policy, bucket, or access keys.
 
 For the recorded bucket, the identity policy can be scoped to the harness's
 dedicated test namespace (replace the bucket ARN if the test bucket changes;
