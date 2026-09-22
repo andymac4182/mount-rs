@@ -181,10 +181,12 @@ exclusive-create verifiers are process-local unless the caller supplies a
 stable handle verifier. A caller can reconnect to a still-running server and
 reuse the tested session. A completed, cached v4.1 `REMOVE` reply also survives
 that TCP reconnect: retrying its slot/sequence returns the original body
-without re-executing the operation. This does not qualify in-flight same-slot
-ordering or persistence after a server-process crash. `NfsConnection`
-close/wait state does not provide
-automatic reconnect, lease recovery, or crash-durable session/reply state;
+without re-executing the operation. A same-slot retry that reaches the server
+while the original is blocked waits, then receives the cached original reply
+after release. The per-RPC lease-sweep write lock currently serializes this
+path; prompt `NFS4ERR_DELAY` and overlapping independent-slot execution are
+not qualified. `NfsConnection` close/wait state does not provide automatic
+reconnect, lease recovery, or crash-durable session/reply state;
 the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. A host-backed forced-process-restart test now proves that one
 NFSv4.1 `FILE_SYNC4` write can be reopened and read through a fresh session
