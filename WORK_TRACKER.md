@@ -1189,6 +1189,11 @@ verifies a post-restart round trip. Its host-enabled macOS run passed 1/1 with
 the shared Cargo wrapper; the follow-up hosted run above passed the preceding
 mounted-I/O concurrency version, while hosted qualification of the new
 teardown/restart extension remains open.
+The first exact-tip hosted rerun, CI `35677973511` at
+`6ccea74f0df6001e2627bf33e3c8b4ffb2d9d58b`, reached macOS native WebDAV but
+the harness treated the server-induced `not currently mounted` cleanup result
+as failure; the corrected cleanup now accepts an absent mount and still fails
+if the mount remains active. A fresh hosted rerun is required.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no

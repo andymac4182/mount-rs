@@ -274,7 +274,11 @@ impl NativeMountGuard {
             &unmount_args(&self.client, &self.mountpoint),
         )
         .await?;
-        if !result.status.success() || mounted(&self.client, &self.mountpoint) {
+        // Closing the server may make a native client detach the mount before
+        // its explicit unmount command runs (macOS does this on some hosted
+        // runner images). The desired cleanup state is still achieved when
+        // the mount is gone; only a mount that remains active is a failure.
+        if mounted(&self.client, &self.mountpoint) {
             return Err(format!(
                 "native WebDAV unmount failed ({}): {}",
                 result.status, result.output
