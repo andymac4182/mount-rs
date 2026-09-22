@@ -38,13 +38,23 @@ missing `fdb_c` linker library. Security scan
 `fa9447cc-4cff-4680-baef-d7f7c260d8c5` has complete one-file coverage and zero
 reportable findings. Fresh exact-head Ozone qualification run
 `35712159705 <https://github.com/andymac4182/mount-rs/actions/runs/35712159705>`
-was dispatched against this SHA and is not yet terminal; no hosted result is
-promoted. Production remains **NO-GO** until all feasible provider rows pass
-the hard 1,000-IOPS/drive target, the aggregate has every end-to-end marker,
-and customer/Ozone security, Tier-1 99.99% SLO, five-minute RPO/RTO and
-backup/DR evidence are closed. W26 continues to own compatibility and
-qualification only; customers deploy Ozone, backup/DR remains Ozone/customer
-owned, and releases remain with the separate stream.
+was dispatched against this SHA at workflow head
+`844f4032c857bc5033ab04fd0f853b3f66a25ab2`, which contains the source commit
+as an ancestor. Its FoundationDB artifact `10688630886` is functionally clean
+with `400/400` successful lifecycles, zero timeout/cleanup failures and all
+restart/authority markers, but records `458.266944` IOPS over
+`2618.561118 ms`; the TiDB artifact `10688255611` is likewise functionally
+clean with `400/400` successful lifecycles, zero timeout/cleanup failures and
+fencing/ambiguity markers, but records `421.067715` IOPS over
+`2849.897909 ms`. Both miss the hard target, and the full workflow remains
+non-terminal while SQLite/PGlite, base and aggregate jobs are pending; these
+producer artifacts are not an aggregate pass. Production remains **NO-GO**
+until all feasible provider rows pass the hard 1,000-IOPS/drive target, the
+aggregate has every end-to-end marker, and customer/Ozone security, Tier-1
+99.99% SLO, five-minute RPO/RTO and backup/DR evidence are closed. W26
+continues to own compatibility and qualification only; customers deploy Ozone,
+backup/DR remains Ozone/customer owned, and releases remain with the separate
+stream.
 
 Current W26 CI-reproducibility boundary (2026-09-22): lockfile fix commit
 `1ceaa96486a96ed4288c079dcde2b3b2d18900bb`
