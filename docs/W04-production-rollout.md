@@ -107,8 +107,10 @@ provider or production acceptance record.
 Ubuntu Node [106641134421](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134421)
 also completed successfully with the exact early-rejection and PGlite/restart
 steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API/package/consumer smoke, and
-`providersFailed: 0`. macOS-latest Node remains in progress; this is still a
-partial qualification run and does not change the production NO-GO decision.
+`providersFailed: 0`. macOS-latest Node was still in progress at the earlier
+ledger refresh and later completed successfully; the retained run is still
+partial because native-FUSE/provider/W26 lanes failed, so production remains
+NO-GO.
 
 macOS-latest Node [106641134336](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134336)
 has now also completed successfully with the exact early-rejection and
@@ -119,6 +121,14 @@ retained SHA `e7850fb4`, but the native-FUSE job
 failed its rootless-kernel step and was cancelled while finalizing. This
 retained run is not a latest-tip full qualification or production release
 record.
+
+Its aggregate-native job [106655469380](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106655469380)
+passed `mount-rs N-API artifact aggregation: PASS`, all five native
+distribution-package validations, and `mount-rs clean consumer install/smoke:
+PASS`. The five artifact IDs and SHA-256 digests are retained in the progress
+ledger as qualification provenance only; they are not a signed production
+release identity and do not close deployment, provider, operations, ownership,
+or release-approval gates.
 
 The retained native package artifacts provide current candidate provenance for
 the support matrix:

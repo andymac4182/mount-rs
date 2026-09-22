@@ -2247,6 +2247,13 @@ Evidence landed without closing the remaining W01 acceptance gates:
   its completion hook remained in progress; its direct log blob was unavailable
   (`BlobNotFound`). No native-FUSE acceptance is promoted, and production stays
   **NO-GO**.
+- Aggregate-native `106655469380` completed successfully after the retained run
+  materialized: `mount-rs N-API artifact aggregation: PASS`, all five native
+  distribution-package validations, and `mount-rs clean consumer install/smoke:
+  PASS` are terminally green. The five artifact IDs/digests are retained in
+  [`docs/w04-progress-ledger.md`](docs/w04-progress-ledger.md) as qualification
+  provenance only; this does not override native-FUSE, provider, W26, or
+  production-release gates.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and
