@@ -632,6 +632,13 @@ Intel Node jobs completed successfully, while Ubuntu Node and both native
 WebDAV jobs remained queued at the audit. No terminal current hosted WebDAV
 result is claimable, so this does not change the production **NO-GO** decision.
 
+The preserved non-canceling run remained in the same queue state on the next
+bounded poll: macOS arm64, macOS Intel, and Ubuntu arm64 Node jobs are
+terminal success, while Ubuntu Node `106702902010` and native WebDAV jobs
+`106702902155`/`106702902262` remain queued. This is an external GitHub
+runner-capacity blocker, not a test failure; no current hosted native WebDAV
+result is claimable.
+
 The same rebuilt package also passed the pinned barrel differential, supported
 session/member differential, and current TypeScript/Rust HTTP differential:
 `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921` yielded 40 paired
