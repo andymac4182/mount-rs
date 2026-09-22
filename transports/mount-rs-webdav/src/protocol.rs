@@ -1386,6 +1386,9 @@ pub fn basic_authorization(header: &str, username: &str, password: &str) -> bool
     let Some(encoded) = header.strip_prefix("Basic") else {
         return false;
     };
+    if !encoded.starts_with(' ') {
+        return false;
+    }
     let encoded = encoded.trim_start_matches(' ');
     if encoded.is_empty()
         || encoded.chars().any(char::is_whitespace)

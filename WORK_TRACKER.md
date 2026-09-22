@@ -1727,6 +1727,11 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package targets and warning-denied Clippy passed, and the native mount test
   remains explicitly ignored. Provider/native/hosted qualification,
   power-loss durability, durable locks, and broader ordering remain open.
+- [x] The WebDAV Basic parser now requires the oracle/RFC `Basic +<base64>`
+  separator instead of accepting a scheme concatenated directly with the
+  payload. The live authenticated HTTP regression rejects `Basic<base64>` and
+  still accepts the configured credentials; provider/native/hosted lifecycle,
+  power-loss durability, durable locks, and broader ordering remain open.
 - [x] The WebDAV N-API scope decision now records the oracle-only clock,
   assertion-callback, and live-lock-table boundaries explicitly. The focused
   Rust test `./scripts/cargo-shared test -p mount-rs-webdav --test webdav
@@ -3653,8 +3658,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Tested source base `c6d6778517f854ac678a80920fe4fb8afd204808` was freshly
-  reverified after the FoundationDB storage/test qualification changes, 9P
+  Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
+  reverified after the 9P N-API server-lifecycle gate isolation, the WebDAV
+  bounded propfind/copy failure fix, the
+  FoundationDB storage/test qualification changes, 9P
   undefined-UID preservation, W07 lease-authority telemetry, N-API
   postbuild/session-metadata changes, the W26 fenced-metadata publication fast
   path, the 9P platform-type alias and 9P direct-probe
@@ -3675,9 +3682,15 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   package JSON also passed static checks. Provider/native rows requiring TiDB,
   RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in skips. This is
   source-health and tracking-control evidence only and does not close
-  W08-P01–P09. This exact merged source was requalified after the FoundationDB,
-  9P, W07 and N-API source changes; no source result is inferred from a
-  documentation-only merge.
+  W08-P01–P09. This exact merged source was requalified after the 9P
+  workflow/server, WebDAV, FoundationDB, 9P, W07 and N-API source changes; no
+  source result is inferred from documentation-only evidence.
+
+  Hosted W08 policy run `35681936375` at source
+  `e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
+  successfully in 2m48s. Its rollout-ledger and release-identity/provenance
+  checks are hosted implementation/static evidence only; they do not create
+  provider, candidate-release, canary, rollback or owner-approval evidence.
 
   A fresh 11:36 AEST repository-policy check passed the positive production
   config fixture with an out-of-band non-secret TLS-policy URL, failed closed

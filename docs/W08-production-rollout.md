@@ -162,8 +162,10 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Tested source base `c6d6778517f854ac678a80920fe4fb8afd204808` was freshly
-reverified locally after the FoundationDB storage/test qualification changes,
+Tested source base `c9df268902335934dbe2c369de881803ca376bcd` was freshly
+reverified locally after the 9P N-API server-lifecycle gate isolation, the
+WebDAV bounded propfind/copy failure fix, the
+FoundationDB storage/test qualification changes,
 9P undefined-UID preservation, W07 lease-authority telemetry, N-API
 postbuild/session-metadata changes, the W26 fenced-metadata publication fast
 path, the 9P platform-type alias and 9P direct-probe
@@ -185,9 +187,15 @@ packet remains NO-GO with zero evidence records. Changed N-API JavaScript and
 package JSON also passed static checks. This is source-health and tracking-
 control evidence only and does not close any production gate. Provider/native
 rows requiring TiDB, RustFS, PGlite, R2, FUSE or NFS remained explicit opt-in
-skips. This exact merged source was requalified after the FoundationDB, 9P,
-W07 and N-API source changes; no source result is inferred from a
-documentation-only merge.
+skips. This exact merged source was requalified after the 9P workflow/server,
+WebDAV, FoundationDB, 9P, W07 and N-API source changes; no source result is
+inferred from documentation-only evidence.
+
+Hosted W08 policy run `35681936375` at source
+`e7be3769dd7c6722ce096c481f30d042d7895dbe`, job `106600554617`, completed
+successfully in 2m48s. Its rollout-ledger and release-identity/provenance
+checks are hosted implementation/static evidence only; they do not create
+provider, candidate-release, canary, rollback or owner-approval evidence.
 
 A fresh credential-free admission check at **2026-09-22 11:36 AEST** passed the
 positive production-config fixture with a non-secret TLS-policy URL supplied
