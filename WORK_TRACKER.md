@@ -5072,8 +5072,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   dedicated W08 release-policy workflow and protected production admission.
   Implementation commit `263be2f4` was reconciled with concurrent mainline
   changes and published in exact public merge `fab2a0cb`; hosted W08 policy
-  run `35709828967` targets that publication and was pending at the ledger
-  refresh, so it is not evidence.
+  run `35709828967`, exact head `fab2a0cb`, job `106688181078`, completed
+  successfully in about 2m45s. Its topology-control, rollout/evidence and
+  release-policy artifact checks are hosted implementation/static evidence
+  only, not provider or production acceptance.
   This is a P01 implementation/control boundary only; it does not prove a
   deployed topology, quorum, provider durability, capacity or production
   approval. *(Implementation/static qualification; provider and production
