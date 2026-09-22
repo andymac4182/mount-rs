@@ -2129,6 +2129,46 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    #[test]
+    fn panicking_transport_error_hook_isolated_and_reported_once() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let callback_calls = Arc::clone(&calls);
+        let state = MountState::new(
+            MountMode::Privileged,
+            PathBuf::from("/tmp/mount-rs-fuse-hook-panic-test"),
+            MountOptions::default(),
+            None,
+            FuseMountHooks {
+                on_transport_error: Some(Arc::new(move |_error| {
+                    callback_calls.fetch_add(1, Ordering::AcqRel);
+                    panic!("injected transport-error hook panic");
+                })),
+            },
+        );
+
+        state.record_transport_error(FuseTransportError::from_message(
+            FuseTransportErrorKind::Protocol,
+            "first transport failure".to_owned(),
+        ));
+        state.record_transport_error(FuseTransportError::from_message(
+            FuseTransportErrorKind::Task,
+            "second transport failure".to_owned(),
+        ));
+
+        assert_eq!(calls.load(Ordering::Acquire), 1);
+        assert_eq!(
+            state
+                .transport_error
+                .lock()
+                .expect("transport error lock")
+                .as_deref(),
+            Some("first transport failure")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn aborting_session_task_marks_mount_closed() {
         let state = Arc::new(MountState::new(
