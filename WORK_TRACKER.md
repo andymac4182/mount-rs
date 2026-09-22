@@ -2031,6 +2031,17 @@ Evidence landed without closing the remaining W01 acceptance gates:
   The retry waits at the per-RPC global lease-sweep write lock, so prompt
   RFC-recommended `NFS4ERR_DELAY` and independent-slot overlap remain open;
   this is not crash-durable replay or production acceptance. W01-NFS is NO-GO.
+- [x] The v4.1 slot admission path now records an active sequence and answers
+  a fully decoded same-slot retry before the global lease-sweep lock: the
+  blocked-backend real-TCP test receives bounded `NFS4ERR_DELAY`, a premature
+  next sequence receives `NFS4ERR_SEQ_MISORDERED`, and the original reply is
+  cached after release. A unit test covers slot-sequence wrap from `u32::MAX`
+  to zero. The focused case passed 20 reruns; the complete locked NFS target
+  passed (41 unit, 1 mountpoint claim with 1 native mount ignored, 2 restart,
+  1 rootless wire, 3 concurrency, 4 errors, 5 lifecycle, 1 v4 barrier, 9 v4
+  wire), with strict Clippy green. Independent-slot overlap, canceled-operation
+  reply recovery, crash-durable replay, native-client ordering, power-loss
+  durability, and exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

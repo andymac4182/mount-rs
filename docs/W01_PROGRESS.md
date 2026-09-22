@@ -332,10 +332,13 @@ orderly TCP reconnect: the same cached slot/sequence returns the original
 mutating `REMOVE` reply without removing a changed target, and the next
 sequence advances normally. A blocked-backend retry of an in-flight
 same-slot request also reaches the server, waits, and then returns the cached
-original body without re-execution. The per-RPC lease-sweep write lock
-currently serializes v4 calls, so these tests do not prove prompt
-`NFS4ERR_DELAY` or overlapping execution on independent slots. Crash-durable
-replay, native-client ordering, and exact-tip hosted acceptance remain open.
+original body without re-execution. A follow-up active-slot guard now returns
+prompt `NFS4ERR_DELAY` to that retry and `NFS4ERR_SEQ_MISORDERED` to a
+premature next sequence, while the completed reply remains replayable; slot
+sequence wrap to zero is unit-tested. The per-RPC lease-sweep write lock still
+serializes ordinary v4 calls, so overlapping execution on independent slots
+is not qualified. Canceled-operation reply recovery, crash-durable replay,
+native-client ordering, and exact-tip hosted acceptance remain open.
 
 WebDAV's streamed `PUT` boundary is deliberately oracle-compatible rather
 than an atomic-publication promise: a body failure returns an error and leaves
