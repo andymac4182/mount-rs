@@ -655,8 +655,10 @@ function checkServerAndKvSubpaths(): void {
     clientId: "types",
   }
   const p9Lock: P9Lock | undefined = p9LockTable.at("/")[0]
-  const p9LockHolder: P9LockHolder | null = p9Locks.getlock(p9LockRequest)
-  const p9User: P9User | null = p9Session.userFor(1)
+  const p9LockHolder: P9LockHolder | undefined = p9Locks.getlock(p9LockRequest)
+  const p9User: P9User | undefined = p9Session.userFor(1)
+  const p9Msize: number | undefined = p9Session.msize
+  const p9SessionVersion: string | undefined = p9Session.version
   const connectionId: number = p9Connection.id
   const connectionPeer: string | null | undefined = p9Connection.peer
   const connectionClosed: boolean = p9Connection.isClosed
@@ -679,6 +681,8 @@ function checkServerAndKvSubpaths(): void {
   void p9LockHolder
   void attachedP9Peer
   void attachedP9Stream
+  void p9Msize
+  void p9SessionVersion
   void attachedP9Call
   void attachedP9Destroy
   void disposal

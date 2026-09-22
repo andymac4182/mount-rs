@@ -24,6 +24,8 @@ const request = (overrides = {}) => ({
 
 assert.equal(table.files, 0);
 assert.equal(table.size, 0);
+assert.equal(table.getlock(request()), undefined);
+assert.equal(first.getlock(request()), undefined);
 assert.equal(first.lock(request()), P9_LOCK_SUCCESS);
 assert.equal(first.held, 1);
 assert.equal(table.files, 1);
