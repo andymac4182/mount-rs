@@ -2235,6 +2235,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   smoke, and `providersFailed: 0` all passed. macOS-latest Node `106641134336`
   remains in progress, so the run is still partial and no new full-qualification
   or production claim is made.
+- macOS-latest Node `106641134336` has now also completed successfully with
+  the exact fragmented early-rejection and PGlite/restart steps,
+  `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration, and
+  `providersFailed: 0`. Together with ARM `106641134434`, macOS-15-intel
+  `106641134367`, and Ubuntu `106641134421`, all four Unix Node recovery lanes
+  pass for retained SHA `e7850fb4`; this does not replace latest-tip
+  requalification.
+- Native FUSE job `106641134269` failed `Exercise actual rootless kernel file
+  operations`, skipped its downstream mounted checks, and was cancelled while
+  its completion hook remained in progress; its direct log blob was unavailable
+  (`BlobNotFound`). No native-FUSE acceptance is promoted, and production stays
+  **NO-GO**.
 - [x] W04.3 Integrate versioning, mount-free VFS and native SQLite-hosting tests.
   The rebased packet (`43ded00`, `980cdd7`, `2d2ac5c`, `be2170b`, final
   rebased tip `7235fde`) adds durable PGlite version metadata, reconnect and

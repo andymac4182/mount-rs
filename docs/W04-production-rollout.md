@@ -79,8 +79,9 @@ targets exact SHA `e7850fb41775351503e5aa685484906b3a3cbbe4`. Its ARM and
 macOS-15-intel Node jobs passed the exact early-rejection and PGlite/restart
 steps, but Ozone/FoundationDB failed its lifecycle capacity gate at `396.44`
 IOPS versus `1000`, and both TiDB lanes failed their ambiguous-commit functional
-boundary. The macOS-latest and Ubuntu Node jobs were still queued at the latest
-ledger refresh. This is qualification evidence only; production remains
+boundary. The macOS-latest and Ubuntu Node jobs were still queued at the
+earlier ledger refresh; both later completed successfully in the retained run.
+This is qualification evidence only; production remains
 **NO-GO**.
 
 The same run separately passed the materialized RustFS,
@@ -108,6 +109,16 @@ also completed successfully with the exact early-rejection and PGlite/restart
 steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API/package/consumer smoke, and
 `providersFailed: 0`. macOS-latest Node remains in progress; this is still a
 partial qualification run and does not change the production NO-GO decision.
+
+macOS-latest Node [106641134336](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134336)
+has now also completed successfully with the exact early-rejection and
+PGlite/restart steps, `PGLITE_BACKUP_RESTORE_ROLLBACK_PASS`, N-API integration,
+and `providersFailed: 0`. All four Unix Node recovery lanes therefore pass for
+retained SHA `e7850fb4`, but the native-FUSE job
+[106641134269](https://github.com/andymac4182/mount-rs/actions/runs/35695427227/job/106641134269)
+failed its rootless-kernel step and was cancelled while finalizing. This
+retained run is not a latest-tip full qualification or production release
+record.
 
 The retained native package artifacts provide current candidate provenance for
 the support matrix:
