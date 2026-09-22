@@ -935,6 +935,10 @@ PUT/GET pairs, a chunked streamed PUT/GET, live Basic-auth
 challenge/acceptance, and one exact-once live request-error callback. The
 provider-backed direct-session matrix also passes 128 concurrent NodeFs and
 SQLite PUT/GET pairs in three repetitions with exact byte readback. The
+published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036` had
+exact-SHA CI/Fault injection/W08 workflows queued or pending, W04 policy
+succeeded, Live Cloudflare R2 failed, and unrelated Native 9P in progress; no
+hosted WebDAV PASS is claimable from that packet. The
 opt-in
 `MOUNT_RS_SERVER_PHASE=webdav node test/servers.mjs` phase also passes the
 host-enabled WebDAV network/fault/restart matrix, while the package-wide

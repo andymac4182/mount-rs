@@ -77,6 +77,11 @@ concurrent NodeFs and SQLite PUT/GET pairs with exact byte readback. This is
 local provider evidence only; hosted remote-provider, network, power-loss,
 durable-lock, and wider ordering/concurrency gates remain open.
 
+For published provider packet `fb9caec81a7e3fa183f5fa51871117e62fa35036`, the
+exact-SHA CI/Fault injection/W08 workflows were queued or pending, W04 policy
+succeeded, Live Cloudflare R2 failed, and an unrelated Native 9P workflow was
+still in progress. No hosted WebDAV PASS is claimable from that packet.
+
 For published packet `4719eb50a6e2d48e4539c10f0638fa2f493301c1`, exact-SHA CI,
 Fault injection, and both W08 release workflows were cancelled; W04 production
 policy succeeded, while Live Cloudflare R2 and an unrelated Native 9P workflow
