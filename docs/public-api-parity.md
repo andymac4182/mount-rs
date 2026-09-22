@@ -369,6 +369,20 @@ Current focused behavior:
   `2f0e23a4bc5ba79fef61426137da365cbcd55f42` passed [Native 9P run `35688865494`](https://github.com/andymac4182/mount-rs/actions/runs/35688865494),
   N-API job `106621392719`, with Rust job `106621392818` also green. Broader
   server-boundary parity remains a separate gate.
+- The direct N-API session class is now constructible as
+  `new P9Session(driver, options?)` over the public native `Filesystem`
+  boundary. The optional session policy includes `msize`, inode/read-only/
+  ownership/debug flags, a shared `P9LockTable`, and request-error/assertion
+  hooks; `session.options` returns effective serializable policy and omits live
+  callback functions. A mount-free regression proves malformed frames return
+  `null` with an `EPROTO` callback, unsupported messages return `Rlerror` with
+  `ENOTSUP`, and `destroy()` releases callback handles so the Node process
+  exits. Exact SHA `1e9fffe0f2765e0be17c1a2e394b70c05dea112e` passed [Native 9P
+  run `35690887775`](https://github.com/andymac4182/mount-rs/actions/runs/35690887775),
+  N-API job `106627448717`, with Rust job `106627448526` also green. The
+  direct constructor deliberately does not adapt structural `FsDriver` values;
+  structural adaptation remains on the factory/mount seams, and broader
+  upstream session parity remains separate.
 - The N-API object boundary keeps serializable lifecycle views: native
   `P9Server.address()`/`path` use string-or-null representations, and effective
   `onError`/`onAssertion` hooks are omitted from `server.options` and
