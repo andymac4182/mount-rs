@@ -370,7 +370,16 @@ SQL`,
         its <code>syncfs</code> barrier and return an error if that barrier
         fails; volatile drivers remain unchanged. This is a local mutation
         acknowledgment boundary, not proof of provider or power-loss
-        durability.
+        durability. The subsequent local S3 qualification packet at exact
+        revision <code>71972b28</code> passed the release N-API build, 990
+        pinned-oracle tests with 79 explicit skips, 4 unit, 6 chunked, 29
+        gateway, and 5 public-API Rust tests, 64-way direct-session/CAS
+        concurrency, process restart, structural-factory parity, and the
+        40-case S3/WebDAV HTTP differential. It remains local/oracle evidence;
+        the latest AWS admission <code>35679010203</code> stopped at
+        <code>missing_bucket</code> and R2 admission <code>35679010292</code>
+        stopped at <code>count=281 limit=20</code>, so neither produced a live
+        service PASS.
       </>
     ),
     inspectLabel: 'List, head, range-read, and delete an owned prefix',
@@ -466,7 +475,7 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Hosted R2 acceptance run', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675' },
       { label: 'Hosted R2 benchmark artifact', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35579174675/artifacts/10630750055' },
-      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35675116591' },
+      { label: 'Latest hosted R2 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35679010292' },
     ],
   },
   rustfs: {
@@ -1050,14 +1059,19 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
         <code>AWS_S3_CI_CONFIG_BLOCKED missing_bucket</code>. The local
         <code>process.abort()</code> multipart restart check is
         native-filesystem evidence only; neither result changes the live AWS
-        or power-loss acceptance boundary.
+        or power-loss acceptance boundary. The latest admission
+        <code>35679010203</code> at published source <code>9e98f14</code>
+        reached the same protected-config validator and stopped at
+        <code>missing_bucket</code> before AWS authentication. No live AWS
+        service PASS is claimable until the protected bucket, region, account,
+        versioning, and OIDC role inputs are provisioned.
       </>
     ),
     sources: [
       { label: 'AWS S3 workstream', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w25--actual-aws-s3-integration' },
       { label: 'AWS S3 production rollout checklist', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'AWS S3 operations runbook', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-operations-runbook.md' },
-      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35669918721' },
+      { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35679010203' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
@@ -1207,7 +1221,15 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
         checks are green. Fresh hosted run <code>35672928117</code> targets
         exact SHA <code>fbc8346d</code>, but its Ozone producers were queued or
         in progress and no aggregate existed at the recorded snapshot, so it
-        is not acceptance evidence.
+        is not acceptance evidence. The later terminal diagnostic packet
+        <code>35674425514</code> completed 1,200/1,200 lifecycle operations
+        with zero timeouts and cleanup failures for every provider row, but
+        measured only 637.01 IOPS for SQLite/R2, 457.65 for PGlite/R2,
+        147.31 for TiDB/R2, and 126.50 for FoundationDB/R2 against the hard
+        1,000-IOPS target; its aggregate failed closed without pass markers.
+        Fresh run <code>35678993571</code> now targets exact SHA
+        <code>4b4fe43a</code> and remains queued, so it is not acceptance
+        evidence.
       </>
     ),
     sources: [
@@ -1219,7 +1241,7 @@ aws s3api get-object --endpoint-url "$OZONE_ENDPOINT" \
       { label: 'Ozone production rollout contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-production-rollout.md' },
       { label: 'Latest hosted Ozone qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35635486040' },
       { label: 'Current Ozone remediation qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35641941218' },
-      { label: 'Current publication-barrier qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35672928117' },
+      { label: 'Current publication-barrier qualification', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35678993571' },
     ],
   },
 } as const satisfies Record<string, ProviderSpec>
