@@ -1039,6 +1039,9 @@ target passes 28/28, and the rebuilt N-API/WebDAV-only host phase remains green.
 The response stream has a native loopback fault regression as well: a short
 driver read fails the client body after `200` headers and produces one
 peer-qualified `Connection` transport report.
+The public `WebdavRequestBody` documentation now states the corresponding
+contract: only known 413 limit faults are drainable for keep-alive reuse;
+non-recoverable body faults close the connection boundary.
 The current hosted provider audit confirms the external boundary: Live AWS S3
 run `35679010203` failed its protected preflight with
 `AWS_S3_CI_CONFIG_BLOCKED missing_bucket` and empty bucket/region/account/role
@@ -5778,6 +5781,7 @@ cross-drive isolation.
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
 | `2026-09-22 WebDAV streamed-response fault evidence` | Prove that a short driver read fails an HTTP response body and reaches the peer-qualified transport-error hook | Focused WebDAV target 28/28, warning-denied Clippy and formatting pass; hosted lifecycle/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
+| `2026-09-22 WebDAV body-stream contract clarification` | Align the public Rust request-body documentation with the published fail-closed drain behavior | Documentation-only clarification; the 28/28 WebDAV, warning-denied Clippy and formatting evidence remains the governing local result, while hosted/provider and durability gates remain open |
 | `2026-09-22 WebDAV unread-body fault packet` | Preserve framing after drainable 413 limits, but report non-recoverable unread-body faults once and close the HTTP connection | Focused WebDAV target 27/27, warning-denied Clippy, formatting, rebuilt N-API addon, generated typecheck, WebDAV-only host-enabled integration, and structural WebDAV regression pass; hosted/provider, power-loss, durable-lock, crash/restart, and same-resource ordering remain open |
 | `2026-09-22 WebDAV structural bounded-listing packet` | Forward the optional structural N-API `FsDriver.readdirBounded(path, maxEntries)` callback and reject over-large callback results as `EOVERFLOW`; exercise bounded PROPFIND, recursive COPY/DELETE, provider overflow, and the explicit absent-capability boundary | Release addon, generated typecheck, WebDAV-only host-enabled server phase, and focused structural WebDAV regression pass; hosted package/provider qualification, power-loss ordering, durable locks, crash/power-loss restart, and same-resource ordering remain open |
 | `2026-09-22 FUSE boundary packet` | Reject unsafe and transport-owned `MountOptions.mount_options` tokens before native Linux FUSE mount/helper invocation | Focused `mount-rs-fuse` all-target tests and strict Clippy passed on macOS; hosted `/dev/fuse`, crash/concurrency, callback-event, and FSKit gates remain open |
