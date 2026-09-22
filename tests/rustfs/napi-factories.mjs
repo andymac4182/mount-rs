@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { createChunkedDriver, Filesystem } from "../../integrations/mount-rs-napi/index.js";
+import { createChunkedDriver, Filesystem } from "../../bindings/mount-rs-napi/index.js";
 
 const required = (name) => {
   const value = process.env[name];

@@ -1,0 +1,14 @@
+[package]
+name = "mount-rs-sqlite-fs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Snapshot-backed SQLite filesystem for mount-rs"
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/mount-rs"
+readme = "README.md"
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+mount-rs-persist = { path = "../mount-rs-persist" }
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }

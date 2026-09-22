@@ -33,7 +33,7 @@ jobs:
             actual_binary_validates_the_loopback_ozone_provider_config_without_credentials_or_network
           cargo test --locked -p mount-rs-cli r2_endpoint_validation_rejects_unsafe_url_shapes
           node examples/node-cli/index.mjs \
-            --config crates/mount-rs-cli/examples/config-pglite-ozone.json --check
+            --config apps/mount-rs-cli/examples/config-pglite-ozone.json --check
       - name: Verify W26 Ozone production config policy without credentials or network
         run: |
           set -o pipefail
@@ -153,7 +153,7 @@ jobs:
       - name: Install the real PGlite composition service
         run: pnpm --dir tests/pglite install --frozen-lockfile
       - name: Install the public Node SDK test addon
-        run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+        run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Build the public Node SDK test addon outside the checkout
         env:
           CARGOFLAGS: --locked
@@ -161,7 +161,7 @@ jobs:
           set -eu
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
-          pnpm --dir integrations/mount-rs-napi exec napi build \
+          pnpm --dir bindings/mount-rs-napi exec napi build \
             --platform --release --no-js --output-dir "$napi_stage"
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
@@ -217,7 +217,7 @@ jobs:
           version: 11
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - name: Install the public Node SDK test addon
-        run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+        run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Build the public Node SDK test addon outside the checkout
         env:
           CARGOFLAGS: --locked
@@ -225,7 +225,7 @@ jobs:
           set -eu
           napi_stage="$RUNNER_TEMP/mount-rs-napi-stage"
           mkdir -p "$napi_stage"
-          pnpm --dir integrations/mount-rs-napi exec napi build \
+          pnpm --dir bindings/mount-rs-napi exec napi build \
             --platform --release --no-js --output-dir "$napi_stage"
           native_path=$(find "$napi_stage" -maxdepth 1 -type f -name '*.node' -print)
           test -n "$native_path"
@@ -380,11 +380,11 @@ jobs:
       - name: Install real PGlite and Node factory prerequisites
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile
-          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Build the N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
       - name: Verify nested process timeout cleanup
         run: sh scripts/test-rustfs-combo-timeout.sh
       - name: Verify bounded Docker command cleanup
@@ -424,11 +424,11 @@ jobs:
       - name: Install real PGlite and Node factory prerequisites
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile
-          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Build the default N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
       - name: Install and verify the Linux FUSE prerequisite for the FDB CLI gate
         run: |
           sudo apt-get update
@@ -528,12 +528,12 @@ jobs:
       - name: Install real PGlite and Node factory prerequisites
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile
-          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Build the N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
           CARGO_TARGET_DIR: ${{ runner.temp }}/mount-rs-tidb-rustfs-cargo-target
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
       - name: Install and verify the Linux FUSE prerequisite for the consumer gate
         run: |
           sudo apt-get update
@@ -663,18 +663,18 @@ jobs:
           pattern: native-*
           path: ${{ runner.temp }}/mount-rs-native-artifacts
           merge-multiple: true
-      - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Check packaging validation regressions
-        run: node integrations/mount-rs-napi/test/distribution-aggregate.mjs
+        run: node bindings/mount-rs-napi/test/distribution-aggregate.mjs
       - name: Validate all five native distribution packages without publishing
         run: >-
-          pnpm --dir integrations/mount-rs-napi run aggregate:artifacts --
+          pnpm --dir bindings/mount-rs-napi run aggregate:artifacts --
           --input-dir "$RUNNER_TEMP/mount-rs-native-artifacts"
           --staging-dir "$RUNNER_TEMP/mount-rs-native-package"
           --keep-staging
       - name: Install and smoke-test a clean consumer from the staged package
         run: >-
-          pnpm --dir integrations/mount-rs-napi run test:distribution:consumer --
+          pnpm --dir bindings/mount-rs-napi run test:distribution:consumer --
           --package-dir "$RUNNER_TEMP/mount-rs-native-package"
 
   native-fuse:
@@ -829,36 +829,36 @@ jobs:
         with:
           version: 11
       - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
-      - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Install pinned oracle dependencies without lifecycle scripts
         run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - name: Build the Windows N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
       - name: Verify portable Windows N-API parity against the pinned oracle
         env:
           MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source
-        run: pnpm --dir integrations/mount-rs-napi test
+        run: pnpm --dir bindings/mount-rs-napi test
       - name: Verify Windows structural-driver adapter harness
-        run: node integrations/mount-rs-napi/test/structural-native.mjs
+        run: node bindings/mount-rs-napi/test/structural-native.mjs
       - name: Verify native Windows Node factories and chunked storage
         run: |
-          node integrations/mount-rs-napi/test/factories.mjs
-          node integrations/mount-rs-napi/test/chunked.mjs
-          node integrations/mount-rs-napi/test/shutdown-lifecycle.mjs
+          node bindings/mount-rs-napi/test/factories.mjs
+          node bindings/mount-rs-napi/test/chunked.mjs
+          node bindings/mount-rs-napi/test/shutdown-lifecycle.mjs
       - name: Verify Windows virtual filesystem consumers and declarations
         run: |
-          pnpm --dir integrations/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
-          pnpm --dir integrations/mount-rs-virtual-fs test
-          pnpm --dir integrations/mount-rs-virtual-fs typecheck
+          pnpm --dir bindings/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
+          pnpm --dir bindings/mount-rs-virtual-fs test
+          pnpm --dir bindings/mount-rs-virtual-fs typecheck
 
       - name: Verify Windows package distribution
-        run: node integrations/mount-rs-napi/test/distribution.mjs
+        run: node bindings/mount-rs-napi/test/distribution.mjs
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-win32-x64-msvc
-          path: integrations/mount-rs-napi/mount-rs.win32-x64-msvc.node
+          path: bindings/mount-rs-napi/mount-rs.win32-x64-msvc.node
           if-no-files-found: error
 
   node:
@@ -882,20 +882,20 @@ jobs:
       - uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda # v4.1.0
         with:
           version: 11
-      - run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+      - run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Install pinned oracle dependencies without lifecycle scripts
         run: pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - name: Build the N-API addon with the locked Rust graph
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
-      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir integrations/mount-rs-napi test
+        run: pnpm --dir bindings/mount-rs-napi build
+      - run: MOUNTX_SOURCE="$GITHUB_WORKSPACE/mountx-source" pnpm --dir bindings/mount-rs-napi test
       - name: Verify real just-bash and Mastra consumers
         timeout-minutes: 5
         run: |
-          pnpm --dir integrations/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
-          pnpm --dir integrations/mount-rs-virtual-fs test
-          pnpm --dir integrations/mount-rs-virtual-fs typecheck
+          pnpm --dir bindings/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
+          pnpm --dir bindings/mount-rs-virtual-fs test
+          pnpm --dir bindings/mount-rs-virtual-fs typecheck
       - name: Verify storage benchmark harness and smoke workload
         timeout-minutes: 5
         run: |
@@ -920,7 +920,7 @@ jobs:
       - name: Verify real Node addon mounted I/O and cleanup
         env:
           MOUNT_RS_NAPI_NATIVE_MOUNT: '1'
-        run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/native.mjs"], check=True, timeout=180)'
+        run: python3 -c 'import subprocess; subprocess.run(["node", "bindings/mount-rs-napi/test/native.mjs"], check=True, timeout=180)'
       - name: Verify Node SDK CLI native mount on Linux FUSE or macOS NFS
         if: runner.os == 'Linux' || runner.os == 'macOS'
         timeout-minutes: 5
@@ -932,12 +932,12 @@ jobs:
         env:
           MOUNT_RS_NAPI_STRUCTURAL_NATIVE_MOUNT: '1'
           MOUNT_RS_NAPI_STRUCTURAL_TRANSPORT: fuse
-        run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
+        run: python3 -c 'import subprocess; subprocess.run(["node", "bindings/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
       - name: Verify structural-driver native mount lifecycle on macOS
         if: runner.os == 'macOS'
         env:
           MOUNT_RS_NAPI_STRUCTURAL_NATIVE_MOUNT: '1'
-        run: python3 -c 'import subprocess; subprocess.run(["node", "integrations/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
+        run: python3 -c 'import subprocess; subprocess.run(["node", "bindings/mount-rs-napi/test/structural-native.mjs"], check=True, timeout=180)'
       - run: pnpm --dir tests/upstream install --frozen-lockfile
       - name: Run the unmodified upstream driver conformance suite
         timeout-minutes: 5
@@ -973,5 +973,5 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: native-${{ matrix.os }}
-          path: integrations/mount-rs-napi/*.node
+          path: bindings/mount-rs-napi/*.node
           if-no-files-found: error

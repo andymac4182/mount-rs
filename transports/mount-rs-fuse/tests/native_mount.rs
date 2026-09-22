@@ -19,11 +19,12 @@ mod linux {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
-    use mount_rs_core::{FileHandle, FsDriver, MemoryFs};
+    use mount_rs_core::{FileHandle, FsDriver};
     use mount_rs_fuse::mount::{
         FuseMountHooks, FuseTransportError, FuseTransportErrorKind, MountOptions, mount,
         mount_with_hooks,
     };
+    use mount_rs_memfs::MemoryFs;
 
     static NEXT_MOUNTPOINT_ID: AtomicU64 = AtomicU64::new(0);
 

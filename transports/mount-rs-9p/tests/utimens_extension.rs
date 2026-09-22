@@ -8,7 +8,8 @@ use mount_rs_9p::{
     P9_TVERSION, P9Session, P9Time, Tattach, Tsetattr, Tversion, decode_message, encode_message,
     read_rversion, write_tattach, write_tsetattr, write_tversion,
 };
-use mount_rs_core::{FsDriver, MemoryFs};
+use mount_rs_core::FsDriver;
+use mount_rs_memfs::MemoryFs;
 
 type TimestampCall = (String, i128, i128, bool);
 

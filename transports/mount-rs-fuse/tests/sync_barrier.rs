@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use mount_rs_core::{
-    Capabilities, ErrorCode, FileHandle, FsDriver, FsError, MemoryFs, OpenFlags, Result, Stats,
+    Capabilities, ErrorCode, FileHandle, FsDriver, FsError, OpenFlags, Result, Stats,
 };
 use mount_rs_fuse::{RequestHeader, constants::FUSE_SYNCFS, session::FuseSession};
+use mount_rs_memfs::MemoryFs;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicUsize, Ordering},

@@ -7,7 +7,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use mount_rs_9p::{P9Mount, P9MountOptions, mount_9p, p9_client_probe, parse_mount_table};
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use tokio::process::Command;
 use tokio::task::spawn_blocking;
 use tokio::time::timeout;

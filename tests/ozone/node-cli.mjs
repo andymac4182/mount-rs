@@ -16,7 +16,7 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..")
 const cliPath = resolve(repositoryRoot, "examples/node-cli/index.mjs");
 const fixturePath = resolve(
   repositoryRoot,
-  "crates/mount-rs-cli/examples/config-pglite-ozone.json",
+  "apps/mount-rs-cli/examples/config-pglite-ozone.json",
 );
 const required = [
   "PGLITE_DATABASE_URL",

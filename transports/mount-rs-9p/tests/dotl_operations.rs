@@ -1,6 +1,6 @@
 use mount_rs_9p::*;
-use mount_rs_core::MemoryFs;
 use mount_rs_core::types::S_IFREG;
+use mount_rs_memfs::MemoryFs;
 
 fn frame<F>(type_: u8, tag: u16, write: F) -> Vec<u8>
 where

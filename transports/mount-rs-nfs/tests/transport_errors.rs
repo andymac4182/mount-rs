@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::frame_record;
 use mount_rs_nfs::server::{NfsServer, NfsServerHooks, NfsTransportError, NfsTransportErrorKind};
 use tokio::io::AsyncWriteExt;

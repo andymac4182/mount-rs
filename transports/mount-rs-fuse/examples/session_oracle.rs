@@ -1,5 +1,6 @@
-use mount_rs_core::{FsDriver, MemoryFs};
+use mount_rs_core::FsDriver;
 use mount_rs_fuse::session::FuseSession;
+use mount_rs_memfs::MemoryFs;
 use std::{
     io::{self, BufRead},
     sync::Arc,

@@ -1,0 +1,12 @@
+[package]
+name = "mount-rs-persist"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Shared persisted filesystem adapter for mount-rs integrations"
+license = "Apache-2.0"
+
+[dependencies]
+mount-rs-memfs = { path = "../mount-rs-memfs" }
+async-trait = "0.1"
+mount-rs-core = { path = "../.." }

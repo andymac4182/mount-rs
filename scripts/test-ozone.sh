@@ -529,7 +529,7 @@ bounded_cli_ignored_cargo_test() {
   test_name=$1
   if bounded_process_command_for_timeout "$ozone_test_timeout" "ozone-cli-$test_name" \
     cargo test \
-      --manifest-path "$repo_dir/crates/mount-rs-cli/Cargo.toml" \
+      --manifest-path "$repo_dir/apps/mount-rs-cli/Cargo.toml" \
       --locked \
       --test cli \
       -- "$test_name" --exact --ignored --test-threads=1 --nocapture; then

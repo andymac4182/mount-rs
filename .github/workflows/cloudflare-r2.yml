@@ -11,9 +11,14 @@ on:
       - 'benchmarks/**'
       - 'crates/**'
       - 'examples/**'
-      - 'integrations/**'
+      - 'apps/mount-rs-cli/**'
+      - 'bindings/**'
+      - 'filesystems/**'
+      - 'providers/**'
       - 'scripts/**'
+      - 'src/**'
       - 'tests/**'
+      - 'transports/mount-rs-http/**'
       - 'transports/mount-rs-s3/**'
   workflow_dispatch:
 
@@ -86,13 +91,13 @@ jobs:
       - name: Install locked Rust and Node test dependencies
         run: |
           pnpm --dir tests/pglite install --frozen-lockfile
-          pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+          pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
           pnpm --dir tests/upstream install --frozen-lockfile
           pnpm --dir mountx-source install --frozen-lockfile --ignore-scripts
       - name: Build the public Node SDK addon
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
       - name: Run the complete authenticated R2 acceptance packet
         env:
           MOUNTX_SOURCE: ${{ github.workspace }}/mountx-source

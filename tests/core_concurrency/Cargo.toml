@@ -8,6 +8,7 @@ publish = false
 [workspace]
 
 [dependencies]
+mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
 mount-rs-core = { path = "../.." }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

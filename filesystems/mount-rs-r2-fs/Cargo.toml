@@ -1,0 +1,15 @@
+[package]
+name = "mount-rs-r2-fs"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "Snapshot-backed R2 filesystem for mount-rs"
+license = "Apache-2.0"
+repository = "https://github.com/andymac4182/mount-rs"
+readme = "README.md"
+
+[dependencies]
+mount-rs-core = { path = "../.." }
+mount-rs-persist = { path = "../mount-rs-persist" }
+mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+object_store = { version = "0.12", default-features = false }

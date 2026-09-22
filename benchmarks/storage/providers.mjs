@@ -11,7 +11,7 @@ export const MOUNTX_PINNED_REVISION = "85361a8212ff9bff8e69f62fa8993ef2c2ec51e8"
 
 const storageDirectory = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(storageDirectory, "../..")
-const nativePackagePath = join(repoRoot, "integrations/mount-rs-napi/index.js")
+const nativePackagePath = join(repoRoot, "bindings/mount-rs-napi/index.js")
 // Keep the oracle reproducible across hosts: callers should prefer an explicit
 // MOUNTX_SOURCE, while a checkout at this documented repository-local location
 // is also accepted. Never fall back to a host-specific temporary directory.

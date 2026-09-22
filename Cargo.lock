@@ -1262,6 +1262,7 @@ name = "mount-rs-9p"
 version = "0.1.0"
 dependencies = [
  "mount-rs-core",
+ "mount-rs-memfs",
  "tokio",
 ]
 
@@ -1274,7 +1275,19 @@ dependencies = [
  "mount-rs-9p",
  "mount-rs-core",
  "mount-rs-fuse",
+ "mount-rs-memfs",
  "mount-rs-nfs",
+ "tokio",
+]
+
+[[package]]
+name = "mount-rs-aws-s3"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "mount-rs-object-store-blocks",
+ "object_store",
  "tokio",
 ]
 
@@ -1297,6 +1310,7 @@ dependencies = [
  "mount-rs-auto",
  "mount-rs-core",
  "mount-rs-http",
+ "mount-rs-memfs",
  "mount-rs-nfs",
  "mount-rs-observability",
  "mount-rs-sdk",
@@ -1311,17 +1325,22 @@ dependencies = [
  "async-trait",
  "mount-rs-9p",
  "mount-rs-auto",
+ "mount-rs-aws-s3",
  "mount-rs-chunked",
  "mount-rs-fuse",
  "mount-rs-host",
  "mount-rs-kv",
+ "mount-rs-memfs",
  "mount-rs-memory",
  "mount-rs-nfs",
  "mount-rs-persist",
  "mount-rs-pglite",
+ "mount-rs-pglite-fs",
  "mount-rs-r2",
+ "mount-rs-r2-fs",
  "mount-rs-s3",
  "mount-rs-sqlite",
+ "mount-rs-sqlite-fs",
  "mount-rs-webdav",
  "object_store",
  "rusqlite",
@@ -1368,6 +1387,7 @@ dependencies = [
  "futures-util",
  "libc",
  "mount-rs-core",
+ "mount-rs-memfs",
  "tokio",
 ]
 
@@ -1391,8 +1411,9 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mount-rs-core",
+ "mount-rs-memfs",
  "mount-rs-observability",
- "mount-rs-sqlite",
+ "mount-rs-sqlite-fs",
  "percent-encoding",
  "reqwest 0.12.28",
  "serde",
@@ -1409,6 +1430,16 @@ dependencies = [
  "mount-rs-core",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "mount-rs-memfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1432,13 +1463,17 @@ dependencies = [
  "mount-rs-fuse",
  "mount-rs-host",
  "mount-rs-kv",
+ "mount-rs-memfs",
  "mount-rs-memory",
  "mount-rs-nfs",
  "mount-rs-observability",
  "mount-rs-pglite",
+ "mount-rs-pglite-fs",
  "mount-rs-r2",
+ "mount-rs-r2-fs",
  "mount-rs-s3",
  "mount-rs-sqlite",
+ "mount-rs-sqlite-fs",
  "mount-rs-tidb",
  "mount-rs-webdav",
  "napi",
@@ -1453,6 +1488,19 @@ version = "0.1.0"
 dependencies = [
  "mount-rs-core",
  "mount-rs-host",
+ "mount-rs-memfs",
+ "tokio",
+]
+
+[[package]]
+name = "mount-rs-object-store-blocks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "mount-rs-core",
+ "object_store",
+ "sha2 0.10.9",
  "tokio",
 ]
 
@@ -1463,6 +1511,7 @@ dependencies = [
  "async-trait",
  "http",
  "mount-rs-core",
+ "mount-rs-memfs",
  "opentelemetry",
  "opentelemetry-appender-tracing",
  "opentelemetry-otlp",
@@ -1479,6 +1528,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-core",
+ "mount-rs-memfs",
 ]
 
 [[package]]
@@ -1488,6 +1538,7 @@ dependencies = [
  "async-trait",
  "md-5 0.10.6",
  "mount-rs-core",
+ "mount-rs-memfs",
  "mount-rs-persist",
  "mount-rs-versioned",
  "serde_json",
@@ -1496,17 +1547,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-pglite-fs"
+version = "0.1.0"
+dependencies = [
+ "mount-rs-core",
+ "mount-rs-persist",
+ "mount-rs-pglite",
+]
+
+[[package]]
 name = "mount-rs-r2"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "futures-util",
  "mount-rs-core",
+ "mount-rs-memfs",
+ "mount-rs-object-store-blocks",
  "mount-rs-persist",
  "mount-rs-s3",
  "object_store",
- "sha2 0.10.9",
  "tokio",
+]
+
+[[package]]
+name = "mount-rs-r2-fs"
+version = "0.1.0"
+dependencies = [
+ "mount-rs-core",
+ "mount-rs-persist",
+ "mount-rs-r2",
+ "object_store",
 ]
 
 [[package]]
@@ -1521,6 +1591,7 @@ dependencies = [
  "hmac 0.12.1",
  "md-5 0.10.6",
  "mount-rs-core",
+ "mount-rs-memfs",
  "percent-encoding",
  "quick-xml",
  "rand 0.9.5",
@@ -1539,15 +1610,18 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-auto",
+ "mount-rs-aws-s3",
  "mount-rs-chunked",
  "mount-rs-core",
  "mount-rs-foundationdb",
  "mount-rs-host",
+ "mount-rs-memfs",
  "mount-rs-memory",
  "mount-rs-observability",
  "mount-rs-pglite",
  "mount-rs-r2",
  "mount-rs-sqlite",
+ "mount-rs-sqlite-fs",
  "mount-rs-tidb",
  "tokio",
 ]
@@ -1558,9 +1632,19 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-core",
+ "mount-rs-memfs",
  "mount-rs-persist",
  "rusqlite",
  "serde_json",
+]
+
+[[package]]
+name = "mount-rs-sqlite-fs"
+version = "0.1.0"
+dependencies = [
+ "mount-rs-core",
+ "mount-rs-persist",
+ "mount-rs-sqlite",
 ]
 
 [[package]]
@@ -1585,6 +1669,7 @@ dependencies = [
  "async-trait",
  "mount-rs-chunked",
  "mount-rs-core",
+ "mount-rs-memfs",
  "mount-rs-r2",
  "mysql_async",
  "serde_json",
@@ -1618,6 +1703,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mount-rs-core",
+ "mount-rs-memfs",
  "percent-encoding",
  "quick-xml",
  "reqwest 0.12.28",

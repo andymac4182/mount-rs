@@ -7,9 +7,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{
-    ErrorCode, FsDriver, MemoryFs,
+    ErrorCode, FsDriver,
     storage::{BlockId, BlockStore, MetadataStore, NAMESPACE_FORMAT_VERSION, NodeData},
 };
+use mount_rs_memfs::MemoryFs;
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use tempfile::tempdir;

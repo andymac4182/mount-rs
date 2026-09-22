@@ -45,12 +45,12 @@ MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-inodes.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-init.mjs
 MOUNTX_SOURCE="$mountx_source" node scripts/check-fuse-session.mjs
 
-pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
-pnpm --dir integrations/mount-rs-napi build
-MOUNTX_SOURCE="$mountx_source" pnpm --dir integrations/mount-rs-napi test
-pnpm --dir integrations/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
-pnpm --dir integrations/mount-rs-virtual-fs test
-pnpm --dir integrations/mount-rs-virtual-fs typecheck
+pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
+pnpm --dir bindings/mount-rs-napi build
+MOUNTX_SOURCE="$mountx_source" pnpm --dir bindings/mount-rs-napi test
+pnpm --dir bindings/mount-rs-virtual-fs install --frozen-lockfile --ignore-scripts
+pnpm --dir bindings/mount-rs-virtual-fs test
+pnpm --dir bindings/mount-rs-virtual-fs typecheck
 node benchmarks/storage/test.mjs
 MOUNTX_SOURCE="$mountx_source" node benchmarks/storage/runner.mjs --smoke --output artifacts/storage-smoke.json
 pnpm --dir tests/upstream install --frozen-lockfile

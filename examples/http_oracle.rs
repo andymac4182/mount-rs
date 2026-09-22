@@ -10,7 +10,8 @@ use std::io::{self, Read, Write};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mount_rs_core::{Capabilities, DirEntry, FileHandle, FsDriver, MemoryFs, MkdirOptions, Stats};
+use mount_rs_core::{Capabilities, DirEntry, FileHandle, FsDriver, MkdirOptions, Stats};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_s3::{Credentials, S3ServerOptions, create_s3_server};
 use mount_rs_webdav::{WebdavServerOptions, create_webdav_server};
 

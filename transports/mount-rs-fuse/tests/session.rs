@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use mount_rs_core::{
-    Capabilities, DirEntry, FileHandle, FsDriver, FsError, MemoryFs, Result, S_IFREG, Stats,
+    Capabilities, DirEntry, FileHandle, FsDriver, FsError, Result, S_IFREG, Stats,
 };
 use mount_rs_fuse::{
     RequestHeader,
@@ -15,6 +15,7 @@ use mount_rs_fuse::{
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::{FuseFlushMechanism, FuseSession, FuseSessionOptions},
 };
+use mount_rs_memfs::MemoryFs;
 use std::{sync::Arc, time::Duration};
 
 fn frame(opcode: u32, nodeid: u64, body: &[u8]) -> Vec<u8> {

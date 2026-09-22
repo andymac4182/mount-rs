@@ -11,4 +11,5 @@ mount-rs-core = { path = "../.." }
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
-mount-rs-host = { path = "../../integrations/mount-rs-host" }
+mount-rs-memfs = { path = "../../filesystems/mount-rs-memfs" }
+mount-rs-host = { path = "../../filesystems/mount-rs-host" }

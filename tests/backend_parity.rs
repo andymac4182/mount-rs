@@ -1,9 +1,12 @@
 use std::sync::Arc;
 
-use mount_rs_core::{ErrorCode, FsDriver, Loopback, MemoryFs, MkdirOptions, OpenFlags};
+use mount_rs_core::{ErrorCode, FsDriver, Loopback, MkdirOptions, OpenFlags};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_persist::{PersistedFs, StateStore};
-use mount_rs_r2::{R2Store, open_object_store};
-use mount_rs_sqlite::{SqliteStore, open_sqlite_memory};
+use mount_rs_r2::R2Store;
+use mount_rs_r2_fs::open_object_store;
+use mount_rs_sqlite::SqliteStore;
+use mount_rs_sqlite_fs::open_sqlite_memory;
 use object_store::ObjectStore;
 use object_store::memory::InMemory;
 use serde_json::{Value, json};
@@ -296,14 +299,14 @@ async fn pglite_matches_the_same_contract_when_a_socket_is_configured() {
         .expect("PGLITE_DATABASE_URL is required for the live PGlite integration test");
     let state_key = unique_state_key("pglite-parity");
     let filesystem =
-        mount_rs_pglite::connect_pglite_with_key(url.to_str().unwrap(), state_key.clone())
+        mount_rs_pglite_fs::connect_pglite_with_key(url.to_str().unwrap(), state_key.clone())
             .await
             .unwrap();
     let actual = scenario(Arc::new(filesystem)).await;
     let expected = scenario(Arc::new(MemoryFs::empty())).await;
     assert_eq!(actual, expected);
 
-    let reopened = mount_rs_pglite::connect_pglite_with_key(url.to_str().unwrap(), state_key)
+    let reopened = mount_rs_pglite_fs::connect_pglite_with_key(url.to_str().unwrap(), state_key)
         .await
         .unwrap();
     let reopened = Loopback::from_arc(Arc::new(reopened));
@@ -312,21 +315,25 @@ async fn pglite_matches_the_same_contract_when_a_socket_is_configured() {
 
     let conflict_key = unique_state_key("pglite-conflict");
     let seed =
-        mount_rs_pglite::connect_pglite_with_key(url.to_str().unwrap(), conflict_key.clone())
+        mount_rs_pglite_fs::connect_pglite_with_key(url.to_str().unwrap(), conflict_key.clone())
             .await
             .unwrap();
     let seed = Loopback::from_arc(Arc::new(seed));
     seed_conflict_files(&seed).await;
     drop(seed);
     {
-        let left =
-            mount_rs_pglite::connect_pglite_with_key(url.to_str().unwrap(), conflict_key.clone())
-                .await
-                .unwrap();
-        let right =
-            mount_rs_pglite::connect_pglite_with_key(url.to_str().unwrap(), conflict_key.clone())
-                .await
-                .unwrap();
+        let left = mount_rs_pglite_fs::connect_pglite_with_key(
+            url.to_str().unwrap(),
+            conflict_key.clone(),
+        )
+        .await
+        .unwrap();
+        let right = mount_rs_pglite_fs::connect_pglite_with_key(
+            url.to_str().unwrap(),
+            conflict_key.clone(),
+        )
+        .await
+        .unwrap();
         let left = Loopback::from_arc(Arc::new(left));
         let right = Loopback::from_arc(Arc::new(right));
         let left_handle = left.open("/left", "r+", 0).await.unwrap();
@@ -338,7 +345,7 @@ async fn pglite_matches_the_same_contract_when_a_socket_is_configured() {
             "unexpected stale-write error: {error}"
         );
     }
-    let reopened = mount_rs_pglite::connect_pglite_with_key(url.to_str().unwrap(), conflict_key)
+    let reopened = mount_rs_pglite_fs::connect_pglite_with_key(url.to_str().unwrap(), conflict_key)
         .await
         .unwrap();
     let reopened = Loopback::from_arc(Arc::new(reopened));

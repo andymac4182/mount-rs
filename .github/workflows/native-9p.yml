@@ -13,7 +13,9 @@ on:
       - 'tests/upstream/**'
       - 'transports/mount-rs-9p/**'
       - 'transports/mount-rs-auto/**'
-      - 'integrations/mount-rs-napi/**'
+      - 'bindings/mount-rs-napi/**'
+      - 'filesystems/mount-rs-memfs/**'
+      - 'src/**'
   pull_request:
     paths:
       - '.github/workflows/native-9p.yml'
@@ -25,7 +27,9 @@ on:
       - 'tests/upstream/**'
       - 'transports/mount-rs-9p/**'
       - 'transports/mount-rs-auto/**'
-      - 'integrations/mount-rs-napi/**'
+      - 'bindings/mount-rs-napi/**'
+      - 'filesystems/mount-rs-memfs/**'
+      - 'src/**'
 
 concurrency:
   group: native-9p-${{ github.ref }}
@@ -142,40 +146,40 @@ jobs:
           test -d /sys/module/9p
           test -d /sys/module/9pnet_fd
       - name: Install the public Node SDK test addon
-        run: pnpm --dir integrations/mount-rs-napi install --frozen-lockfile
+        run: pnpm --dir bindings/mount-rs-napi install --frozen-lockfile
       - name: Build the public Node SDK test addon
         env:
           CARGOFLAGS: --locked
-        run: pnpm --dir integrations/mount-rs-napi build
+        run: pnpm --dir bindings/mount-rs-napi build
       - name: Verify N-API 9P server and attached-stream lifecycle
-        run: MOUNT_RS_SERVER_PHASE=p9 node integrations/mount-rs-napi/test/servers.mjs
+        run: MOUNT_RS_SERVER_PHASE=p9 node bindings/mount-rs-napi/test/servers.mjs
       - name: Verify direct N-API 9P session lifecycle
-        run: node integrations/mount-rs-napi/test/p9-session.mjs
+        run: node bindings/mount-rs-napi/test/p9-session.mjs
       - name: Verify N-API 9P server and connection member surface
-        run: node integrations/mount-rs-napi/test/p9-server-members.mjs
+        run: node bindings/mount-rs-napi/test/p9-server-members.mjs
       - name: Verify N-API 9P server connection identity and cleanup
-        run: node integrations/mount-rs-napi/test/p9-server-identity.mjs
+        run: node bindings/mount-rs-napi/test/p9-server-identity.mjs
       - name: Verify N-API 9P mixed client arrival order
-        run: node integrations/mount-rs-napi/test/p9-server-order.mjs
+        run: node bindings/mount-rs-napi/test/p9-server-order.mjs
       - name: Verify N-API 9P native connection close idempotence
-        run: node integrations/mount-rs-napi/test/p9-server-connection-lifecycle.mjs
+        run: node bindings/mount-rs-napi/test/p9-server-connection-lifecycle.mjs
       - name: Verify automatic N-API 9P mounted I/O and cleanup
         run: |
           node_path=$(command -v node)
           sudo env "PATH=$PATH" \
             MOUNT_RS_NAPI_NATIVE_MOUNT=1 \
             MOUNT_RS_NAPI_TRANSPORT=9p \
-            timeout 180s "$node_path" integrations/mount-rs-napi/test/native.mjs
+            timeout 180s "$node_path" bindings/mount-rs-napi/test/native.mjs
       - name: Verify direct ./9p N-API mounted I/O and cleanup
         run: |
           node_path=$(command -v node)
           sudo env "PATH=$PATH" \
             MOUNT_RS_NAPI_P9_NATIVE_MOUNT=1 \
-            timeout 180s "$node_path" integrations/mount-rs-napi/test/p9-native.mjs
+            timeout 180s "$node_path" bindings/mount-rs-napi/test/p9-native.mjs
       - name: Verify structural-driver N-API 9P mounted I/O and cleanup
         run: |
           node_path=$(command -v node)
           sudo env "PATH=$PATH" \
             MOUNT_RS_NAPI_STRUCTURAL_NATIVE_MOUNT=1 \
             MOUNT_RS_NAPI_STRUCTURAL_TRANSPORT=9p \
-            timeout 180s "$node_path" integrations/mount-rs-napi/test/structural-native.mjs
+            timeout 180s "$node_path" bindings/mount-rs-napi/test/structural-native.mjs

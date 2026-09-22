@@ -879,6 +879,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "mount-rs-memfs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "mount-rs-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mount-rs-object-store-blocks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "mount-rs-core",
+ "object_store",
+ "sha2 0.10.9",
+ "tokio",
+]
+
+[[package]]
 name = "mount-rs-ozone-tests"
 version = "0.1.0"
 dependencies = [
@@ -899,6 +921,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "mount-rs-core",
+ "mount-rs-memfs",
 ]
 
 [[package]]
@@ -919,12 +942,10 @@ name = "mount-rs-r2"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "futures-util",
  "mount-rs-core",
+ "mount-rs-object-store-blocks",
  "mount-rs-persist",
  "object_store",
- "sha2 0.10.9",
- "tokio",
 ]
 
 [[package]]

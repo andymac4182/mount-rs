@@ -32,7 +32,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
     let mounted = mount_rs_fuse::mount::mount(
-        Arc::new(mount_rs_core::MemoryFs::empty()),
+        Arc::new(mount_rs_memfs::MemoryFs::empty()),
         &mountpoint,
         options,
     )

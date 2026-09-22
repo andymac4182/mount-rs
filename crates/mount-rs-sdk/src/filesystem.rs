@@ -1,0 +1,156 @@
+//! Filesystem facade and its shutdown lifecycle.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
+use mount_rs_core::{ErrorCode, FsDriver, FsError, Result};
+use mount_rs_host::{HostFs, HostFsOptions};
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
+use mount_rs_sqlite_fs::{SqliteFs, open_sqlite};
+
+use crate::options::SplitOptions;
+use crate::providers::{StorageResources, open_storage};
+use crate::stores::{ErasedBlockStore, ErasedMetadataStore};
+#[cfg(feature = "observability")]
+use crate::{Telemetry, global_telemetry};
+
+/// Identifies the top-level filesystem construction used by an SDK consumer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilesystemKind {
+    Memory,
+    Host,
+    Sqlite,
+    SplitStore,
+}
+
+/// A Rust SDK filesystem and its provider cleanup lifecycle.
+pub struct Filesystem {
+    inner: FilesystemInner,
+}
+
+enum FilesystemInner {
+    Memory(MemoryFs),
+    Host(HostFs),
+    Sqlite(SqliteFs),
+    Split(
+        ChunkedFs<ErasedMetadataStore, ErasedBlockStore>,
+        StorageResources,
+    ),
+}
+
+impl Filesystem {
+    /// Construct a volatile in-memory filesystem.
+    pub fn memory(options: MemoryOptions) -> Self {
+        Self {
+            inner: FilesystemInner::Memory(MemoryFs::new(options)),
+        }
+    }
+
+    /// Construct a host-backed filesystem rooted at `root`.
+    pub fn host(root: impl AsRef<Path>, options: HostFsOptions) -> Self {
+        Self {
+            inner: FilesystemInner::Host(HostFs::with_options(root, options)),
+        }
+    }
+
+    /// Open a durable SQLite-backed filesystem.
+    pub async fn sqlite(path: impl AsRef<Path>) -> Result<Self> {
+        Ok(Self {
+            inner: FilesystemInner::Sqlite(open_sqlite(path).await?),
+        })
+    }
+
+    /// Open a filesystem composed from independent metadata and block stores.
+    pub async fn split(options: SplitOptions) -> Result<Self> {
+        if options.chunk_size_bytes == 0 {
+            return Err(FsError::new(ErrorCode::Einval)
+                .with_message("chunk_size_bytes must be greater than zero"));
+        }
+        let chunk_options = ChunkedOptions::fixed(options.owner, options.chunk_size_bytes)?
+            .with_lease_ttl(options.lease_ttl)
+            .with_identity(options.uid, options.gid, options.umask);
+        let opened = open_storage(&options.metadata, &options.blocks).await?;
+        let resources = opened.resources.clone();
+        match ChunkedFs::open(opened.metadata, opened.blocks, chunk_options).await {
+            Ok(driver) => Ok(Self {
+                inner: FilesystemInner::Split(driver, resources),
+            }),
+            Err(error) => {
+                let _ = resources.close().await;
+                Err(error)
+            }
+        }
+    }
+
+    /// Return the shared driver contract used by transports and loopback
+    /// clients. The returned handle remains valid until this filesystem is
+    /// shut down.
+    pub fn driver(&self) -> Arc<dyn FsDriver> {
+        match &self.inner {
+            FilesystemInner::Memory(driver) => Arc::new(driver.clone()),
+            FilesystemInner::Host(driver) => Arc::new(driver.clone()),
+            FilesystemInner::Sqlite(driver) => Arc::new(driver.clone()),
+            FilesystemInner::Split(driver, _) => Arc::new(driver.clone()),
+        }
+    }
+
+    /// Return a driver decorated with optional application-owned telemetry.
+    ///
+    /// The decorator is feature-gated so the default SDK build has no
+    /// observability dependency or runtime work. It only instruments this
+    /// returned driver view; filesystem construction, shutdown, and the
+    /// existing [`Self::driver`] behavior remain unchanged.
+    #[cfg(feature = "observability")]
+    pub fn driver_with_telemetry(&self, telemetry: Telemetry) -> Arc<dyn FsDriver> {
+        mount_rs_observability::InstrumentedDriver::from_arc(self.driver(), telemetry).into_arc()
+    }
+
+    /// Return a driver decorated with the process-wide application telemetry.
+    ///
+    /// Applications can install exporters and then call
+    /// [`crate::set_global_telemetry`] during startup. The default global handle is
+    /// disabled, so this method is also a no-op at runtime until the
+    /// application explicitly enables telemetry.
+    #[cfg(feature = "observability")]
+    pub fn observed_driver(&self) -> Arc<dyn FsDriver> {
+        self.driver_with_telemetry(global_telemetry())
+    }
+
+    pub const fn kind(&self) -> FilesystemKind {
+        match &self.inner {
+            FilesystemInner::Memory(_) => FilesystemKind::Memory,
+            FilesystemInner::Host(_) => FilesystemKind::Host,
+            FilesystemInner::Sqlite(_) => FilesystemKind::Sqlite,
+            FilesystemInner::Split(_, _) => FilesystemKind::SplitStore,
+        }
+    }
+
+    /// Release writer leases and provider resources in the safe order.
+    pub async fn shutdown(&self) -> Result<()> {
+        match &self.inner {
+            FilesystemInner::Split(driver, resources) => {
+                let driver_result = driver.shutdown().await;
+                let resources_result = resources.close().await;
+                driver_result.and(resources_result)
+            }
+            FilesystemInner::Memory(_) | FilesystemInner::Host(_) | FilesystemInner::Sqlite(_) => {
+                Ok(())
+            }
+        }
+    }
+}
+
+impl Clone for Filesystem {
+    fn clone(&self) -> Self {
+        let inner = match &self.inner {
+            FilesystemInner::Memory(driver) => FilesystemInner::Memory(driver.clone()),
+            FilesystemInner::Host(driver) => FilesystemInner::Host(driver.clone()),
+            FilesystemInner::Sqlite(driver) => FilesystemInner::Sqlite(driver.clone()),
+            FilesystemInner::Split(driver, resources) => {
+                FilesystemInner::Split(driver.clone(), resources.clone())
+            }
+        };
+        Self { inner }
+    }
+}

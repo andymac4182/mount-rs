@@ -2865,7 +2865,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
-    use mount_rs_core::{MemoryFs, MemoryOptions};
+    use mount_rs_memfs::{MemoryFs, MemoryOptions};
 
     async fn session() -> Nfs3Session {
         Nfs3Session::new(

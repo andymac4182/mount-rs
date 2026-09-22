@@ -7,9 +7,10 @@ use std::task::{Context, Poll};
 use async_trait::async_trait;
 use bytes::Bytes;
 use mount_rs_core::{
-    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MemoryFs, MkdirOptions,
+    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MkdirOptions,
     Result as FsResult, Stats,
 };
+use mount_rs_memfs::MemoryFs;
 use mount_rs_webdav::protocol::{
     RangeSpec, collect_body, evaluate_conditionals, href_of, parse_depth, parse_destination,
     parse_http_date_ms, parse_if, parse_lock_info, parse_lock_token, parse_overwrite, parse_range,

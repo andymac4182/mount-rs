@@ -27,8 +27,8 @@ export type ProviderSpec = {
 export const providerSpecs = {
   memory: {
     slug: 'memory',
-    name: 'Memory / memfs',
-    eyebrow: 'Provider / volatile local state',
+    name: 'Memory metadata + blocks',
+    eyebrow: 'Provider / volatile storage',
     maturity: 'Validated',
     maturityNote: 'Core contract and local differential evidence; volatile by design.',
     summary: (
@@ -36,7 +36,8 @@ export const providerSpecs = {
         The memory providers are the smallest complete composition: useful for
         tests, local tools, and a mount-free process that owns its state. They
         deliberately do not pretend that an acknowledged operation survives
-        process exit.
+        process exit. The standalone <code>MemoryFs</code> implementation lives
+        in the separate <code>mount-rs-memfs</code> filesystem crate.
       </>
     ),
     metadata: (
@@ -99,7 +100,8 @@ println!("revision={} bytes={}", loaded.revision, bytes.len());`,
       </>
     ),
     sources: [
-      { label: 'Memory provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-memory/src/lib.rs' },
+      { label: 'Memory provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-memory/src/lib.rs' },
+      { label: 'Memory filesystem crate', href: 'https://github.com/andymac4182/mount-rs/tree/main/filesystems/mount-rs-memfs' },
       { label: 'Architecture and durability model', href: 'https://github.com/andymac4182/mount-rs/blob/main/ARCHITECTURE.md' },
     ],
   },
@@ -183,7 +185,7 @@ sqlite3 blocks.sqlite \
       </>
     ),
     sources: [
-      { label: 'SQLite provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-sqlite/src/storage.rs' },
+      { label: 'SQLite provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-sqlite/src/storage.rs' },
       { label: 'SQLite reliability matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/sqlite-reliability-matrix.md' },
     ],
   },
@@ -319,7 +321,7 @@ SQL`,
       </>
     ),
     sources: [
-      { label: 'PGlite provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-pglite/src/storage.rs' },
+      { label: 'PGlite provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-pglite/src/storage.rs' },
       { label: 'Node split-store example', href: 'https://github.com/andymac4182/mount-rs/blob/main/README.md#node-split-store-api' },
       { label: 'Provider matrix and Node CLI', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/cli.mjs' },
       { label: 'PGlite progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w04-progress-ledger.md' },
@@ -491,7 +493,8 @@ aws s3api get-object --endpoint-url "$R2_ENDPOINT" \
       </>
     ),
     sources: [
-      { label: 'R2 block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
+      { label: 'R2 block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-r2/src/blocks.rs' },
+      { label: 'Shared object-store block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-object-store-blocks/src/lib.rs' },
       { label: 'Live R2 evidence in the tracker', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w05--cloudflare-r2' },
       { label: 'Configuration-driven provider matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/provider_matrix/config-pglite-r2.json' },
       { label: 'Budgeted live-R2 workflow', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/cloudflare-r2.yml' },
@@ -716,8 +719,8 @@ LIMIT 20;`,
       </>
     ),
     sources: [
-      { label: 'TiDB provider README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-tidb/README.md' },
-      { label: 'TiDB provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-tidb/src/storage.rs' },
+      { label: 'TiDB provider README', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-tidb/README.md' },
+      { label: 'TiDB provider source', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-tidb/src/storage.rs' },
       { label: 'TiDB/RustFS consumer matrix', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w08--tidb' },
       { label: 'Durable Ozone/TiDB CI gate', href: 'https://github.com/andymac4182/mount-rs/blob/main/.github/workflows/ci.yml' },
       { label: 'TiDB progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W08-progress-ledger.md' },
@@ -1028,8 +1031,8 @@ getrange <prefix>\\x00block/ <prefix>\\x00block0`,
       </>
     ),
     sources: [
-      { label: 'FoundationDB integration README', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-foundationdb/README.md' },
-      { label: 'FoundationDB keyspace implementation', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-foundationdb/src/lib.rs' },
+      { label: 'FoundationDB integration README', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-foundationdb/README.md' },
+      { label: 'FoundationDB keyspace implementation', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-foundationdb/src/lib.rs' },
       { label: 'FoundationDB workstream evidence', href: 'https://github.com/andymac4182/mount-rs/blob/main/WORK_TRACKER.md#-w07--foundationdb' },
       { label: 'Durable composition harness', href: 'https://github.com/andymac4182/mount-rs/blob/main/tests/foundationdb/README.md' },
       { label: 'Ozone durability progress ledger', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/w26-progress-ledger.md' },
@@ -1228,10 +1231,11 @@ aws s3api get-object --bucket "$AWS_S3_BUCKET" \
       { label: 'Latest hosted AWS S3 admission', href: 'https://github.com/andymac4182/mount-rs/actions/runs/35712627727' },
       { label: 'Latest AWS S3 qualification record', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/aws-s3-production-rollout.md' },
       { label: 'S3 gateway publication contract', href: 'https://github.com/andymac4182/mount-rs/blob/main/transports/mount-rs-s3/README.md' },
+      { label: 'AWS S3 provider crate', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-aws-s3/src/lib.rs' },
       { label: 'S3 transport durability boundary', href: 'https://github.com/andymac4182/mount-rs/blob/main/docs/W01_S3_PROGRESS.md' },
       { label: 'Staged publication change', href: 'https://github.com/andymac4182/mount-rs/commit/74f1cd5406001e88b39ef91b5d6b9bef5b560015' },
       { label: 'Bounded CopyObject change', href: 'https://github.com/andymac4182/mount-rs/commit/165f3690e4c4e23bf5118870ba1cfff0abf6083a' },
-      { label: 'S3-compatible block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/integrations/mount-rs-r2/src/blocks.rs' },
+      { label: 'Shared object-store block adapter', href: 'https://github.com/andymac4182/mount-rs/blob/main/providers/mount-rs-object-store-blocks/src/lib.rs' },
     ],
   },
   ozone: {

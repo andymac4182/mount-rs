@@ -1,6 +1,5 @@
-use mount_rs_core::{
-    ErrorCode, Loopback, MemoryFs, MemoryOptions, MkdirOptions, S_IFCHR, S_IFIFO, S_IFSOCK,
-};
+use mount_rs_core::{ErrorCode, Loopback, MkdirOptions, S_IFCHR, S_IFIFO, S_IFSOCK};
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
 
 async fn memory() -> Loopback {
     Loopback::new(MemoryFs::empty())

@@ -9,11 +9,11 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
-mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
-mount-rs-pglite = { path = "../../integrations/mount-rs-pglite" }
-mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
-mount-rs-sqlite = { path = "../../integrations/mount-rs-sqlite" }
+mount-rs-pglite = { path = "../../providers/mount-rs-pglite" }
+mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
+mount-rs-sqlite = { path = "../../providers/mount-rs-sqlite" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 tokio-postgres = { version = "0.7", default-features = false, features = ["runtime"] }

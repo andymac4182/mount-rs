@@ -417,15 +417,15 @@ if [ -n "${R2_ENDPOINT:-}" ]; then
   # The first composed client proves the split ChunkedFs path and the provider
   # contract against the same real cluster. A second client runs after the
   # owned FoundationDB container is restarted below.
-  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
+  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_composition -- --exact --nocapture && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
   test_prefix=${RUSTFS_COMBO_PREFIX:?RUSTFS_COMBO_PREFIX must be set for the composed gate}
   : "${R2_BUCKET:?R2_BUCKET must be set for the composed gate}"
   : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID must be set for the composed gate}"
   : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY must be set for the composed gate}"
 else
   rustfs_endpoint=""
-  test_manifest=integrations/mount-rs-foundationdb/Cargo.toml
-  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
+  test_manifest=providers/mount-rs-foundationdb/Cargo.toml
+  test_command="set -e; cargo check --locked -p mount-rs-sdk -p mount-rs-cli -p mount-rs-napi --features mount-rs-sdk/foundationdb,mount-rs-cli/foundationdb,mount-rs-napi/foundationdb && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb -- --nocapture"
   if [ "$external_mode" -eq 1 ]; then
     test_prefix=${MOUNT_RS_FOUNDATIONDB_TEST_PREFIX:-mount-rs/foundationdb-external/$run_id}
   else
@@ -447,7 +447,7 @@ if [ -n "$rustfs_endpoint" ] || [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq
     authority_prefix="$test_prefix/lease-authority"
   fi
   if [ "$run_native_cli" -eq 1 ] || [ "$run_napi" -eq 1 ]; then
-    test_command="${test_command} && cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture"
+    test_command="${test_command} && cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture"
     if [ "$run_native_cli" -eq 1 ]; then
       test_command="${test_command} && MOUNT_RS_CLI_NATIVE_FOUNDATIONDB=1 MOUNT_RS_CLI_FOUNDATIONDB_SHARED_PROVIDER=1 cargo test --locked -p mount-rs-cli --features foundationdb --test native_lifecycle cli_foundationdb_rustfs_config_binary_mounts_and_reopens -- --ignored --exact --nocapture && echo FOUNDATIONDB_CLI_PASS mode=foundationdb-rustfs-fuse"
     fi
@@ -485,7 +485,7 @@ start_authority_heartbeat() {
     'export PATH=/usr/local/cargo/bin:$PATH
      apt-get update -qq
      apt-get install -y -qq --no-install-recommends clang libclang-dev >/dev/null
-     exec cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb foundationdb_authority_heartbeat -- --ignored --exact --nocapture' \
+     exec cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb foundationdb_authority_heartbeat -- --ignored --exact --nocapture' \
     >/dev/null
 
   heartbeat_ticks=0
@@ -652,7 +652,7 @@ check_authority_heartbeat
 
 if [ "$run_napi" -eq 1 ]; then
   check_authority_heartbeat
-  node_command='node integrations/mount-rs-napi/test/foundationdb.mjs'
+  node_command='node bindings/mount-rs-napi/test/foundationdb.mjs'
   if [ "$run_iops" -eq 1 ]; then
     iops_size_mib=${MOUNT_RS_FOUNDATIONDB_IOPS_SIZE_MIB:-1}
     iops_payload_bytes=${MOUNT_RS_FOUNDATIONDB_IOPS_PAYLOAD_BYTES:-4096}
@@ -777,7 +777,7 @@ if [ -n "$rustfs_endpoint" ]; then
   echo "FOUNDATIONDB_SERVICE_RESTART_READY topology=$topology server=$restart_server"
   check_authority_heartbeat
 
-  restart_test_command="cargo test --manifest-path integrations/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
+  restart_test_command="cargo test --manifest-path providers/mount-rs-foundationdb/Cargo.toml --locked --features foundationdb --test foundationdb publish_foundationdb_authority_for_consumers -- --exact --nocapture && cargo test --manifest-path tests/foundationdb/Cargo.toml --locked --lib foundationdb_rustfs_chunked_restart_reopen -- --exact --nocapture"
   docker run --rm \
     --platform "$docker_platform" \
     --network "$network" \
@@ -807,7 +807,7 @@ fi
 
 if [ -n "$rustfs_endpoint" ]; then
   check_authority_heartbeat
-  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifests=$test_manifest+integrations/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass soak_rounds=$soak_rounds"
+  echo "FOUNDATIONDB_TEST_PASS topology=$topology manifests=$test_manifest+providers/mount-rs-foundationdb/Cargo.toml platform=$docker_platform service_restart=pass soak_rounds=$soak_rounds"
 else
   echo "FOUNDATIONDB_TEST_PASS topology=$topology manifest=$test_manifest platform=$docker_platform soak_rounds=$soak_rounds"
 fi

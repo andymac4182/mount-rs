@@ -1,4 +1,5 @@
-use mount_rs_core::{Loopback, MemoryFs};
+use mount_rs_core::Loopback;
+use mount_rs_memfs::MemoryFs;
 
 pub async fn parity_filesystem() -> Loopback {
     use mount_rs_chunked::{ChunkedFs, ChunkedOptions};

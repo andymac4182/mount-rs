@@ -10,9 +10,9 @@ publish = false
 [dependencies]
 async-trait = "0.1"
 foundationdb = { version = "0.11.0", default-features = false, features = ["embedded-fdb-include", "fdb-7_4"] }
-mount-rs-chunked = { path = "../../integrations/mount-rs-chunked" }
+mount-rs-chunked = { path = "../../filesystems/mount-rs-chunked" }
 mount-rs-core = { path = "../.." }
-mount-rs-foundationdb = { path = "../../integrations/mount-rs-foundationdb", features = ["foundationdb"] }
-mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
+mount-rs-foundationdb = { path = "../../providers/mount-rs-foundationdb", features = ["foundationdb"] }
+mount-rs-r2 = { path = "../../providers/mount-rs-r2" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

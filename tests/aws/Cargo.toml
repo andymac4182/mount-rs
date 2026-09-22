@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 mount-rs-core = { path = "../.." }
-mount-rs-r2 = { path = "../../integrations/mount-rs-r2" }
+mount-rs-aws-s3 = { path = "../../providers/mount-rs-aws-s3" }
 mount-rs-sdk = { path = "../../crates/mount-rs-sdk" }
 object_store = { version = "0.12", default-features = false, features = ["aws"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

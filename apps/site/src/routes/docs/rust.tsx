@@ -26,8 +26,9 @@ function RustDocs() {
         without requiring a kernel mount.
       </p>
 
-      <CodeBlock label="Core crate / direct loopback access">
-        {`use mount_rs::{Loopback, MemoryFs, MemoryOptions};
+      <CodeBlock label="Core contract + memfs / direct loopback access">
+        {`use mount_rs_core::Loopback;
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
 
 let fs = Loopback::new(MemoryFs::new(MemoryOptions::default()));
 fs.write_file("/hello", b"hello").await?;
@@ -77,7 +78,7 @@ fs.shutdown().await?; // release the provider writer lease`}
       </div>
 
       <p className="source-note inline-source">
-        Related source: <a href="https://github.com/andymac4182/mount-rs/tree/main/integrations/mount-rs-chunked">ChunkedFs integration</a> and <a href="https://github.com/andymac4182/mount-rs/blob/main/src/chunking.rs">chunking contract</a>.
+        Related source: <a href="https://github.com/andymac4182/mount-rs/tree/main/filesystems/mount-rs-memfs">MemoryFs crate</a>, <a href="https://github.com/andymac4182/mount-rs/tree/main/filesystems/mount-rs-chunked">ChunkedFs crate</a>, and <a href="https://github.com/andymac4182/mount-rs/blob/main/src/chunking.rs">chunking contract</a>.
       </p>
     </article>
   )

@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use mount_rs_aws_s3::{AwsS3BlockStore, AwsS3Config};
 use mount_rs_core::storage::{BlockId, BlockStore};
 use mount_rs_core::{Loopback, MkdirOptions};
-use mount_rs_r2::{AwsS3Config, R2BlockStore};
 use mount_rs_sdk::{Filesystem, SplitOptions, StoreConfig};
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
@@ -118,7 +118,7 @@ async fn actual_aws_s3_block_and_composed_filesystem() {
     bounded(async {
         let prefix = test_prefix();
         let object_store = aws_store();
-        let blocks = R2BlockStore::new(Arc::clone(&object_store), prefix.clone(), true).unwrap();
+        let blocks = AwsS3BlockStore::new(Arc::clone(&object_store), prefix.clone(), true).unwrap();
         assert!(blocks.durable(), "actual AWS S3 blocks must be durable");
 
         let payload = patterned_bytes(32_768);
@@ -141,7 +141,7 @@ async fn actual_aws_s3_block_and_composed_filesystem() {
             &payload[7..23]
         );
 
-        // Exercise the same create-only operation used by R2BlockStore at the
+        // Exercise the same create-only operation used by AwsS3BlockStore at the
         // exact block key, so an immutable block cannot be overwritten.
         let duplicate_block = object_store
             .put_opts(
@@ -414,7 +414,7 @@ async fn actual_aws_s3_reopen_after_process_restart() {
                 .trim()
                 .to_owned(),
         );
-        let blocks = R2BlockStore::new(aws_store(), test_prefix(), true).unwrap();
+        let blocks = AwsS3BlockStore::new(aws_store(), test_prefix(), true).unwrap();
         assert_eq!(blocks.get(&block_id).await.unwrap(), restart_payload());
 
         let object_store = aws_store();
@@ -433,14 +433,12 @@ async fn actual_aws_s3_reopen_after_process_restart() {
         // connection, and signed S3 client. This is the cross-process
         // boundary for the independent metadata and block providers.
         let composed_prefix = format!("{prefix}/composed/blocks");
-        let reopened = Filesystem::split(
-            aws_s3_split_options(
-                metadata_fixture(),
-                composed_prefix,
-                "aws-s3-process-reopen",
-                65_536,
-            ),
-        )
+        let reopened = Filesystem::split(aws_s3_split_options(
+            metadata_fixture(),
+            composed_prefix,
+            "aws-s3-process-reopen",
+            65_536,
+        ))
         .await
         .unwrap();
         let reopened_loopback = Loopback::from_arc(reopened.driver());

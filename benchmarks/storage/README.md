@@ -2,7 +2,7 @@
 
 This directory contains the dependency-light storage benchmark requested by
 `REQUIREMENTS.md#storage-benchmark-acceptance`. It uses the public
-`integrations/mount-rs-napi/index.js` loader for mount-rs and imports the actual
+`bindings/mount-rs-napi/index.js` loader for mount-rs and imports the actual
 mountx TypeScript memory driver/loopback as the oracle. Node CI runs its unit
 tests and smoke workload on macOS and Linux and uploads the raw smoke JSON.
 The local `scripts/test-all.sh` gate also includes the smoke workload.

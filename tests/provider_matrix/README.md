@@ -44,7 +44,7 @@ Native mount self-tests remain explicit platform gates because they require a
 usable FUSE/NFS transport.
 
 The Node SDK command expects the checked-out native addon at
-\`integrations/mount-rs-napi/mount-rs.darwin-arm64.node\` (or the corresponding
+\`bindings/mount-rs-napi/mount-rs.darwin-arm64.node\` (or the corresponding
 platform build). The CLI command builds/runs only the focused CLI package
 commands it needs and captures child output so provider values are not echoed.
 

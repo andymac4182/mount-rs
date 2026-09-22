@@ -440,10 +440,10 @@ function runRust(config, rustTimeoutMs) {
 
 function loadNapi() {
   try {
-    return createRequire(import.meta.url)(resolve(repoRoot, "integrations/mount-rs-napi/index.js"))
+    return createRequire(import.meta.url)(resolve(repoRoot, "bindings/mount-rs-napi/index.js"))
   } catch (error) {
     throw new Error(
-      "could not load integrations/mount-rs-napi/index.js; build the existing N-API artifact first: " +
+      "could not load bindings/mount-rs-napi/index.js; build the existing N-API artifact first: " +
         error.message,
     )
   }

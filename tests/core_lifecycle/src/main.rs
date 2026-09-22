@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::io::{self, BufRead};
 use std::sync::Arc;
 
-use mount_rs_core::{FileHandle, Loopback, MemoryFs, MemoryOptions, MkdirOptions, Stats};
+use mount_rs_core::{FileHandle, Loopback, MkdirOptions, Stats};
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use serde_json::{Value, json};
 
 fn path(command: &Value) -> &str {

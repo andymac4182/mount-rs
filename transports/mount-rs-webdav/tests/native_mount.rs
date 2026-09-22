@@ -15,7 +15,8 @@ use std::process::{Command as BlockingCommand, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{FsDriver, Loopback, MemoryFs};
+use mount_rs_core::{FsDriver, Loopback};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_webdav::{WebdavServerOptions, create_webdav_server};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};

@@ -50,11 +50,11 @@ if [ "${MOUNT_RS_PGLITE_TEST_SCOPE:-}" = "native-fuse" ]; then
 fi
 
 # Exercise bounded socket-slot cleanup against a real in-process PGlite server.
-node "$repo_dir/integrations/mount-rs-pglite/test/server_slot_release.mjs"
+node "$repo_dir/providers/mount-rs-pglite/test/server_slot_release.mjs"
 
 # Verify detach failure remains rejected and cannot release a bounded slot.
 node --unhandled-rejections=strict \
-  "$repo_dir/integrations/mount-rs-pglite/test/server_cleanup_failure.mjs"
+  "$repo_dir/providers/mount-rs-pglite/test/server_cleanup_failure.mjs"
 
 MOUNT_RS_REQUIRE_PGLITE=1 \
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
@@ -82,13 +82,13 @@ PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?ssl
   "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test split_store pglite_metadata_and_blocks_compose_independently -- --ignored --nocapture
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  node "$repo_dir/integrations/mount-rs-napi/test/pglite.mjs"
+  node "$repo_dir/bindings/mount-rs-napi/test/pglite.mjs"
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  node "$repo_dir/integrations/mount-rs-napi/test/factories.mjs"
+  node "$repo_dir/bindings/mount-rs-napi/test/factories.mjs"
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
-  node "$repo_dir/integrations/mount-rs-napi/test/chunked.mjs"
+  node "$repo_dir/bindings/mount-rs-napi/test/chunked.mjs"
 
 PGLITE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:$port/postgres?sslmode=disable" \
   "$repo_dir/scripts/cargo-shared" test --locked -p mount-rs-core --test fuse_backends fuse_pglite_operations_survive_connection_reopen -- --ignored --nocapture

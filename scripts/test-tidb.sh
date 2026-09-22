@@ -684,7 +684,7 @@ run_node_provider_test() {
   MOUNT_RS_TIDB_NAPI=1 \
   MOUNT_RS_TIDB_URL="$tidb_url" \
   MOUNT_RS_TIDB_NODE_PREFIX="$node_prefix" \
-    node "$repo_dir/integrations/mount-rs-napi/test/tidb.mjs"
+    node "$repo_dir/bindings/mount-rs-napi/test/tidb.mjs"
   if [ "$run_iops" -eq 1 ]; then
     iops_output=${MOUNT_RS_TIDB_IOPS_OUTPUT:-$run_dir/tidb-ozone-iops.json}
     iops_size_mib=${MOUNT_RS_TIDB_IOPS_SIZE_MIB:-1}

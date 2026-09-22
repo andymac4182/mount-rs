@@ -30,7 +30,7 @@ live-service parity item.
 
 The N-API package currently exports the root, `auto`, `nfs`, `9p`, `fuse`, `s3`,
 `webdav`, and the three driver helpers. The exact map is in
-[`package.json`](../integrations/mount-rs-napi/package.json#L11-L60). The
+[`package.json`](../bindings/mount-rs-napi/package.json#L11-L60). The
 `./fuse` entry is now a Rust-backed codec/inode barrel; it is deliberately not
 described as a complete session or native-mount implementation.
 
@@ -57,8 +57,8 @@ barrels are under `/tmp/mountx-source.uWiHfX/src`.
 The current N-API adapter accepts a structural JS driver with required
 `stat`, `readdir`, and `open` methods, maps optional filesystem methods, and
 returns `ENOSYS` for an omitted optional method. See
-[`js_driver.rs`](../integrations/mount-rs-napi/src/js_driver.rs#L1367-L1664) and
-the [`create_driver` factory](../integrations/mount-rs-napi/src/js_driver.rs#L2103-L2145).
+[`js_driver.rs`](../bindings/mount-rs-napi/src/js_driver.rs#L1367-L1664) and
+the [`create_driver` factory](../bindings/mount-rs-napi/src/js_driver.rs#L2103-L2145).
 
 That adapter is not yet the oracle contract boundary:
 
@@ -92,13 +92,13 @@ XDR/RPC primitives, errors, and record assembly; the 9P test covers the CJS to
 ESM alias surface and wire primitives. These are codec boundaries, not full
 transport/session parity:
 
-- [`nfs.cjs`](../integrations/mount-rs-napi/nfs.cjs) and
-  [`nfs-codec.mjs`](../integrations/mount-rs-napi/test/nfs-codec.mjs#L1-L20)
+- [`nfs.cjs`](../bindings/mount-rs-napi/nfs.cjs) and
+  [`nfs-codec.mjs`](../bindings/mount-rs-napi/test/nfs-codec.mjs#L1-L20)
   do not establish NFS v3/v4 mount/session/server parity.
-- [`p9.cjs`](../integrations/mount-rs-napi/p9.cjs) and
-  [`9p-codec.mjs`](../integrations/mount-rs-napi/test/9p-codec.mjs#L132-L245)
+- [`p9.cjs`](../bindings/mount-rs-napi/p9.cjs) and
+  [`9p-codec.mjs`](../bindings/mount-rs-napi/test/9p-codec.mjs#L132-L245)
   cover the CJS-to-ESM codec aliases, wire primitives, and typed message
-  bodies; [`p9-constants.mjs`](../integrations/mount-rs-napi/test/p9-constants.mjs)
+  bodies; [`p9-constants.mjs`](../bindings/mount-rs-napi/test/p9-constants.mjs)
   additionally differentially checks all 124 upstream 9P constants and
   `messageName`. These are still codec/barrel boundaries, not the complete
   upstream 9P server object or all protocol behavior.
@@ -107,8 +107,8 @@ transport/session parity:
   transport table, and its Rust-backed `FuseSession` exposes the mount-free
   request/lifecycle boundary. Native kernel mount objects remain outside this
   subpath; root `mount` owns that platform-specific surface. See
-  [`fuse.cjs`](../integrations/mount-rs-napi/fuse.cjs) and
-  [`fuse_session.rs`](../integrations/mount-rs-napi/src/fuse_session.rs).
+  [`fuse.cjs`](../bindings/mount-rs-napi/fuse.cjs) and
+  [`fuse_session.rs`](../bindings/mount-rs-napi/src/fuse_session.rs).
 
 **Required closure evidence:** keep the broad request/reply and mount-free
 session exports aligned with the serialized dispatch policy, then qualify the
@@ -130,7 +130,7 @@ The Rust implementation has useful, tested FUSE pieces:
   `READDIR`/`READDIRPLUS` bodies. UTF-8 names, 8-byte alignment, bounded
   packing, protocol layouts, integer coercion and malformed input are
   differentially tested against the pinned oracle in
-  [`fuse-codec.mjs`](../integrations/mount-rs-napi/test/fuse-codec.mjs);
+  [`fuse-codec.mjs`](../bindings/mount-rs-napi/test/fuse-codec.mjs);
 - the same barrel now exposes typed Rust-backed `READ`/`WRITE`,
   `GETATTR`/`SETATTR`, `OPEN`/`OPENDIR`, `LOOKUP`, `READLINK`, and `STATFS`
   request/reply codecs. Protocol 7.8/7.39/7.41 differential checks cover
@@ -164,8 +164,8 @@ The Rust implementation has useful, tested FUSE pieces:
   state and mutation logic remain in Rust. The focused oracle test covers
   driver-identity hardlinks, held orphaned nodes, `FORGET`, directory subtree
   remapping, replacement targets, and `useDriverIno: false`; see
-  [`fuse_inodes.rs`](../integrations/mount-rs-napi/src/fuse_inodes.rs) and
-  [`fuse-inodes.mjs`](../integrations/mount-rs-napi/test/fuse-inodes.mjs).
+  [`fuse_inodes.rs`](../bindings/mount-rs-napi/src/fuse_inodes.rs) and
+  [`fuse-inodes.mjs`](../bindings/mount-rs-napi/test/fuse-inodes.mjs).
 
 The oracle FUSE barrel also exports constants, init, inodes, mount, notify,
 protocol, record, and session, including a broad request/reply body codec.
@@ -189,15 +189,15 @@ the native-session, hosted-platform, or native-mount acceptance boundary.
 ### P1 — auto/mount option and lifecycle parity: PARTIAL; UNVERIFIED
 
 The current root facade exposes `mount`, `liveMounts`, `unmountAll`, and
-`probeTransports` through [`postbuild.mjs`](../integrations/mount-rs-napi/postbuild.mjs#L6-L22).
+`probeTransports` through [`postbuild.mjs`](../bindings/mount-rs-napi/postbuild.mjs#L6-L22).
 The native `Mounted` object exposes transport, mountpoint, source, active, and
 `unmount`; the bounded 9P view additionally exposes `trans`, the adopted
 server/connection, `waitClosed()`, and `closed`; see
-[`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L175-L205).
+[`index.d.ts`](../bindings/mount-rs-napi/index.d.ts#L175-L205).
 
 The public auto options are currently `transport`, `readOnly`,
 `unmountTimeout`, `onTransportError`, `nfsSqliteSingleHost`, and a bounded
-`p9` bag. [`JsAutoMountOptions`](../integrations/mount-rs-napi/index.d.ts#L1148-L1168)
+`p9` bag. [`JsAutoMountOptions`](../bindings/mount-rs-napi/index.d.ts#L1148-L1168)
 defines that shared shape. The direct `./9p` facade additionally exposes
 `p9ClientProbe`, `p9Platform`, `socketPathRefusal`, `tcpSourceRefusal`,
 `p9MountOptions`, `mount9p`, `live9pMounts`, and `unmountAll9p`. The supported
@@ -272,15 +272,15 @@ explicit evidence boundary.
 The postbuild server facade supplies cached `listen`/`close`, makes `listen`
 return the server, and adds `Symbol.asyncDispose`; it also supplies the P9
 `connection.closed` promise. See
-[`postlude-servers.cjs`](../integrations/mount-rs-napi/postlude-servers.cjs#L1-L135)
-and its lifecycle assertions in [`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L166-L183).
+[`postlude-servers.cjs`](../bindings/mount-rs-napi/postlude-servers.cjs#L1-L135)
+and its lifecycle assertions in [`servers.mjs`](../bindings/mount-rs-napi/test/servers.mjs#L166-L183).
 
 Current focused behavior:
 
 - NFS and P9 expose transport-error callbacks in the native options and have
   loopback TCP tests for malformed records/frames and orderly EOF handling;
-  see [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L297-L452)
-  and [`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L198-L445).
+  see [`servers.rs`](../bindings/mount-rs-napi/src/servers.rs#L297-L452)
+  and [`servers.mjs`](../bindings/mount-rs-napi/test/servers.mjs#L198-L445).
 - P9 exposes native clients, connection session access, and the closed promise.
   The Node facade now implements `server.attach(stream, options)` with actual
   stream-backed connections, direct `session.handleCall`/`destroy`, ownership,
@@ -293,7 +293,7 @@ Current focused behavior:
   `address:port`, while the attached-stream contract uses `undefined` when no
   peer fallback is supplied.
 - The server/attach lifecycle now has an independent regression selector:
-  `MOUNT_RS_SERVER_PHASE=p9 node integrations/mount-rs-napi/test/servers.mjs`
+  `MOUNT_RS_SERVER_PHASE=p9 node bindings/mount-rs-napi/test/servers.mjs`
   reaches the real 9P TCP listener, attached socket and non-socket duplex
   paths, duplicate attach, backpressure, frame-limit, write-fault, and
   server-close phases without being preceded by the unrelated Darwin NFS
@@ -660,8 +660,8 @@ bodies, and the full supported server/session string/symbol prototype-member
 differential now passes; only the three oracle-only controls remain outside
 scope. Compare the current
   native options and objects in
-  [`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L816-L1192) with
-  the declarations in [`index.d.ts`](../integrations/mount-rs-napi/index.d.ts#L1085-L1203).
+  [`servers.rs`](../bindings/mount-rs-napi/src/servers.rs#L816-L1192) with
+  the declarations in [`index.d.ts`](../bindings/mount-rs-napi/index.d.ts#L1085-L1203).
 - S3 and WebDAV lifecycle wrappers are covered only to the extent exercised by
   their focused tests; this is not a claim of all upstream connection/session
   behavior.
@@ -671,8 +671,8 @@ scope. Compare the current
 The current S3 factory supports one native `Filesystem` or an object whose
 values are native `Filesystem` references. It validates bucket names and has
 focused two-bucket PUT/GET isolation coverage; see
-[`servers.rs`](../integrations/mount-rs-napi/src/servers.rs#L893-L1057) and
-[`servers.mjs`](../integrations/mount-rs-napi/test/servers.mjs#L458-L501).
+[`servers.rs`](../bindings/mount-rs-napi/src/servers.rs#L893-L1057) and
+[`servers.mjs`](../bindings/mount-rs-napi/test/servers.mjs#L458-L501).
 
 The JavaScript facade now adapts structural drivers in mixed bucket maps before
 the native extractor, with real server isolation coverage. It now also performs
@@ -712,14 +712,14 @@ across all 28 gateway cases. The generated package build and N-API integration
 verify connection/transport-error member parity and direct Node peer-fault
 injection, while `S3Session.close()` and the supported server/session member
 boundary are differentially checked by
-[`test/s3-session-parity.mjs`](../integrations/mount-rs-napi/test/s3-session-parity.mjs);
+[`test/s3-session-parity.mjs`](../bindings/mount-rs-napi/test/s3-session-parity.mjs);
 live AWS/R2 and native/hosted lifecycle evidence remain open. The oracle-only
 pure codec/helper members are explicitly outside the supported Node scope, and
 the standalone TypeScript fixture check passes against the checked-in
 declarations.
 
 The supported-scope decision is pinned by
-[`test/s3-barrel-scope.mjs`](../integrations/mount-rs-napi/test/s3-barrel-scope.mjs):
+[`test/s3-barrel-scope.mjs`](../bindings/mount-rs-napi/test/s3-barrel-scope.mjs):
 with `MOUNTX_SOURCE=/private/tmp/mountx-source-w01-20260921`, the package
 `./s3` export is compared to the oracle's runtime export set and the exact 153
 oracle-only codec/helper names are asserted as Rust-owned and out of the Node
@@ -803,15 +803,15 @@ provider/native, restart, and hosted gates remain open.
 The CLI parser and runtime cover transport selection, driver selection,
 read-only/empty/allow-other flags, probe, mountpoint precedence, Ctrl-C
 cleanup, and stale-mount cleanup. See
-[`parser.rs`](../crates/mount-rs-cli/src/parser.rs#L1-L15) and
-[`runtime.rs`](../crates/mount-rs-cli/src/runtime.rs#L289-L405).
+[`parser.rs`](../apps/mount-rs-cli/src/parser.rs#L1-L15) and
+[`runtime.rs`](../apps/mount-rs-cli/src/runtime.rs#L289-L405).
 Focused tests cover help/version/probe, parser values, transport/driver
 selection, configuration validation, and actual Rust-binary SDK self-tests in
-[`cli.rs`](../crates/mount-rs-cli/tests/cli.rs#L6-L121).
+[`cli.rs`](../apps/mount-rs-cli/tests/cli.rs#L6-L121).
 
 The CLI README explicitly separates ordinary tests from native FUSE subprocess
 tests and says the latter require explicit prerequisites; see
-[`README.md`](../crates/mount-rs-cli/README.md#L113-L141). Exact oracle help,
+[`README.md`](../apps/mount-rs-cli/README.md#L113-L141). Exact oracle help,
 demo hints, native mount/unmount behavior, and live filesystem results remain
 unverified. Do not report skipped native tests as passing.
 
@@ -859,12 +859,12 @@ These surfaces have concrete current-tree implementation, while the primary
 ledger above records where oracle parity is still incomplete:
 
 - Native N-API filesystem/handle operations and lifecycle behavior in
-  [`lib.rs`](../integrations/mount-rs-napi/src/lib.rs#L2307-L2732), exercised by
-  [`contract.mjs`](../integrations/mount-rs-napi/test/contract.mjs) and
-  [`smoke.mjs`](../integrations/mount-rs-napi/test/smoke.mjs).
+  [`lib.rs`](../bindings/mount-rs-napi/src/lib.rs#L2307-L2732), exercised by
+  [`contract.mjs`](../bindings/mount-rs-napi/test/contract.mjs) and
+  [`smoke.mjs`](../bindings/mount-rs-napi/test/smoke.mjs).
 - Root path, mode, errno, error, range, and `PathLock` utilities in
-  [`utilities.mjs`](../integrations/mount-rs-napi/test/utilities.mjs#L20-L320),
-  with the root aliases installed by [`postbuild.mjs`](../integrations/mount-rs-napi/postbuild.mjs#L6-L22).
+  [`utilities.mjs`](../bindings/mount-rs-napi/test/utilities.mjs#L20-L320),
+  with the root aliases installed by [`postbuild.mjs`](../bindings/mount-rs-napi/postbuild.mjs#L6-L22).
 - Unstorage driver binding and fixed/extensible chunked storage, with focused
   N-API tests; these are implementation surfaces, not proof of every upstream
   capability or storage-backend result.
@@ -877,15 +877,15 @@ ledger above records where oracle parity is still incomplete:
   pieces, subject to their respective partial ledgers above.
 - Rust-backed FUSE inode state through the `./fuse` `InodeTable` facade, with
   the pinned-oracle comparison in
-  [`test/fuse-inodes.mjs`](../integrations/mount-rs-napi/test/fuse-inodes.mjs).
+  [`test/fuse-inodes.mjs`](../bindings/mount-rs-napi/test/fuse-inodes.mjs).
 
 ## Verification and evidence boundary
 
 The relevant tests are intentionally separated by what they prove:
 
-- `integrations/mount-rs-napi/test/utilities.mjs`, `contract.mjs`, and
+- `bindings/mount-rs-napi/test/utilities.mjs`, `contract.mjs`, and
   `smoke.mjs`: native core and utility components.
-- `integrations/mount-rs-napi/test/js-driver.mjs` and `differential.mjs`:
+- `bindings/mount-rs-napi/test/js-driver.mjs` and `differential.mjs`:
   oracle-backed only when `MOUNTX_SOURCE` is set; both contain explicit skip
   paths when it is not.
 - `nfs-codec.mjs` and `9p-codec.mjs`: focused wire/codec comparisons, not full

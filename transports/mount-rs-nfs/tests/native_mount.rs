@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use mount_rs_core::{MemoryFs, MemoryOptions};
+use mount_rs_memfs::{MemoryFs, MemoryOptions};
 use mount_rs_nfs::{NativeNfsMount, NfsMountOptions, NfsVersion, mount_nfs, nfs_client_probe};
 
 const MOUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);

@@ -11,7 +11,10 @@ Transport crates and the napi-rs/CLI frontends consume the filesystem contract.
 | Memory | Yes | Yes | Volatile |
 | SQLite | Yes | Yes | Persistent file-backed database; memory databases are volatile |
 | PGlite | Yes | Yes | Explicit caller assertion, volatile by default |
-| R2 | No | Yes | Completed remote object writes; live account acceptance still required |
+| R2 / S3-compatible endpoint | No | Yes | Explicit caller assertion for completed remote object writes; live service acceptance still required |
+| AWS S3 | No | Yes | Explicit caller assertion for the object-store block adapter; actual AWS S3 acceptance remains separate |
+| TiDB | Yes | Yes | Explicit caller assertion, volatile by default; depends on the TiDB/TiKV deployment |
+| FoundationDB | Yes | Yes | Explicit caller assertion, volatile by default; native client and lease authority are opt-in |
 
 Metadata and blocks can use different providers or independent database files.
 Metadata contains inode attributes, directory entries and block references, not

@@ -5,7 +5,7 @@ import { pathToFileURL } from "node:url";
 
 const PINNED_ORACLE = "85361a8212ff9bff8e69f62fa8993ef2c2ec51e8";
 const require = createRequire(import.meta.url);
-const binding = require("../../integrations/mount-rs-napi/index.js");
+const binding = require("../../bindings/mount-rs-napi/index.js");
 const source = process.env.MOUNTX_SOURCE;
 assert.ok(source, "MOUNTX_SOURCE must identify the pinned mountx oracle");
 assert.equal(

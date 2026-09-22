@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mount_rs_core::{DirEntry, FileHandle, FsDriver, MemoryFs, Result, Stats};
+use mount_rs_core::{DirEntry, FileHandle, FsDriver, Result, Stats};
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::constants::{
     MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_MNT, MOUNTPROC3_NULL, NFS_PROGRAM, NFS_V3, NFS3_OK,
     NFSPROC3_GETATTR, NFSPROC3_LOOKUP,

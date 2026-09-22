@@ -24,7 +24,7 @@ The current split design in [`src/storage.rs`](../src/storage.rs) already gives 
 - `MetadataStore::publish(expected_revision, lease, namespace)` is an atomic metadata publication guarded by a revision and `WriterLease` fence.
 - `BlockStore::put` writes immutable blocks, and `BlockStore::flush` is the durability barrier before metadata may reference them.
 - `ChunkerConfig` is persisted per layout. Fixed-size chunking remains the initial format.
-- [`integrations/mount-rs-chunked/src/lib.rs`](../integrations/mount-rs-chunked/src/lib.rs) already serializes operations with its gate, flushes blocks before publishing metadata, and fails closed when a metadata publication is uncertain.
+- [`filesystems/mount-rs-chunked/src/lib.rs`](../filesystems/mount-rs-chunked/src/lib.rs) already serializes operations with its gate, flushes blocks before publishing metadata, and fails closed when a metadata publication is uncertain.
 
 The versioning extension must preserve those invariants. The provider's internal revision is a concurrency token; it is not itself a user-visible historical version because it may advance for metadata changes such as access-time updates and may not identify a complete block/manifest publication.
 

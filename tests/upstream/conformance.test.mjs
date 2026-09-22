@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const require = createRequire(import.meta.url);
-const binding = require('../../integrations/mount-rs-napi/index.js');
+const binding = require('../../bindings/mount-rs-napi/index.js');
 const source = process.env.MOUNTX_SOURCE;
 if (!source) throw new Error('MOUNTX_SOURCE must identify the pinned upstream checkout');
 const { conformance } = await import(pathToFileURL(`${source}/test/conformance.ts`).href);

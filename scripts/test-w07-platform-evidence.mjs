@@ -11,7 +11,7 @@ import {
 const sourceRevision = "a".repeat(40);
 const linuxLog = [
   "W07_PRODUCTION_QUALIFICATION_PROVENANCE_PASS repository=andymac4182/mount-rs workflow=W07 FoundationDB production qualification ref=refs/heads/main source_revision=" + sourceRevision + " run_id=123 run_attempt=1 runner=GitHub Actions 1",
-  "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+integrations/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=10",
+  "FOUNDATIONDB_TEST_PASS topology=durable manifests=tests/foundationdb/Cargo.toml+providers/mount-rs-foundationdb/Cargo.toml platform=linux/amd64 service_restart=pass soak_rounds=10",
   "W07_PRODUCTION_QUALIFICATION_EVIDENCE_PASS rounds=10 workload=composition operations=15",
 ].join("\n");
 const macosLog = [

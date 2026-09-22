@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::sync::Arc;
 
-use mount_rs_core::{FileHandle, Loopback, MemoryFs, MkdirOptions, Stats, StatsFs};
+use mount_rs_core::{FileHandle, Loopback, MkdirOptions, Stats, StatsFs};
+use mount_rs_memfs::MemoryFs;
 use serde_json::{Value, json};
 
 fn stable_stats(stats: &Stats, exact_times: bool) -> Value {
@@ -305,7 +306,7 @@ async fn execute(
 
 #[tokio::main]
 async fn main() {
-    let fs = Loopback::new(MemoryFs::new(mount_rs_core::MemoryOptions {
+    let fs = Loopback::new(MemoryFs::new(mount_rs_memfs::MemoryOptions {
         uid: 501,
         gid: 20,
         umask: 0,

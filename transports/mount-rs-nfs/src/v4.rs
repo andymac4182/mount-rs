@@ -5002,7 +5002,7 @@ fn allowed_access4(stats: &Stats, credentials: &RpcCredentials) -> u32 {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use mount_rs_core::MemoryFs;
+    use mount_rs_memfs::MemoryFs;
 
     use super::{Nfs4Session, SeqidOrdering, bump_stateid_seq, compare_stateid_seqid, session_id};
     use crate::{

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
-use mount_rs_core::{FsDriver, Loopback, MemoryFs, MkdirOptions};
+use mount_rs_core::{FsDriver, Loopback, MkdirOptions};
+use mount_rs_memfs::MemoryFs;
 use serde_json::json;
 
 #[tokio::main]

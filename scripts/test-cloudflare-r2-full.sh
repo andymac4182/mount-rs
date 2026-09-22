@@ -78,7 +78,7 @@ echo "CLOUDFLARE_R2_RUST_CLI_PASS"
 
 echo "CLOUDFLARE_R2_NODE_SDK_START"
 MOUNTX_SOURCE="$MOUNTX_SOURCE" \
-  pnpm --dir "$repo_dir/integrations/mount-rs-napi" test
+  pnpm --dir "$repo_dir/bindings/mount-rs-napi" test
 echo "CLOUDFLARE_R2_NODE_SDK_PASS"
 
 echo "CLOUDFLARE_R2_SERVICE_EVIDENCE_START"

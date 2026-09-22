@@ -9,7 +9,7 @@ import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createChunkedDriver, Filesystem } from "../../integrations/mount-rs-napi/index.js";
+import { createChunkedDriver, Filesystem } from "../../bindings/mount-rs-napi/index.js";
 import {
   cleanupR2Prefix,
   listR2Prefix,

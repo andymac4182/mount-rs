@@ -792,7 +792,7 @@ mod tests {
     use super::*;
     use crate::constants::{MOUNT_PROGRAM, MOUNT_V3, MOUNTPROC3_NULL};
     use crate::rpc::{RecordAssembler, decode_reply, encode_call};
-    use mount_rs_core::MemoryFs;
+    use mount_rs_memfs::MemoryFs;
     use tokio::io::{
         AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf,
     };

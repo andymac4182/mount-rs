@@ -9,13 +9,13 @@ const routes = [
     path: '/',
     status: 200,
     contentType: 'text/html',
-    expected: ['Put bytes where your process needs them.', 'not release-ready', 'ChunkedFs'],
+    expected: ['Build file features.', 'prerelease', 'MemoryFs'],
   },
   {
     path: '/docs',
     status: 200,
     contentType: 'text/html',
-    expected: ['The boundary is the product.', 'createChunkedDriver', 'GitHub Release', 'View downloads', 'v0.1.0-cli-preview'],
+    expected: ['Choose the file decision you need to make.', 'createChunkedDriver', 'GitHub Release', 'View downloads', 'v0.1.0-cli-preview'],
   },
   { path: '/docs/', status: 307, redirectTo: '/docs' },
   {
@@ -57,7 +57,7 @@ const routes = [
     path: '/docs/providers/memory',
     status: 200,
     contentType: 'text/html',
-    expected: ['Memory / memfs', 'durable()', 'metadata.versions', 'Validated'],
+    expected: ['Memory metadata + blocks', 'durable()', 'metadata.versions', 'Validated'],
   },
   {
     path: '/docs/providers/sqlite',
@@ -87,7 +87,7 @@ const routes = [
     path: '/docs/providers/tidb',
     status: 200,
     contentType: 'text/html',
-    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', 'v8.5.7', 'symlink-path rejection', 'Experimental'],
+    expected: ['TiDB', 'mount_rs_tidb_metadata', 'mount_rs_tidb_blocks', 'information_schema.COLUMNS', '3PD/3TiKV', 'MOUNT_RS_TIDB_URL', 'Preview'],
   },
   {
     path: '/docs/providers/foundationdb',
@@ -99,7 +99,7 @@ const routes = [
     path: '/docs/providers/aws-s3',
     status: 200,
     contentType: 'text/html',
-    expected: ['AWS S3', 'mount-rs-tests/owned-run/', 'planned block key', 'Planned', 'AWS_REGION'],
+    expected: ['AWS S3', 'mount-rs-tests/owned-run/', 'planned block key', 'Validated', 'AWS_REGION', 'AWS S3 provider crate'],
   },
   {
     path: '/docs/providers/ozone',
@@ -118,13 +118,13 @@ const routes = [
     path: '/docs/transports/fuse',
     status: 200,
     contentType: 'text/html',
-    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'GETATTR', 'SETATTR', 'OPEN', 'OPENDIR', 'CREATE', 'LOOKUP', 'READLINK', 'STATFS', 'BATCH_FORGET', 'INTERRUPT', 'RELEASE', 'FSYNC', 'READDIRPLUS', 'ACCESS', 'FUSE_INIT_EXT', 'packDirentsPlus', 'Hosted CI run 35575442663'],
+    expected: ['FUSE', '/dev/fuse', 'Preview', 'Rust-backed', './fuse', 'GETATTR', 'SETATTR', 'OPEN', 'OPENDIR', 'CREATE', 'LOOKUP', 'READLINK', 'STATFS', 'BATCH_FORGET', 'INTERRUPT', 'RELEASE', 'FSYNC', 'READDIRPLUS', 'ACCESS', 'FUSE_INIT_EXT', 'packDirentsPlus', 'Historical hosted Linux transport CI'],
   },
   {
     path: '/docs/transports/nfs',
     status: 200,
     contentType: 'text/html',
-    expected: ['NFS', 'mount_nfs', 'Preview', 'unlink/rename', '266 oracle', 'Node CLI', 'HostFs', 'capability-gated'],
+    expected: ['NFS', 'mount_nfs', 'Preview', 'unlink/rename', '266', 'Nfs3Session', 'HostFs', 'NFS4ERR_BADSESSION'],
   },
   {
     path: '/docs/transports/9p',

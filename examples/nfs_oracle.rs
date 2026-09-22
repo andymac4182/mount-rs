@@ -1,5 +1,5 @@
 //! Loopback-only server for the unmodified upstream NFS clients and suite.
-use mount_rs_core::MemoryFs;
+use mount_rs_memfs::MemoryFs;
 use mount_rs_nfs::{NfsServer, NfsServerOptions};
 use std::io::{Read, Write};
 

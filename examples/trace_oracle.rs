@@ -1,4 +1,5 @@
-use mount_rs_core::{Loopback, MemoryFs, MkdirOptions, Result};
+use mount_rs_core::{Loopback, MkdirOptions, Result};
+use mount_rs_memfs::MemoryFs;
 use serde_json::{Value, json};
 use std::io::{self, BufRead};
 
@@ -107,9 +108,9 @@ async fn main() {
             .await
             .unwrap(),
         ),
-        "sqlite" => Loopback::new(mount_rs_sqlite::open_sqlite_memory().await.unwrap()),
+        "sqlite" => Loopback::new(mount_rs_sqlite_fs::open_sqlite_memory().await.unwrap()),
         "object-store" => Loopback::new(
-            mount_rs_r2::open_object_store(
+            mount_rs_r2_fs::open_object_store(
                 std::sync::Arc::new(object_store::memory::InMemory::new()),
                 "trace/state",
             )
@@ -136,7 +137,7 @@ async fn main() {
         "pglite" => {
             let url = std::env::var("PGLITE_DATABASE_URL").expect("PGLITE_DATABASE_URL required");
             Loopback::new(
-                mount_rs_pglite::connect_pglite_with_key(
+                mount_rs_pglite_fs::connect_pglite_with_key(
                     &url,
                     format!("trace-{}", std::process::id()),
                 )

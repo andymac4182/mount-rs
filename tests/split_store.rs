@@ -4,13 +4,14 @@ use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use mount_rs_aws_s3::{AwsS3BlockStore, AwsS3Config};
 use mount_rs_chunked::{ChunkedFs, ChunkedOptions};
 use mount_rs_core::{
     ErrorCode, FsDriver, Loopback, MkdirOptions,
     storage::{BlockId, BlockStore, MetadataStore},
 };
 use mount_rs_memory::{MemoryBlockStore, MemoryMetadataStore};
-use mount_rs_r2::{AwsS3Config, R2BlockStore, R2Config};
+use mount_rs_r2::{R2BlockStore, R2Config};
 use mount_rs_sqlite::{SqliteBlockStore, SqliteMetadataStore};
 use object_store::path::Path as ObjectPath;
 use object_store::{GetOptions, ObjectStore, PutMode, PutOptions, PutPayload, UpdateVersion};
@@ -94,7 +95,7 @@ async fn memory_metadata_with_memory_blocks() {
 /// closes and verifies that the unique owned prefix is empty.
 #[derive(Clone)]
 struct TrackedObjectStoreBlocks {
-    inner: R2BlockStore,
+    inner: Arc<dyn BlockStore>,
     object_store: Arc<dyn ObjectStore>,
     prefix: String,
     created: Arc<Mutex<BTreeSet<String>>>,
@@ -103,12 +104,19 @@ struct TrackedObjectStoreBlocks {
 impl TrackedObjectStoreBlocks {
     fn from_r2_config(config: &R2Config, prefix: String) -> Self {
         let object_store = config.build_store().expect("live R2 object store");
-        Self::from_object_store(object_store, prefix)
+        let inner = R2BlockStore::new(object_store.clone(), prefix.clone(), true)
+            .expect("live R2 block store");
+        Self::new(Arc::new(inner), object_store, prefix)
     }
 
-    fn from_object_store(object_store: Arc<dyn ObjectStore>, prefix: String) -> Self {
-        let inner = R2BlockStore::new(object_store.clone(), prefix.clone(), true)
-            .expect("live object-store block store");
+    fn from_aws_config(config: &AwsS3Config, prefix: String) -> Self {
+        let object_store = config.build_store().expect("live AWS S3 object store");
+        let inner = AwsS3BlockStore::new(object_store.clone(), prefix.clone(), true)
+            .expect("live AWS S3 block store");
+        Self::new(Arc::new(inner), object_store, prefix)
+    }
+
+    fn new(inner: Arc<dyn BlockStore>, object_store: Arc<dyn ObjectStore>, prefix: String) -> Self {
         Self {
             inner,
             object_store,
@@ -124,7 +132,7 @@ impl TrackedObjectStoreBlocks {
     fn track_key(&self, key: impl Into<String>) {
         self.created
             .lock()
-            .expect("tracked R2 object lock")
+            .expect("tracked object-store lock")
             .insert(key.into());
     }
 
@@ -136,14 +144,14 @@ impl TrackedObjectStoreBlocks {
         let keys = self
             .created
             .lock()
-            .expect("tracked R2 object lock")
+            .expect("tracked object-store lock")
             .iter()
             .cloned()
             .collect::<Vec<_>>();
         for key in keys {
             match self.object_store.delete(&ObjectPath::from(key)).await {
                 Ok(()) | Err(object_store::Error::NotFound { .. }) => {}
-                Err(error) => panic!("delete owned live R2 object: {error}"),
+                Err(error) => panic!("delete owned live object-store object: {error}"),
             }
         }
 
@@ -151,10 +159,10 @@ impl TrackedObjectStoreBlocks {
             .object_store
             .list_with_delimiter(Some(&ObjectPath::from(self.prefix.clone())))
             .await
-            .expect("list owned live R2 prefix after cleanup");
+            .expect("list owned live object-store prefix after cleanup");
         assert!(
             remaining.objects.is_empty() && remaining.common_prefixes.is_empty(),
-            "live R2 owned prefix still contains objects after exact cleanup: {:?}",
+            "live object-store owned prefix still contains objects after exact cleanup: {:?}",
             remaining.objects
         );
     }
@@ -169,7 +177,7 @@ where
     // owned prefix after all successful operations have finished.
     let result = tokio::spawn(operation).await;
     blocks.cleanup().await;
-    result.expect("live R2 test operation panicked");
+    result.expect("live object-store test operation panicked");
 }
 
 #[async_trait::async_trait]
@@ -193,7 +201,7 @@ impl BlockStore for TrackedObjectStoreBlocks {
         if result.is_ok() {
             self.created
                 .lock()
-                .expect("tracked R2 object lock")
+                .expect("tracked object-store lock")
                 .remove(&format!("{}/{}", self.prefix, id.0));
         }
         result
@@ -558,10 +566,7 @@ async fn live_aws_s3_blocks_with_independent_pglite_metadata() {
         )
     });
     let config = AwsS3Config { bucket, region };
-    let blocks = TrackedObjectStoreBlocks::from_object_store(
-        config.build_store().expect("live AWS S3 object store"),
-        prefix.clone(),
-    );
+    let blocks = TrackedObjectStoreBlocks::from_aws_config(&config, prefix.clone());
 
     run_with_exact_object_cleanup(blocks.clone(), async move {
         exercise(
@@ -580,7 +585,7 @@ async fn live_aws_s3_blocks_with_independent_pglite_metadata() {
             PgliteMetadataStore::connect_with_key(&url, &scope)
                 .await
                 .unwrap(),
-            R2BlockStore::new(
+            AwsS3BlockStore::new(
                 config.build_store().expect("fresh AWS S3 object store"),
                 prefix,
                 true,
@@ -602,7 +607,7 @@ async fn live_aws_s3_blocks_with_independent_pglite_metadata() {
             expected
         );
         reopened.shutdown().await.unwrap();
-        println!("AWS_S3_PGLITE_PASS prefix={}", blocks.inner.prefix());
+        println!("AWS_S3_PGLITE_PASS prefix={}", blocks.prefix);
     })
     .await;
 }
@@ -620,10 +625,7 @@ async fn live_aws_s3_pglite_prepare_for_restart() {
     let prefix = std::env::var("AWS_S3_TEST_PREFIX")
         .expect("AWS_S3_TEST_PREFIX required for persistent restart qualification");
     let config = AwsS3Config { bucket, region };
-    let blocks = TrackedObjectStoreBlocks::from_object_store(
-        config.build_store().expect("live AWS S3 object store"),
-        prefix,
-    );
+    let blocks = TrackedObjectStoreBlocks::from_aws_config(&config, prefix);
     let options = PgliteStorageOptions::new(&scope).with_durable(true);
     let metadata = PgliteMetadataStore::connect_with_options(&url, options.clone())
         .await
@@ -713,7 +715,7 @@ async fn live_aws_s3_pglite_reopen_after_restore() {
     )
     .await
     .unwrap();
-    let blocks = R2BlockStore::new(config.build_store().unwrap(), prefix, true).unwrap();
+    let blocks = AwsS3BlockStore::new(config.build_store().unwrap(), prefix, true).unwrap();
     let reopened = ChunkedFs::open(
         metadata.clone(),
         blocks,

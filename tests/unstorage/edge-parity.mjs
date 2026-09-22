@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
-const binding = require("../../integrations/mount-rs-napi/index.js");
+const binding = require("../../bindings/mount-rs-napi/index.js");
 const source = process.env.MOUNTX_SOURCE;
 assert.ok(source, "MOUNTX_SOURCE must identify the pinned upstream checkout");
 
