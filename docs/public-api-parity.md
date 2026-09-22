@@ -305,6 +305,17 @@ Current focused behavior:
   full package script reached all 9P checks before the unrelated NFS relisten
   phase hit the Darwin sandbox's `Operation not permitted` boundary; broader
   upstream member parity and production acceptance remain open.
+- The bounded body readers `readRread`, `readTwrite`, and `readRreaddir` now
+  preserve the oracle's optional maximum-item argument, defaulting to
+  `P9_MAX_ITEM` and retaining the native bounded-body error behavior. The 44-case
+  codec differential covers bounded success and oversized-body errors for all
+  three readers, with generated typecheck, syntax, fid/runtime, diff,
+  formatting, strict Clippy, and 18 focused Rust tests green. Exact SHA
+  `bba379ebe4339e951de9cb7ca02b4b499c3a3874` passed [Native 9P run
+  `35677755888`](https://github.com/andymac4182/mount-rs/actions/runs/35677755888),
+  with N-API job `106587739639` and Rust job `106587739402` successful. This
+  closes the identified bounded-reader declaration/forwarding mismatch only;
+  broader upstream member parity and production acceptance remain open.
 - The direct `./9p` probe helpers also retain the oracle's platform argument
   boundary: `p9ClientProbe(platform?)` returns deterministic override facts
   without attempting a mount, and `p9Platform(platform?)` maps the requested
