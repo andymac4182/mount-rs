@@ -4,7 +4,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::task::{Context, Poll};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -2682,6 +2682,71 @@ async fn real_http_download_sends_first_chunk_before_next_driver_read() {
     let stats = session.stats().await;
     assert_eq!(stats.response_bytes, payload.len() as u64);
     server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn http_server_close_aborts_stalled_response_at_drain_deadline() {
+    let memory = MemoryFs::empty();
+    let payload = vec![0x41; 2 * 1024 * 1024];
+    let handle = memory
+        .open("/stalled-download.bin", "w", 0o666)
+        .await
+        .expect("open stalled object");
+    handle
+        .write(&payload, Some(0))
+        .await
+        .expect("write stalled object");
+    handle.close().await.expect("close stalled object");
+
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory,
+        signals: signals.clone(),
+    }));
+    let server = S3Server::start(
+        Arc::clone(&session),
+        S3ServerOptions {
+            drain_timeout: Duration::from_millis(50),
+            ..S3ServerOptions::default()
+        },
+    )
+    .await
+    .expect("loopback listener");
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request = format!(
+        "GET /mountx/stalled-download.bin HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        server.address()
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write request");
+    timeout(Duration::from_secs(2), signals.first_read.notified())
+        .await
+        .expect("stalled response reached the first driver read");
+
+    let started = Instant::now();
+    server
+        .close()
+        .await
+        .expect("close cuts a response past the drain deadline");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "bounded close took too long: {:?}",
+        started.elapsed()
+    );
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if server.connections() == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("stalled connection was dropped after close");
 }
 
 #[derive(Debug)]

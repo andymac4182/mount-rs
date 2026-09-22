@@ -4528,6 +4528,14 @@ reproducible in a production-like environment.
   service PASS is claimable; protected AWS configuration, the R2 budget reset,
   physical power-loss durability, broader workload bounds, and native/hosted
   acceptance remain open, so W01-S3 stays **NO-GO**.
+- [x] The next W01-S3 server-lifecycle packet makes bounded close match the
+  oracle's drain-deadline behavior: tracked connections are cancelled and the
+  detached Axum task is aborted instead of returning a timeout while retaining
+  a live connection. The focused stalled-response regression and full Rust
+  5/6/32/5 packet, strict Clippy, release addon, host server integration,
+  callback/session/concurrency/restart/typecheck/distribution checks passed;
+  live providers, power-loss durability, broader workload bounds, and
+  native/hosted acceptance remain open, so W01-S3 stays **NO-GO**.
 - [ ] W10.1 Finish per-transport backend/platform acceptance matrix, including
   native lifecycle, disconnect/error behavior and streaming/backpressure.
 - [ ] W10.2 Verify transport auto-selection and explicit unsupported behavior.

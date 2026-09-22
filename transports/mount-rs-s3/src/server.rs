@@ -6,10 +6,11 @@
 //! put a reviewed TLS/mTLS proxy in front of the loopback listener when remote
 //! access is required.
 
+use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -98,8 +99,68 @@ pub struct S3Server {
     address: SocketAddr,
     drain_timeout: Duration,
     active_connections: Arc<AtomicUsize>,
+    connection_shutdowns: Arc<ConnectionShutdowns>,
     shutdown: Mutex<Option<oneshot::Sender<()>>>,
     task: Mutex<Option<JoinHandle<Result<(), std::io::Error>>>>,
+}
+
+#[derive(Default)]
+struct ConnectionShutdown {
+    cancelled: AtomicBool,
+    waker: StdMutex<Option<std::task::Waker>>,
+}
+
+impl ConnectionShutdown {
+    fn register(&self, context: &Context<'_>) -> bool {
+        if self.cancelled.load(Ordering::Acquire) {
+            return true;
+        }
+        let mut waker = self.waker.lock().expect("S3 connection waker lock");
+        if self.cancelled.load(Ordering::Acquire) {
+            return true;
+        }
+        *waker = Some(context.waker().clone());
+        false
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Some(waker) = self.waker.lock().expect("S3 connection waker lock").take() {
+            waker.wake();
+        }
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+#[derive(Default)]
+struct ConnectionShutdowns {
+    entries: StdMutex<Vec<Weak<ConnectionShutdown>>>,
+}
+
+impl ConnectionShutdowns {
+    fn register(&self, shutdown: &Arc<ConnectionShutdown>) {
+        self.entries
+            .lock()
+            .expect("S3 connection shutdown registry")
+            .push(Arc::downgrade(shutdown));
+    }
+
+    fn cancel_all(&self) {
+        let mut entries = self
+            .entries
+            .lock()
+            .expect("S3 connection shutdown registry");
+        entries.retain(|entry| {
+            let Some(shutdown) = entry.upgrade() else {
+                return false;
+            };
+            shutdown.cancel();
+            true
+        });
+    }
 }
 
 impl S3Server {
@@ -127,6 +188,7 @@ impl S3Server {
             .map_err(S3BindError::Bind)?;
         let address = listener.local_addr().map_err(S3BindError::Bind)?;
         let active_connections = Arc::new(AtomicUsize::new(0));
+        let connection_shutdowns = Arc::new(ConnectionShutdowns::default());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let app = Router::new()
             .fallback(any(handle_http))
@@ -135,6 +197,7 @@ impl S3Server {
         let tracked_listener = TrackedListener {
             listener,
             active_connections: Arc::clone(&active_connections),
+            connection_shutdowns: Arc::clone(&connection_shutdowns),
             hooks: hooks.clone(),
         };
         let task = tokio::spawn(async move {
@@ -160,6 +223,7 @@ impl S3Server {
             address,
             drain_timeout: options.drain_timeout,
             active_connections,
+            connection_shutdowns,
             shutdown: Mutex::new(Some(shutdown_tx)),
             task: Mutex::new(Some(task)),
         })
@@ -199,12 +263,25 @@ impl S3Server {
         if let Some(sender) = self.shutdown.lock().await.take() {
             let _ = sender.send(());
         }
-        if let Some(task) = self.task.lock().await.take() {
-            tokio::time::timeout(self.drain_timeout, task)
-                .await
-                .map_err(|_| S3BindError::Task("S3 server close timed out".to_owned()))?
-                .map_err(|error| S3BindError::Task(error.to_string()))?
-                .map_err(|error| S3BindError::Task(error.to_string()))?;
+        if let Some(mut task) = self.task.lock().await.take() {
+            match tokio::time::timeout(self.drain_timeout, &mut task).await {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(error))) => {
+                    return Err(S3BindError::Task(error.to_string()));
+                }
+                Ok(Err(error)) => {
+                    return Err(S3BindError::Task(error.to_string()));
+                }
+                Err(_) => {
+                    // Dropping a JoinHandle detaches the task. Cancel every
+                    // tracked connection before aborting it so an in-flight
+                    // stream cannot keep serving or retain a connection after
+                    // the bounded drain.
+                    self.connection_shutdowns.cancel_all();
+                    task.abort();
+                    let _ = task.await;
+                }
+            }
         }
         self.session
             .close()
@@ -227,6 +304,7 @@ impl Drop for S3Server {
 struct TrackedListener {
     listener: TcpListener,
     active_connections: Arc<AtomicUsize>,
+    connection_shutdowns: Arc<ConnectionShutdowns>,
     hooks: S3ServerHooks,
 }
 
@@ -239,10 +317,13 @@ impl Listener for TrackedListener {
             match self.listener.accept().await {
                 Ok((stream, peer)) => {
                     self.active_connections.fetch_add(1, Ordering::AcqRel);
+                    let shutdown = Arc::new(ConnectionShutdown::default());
+                    self.connection_shutdowns.register(&shutdown);
                     return (
                         TrackedIo {
                             stream,
                             active_connections: Arc::clone(&self.active_connections),
+                            shutdown,
                             hooks: self.hooks.clone(),
                             peer: peer.to_string(),
                             reported: false,
@@ -270,15 +351,21 @@ impl Listener for TrackedListener {
 struct TrackedIo {
     stream: tokio::net::TcpStream,
     active_connections: Arc<AtomicUsize>,
+    shutdown: Arc<ConnectionShutdown>,
     hooks: S3ServerHooks,
     peer: String,
     reported: bool,
 }
 
 impl TrackedIo {
+    fn cancelled(context: &Context<'_>, shutdown: &ConnectionShutdown) -> bool {
+        shutdown.register(context)
+    }
+
     fn report_io_error<T>(&mut self, result: Poll<std::io::Result<T>>) -> Poll<std::io::Result<T>> {
         if let Poll::Ready(Err(error)) = &result
             && !self.reported
+            && !self.shutdown.is_cancelled()
         {
             self.reported = true;
             report(
@@ -300,6 +387,12 @@ impl AsyncRead for TrackedIo {
         context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if Self::cancelled(context, &self.shutdown) {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "S3 server connection closed",
+            )));
+        }
         let result = Pin::new(&mut self.stream).poll_read(context, buffer);
         self.report_io_error(result)
     }
@@ -311,6 +404,12 @@ impl AsyncWrite for TrackedIo {
         context: &mut Context<'_>,
         buffer: &[u8],
     ) -> Poll<std::io::Result<usize>> {
+        if Self::cancelled(context, &self.shutdown) {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "S3 server connection closed",
+            )));
+        }
         let result = Pin::new(&mut self.stream).poll_write(context, buffer);
         self.report_io_error(result)
     }
@@ -319,6 +418,12 @@ impl AsyncWrite for TrackedIo {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if Self::cancelled(context, &self.shutdown) {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "S3 server connection closed",
+            )));
+        }
         let result = Pin::new(&mut self.stream).poll_flush(context);
         self.report_io_error(result)
     }
@@ -327,6 +432,12 @@ impl AsyncWrite for TrackedIo {
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if Self::cancelled(context, &self.shutdown) {
+            return Poll::Ready(Err(std::io::Error::new(
+                ErrorKind::ConnectionAborted,
+                "S3 server connection closed",
+            )));
+        }
         let result = Pin::new(&mut self.stream).poll_shutdown(context);
         self.report_io_error(result)
     }
