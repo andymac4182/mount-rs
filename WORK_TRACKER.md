@@ -858,7 +858,7 @@ complete.
 | W04 | PGlite | Verifying | Main |
 | W05 | Cloudflare R2 | Complete for requested Rust/Node SDK and CLI hosted acceptance; native/platform gates remain separate | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
-| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest terminal qualification is green at [run `35674506961`](https://github.com/andymac4182/mount-rs/actions/runs/35674506961) / exact source `a7eb3be47e3e5edfd4b3e8a516d1b8cbceaab199`, with six rollout-ledger, five qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the base composition marker was p95/p99 88,362µs at 111.17 ops/s and five-round soak p95/p99 ranged 13,388–15,041µs with throughput 206.94–236.23 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 70.83 lifecycle IOPS with all 1,200 operations successful, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35674506961-1` (ID `10672253304`, SHA-256 `e558dea65ac63d87873d36e6bff09daa70f824310309c1c1e6dd87c109b7b5b1`) was retained with the seven-gate packet still NO-GO; production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open | Maxwell (complete slice) / Main |
+| W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest terminal qualification is green at [run `35675987457`](https://github.com/andymac4182/mount-rs/actions/runs/35675987457) / exact source `1670ceba81b24c1ed39b8ab396671324c7f28193`, with six rollout-ledger, five qualification-log, four workload-artifact and twelve production-evidence packet regression cases plus the NO-GO guard; live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service-restart, authority-republish, fresh-client and RustFS integration paths passed; the base composition marker was p95/p99 43,146µs at 158.97 ops/s and five-round soak p95/p99 ranged 12,701–14,187µs with throughput 218.16–225.92 ops/s; the corrected 400-lifecycle/64-concurrency/4KiB workload artifact measured 64.73 lifecycle IOPS with all 1,200 operations successful, but remains bounded qualification rather than capacity evidence; artifact `foundationdb-production-qualification-35675987457-1` (ID `10673640911`, SHA-256 `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`) was retained with the seven-gate packet still NO-GO; production authority, complete Node/native platform matrix, production-like load/capacity, observability, recovery, rollback and owner gates remain open | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
 | W09 | Node / napi-rs and public API | Verifying; public Rust SDK, Rust-backed FUSE state, and Node SDK CLI landed; platform/package gaps remain | Main (packets integrated) |
 | W10 | FUSE, NFS, 9P, WebDAV, S3 | FUSE codec, lifecycle, ACCESS, INIT and session packets landed; native and cross-platform transport acceptance remains open | Main (packets integrated) |
@@ -2185,6 +2185,21 @@ Evidence landed without closing the remaining W01 acceptance gates:
   packet is still `NO-GO` with seven open gates and zero evidence records;
   deployment-level authority credentials, monitored clock/cadence telemetry
   and failover evidence remain pending, so W07.3 is not marked complete.
+  Fresh published-tip requalification
+  [35675987457](https://github.com/andymac4182/mount-rs/actions/runs/35675987457)
+  (job `106582524993`, exact revision
+  `1670ceba81b24c1ed39b8ab396671324c7f28193`) completed green in 11m57s on
+  Ubuntu 24.04/Linux `amd64`. It re-ran the policy/negative fixtures,
+  lease-publication guard, NO-GO packet guard and regression cases, then
+  passed the live durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE,
+  service-restart/authority-republish, fresh-client and RustFS integration
+  paths. The retained artifact is
+  `foundationdb-production-qualification-35675987457-1` (ID `10673640911`)
+  with SHA-256
+  `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`;
+  the packet is still `NO-GO` with seven open gates and zero evidence records.
+  Deployment-level authority credentials, monitored clock/cadence telemetry
+  and failover evidence remain pending, so W07.3 is not marked complete.
 - [x] W07.4 Add conservative transaction/block limits, CAS, stale-writer and
   deterministic lease-fencing checks. Provider restart and hosted identity remain
   separate acceptance work.
@@ -2291,6 +2306,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   Ubuntu 24.04/Linux `amd64`. This adds hosted evidence for the corrected
   workload artifact only; live macOS service/cluster acceptance, the complete
   advertised platform/package matrix and production owner gates remain open.
+  Fresh published-tip requalification
+  [35675987457](https://github.com/andymac4182/mount-rs/actions/runs/35675987457)
+  (job `106582524993`, exact revision
+  `1670ceba81b24c1ed39b8ab396671324c7f28193`) completed green in 11m57s and
+  passed live Node/N-API, Linux CLI/FUSE mount and reopen, durable
+  FoundationDB/RustFS service restart/authority republish, fresh-client
+  reopen and RustFS integration on Ubuntu 24.04/Linux `amd64`. Its retained
+  artifact is `foundationdb-production-qualification-35675987457-1` (ID
+  `10673640911`) with SHA-256
+  `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`.
+  Live macOS service/cluster acceptance, the complete advertised
+  platform/package matrix and production owner gates remain open.
 - [x] W07.6 **FoundationDB metadata + RustFS S3 chunks:** main passed the real-service
   composition and provider contract in the full RustFS harness (exit 0), with
   multi-chunk round trips, fresh-client reopen, CAS and expired-writer fencing.
@@ -2857,10 +2884,10 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   hosted attempt `35673343510` at revision `9ea7e493` correctly produced no
   pass because the first implementation imposed an unsupported 1,000-IOPS
   floor and measured 29.13 IOPS. Terminal run
-  [35674506961](https://github.com/andymac4182/mount-rs/actions/runs/35674506961)
-  at exact revision `a7eb3be47e3e5edfd4b3e8a516d1b8cbceaab199` now passes the
+  [35675987457](https://github.com/andymac4182/mount-rs/actions/runs/35675987457)
+  at exact revision `1670ceba81b24c1ed39b8ab396671324c7f28193` now passes the
   corrected profile: 400 complete lifecycles at 64-way concurrency and 4 KiB,
-  measured 70.83 lifecycle IOPS, all 1,200 operations successful, zero
+  measured 64.73 lifecycle IOPS, all 1,200 operations successful, zero
   timeouts/cleanup failures, and a retained machine-readable artifact. This
   is bounded hosted Linux qualification only; production-like duration/load,
   retry/error-budget, resource-growth, capacity, cost and scaling acceptance
@@ -2897,22 +2924,22 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     and fresh-client reopen at production-like duration and load. Record
     latency, retry, capacity and error-budget results. The real composition
     harness now emits `FOUNDATIONDB_LATENCY_PASS` with p50/p95/p99 operation
-    latency and throughput; latest hosted run `35674506961` recorded base
-    `operations=15 p50_us=2617 p95_us=88362 p99_us=88362 total_ms=134
-    throughput_ops_per_sec=111.17` at exact revision
-    `a7eb3be47e3e5edfd4b3e8a516d1b8cbceaab199`; its five isolated soak-round
-    p95/p99 values ranged from 13,388µs to 15,041µs and throughput ranged
-    from 206.94 to 236.23 ops/s. The same terminal run passed the fixed
-    400-iteration, 64-concurrency, 4 KiB profile with measured 70.83 lifecycle
+    latency and throughput; latest hosted run `35675987457` recorded base
+    `operations=15 p50_us=3394 p95_us=43146 p99_us=43146 total_ms=94
+    throughput_ops_per_sec=158.97` at exact revision
+    `1670ceba81b24c1ed39b8ab396671324c7f28193`; its five isolated soak-round
+    p95/p99 values ranged from 12,701µs to 14,187µs and throughput ranged
+    from 218.16 to 225.92 ops/s. The same terminal run passed the fixed
+    400-iteration, 64-concurrency, 4 KiB profile with measured 64.73 lifecycle
     IOPS, 400 successful writes/reads/deletes, zero timeouts and zero cleanup
-    failures; artifact `foundationdb-production-qualification-35674506961-1`
-    (ID `10672253304`, SHA-256
-    `e558dea65ac63d87873d36e6bff09daa70f824310309c1c1e6dd87c109b7b5b1`) was
+    failures; artifact `foundationdb-production-qualification-35675987457-1`
+    (ID `10673640911`, SHA-256
+    `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`) was
     retained and independently validated. The profile's non-zero floor is
-    structural, not a capacity target. The prior `35671492720` recorded base
-    `operations=15 p50_us=3846 p95_us=38409 p99_us=38409 total_ms=96
-    throughput_ops_per_sec=155.90`; soak p95/p99 ranged from 13,005µs to
-    14,243µs and throughput from 199.39 to 214.47 ops/s. Production-shaped
+    structural, not a capacity target. The prior `35674506961` recorded base
+    `operations=15 p50_us=2617 p95_us=88362 p99_us=88362 total_ms=134
+    throughput_ops_per_sec=111.17`; soak p95/p99 ranged from 13,388µs to
+    15,041µs and throughput from 206.94 to 236.23 ops/s. Production-shaped
     duration, retry/error budget, resource growth, safe capacity, cost and
     scaling triggers are still required.
   - [ ] **Observability and operations:** expose and alert on cluster health,
@@ -2926,11 +2953,11 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
     record owner sign-off.
   - [ ] **Hosted and platform evidence:** the latest hosted FoundationDB/RustFS,
     Node, CLI/native Linux checkpoint is green for exact revision
-    `a7eb3be47e3e5edfd4b3e8a516d1b8cbceaab199` in run `35674506961` (job
-    `106578027627`) on `ubuntu-24.04`/Linux `amd64`, with the retained
-    `foundationdb-production-qualification-35674506961-1` artifact (ID
-    `10672253304`, SHA-256
-    `e558dea65ac63d87873d36e6bff09daa70f824310309c1c1e6dd87c109b7b5b1`).
+    `1670ceba81b24c1ed39b8ab396671324c7f28193` in run `35675987457` (job
+    `106582524993`) on `ubuntu-24.04`/Linux `amd64`, with the retained
+    `foundationdb-production-qualification-35675987457-1` artifact (ID
+    `10673640911`, SHA-256
+    `0cb38b97b121ef8b6b69a1c4ef76d112bb24ba716b19eb6153ee52b13a3cc694`).
     Complete the
     advertised macOS/Linux build/native matrix and any remaining
     clean-install/package evidence; record the actual runner, cluster/image,
