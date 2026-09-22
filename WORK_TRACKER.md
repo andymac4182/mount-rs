@@ -3529,8 +3529,9 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   provider run or grant release approval. *(Implementation/static
   qualification; production evidence and approval remain external.)*
 
-  Merged source base `f68106cfcc64f3c7e4c90b2c413fcc393824a526` was freshly
-  reverified after concurrent WebDAV mounted-restart cleanup correction, S3
+  Merged source base `541365432f4400a2309002a138cfbea75f26d44b` was freshly
+  reverified after concurrent WebDAV mounted-restart cleanup correction,
+  chunked lease-release fix, 9P synchronous mount inspection, S3
   conditional-put/session-concurrency gateway coverage, N-API
   provider-network cleanup, RustFS/Ozone lockfile refreshes, 9P bounded-reader,
   9P frame-assembler and WebDAV native-concurrency, R2 upload coalescing, N-API
