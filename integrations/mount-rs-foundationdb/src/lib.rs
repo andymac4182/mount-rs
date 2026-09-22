@@ -2090,18 +2090,29 @@ impl MetadataStore for FoundationDbMetadataStore {
                 let oracle = Arc::clone(&oracle);
                 Box::pin(async move {
                     configure_transaction(trx, limits)?;
-                    let current_lease = get_owned(trx, &lease_key)
-                        .await?
+                    // These reads share one transaction and do not depend on
+                    // one another. Poll them together so a publication pays
+                    // one provider read window instead of three serial ones;
+                    // the transaction still supplies one read version and
+                    // the same lease/revision/authority validation boundary.
+                    let authority_time = async {
+                        oracle
+                            .now_ms_in_transaction(trx)
+                            .await
+                            .map_err(TxnError::Fs)
+                    };
+                    let (raw_lease, raw_manifest, now_ms) = futures_util::future::try_join3(
+                        get_owned(trx, &lease_key),
+                        get_owned(trx, &manifest_key),
+                        authority_time,
+                    )
+                    .await?;
+                    let current_lease = raw_lease
                         .ok_or_else(|| TxnError::Fs(stale()))
                         .and_then(|bytes| decode_lease(&bytes).map_err(TxnError::Fs))?;
-                    let current_manifest = get_owned(trx, &manifest_key)
-                        .await?
+                    let current_manifest = raw_manifest
                         .map(|bytes| decode_manifest(&bytes).map_err(TxnError::Fs))
                         .transpose()?;
-                    let now_ms = oracle
-                        .now_ms_in_transaction(trx)
-                        .await
-                        .map_err(TxnError::Fs)?;
                     if !lease_matches(&current_lease, &requested, now_ms) {
                         return Err(TxnError::Fs(stale()));
                     }

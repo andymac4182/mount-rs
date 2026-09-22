@@ -14,6 +14,7 @@ default = []
 foundationdb = [
     "dep:async-trait",
     "dep:foundationdb",
+    "dep:futures-util",
     "dep:mount-rs-core",
     "dep:serde_json",
     "dep:sha2",
@@ -22,6 +23,7 @@ foundationdb = [
 
 [dependencies]
 async-trait = { version = "0.1", optional = true }
+futures-util = { version = "0.3", optional = true }
 mount-rs-core = { path = "../..", optional = true }
 sha2 = { version = "0.10", optional = true }
 serde_json = { version = "1", optional = true }
