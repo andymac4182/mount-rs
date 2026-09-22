@@ -292,6 +292,13 @@ Linux lifecycle, and Rust job `106697612506` passed the native lifecycle. This
 rerun covers the shared post-d11 N-API addon-build change; the supported scope
 and overall W01/release **NO-GO** decision are unchanged.
 
+The W01-9P completion audit is now closed for the documented supported scope:
+all applicable public/session/connection/attach/native/concurrency gates are
+PASS, and crash/reset recovery, broader oracle members, cross-transport signal
+ownership, Windows runtime/N-API, and non-Linux native mounts are explicit
+boundaries. This qualifies the 9P slice only; repository production/release
+remains **NO-GO** for the other W01 gates.
+
 The preceding W01-9P transport-teardown packet was published at exact SHA
 `1179d9e3fbdb95ea1cca9866fd249c949614a9e1` and passed [Native 9P run
 `35685073733`](https://github.com/andymac4182/mount-rs/actions/runs/35685073733):

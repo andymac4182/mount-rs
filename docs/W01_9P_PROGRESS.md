@@ -6,7 +6,7 @@ Owner: delegated W01-9P task
 
 Last refreshed: **2026-09-22** (Australia/Brisbane)
 
-Status: **In progress — production NO-GO**
+Status: **Supported 9P scope qualified — repository production/release NO-GO**
 
 This tracker owns 9P protocol, session, connection, attach, mount, and
 transport-lifecycle parity. Codec and raw-frame results do not prove the
@@ -73,6 +73,21 @@ oracle by design, while the supported mount-rs 9P contract has no unclassified
 omitted operation in this audit. Overall W01 and release status remain
 **NO-GO** until the other W01 gates and any separately required broader parity
 decision are closed.
+
+## Completion audit
+
+The advertised 9P scope is now qualified: public codec/barrel/protocol behavior,
+direct native/structural sessions, server/connection/attach contracts, mounted
+identity, Linux native Rust and N-API lifecycle, concurrency, cancellation,
+transport faults, and the current-head hosted upstream suite are evidenced by
+the gates above. The current-head source at `38346fea42b7950e2599103a477d804808262e2b`
+passed [Native 9P run `35712873612`](https://github.com/andymac4182/mount-rs/actions/runs/35712873612),
+and no 9P-scoped implementation, test, or workflow files changed after that
+run. The remaining crash/reset recovery, automatic cross-transport signal
+ownership, broader upstream member families, Windows runtime/N-API, and
+non-Linux native-mount behaviors are explicit supported-scope exclusions, not
+unclassified omissions. This qualifies W01-9P for the documented scope only;
+repository production/release remains **NO-GO** until the other W01 gates close.
 
 ## Current queue
 
@@ -732,7 +747,8 @@ so it is not promoted as a 9P result; production remains NO-GO.
 
 ## Completion rule
 
-The owning task may mark W01-9P production-ready only when every applicable
-gate above is PASS or explicitly accepted outside supported scope, exact
-commands and prerequisites are recorded here, and this file is committed with
-the implementation/test chunk. Until then the decision remains **NO-GO**.
+The supported W01-9P scope is qualified because every applicable gate above is
+PASS or explicitly accepted outside supported scope, with exact commands and
+prerequisites recorded here. Repository production/release remains **NO-GO**
+until the other W01 gates and any separately required broader parity decision
+are closed.
