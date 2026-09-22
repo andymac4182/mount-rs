@@ -7,9 +7,10 @@ use mount_rs_fuse::{
     constants::{
         FUSE_ACCESS, FUSE_BATCH_FORGET, FUSE_BMAP, FUSE_COPY_FILE_RANGE, FUSE_FALLOCATE,
         FUSE_FORGET, FUSE_GETLK, FUSE_GETXATTR, FUSE_INTERRUPT, FUSE_IOCTL, FUSE_LINK,
-        FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_POLL, FUSE_READLINK,
-        FUSE_RELEASE, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RENAME2, FUSE_RMDIR, FUSE_SETLK,
-        FUSE_SETLKW, FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS, FUSE_SYMLINK, FUSE_UNLINK,
+        FUSE_LISTXATTR, FUSE_LOOKUP, FUSE_LSEEK, FUSE_MKDIR, FUSE_MKNOD, FUSE_OPENDIR, FUSE_POLL,
+        FUSE_READLINK, FUSE_RELEASE, FUSE_RELEASEDIR, FUSE_REMOVEXATTR, FUSE_RENAME, FUSE_RENAME2,
+        FUSE_RMDIR, FUSE_SETLK, FUSE_SETLKW, FUSE_SETXATTR, FUSE_SETXATTR_EXT, FUSE_STATFS,
+        FUSE_SYMLINK, FUSE_UNLINK,
     },
     protocol::{FuseReplyBody, ProtocolContext, decode_reply_body},
     session::{FuseFlushMechanism, FuseSession, FuseSessionOptions},
@@ -285,6 +286,21 @@ async fn construction_options_control_identity_timeouts_cache_and_errors() {
     path_identity.destroy().await;
     assert!(path_identity.is_destroyed());
     assert_eq!(path_identity.open_handles(), 0);
+}
+
+#[tokio::test]
+async fn directory_handles_are_counted_and_released() {
+    let mut session = FuseSession::new(Arc::new(MemoryFs::empty()));
+    let created = request(&mut session, FUSE_MKDIR, 1, &mkdir_body(0o755, "dir")).await;
+    let directory = number(&created, 0);
+    let opened = request(&mut session, FUSE_OPENDIR, directory, &[0; 8]).await;
+    let handle = number(&opened, 0);
+    assert_eq!(session.open_handles(), 1);
+
+    let mut release = vec![0; 24];
+    release[..8].copy_from_slice(&handle.to_le_bytes());
+    request(&mut session, FUSE_RELEASEDIR, directory, &release).await;
+    assert_eq!(session.open_handles(), 0);
 }
 
 #[tokio::test]

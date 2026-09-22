@@ -1105,6 +1105,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Added direct public `max_request` and negotiated-INIT state coverage; all 20 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Expanded native mount default-option coverage for source, permissions, frame, and lifecycle timeout policy; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Added helper-free privileged and root-auto mount-mode selection coverage; host tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Added directory-handle accounting coverage for `OPENDIR`/`RELEASEDIR`; all 21 session tests, Linux-target test check, and warning-denied Clippy passed | W01 remains NO-GO |
 
 ## Definition of W01 complete
 
