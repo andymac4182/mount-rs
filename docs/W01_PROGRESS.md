@@ -1089,6 +1089,7 @@ spent waiting for a hosted job or credential approval.
 | 2026-09-22 | W01-FUSE | Rechecked deterministic mount-free durability barriers: all 4 `sync_barrier` tests passed for `SYNCFS`, `FSYNCDIR`, durable/volatile `FLUSH`, and backend errors; this does not qualify kernel persistence or crash recovery | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | Linux-target `cargo check --tests` passed for the FUSE crate; executable cross-linking is unavailable on Darwin due to incompatible host linker flags, so no Linux runtime result is inferred | W01 remains NO-GO |
 | 2026-09-22 | W01-FUSE | The complete current FUSE package suite passed 61 tests across unit, INIT, notify/record, protocol, session, and sync-barrier lanes; Darwin reported zero native mount tests, so hosted kernel acceptance remains open | W01 remains NO-GO |
+| 2026-09-22 | W01-FUSE | Warning-denied Clippy passed for the complete current FUSE target set using an isolated Cargo target; this does not substitute for hosted Linux lifecycle or durability evidence | W01 remains NO-GO |
 
 ## Definition of W01 complete
 
