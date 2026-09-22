@@ -266,6 +266,11 @@ Current focused behavior:
   with N-API job `106569412372` passing automatic/direct/structural mounted
   I/O and cleanup plus direct native session/lock assertions, and Rust job
   `106569412047` passing all four ignored native tests.
+- The direct `./9p` probe helpers also retain the oracle's platform argument
+  boundary: `p9ClientProbe(platform?)` returns deterministic override facts
+  without attempting a mount, and `p9Platform(platform?)` maps the requested
+  platform to `"linux" | undefined`; the zero-argument probe remains backed by
+  the native host probe.
 - The N-API P9 session now exposes the scalar session policy through
   `session.options` and the attach identity through `userFor(fid)`; the server
   exposes its effective scalar policy through `server.options`. These members

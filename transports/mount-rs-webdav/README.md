@@ -16,6 +16,12 @@ body chunk, matching the pinned oracle: a request-body failure may therefore
 leave the bytes already written, and this transport does not claim atomic PUT
 publication. Regular-file GET responses are streamed with positional reads
 and are closed on completion or connection shutdown.
+When a driver advertises `Capabilities::durable_writes`, every successful
+filesystem mutation awaits that driver's `syncfs` barrier before WebDAV
+acknowledges it; an unsupported or failed barrier is returned as a request
+failure rather than a false durable success. Volatile drivers retain the
+successful no-op default. WebDAV locks remain process-local session state and
+are not presented as durable locks.
 
 The HTTP integration tests bind an ephemeral loopback TCP socket and run as an
 ordinary user on both macOS and Linux. They are protocol tests; they do not

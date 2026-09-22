@@ -483,6 +483,7 @@ impl WebdavSession {
         self.require_writable(path, guard, existing.is_none())?;
         self.check_conditionals(head, existing.as_ref())?;
         self.write_file_stream(path, body).await?;
+        self.durability_barrier().await?;
         let stats = self.stat_or_absent(path).await?;
         let mut headers = BTreeMap::new();
         headers.insert("content-length".to_owned(), "0".to_owned());
@@ -586,6 +587,17 @@ impl WebdavSession {
         result.and(close).map_err(WebdavError::from)
     }
 
+    /// Await the driver's persistence barrier before acknowledging a
+    /// filesystem mutation. Volatile drivers remain a successful no-op;
+    /// durable drivers must implement `syncfs` or the request fails rather
+    /// than reporting a false durable success.
+    async fn durability_barrier(&self) -> Result<(), WebdavError> {
+        if self.driver.capabilities().durable_writes {
+            self.driver.syncfs().await?;
+        }
+        Ok(())
+    }
+
     async fn delete(
         &self,
         head: &WebdavRequestHead,
@@ -619,10 +631,14 @@ impl WebdavSession {
         if !stats.is_directory() {
             self.driver.unlink(path).await?;
             self.discard_unmapped(path).await;
+            self.durability_barrier().await?;
             return Ok(WebdavResponse::empty(204));
         }
-        let failures = self.delete_tree(path).await;
+        let (failures, mutated) = self.delete_tree(path).await;
         self.discard_unmapped(path).await;
+        if mutated {
+            self.durability_barrier().await?;
+        }
         if failures.is_empty() {
             Ok(WebdavResponse::empty(204))
         } else {
@@ -633,45 +649,54 @@ impl WebdavSession {
     fn delete_tree<'a>(
         &'a self,
         path: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Vec<Failure>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = (Vec<Failure>, bool)> + Send + 'a>> {
         Box::pin(async move {
             let entries = match self.driver.readdir(path).await {
                 Ok(entries) => entries,
-                Err(error) if is_absent(&error) => return Vec::new(),
+                Err(error) if is_absent(&error) => return (Vec::new(), false),
                 Err(error) => {
-                    return vec![Failure {
-                        path: path.to_owned(),
-                        collection: true,
-                        status: status_for_error(error.code),
-                    }];
+                    return (
+                        vec![Failure {
+                            path: path.to_owned(),
+                            collection: true,
+                            status: status_for_error(error.code),
+                        }],
+                        false,
+                    );
                 }
             };
             let mut failures = Vec::new();
+            let mut mutated = false;
             for entry in entries {
                 let child = join(path, &entry.name);
                 if entry.file_type == FileType::Directory {
-                    failures.extend(self.delete_tree(&child).await);
-                } else if let Err(error) = self.driver.unlink(&child).await
-                    && !is_absent(&error)
-                {
-                    failures.push(Failure {
-                        path: child,
-                        collection: false,
-                        status: status_for_error(error.code),
-                    });
+                    let (child_failures, child_mutated) = self.delete_tree(&child).await;
+                    failures.extend(child_failures);
+                    mutated |= child_mutated;
+                } else {
+                    match self.driver.unlink(&child).await {
+                        Ok(()) => mutated = true,
+                        Err(error) if is_absent(&error) => {}
+                        Err(error) => failures.push(Failure {
+                            path: child,
+                            collection: false,
+                            status: status_for_error(error.code),
+                        }),
+                    }
                 }
             }
-            if failures.is_empty()
-                && let Err(error) = self.driver.rmdir(path).await
-                && !is_absent(&error)
-            {
-                failures.push(Failure {
-                    path: path.to_owned(),
-                    collection: true,
-                    status: status_for_error(error.code),
-                });
+            if failures.is_empty() {
+                match self.driver.rmdir(path).await {
+                    Ok(()) => mutated = true,
+                    Err(error) if is_absent(&error) => {}
+                    Err(error) => failures.push(Failure {
+                        path: path.to_owned(),
+                        collection: true,
+                        status: status_for_error(error.code),
+                    }),
+                }
             }
-            failures
+            (failures, mutated)
         })
     }
 
@@ -696,6 +721,7 @@ impl WebdavSession {
         self.require_collection(&parent(path)).await?;
         self.require_writable(path, guard, true)?;
         self.driver.mkdir(path, MkdirOptions::default()).await?;
+        self.durability_barrier().await?;
         Ok(WebdavResponse::empty(201))
     }
 
@@ -775,39 +801,55 @@ impl WebdavSession {
                 .with_message("the destination exists and Overwrite is F")
                 .into());
         }
+        let mut mutated = false;
         if existing.is_some() {
-            let failures = if existing.as_ref().is_some_and(Stats::is_directory) {
+            let (failures, deleted) = if existing.as_ref().is_some_and(Stats::is_directory) {
                 self.delete_tree(&destination).await
             } else {
                 match self.driver.unlink(&destination).await {
-                    Ok(())
-                    | Err(FsError {
+                    Ok(()) => (Vec::new(), true),
+                    Err(FsError {
                         code: ErrorCode::Enoent,
                         ..
-                    }) => Vec::new(),
-                    Err(error) => vec![Failure {
-                        path: destination.clone(),
-                        collection: false,
-                        status: status_for_error(error.code),
-                    }],
+                    }) => (Vec::new(), false),
+                    Err(error) => (
+                        vec![Failure {
+                            path: destination.clone(),
+                            collection: false,
+                            status: status_for_error(error.code),
+                        }],
+                        false,
+                    ),
                 }
             };
+            mutated |= deleted;
             if !failures.is_empty() {
+                if mutated {
+                    self.durability_barrier().await?;
+                }
                 return Ok(self.multistatus(&failures));
             }
         }
         if moving {
             self.driver.rename(path, &destination).await?;
+            mutated = true;
             self.discard_unmapped(path).await;
             self.discard_unmapped(&destination).await;
         } else {
-            let failures = self
+            let (failures, copied) = self
                 .copy_tree(path, &destination, &stats, depth == Depth::Infinity)
                 .await;
+            mutated |= copied;
             self.discard_unmapped(&destination).await;
             if !failures.is_empty() {
+                if mutated {
+                    self.durability_barrier().await?;
+                }
                 return Ok(self.multistatus(&failures));
             }
+        }
+        if mutated {
+            self.durability_barrier().await?;
         }
         Ok(WebdavResponse::empty(if existing.is_some() {
             204
@@ -822,23 +864,29 @@ impl WebdavSession {
         destination: &'a str,
         stats: &'a Stats,
         deep: bool,
-    ) -> Pin<Box<dyn Future<Output = Vec<Failure>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = (Vec<Failure>, bool)> + Send + 'a>> {
         Box::pin(async move {
             if !stats.is_directory() {
                 if !stats.is_file() {
-                    return vec![Failure {
-                        path: source.to_owned(),
-                        collection: false,
-                        status: 403,
-                    }];
+                    return (
+                        vec![Failure {
+                            path: source.to_owned(),
+                            collection: false,
+                            status: 403,
+                        }],
+                        false,
+                    );
                 }
                 return match self.copy_file(source, destination, stats.size).await {
-                    Ok(()) => Vec::new(),
-                    Err(error) => vec![Failure {
-                        path: source.to_owned(),
-                        collection: false,
-                        status: status_of_error(&error),
-                    }],
+                    Ok(()) => (Vec::new(), true),
+                    Err(error) => (
+                        vec![Failure {
+                            path: source.to_owned(),
+                            collection: false,
+                            status: status_of_error(&error),
+                        }],
+                        false,
+                    ),
                 };
             }
             if let Err(error) = self
@@ -846,26 +894,33 @@ impl WebdavSession {
                 .mkdir(destination, MkdirOptions::default())
                 .await
             {
-                return vec![Failure {
-                    path: source.to_owned(),
-                    collection: true,
-                    status: status_for_error(error.code),
-                }];
+                return (
+                    vec![Failure {
+                        path: source.to_owned(),
+                        collection: true,
+                        status: status_for_error(error.code),
+                    }],
+                    false,
+                );
             }
             if !deep {
-                return Vec::new();
+                return (Vec::new(), true);
             }
             let entries = match self.driver.readdir(source).await {
                 Ok(entries) => entries,
                 Err(error) => {
-                    return vec![Failure {
-                        path: source.to_owned(),
-                        collection: true,
-                        status: status_for_error(error.code),
-                    }];
+                    return (
+                        vec![Failure {
+                            path: source.to_owned(),
+                            collection: true,
+                            status: status_for_error(error.code),
+                        }],
+                        true,
+                    );
                 }
             };
             let mut failures = Vec::new();
+            let mut mutated = true;
             for entry in entries {
                 let child = join(source, &entry.name);
                 let target = join(destination, &entry.name);
@@ -879,10 +934,13 @@ impl WebdavSession {
                         status: 403,
                     });
                 } else {
-                    failures.extend(self.copy_tree(&child, &target, &child_stats, true).await);
+                    let (child_failures, child_mutated) =
+                        self.copy_tree(&child, &target, &child_stats, true).await;
+                    failures.extend(child_failures);
+                    mutated |= child_mutated;
                 }
             }
-            failures
+            (failures, mutated)
         })
     }
 
@@ -1151,12 +1209,17 @@ impl WebdavSession {
             }
         }
         let blocked = outcomes.iter().any(|outcome| outcome.status != 200);
+        let mut mutated = false;
         if !blocked {
             for outcome in &outcomes {
                 if let Some(mtime) = outcome.set_mtime_ms {
                     self.driver.utimes(path, stats.atime_ms, mtime).await?;
+                    mutated = true;
                 }
             }
+        }
+        if mutated {
+            self.durability_barrier().await?;
         }
         let mut propstats: Vec<Propstat> = Vec::new();
         for outcome in outcomes {
@@ -1239,6 +1302,7 @@ impl WebdavSession {
             self.require_collection(&parent(path)).await?;
             self.require_writable(path, guard, true)?;
             self.write_file(path, &[]).await?;
+            self.durability_barrier().await?;
         }
         let grant = self
             .locks

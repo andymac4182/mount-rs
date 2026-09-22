@@ -1,10 +1,14 @@
 use std::pin::Pin;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
+use async_trait::async_trait;
 use bytes::Bytes;
-use mount_rs_core::{FsDriver, MemoryFs};
+use mount_rs_core::{
+    Capabilities, DirEntry, ErrorCode, FileHandle, FsDriver, FsError, MemoryFs, MkdirOptions,
+    Result as FsResult, Stats,
+};
 use mount_rs_webdav::protocol::{
     RangeSpec, collect_body, href_of, parse_depth, parse_destination, parse_lock_info,
     parse_lock_token, parse_overwrite, parse_range, parse_target_path, parse_xml, status_of_error,
@@ -43,6 +47,75 @@ async fn server() -> WebdavServer {
     let server = create_webdav_server(fs, WebdavServerOptions::default()).expect("loopback bind");
     server.listen().await.expect("listen");
     server
+}
+
+struct DurableBarrierFs {
+    inner: MemoryFs,
+    syncfs_calls: AtomicUsize,
+    fail_next_syncfs: AtomicBool,
+}
+
+impl DurableBarrierFs {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            inner: MemoryFs::empty(),
+            syncfs_calls: AtomicUsize::new(0),
+            fail_next_syncfs: AtomicBool::new(false),
+        })
+    }
+
+    fn syncfs_calls(&self) -> usize {
+        self.syncfs_calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait]
+impl FsDriver for DurableBarrierFs {
+    fn capabilities(&self) -> Capabilities {
+        let mut capabilities = self.inner.capabilities();
+        capabilities.durable_writes = true;
+        capabilities
+    }
+
+    async fn syncfs(&self) -> FsResult<()> {
+        self.syncfs_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_next_syncfs.swap(false, Ordering::SeqCst) {
+            return Err(FsError::new(ErrorCode::Eio).with_syscall("syncfs"));
+        }
+        Ok(())
+    }
+
+    async fn stat(&self, path: &str) -> FsResult<Stats> {
+        self.inner.stat(path).await
+    }
+
+    async fn readdir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
+        self.inner.readdir(path).await
+    }
+
+    async fn open(&self, path: &str, flags: &str, mode: u32) -> FsResult<Arc<dyn FileHandle>> {
+        self.inner.open(path, flags, mode).await
+    }
+
+    async fn mkdir(&self, path: &str, options: MkdirOptions) -> FsResult<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+
+    async fn rmdir(&self, path: &str) -> FsResult<()> {
+        self.inner.rmdir(path).await
+    }
+
+    async fn unlink(&self, path: &str) -> FsResult<()> {
+        self.inner.unlink(path).await
+    }
+
+    async fn rename(&self, old_path: &str, new_path: &str) -> FsResult<()> {
+        self.inner.rename(old_path, new_path).await
+    }
+
+    async fn utimes(&self, path: &str, atime_ms: i64, mtime_ms: i64) -> FsResult<()> {
+        self.inner.utimes(path, atime_ms, mtime_ms).await
+    }
 }
 
 #[tokio::test]
@@ -275,6 +348,166 @@ async fn session_errors_are_reported_once_with_the_request_head() {
     assert_eq!(reports[0].1.target, unsupported_head.target);
     assert_eq!(reports[1].1.method, unauthorized_head.method);
     assert_eq!(reports[1].1.target, unauthorized_head.target);
+}
+
+#[tokio::test]
+async fn durable_mutations_wait_for_and_report_syncfs_barriers() {
+    let driver = DurableBarrierFs::new();
+    let session = WebdavSession::new(
+        Arc::clone(&driver) as Arc<dyn FsDriver>,
+        WebdavSessionOptions::default(),
+    );
+
+    let put = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/durable.txt".to_owned(),
+                headers: Default::default(),
+            },
+            b"durable".as_slice(),
+        )
+        .await;
+    assert_eq!(put.status, 201);
+    assert_eq!(driver.syncfs_calls(), 1);
+
+    let mkcol = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "MKCOL".to_owned(),
+                target: "/dir".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(mkcol.status, 201);
+    assert_eq!(driver.syncfs_calls(), 2);
+
+    let proppatch = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PROPPATCH".to_owned(),
+                target: "/durable.txt".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><D:getlastmodified>Wed, 21 Oct 2015 07:28:00 GMT</D:getlastmodified></D:prop></D:set></D:propertyupdate>"#,
+        )
+        .await;
+    assert_eq!(proppatch.status, 207);
+    assert_eq!(driver.syncfs_calls(), 3);
+
+    let copy = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "COPY".to_owned(),
+                target: "/durable.txt".to_owned(),
+                headers: [("destination".to_owned(), "/dir/copied.txt".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(copy.status, 201);
+    assert_eq!(driver.syncfs_calls(), 4);
+
+    let move_response = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "MOVE".to_owned(),
+                target: "/dir/copied.txt".to_owned(),
+                headers: [("destination".to_owned(), "/dir/moved.txt".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(move_response.status, 201);
+    assert_eq!(driver.syncfs_calls(), 5);
+
+    let delete_file = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "DELETE".to_owned(),
+                target: "/dir/moved.txt".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(delete_file.status, 204);
+    assert_eq!(driver.syncfs_calls(), 6);
+
+    let lock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "LOCK".to_owned(),
+                target: "/locked.txt".to_owned(),
+                headers: Default::default(),
+            },
+            br#"<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope><locktype><write/></locktype></lockinfo>"#,
+        )
+        .await;
+    assert_eq!(lock.status, 201);
+    assert_eq!(driver.syncfs_calls(), 7);
+    let lock_token = lock.headers.get("lock-token").cloned().expect("lock token");
+
+    let unlock = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "UNLOCK".to_owned(),
+                target: "/locked.txt".to_owned(),
+                headers: [("lock-token".to_owned(), lock_token)]
+                    .into_iter()
+                    .collect(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(unlock.status, 204);
+    assert_eq!(driver.syncfs_calls(), 7);
+
+    let delete_dir = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "DELETE".to_owned(),
+                target: "/dir".to_owned(),
+                headers: Default::default(),
+            },
+            &[] as &[u8],
+        )
+        .await;
+    assert_eq!(delete_dir.status, 204);
+    assert_eq!(driver.syncfs_calls(), 8);
+
+    driver.fail_next_syncfs.store(true, Ordering::SeqCst);
+    let failed = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/retry.txt".to_owned(),
+                headers: Default::default(),
+            },
+            b"retry".as_slice(),
+        )
+        .await;
+    assert_eq!(failed.status, 500);
+    assert_eq!(driver.syncfs_calls(), 9);
+
+    let retried = session
+        .handle_request(
+            WebdavRequestHead {
+                method: "PUT".to_owned(),
+                target: "/retry.txt".to_owned(),
+                headers: Default::default(),
+            },
+            b"retry".as_slice(),
+        )
+        .await;
+    assert_eq!(retried.status, 204);
+    assert_eq!(driver.syncfs_calls(), 10);
 }
 
 struct FailingRequestBody {
