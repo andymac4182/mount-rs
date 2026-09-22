@@ -162,10 +162,9 @@ tests and strict Clippy with `-D warnings` using a bounded external Cargo
 target. This is implementation evidence only; credentialed provider,
 production topology, operational, canary and approval gates remain open.
 
-Source base `f4f672dd9a722addad87b5c7af6e1bff22db1a49` was freshly reverified
-locally after the concurrent NFS queued-work, 9P/N-API, WebDAV/HTTP/provider,
-Ozone, FUSE, chunked, bounded-teardown and restart-fencing updates: the full
-locked workspace test suite exited 0 and strict workspace Clippy with
+Source base `e88099a0eb89bbd847ea78f4e931cf4b3555f5ef` was freshly reverified
+locally after concurrent N-API, WebDAV, lockfile, NFS, 9P and provider updates:
+the full locked workspace test suite exited 0 and strict workspace Clippy with
 `-D warnings` exited 0. The four W08 rollout/evidence policy commands also
 passed with 36 functional items, 9 open production gates, 7 rollout tests and
 11 evidence tests; the packet remains NO-GO with zero evidence records. This
