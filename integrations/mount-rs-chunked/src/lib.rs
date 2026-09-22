@@ -290,6 +290,7 @@ where
     lifecycle: tokio::sync::RwLock<()>,
     state: Mutex<RuntimeState>,
     lease: Mutex<Option<WriterLease>>,
+    lease_gate: AsyncGate,
     lease_renewed: AtomicBool,
     preparing_mutations: Arc<AtomicUsize>,
     mutations: Mutex<MutationQueue>,
@@ -389,6 +390,7 @@ where
                     closed: false,
                 }),
                 lease: Mutex::new(Some(lease.clone())),
+                lease_gate: AsyncGate::new(),
                 lease_renewed: AtomicBool::new(false),
                 preparing_mutations: Arc::new(AtomicUsize::new(0)),
                 mutations: Mutex::new(MutationQueue::new()),
@@ -560,10 +562,12 @@ where
     }
 
     async fn renew_lease(&self) -> Result<WriterLease> {
+        let _lease_gate = self.inner.lease_gate.lock().await;
         self.renew_lease_inner(false).await
     }
 
     async fn validate_lease(&self) -> Result<()> {
+        let _lease_gate = self.inner.lease_gate.lock().await;
         self.renew_lease_inner(true).await.map(|_| ())
     }
 
@@ -1226,9 +1230,14 @@ where
         let normalized = normalize_path(path);
         let _lifecycle = self.inner.lifecycle.read().await;
         let preparation = self.begin_mutation_preparation();
+        // This is an optimistic, read-only preparation snapshot. The state
+        // mutex keeps it coherent while the batcher's revision/CAS and
+        // conflict fallback decide whether it can publish after immutable
+        // block work completes. Keep it outside the global mutation gate so
+        // concurrent whole-file preparations can overlap; lease renewal has
+        // its own gate because it may perform a provider mutation.
+        self.ensure_operation_lease().await?;
         let (layout, original, inode, expected_revision, new_inode) = {
-            let _gate = self.inner.gate.lock().await;
-            self.ensure_operation_lease().await?;
             let (namespace, revision) = self.snapshot()?;
             let entry = walk(&namespace, &normalized, true, "open", 0)?;
             if let Some(inode) = entry.node {

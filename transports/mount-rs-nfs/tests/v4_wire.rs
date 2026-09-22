@@ -324,6 +324,8 @@ const OP_READ: u32 = 25;
 const OP_READDIR: u32 = 26;
 const OP_READLINK: u32 = 27;
 const OP_REMOVE: u32 = 28;
+const OP_RENAME: u32 = 29;
+const OP_SAVEFH: u32 = 32;
 const OP_WRITE: u32 = 38;
 const OP_EXCHANGE_ID: u32 = 42;
 const OP_CREATE_SESSION: u32 = 43;
@@ -1576,6 +1578,299 @@ fn nfs_v4_open_survives_v3_rename_over_its_name() {
                     consume_sequence_result(&mut current, "replacement handle live");
                     parse_result_header(&mut current, OP_PUTFH);
                     current.end("replacement handle live response").unwrap();
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nfs_v3_rename_same_inode_preserves_source_handle_after_alias_remove() {
+    struct HostRoot(PathBuf);
+
+    impl Drop for HostRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(self.0.join("source.txt"));
+            let _ = std::fs::remove_file(self.0.join("alias.txt"));
+            let _ = std::fs::remove_dir(&self.0);
+        }
+    }
+
+    std::thread::Builder::new()
+        .name("nfs-v3-hardlink-rename-noop".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let nonce = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("system clock after Unix epoch")
+                        .as_nanos();
+                    let host_root = (0..32)
+                        .find_map(|attempt| {
+                            let path = std::env::temp_dir().join(format!(
+                                "mount-rs-nfs-hardlink-rename-{}-{nonce}-{attempt}",
+                                std::process::id()
+                            ));
+                            match std::fs::create_dir(&path) {
+                                Ok(()) => Some(HostRoot(path)),
+                                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                                    None
+                                }
+                                Err(error) => panic!("create host-backed NFS root: {error}"),
+                            }
+                        })
+                        .expect("claim a unique host-backed NFS root");
+                    std::fs::write(host_root.0.join("source.txt"), b"same inode").unwrap();
+                    std::fs::hard_link(
+                        host_root.0.join("source.txt"),
+                        host_root.0.join("alias.txt"),
+                    )
+                    .unwrap();
+                    let server =
+                        NfsServer::new(HostFs::new(&host_root.0), NfsServerOptions::default());
+                    let address = server.listen().await.unwrap();
+                    let mut stream = TcpStream::connect(address).await.unwrap();
+                    let mut mount = rpc_call(
+                        &mut stream,
+                        1001,
+                        MOUNT_PROGRAM,
+                        MOUNT_V3,
+                        MOUNTPROC3_MNT,
+                        encode_xdr(|writer| writer.string("/")),
+                        None,
+                    )
+                    .await;
+                    let root = read_mount_res(&mut mount).unwrap().fh.unwrap();
+                    mount.end("hardlink MOUNT response").unwrap();
+                    let mut lookup = rpc_call(
+                        &mut stream,
+                        1002,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("source.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    let source = read_lookup_res(&mut lookup).unwrap().object.unwrap();
+                    lookup.end("source LOOKUP response").unwrap();
+                    let mut renamed = rpc_call(
+                        &mut stream,
+                        1003,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_RENAME,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("source.txt");
+                            writer.var_opaque(&root);
+                            writer.string("alias.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_rename_res(&mut renamed).unwrap().status, NFS3_OK);
+                    renamed.end("same-inode RENAME response").unwrap();
+                    let mut removed = rpc_call(
+                        &mut stream,
+                        1004,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_REMOVE,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("alias.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_wcc_res(&mut removed).unwrap().status, NFS3_OK);
+                    removed.end("alias REMOVE response").unwrap();
+                    let mut getattr = rpc_call(
+                        &mut stream,
+                        1005,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_GETATTR,
+                        encode_xdr(|writer| writer.var_opaque(&source)),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(read_getattr_res(&mut getattr).unwrap().status, NFS3_OK);
+                    getattr.end("source GETATTR after alias REMOVE").unwrap();
+                    let mut remaining = rpc_call(
+                        &mut stream,
+                        1006,
+                        NFS_PROGRAM,
+                        NFS_V3,
+                        NFSPROC3_LOOKUP,
+                        encode_xdr(|writer| {
+                            writer.var_opaque(&root);
+                            writer.string("source.txt");
+                        }),
+                        None,
+                    )
+                    .await;
+                    assert_eq!(
+                        read_lookup_res(&mut remaining).unwrap().object.unwrap(),
+                        source
+                    );
+                    remaining.end("source LOOKUP after alias REMOVE").unwrap();
+                    assert_eq!(
+                        std::fs::read(host_root.0.join("source.txt")).unwrap(),
+                        b"same inode"
+                    );
+                    assert!(!host_root.0.join("alias.txt").exists());
+                    server.close().await.unwrap();
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+fn nfs_v4_rename_same_inode_preserves_source_handle_after_alias_remove() {
+    std::thread::Builder::new()
+        .name("nfs-v4-hardlink-rename-noop".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let inner = MemoryFs::empty();
+                    inner
+                        .write_file("/source.txt", b"same inode")
+                        .await
+                        .unwrap();
+                    inner.link("/source.txt", "/alias.txt").await.unwrap();
+                    let server = NfsServer::new(inner, NfsServerOptions::default());
+                    let address = server.listen().await.unwrap();
+                    let (mut stream, mut client) =
+                        connect_v4_client(address, 1101, b"same-inode-rename-owner").await;
+                    let mut source_reply = rpc(
+                        &mut stream,
+                        1104,
+                        compound(
+                            "source-before-same-inode-rename",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("source.txt")),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut source_reply, 4);
+                    consume_sequence_result(&mut source_reply, "source before rename");
+                    parse_result_header(&mut source_reply, OP_PUTROOTFH);
+                    parse_result_header(&mut source_reply, OP_LOOKUP);
+                    parse_result_header(&mut source_reply, OP_GETFH);
+                    let source = source_reply
+                        .var_opaque(128, "original source handle")
+                        .unwrap();
+                    source_reply.end("source before rename response").unwrap();
+
+                    client.sequence += 1;
+                    let mut renamed = rpc(
+                        &mut stream,
+                        1105,
+                        compound(
+                            "same-inode-v4-rename",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_SAVEFH, |_| {}),
+                                op(OP_RENAME, |writer| {
+                                    writer.string("source.txt");
+                                    writer.string("alias.txt");
+                                }),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut renamed, 4);
+                    consume_sequence_result(&mut renamed, "same-inode v4 rename");
+                    parse_result_header(&mut renamed, OP_PUTROOTFH);
+                    parse_result_header(&mut renamed, OP_SAVEFH);
+                    parse_result_header(&mut renamed, OP_RENAME);
+                    for _ in 0..2 {
+                        let _ = renamed.bool("rename change atomic").unwrap();
+                        let _ = renamed.u64("rename change before").unwrap();
+                        let _ = renamed.u64("rename change after").unwrap();
+                    }
+                    renamed.end("same-inode v4 rename response").unwrap();
+
+                    client.sequence += 1;
+                    let mut removed = rpc(
+                        &mut stream,
+                        1106,
+                        compound(
+                            "remove-hardlink-alias",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_REMOVE, |writer| writer.string("alias.txt")),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut removed, 3);
+                    consume_sequence_result(&mut removed, "remove hardlink alias");
+                    parse_result_header(&mut removed, OP_PUTROOTFH);
+                    parse_result_header(&mut removed, OP_REMOVE);
+                    let _ = removed.bool("remove change atomic").unwrap();
+                    let _ = removed.u64("remove change before").unwrap();
+                    let _ = removed.u64("remove change after").unwrap();
+                    removed.end("remove hardlink alias response").unwrap();
+
+                    client.sequence += 1;
+                    let mut remaining = rpc(
+                        &mut stream,
+                        1107,
+                        compound(
+                            "source-after-alias-remove",
+                            &[
+                                sequence(&client),
+                                op(OP_PUTFH, |writer| writer.var_opaque(&source)),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_LOOKUP, |writer| writer.string("source.txt")),
+                                op(OP_GETFH, |_| {}),
+                            ],
+                        ),
+                    )
+                    .await;
+                    parse_compound_header(&mut remaining, 5);
+                    consume_sequence_result(&mut remaining, "source after alias removal");
+                    parse_result_header(&mut remaining, OP_PUTFH);
+                    parse_result_header(&mut remaining, OP_PUTROOTFH);
+                    parse_result_header(&mut remaining, OP_LOOKUP);
+                    parse_result_header(&mut remaining, OP_GETFH);
+                    assert_eq!(
+                        remaining
+                            .var_opaque(128, "surviving source handle")
+                            .unwrap(),
+                        source
+                    );
+                    remaining
+                        .end("source after alias removal response")
+                        .unwrap();
                     server.close().await.unwrap();
                 });
         })

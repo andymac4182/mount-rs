@@ -4,6 +4,46 @@ Updated: 2026-09-22. Baseline: local commit `21803fd` plus the sequentially
 published `main` updates listed below. Overall status: **in progress;
 not release-ready**.
 
+## Current W26 exact-head hosted queue recheck (2026-09-22)
+
+At 22:07 AEST, manual run
+[`35724922283`](https://github.com/andymac4182/mount-rs/actions/runs/35724922283)
+still has exact head `c1d3037a`, status `queued`, and no conclusion. A bounded
+watch plus a direct query confirmed all seven W26 provider/base/aggregate jobs
+remain queued. Only the local watcher was stopped; the hosted run remains
+active. This is external runner capacity, not a provider result. W26
+completion percentages and production **NO-GO** are unchanged pending the
+hard 1,000 IOPS/drive rows, complete aggregate/end-to-end packet, customer
+security/SLO/RPO/RTO evidence, and customer/Ozone-owned backup/DR.
+
+## Current W26 optimistic preparation snapshot boundary (2026-09-22)
+
+Runtime commit
+[`c1d3037ad3e179a2df01005f1b72295f08f0887b`](https://github.com/andymac4182/mount-rs/commit/c1d3037ad3e179a2df01005f1b72295f08f0887b)
+(`perf(w26): overlap whole-file preparation snapshots`) is published at
+`origin/main`. It adds a dedicated lease-renewal gate, keeps provider lease
+renewal/validation mutations serialized, and moves only the read-only initial
+`write_file_atomic` namespace snapshot outside the global mutation gate. The
+state mutex, mutation-batch revision/CAS and create rebase, conflict fallback,
+fenced publication, lifecycle/shutdown and fail-closed semantics remain the
+authority boundaries.
+
+Local evidence is complete: the focused chunked suite is 22 passed/0 failed,
+full locked workspace all-target tests and strict full-workspace Clippy exit
+successfully, and security scan
+`86a4e46e-caef-4d9b-8ab7-aeba21571d80` has complete changed-file coverage and
+zero findings. Manual run
+[`35724922283`](https://github.com/andymac4182/mount-rs/actions/runs/35724922283)
+has exact head `c1d3037a`; its seven W26 provider/base/aggregate jobs were
+queued at 22:03 AEST. No provider, performance or aggregate result is
+promoted from queued state.
+
+W26.15, W26.14 and P14 remain open/NO-GO pending four terminal provider rows
+at the hard 1,000 IOPS/drive target, the complete aggregate/end-to-end packet,
+customer/Ozone security, Tier-1 99.99% reliability, five-minute RPO/RTO and
+customer/Ozone-owned backup/DR evidence. W26 owns compatibility and
+qualification only; customers deploy Ozone and another stream owns releases.
+
 ## Current W26 hosted queue recheck (2026-09-22)
 
 At 21:52 AEST, manual run
@@ -2614,6 +2654,15 @@ Evidence landed without closing the remaining W01 acceptance gates:
   unit/25 v4 wire, strict NFS Clippy and formatting passed, and local opt-in
   macOS native NFSv3 passed 1/1. The previous exact-tip hosted CI run was
   cancelled without jobs; native v4.1 ordering, cross-process recovery,
+  crash/power-loss durability, exact-tip hosted acceptance, and production
+  readiness remain open.
+- [x] W01-NFS same-inode hard-link RENAME no longer remaps handles after a
+  backend no-op. A pre-fix real-TCP v3 case gave the surviving source a new
+  opaque ID after alias removal; both v3 and v4 now compare lstat device/inode
+  before updating handle and exclusive-create mappings. HostFs-backed v3 and
+  rootless v4 cases passed ten paired reruns; full locked NFS (44 unit, 27 v4
+  wire), strict NFS/N-API Clippy, formatting, and local opt-in macOS native
+  NFSv3 passed. Native v4.1 ordering, external/cross-process changes,
   crash/power-loss durability, exact-tip hosted acceptance, and production
   readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
