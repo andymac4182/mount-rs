@@ -1456,7 +1456,10 @@ impl S3Session {
             if is_staging_key(&key) {
                 match delete_staging_key(&driver, &key).await {
                     Ok(()) => deleted.push(key),
-                    Err(error) => errors.push((key, error.error())),
+                    Err(error) => {
+                        self.report_error(&error, head);
+                        errors.push((key, error.error()));
+                    }
                 }
                 continue;
             }
@@ -1469,7 +1472,10 @@ impl S3Session {
             };
             match self.delete_object(driver.clone(), &target).await {
                 Ok(_) => deleted.push(key),
-                Err(error) => errors.push((key, error.error())),
+                Err(error) => {
+                    self.report_error(&error, head);
+                    errors.push((key, error.error()));
+                }
             }
         }
         if !deleted.is_empty() {
