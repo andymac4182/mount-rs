@@ -1172,12 +1172,20 @@ workflow builds the locked addon and runs the full pinned-oracle N-API package
 script, providing hosted cross-platform WebDAV session, streaming, lifecycle,
 concurrency, provider, crash, and parity evidence. The workflow remains
 nonterminal on an unrelated native-FUSE job, so mounted-host concurrency,
-live-provider, power-loss, and durable-lock acceptance remain open.
+live-provider, power-loss, and durable-lock acceptance remained open at that
+snapshot.
+The updated exact-tip CI run `35676711711` at
+`87b2e2f0f95ff58830f04c1bd80e5f49e14b7fea` passed both revised native WebDAV
+jobs, `106584655866` on macOS and `106584656036` on Ubuntu, including the
+eight concurrent native-client write/read pairs. Mounted-I/O concurrency is
+now hosted evidence; adverse mounted-host teardown/restart, live-provider,
+power-loss, durable-lock, and wider ordering acceptance remain open.
 The ignored native WebDAV harness now performs eight concurrent native-client
 write/read pairs after the basic round trip and verifies every payload through
 the driver. The host-enabled macOS run passed 1/1 with the shared Cargo
-wrapper; hosted Linux/macOS reruns are required before mounted-host
-concurrency is accepted, and mounted-host teardown remains open.
+wrapper. At this local evidence snapshot, hosted Linux/macOS reruns were still
+required; the follow-up hosted run above passed mounted-I/O concurrency, while
+mounted-host teardown remains open.
 At final ledger tip `3148aa5a95e5cdcf328014fac7e007db0e16adfe`, exact-SHA CI
 `35673381803` and W08 policy/targets `35673381898`/`35673381797` were pending,
 Fault injection `35673381853` and W04 policy `35673381814` were queued, and no
