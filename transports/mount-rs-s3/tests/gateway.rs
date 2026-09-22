@@ -2380,6 +2380,18 @@ impl FsDriver for ProbeFs {
         self.inner.rename(old_path, new_path).await
     }
 
+    async fn mkdir(
+        &self,
+        path: &str,
+        options: mount_rs_core::MkdirOptions,
+    ) -> FsResult<Option<String>> {
+        self.inner.mkdir(path, options).await
+    }
+
+    async fn rmdir(&self, path: &str) -> FsResult<()> {
+        self.inner.rmdir(path).await
+    }
+
     async fn unlink(&self, path: &str) -> FsResult<()> {
         self.inner.unlink(path).await
     }
@@ -2699,6 +2711,90 @@ async fn real_http_aborted_upload_removes_staging_and_object() {
 
     wait_for_no_root_staging(&memory).await;
     assert!(memory.stat("/aborted-http.bin").await.is_err());
+    assert!(session.assertions().is_empty());
+    server.close().await.expect("clean shutdown");
+}
+
+#[tokio::test]
+async fn real_http_aborted_multipart_part_preserves_existing_part() {
+    let memory = MemoryFs::empty();
+    let signals = ProbeSignals::new();
+    let session = Arc::new(S3Session::new(ProbeFs {
+        inner: memory.clone(),
+        signals: signals.clone(),
+    }));
+    let initiated = session
+        .handle(request("POST", "/mountx/atomic-http.bin?uploads", [], &[]))
+        .await;
+    assert_eq!(initiated.status, 200);
+    let upload_id = xml_field(&initiated.body, "UploadId");
+    let original = session
+        .handle(request(
+            "PUT",
+            &format!("/mountx/atomic-http.bin?uploadId={upload_id}&partNumber=1"),
+            b"original http part",
+            &[],
+        ))
+        .await;
+    assert_eq!(original.status, 200);
+    timeout(Duration::from_secs(1), signals.first_write.notified())
+        .await
+        .expect("consume original part write notification");
+    let writes_before = signals.writes.load(Ordering::Acquire);
+    signals.release_read.notify_one();
+
+    let server = S3Server::start(Arc::clone(&session), S3ServerOptions::default())
+        .await
+        .expect("loopback listener");
+    let replacement = vec![0x73; 512 * 1024];
+    let first_fragment = 64 * 1024;
+    let mut stream = TcpStream::connect(server.address())
+        .await
+        .expect("connect gateway");
+    let request_head = format!(
+        "PUT /mountx/atomic-http.bin?uploadId={upload_id}&partNumber=1 HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
+        server.address(),
+        replacement.len()
+    );
+    stream
+        .write_all(request_head.as_bytes())
+        .await
+        .expect("write replacement request head");
+    stream
+        .write_all(&replacement[..first_fragment])
+        .await
+        .expect("write partial replacement body");
+    timeout(Duration::from_secs(2), async {
+        loop {
+            if signals.writes.load(Ordering::Acquire) > writes_before {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("replacement staging write before client disconnect");
+    let stream = stream.into_std().expect("convert client stream");
+    SockRef::from(&stream)
+        .set_linger(Some(Duration::ZERO))
+        .expect("set reset-on-close");
+    drop(stream);
+
+    wait_for_no_part_staging(&memory, &upload_id).await;
+    let path = format!("/.mountx-multipart/{upload_id}/part-1");
+    let stats = memory.stat(&path).await.expect("original part remains");
+    let handle = memory
+        .open(&path, "r", 0)
+        .await
+        .expect("open original part");
+    let mut bytes = vec![0_u8; stats.size as usize];
+    let count = handle
+        .read(&mut bytes, Some(0))
+        .await
+        .expect("read original part");
+    handle.close().await.expect("close original part");
+    bytes.truncate(count);
+    assert_eq!(bytes, b"original http part");
     assert!(session.assertions().is_empty());
     server.close().await.expect("clean shutdown");
 }

@@ -5146,6 +5146,16 @@ reproducible in a production-like environment.
   local request-cancellation staging evidence only; live providers, power-loss
   durability, broader workload bounds, and native/hosted acceptance remain open
   and W01-S3 stays **NO-GO**.
+- [x] Qualified real HTTP aborted multipart-part replacement cleanup with
+  `real_http_aborted_multipart_part_preserves_existing_part`: after an existing
+  multipart part is committed, a replacement part is partially staged and the
+  client sends a TCP reset; the private `.part-*` staging entry is reaped within
+  the bounded wait and the original part remains byte-for-byte intact. The
+  complete current Rust 5/6/44/5 packet, strict Clippy, formatting/diff checks,
+  and isolated S3 N-API server integration passed. This is bounded local
+  multipart request-cancellation replacement evidence only; live providers,
+  power-loss durability, broader workload bounds, and native/hosted acceptance
+  remain open and W01-S3 stays **NO-GO**.
 - [x] The automatic provider runs for published packet `fcf1d547` were
   refreshed: AWS run `35693941024` stopped at
   `AWS_S3_CI_CONFIG_BLOCKED missing_bucket`, while R2 run `35693941037`
