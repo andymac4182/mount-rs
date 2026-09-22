@@ -2388,13 +2388,16 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  The current pushed tip `496ed42b` is locally fully qualified after the
-  direct-9P, PGlite autocommit, S3 pipelining, and structural-driver changes:
+  The current pushed tip `7440a68` is locally fully qualified after the
+  direct-9P, PGlite autocommit, S3 pipelining, structural-driver, and HTTP
+  framing-boundary changes:
   the full locked Rust workspace, strict Clippy, optimized N-API build,
   complete Node SDK/CLI suite, and real PGlite/provider/CLI/oracle matrix pass
   with Rust SDK `6/3/0`, Node SDK `5/3/0`, CLI `12/2`, upstream `1200/82`,
   and all `40 × 621` trace lanes green. Direct and structural N-API 9P
-  sessions pass, and the S3 gateway has `34/34` passing tests. No terminal
+  sessions pass, and the S3 gateway has `37/37` passing tests, including
+  Expect/Continue, transfer-encoding refusal, HEAD framing, and pipelined
+  response ordering. No terminal
   hosted release acceptance is claimed for this moving tip; R2 remains
   fail-closed at the monthly cap. Remaining production actions are to select
   a settled final SHA, obtain terminal same-SHA hosted CI/fault/W04/W07/W08
