@@ -37,10 +37,20 @@ function completeGoPacket() {
     remainingActions: [],
     evidence: [
       {
+        recordId: `fixture-record-${gate.id}`,
         revision: "b".repeat(40),
         providerVersions: ["provider-image@sha256:fixture"],
+        configuration: "config-sha256:fixture",
         topology: "production-like fixture topology",
+        authority: "prefix=fixture; writer=fixture-writer; consumer=fixture-reader",
         environment: "fixture-environment",
+        people: "incident-commander=fixture-ic; operator=fixture-operator; release-owner=fixture-owner; approver=fixture-approver",
+        timestamps: {
+          startedAt: "2026-09-22T00:00:00Z",
+          completedAt: "2026-09-22T00:05:00Z",
+          cleanedUpAt: "2026-09-22T00:06:00Z",
+        },
+        result: "PASS; fixture RPO/RTO/SLO impact and cleanup result recorded",
         testOrRunId: `fixture-${gate.id}`,
         terminalStatus: "success",
         owner: "fixture-owner",
@@ -135,6 +145,43 @@ const cases = [
     args: ["--require-go"],
   },
   {
+    name: "go-missing-context",
+    expectedStatus: 1,
+    expectedOutput: "reason=w07-p01-evidence-1-configuration-field-required",
+    evidence: (() => {
+      const packet = completeGoPacket();
+      delete packet.gates[0].evidence[0].configuration;
+      return packet;
+    })(),
+    rollout: goRollout(),
+    args: ["--require-go"],
+  },
+  {
+    name: "go-invalid-timestamp",
+    expectedStatus: 1,
+    expectedOutput: "reason=w07-p01-evidence-1-started-at-must-be-iso8601",
+    evidence: (() => {
+      const packet = completeGoPacket();
+      packet.gates[0].evidence[0].timestamps.startedAt = "not-a-time";
+      return packet;
+    })(),
+    rollout: goRollout(),
+    args: ["--require-go"],
+  },
+  {
+    name: "go-duplicate-record-id",
+    expectedStatus: 1,
+    expectedOutput: "reason=w07-p02-evidence-1-record-id-duplicate",
+    evidence: (() => {
+      const packet = completeGoPacket();
+      packet.gates[1].evidence[0].recordId =
+        packet.gates[0].evidence[0].recordId;
+      return packet;
+    })(),
+    rollout: goRollout(),
+    args: ["--require-go"],
+  },
+  {
     name: "go-placeholder-evidence",
     expectedStatus: 1,
     expectedOutput: "reason=w07-p01-evidence-1-topology-must-be-concrete",
@@ -153,6 +200,19 @@ const cases = [
     evidence: (() => {
       const packet = completeGoPacket();
       packet.gates[0].evidence[0].terminalStatus = "pending";
+      return packet;
+    })(),
+    rollout: goRollout(),
+    args: ["--require-go"],
+  },
+  {
+    name: "go-invalid-timestamp-order",
+    expectedStatus: 1,
+    expectedOutput: "reason=w07-p01-evidence-1-timestamps-order-invalid",
+    evidence: (() => {
+      const packet = completeGoPacket();
+      packet.gates[0].evidence[0].timestamps.cleanedUpAt =
+        "2026-09-22T00:04:00Z";
       return packet;
     })(),
     rollout: goRollout(),

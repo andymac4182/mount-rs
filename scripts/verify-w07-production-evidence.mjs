@@ -60,6 +60,18 @@ function requireSha(value, reason) {
   if (!/^[0-9a-f]{40}$/u.test(value ?? "")) fail(reason);
 }
 
+function requireTimestamp(value, reason) {
+  requireConcreteString(value, reason);
+  if (
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/u.test(
+      value,
+    ) ||
+    !Number.isFinite(Date.parse(value))
+  ) {
+    fail(`${reason}-must-be-iso8601`);
+  }
+}
+
 const terminalStatuses = new Set(["success", "passed", "approved", "complete"]);
 const expectedGates = [
   { id: "W07-P01", name: "Identity and least privilege" },
@@ -113,6 +125,7 @@ if (!Array.isArray(packet.gates) || packet.gates.length !== expectedGates.length
 }
 
 const seenGateIds = new Set();
+const seenRecordIds = new Set();
 let closedGates = 0;
 let evidenceRecords = 0;
 
@@ -146,6 +159,50 @@ for (const expected of expectedGates) {
     if (record === null || typeof record !== "object" || Array.isArray(record)) {
       fail(`${recordKey}-must-be-object`);
     }
+    for (const [field, fieldKey] of [
+      ["recordId", "record-id"],
+      ["configuration", "configuration"],
+      ["authority", "authority"],
+      ["people", "people"],
+      ["result", "result"],
+    ]) {
+      if (!Object.hasOwn(record, field)) {
+        fail(`${recordKey}-${fieldKey}-field-required`);
+      }
+      requireConcreteString(record[field], `${recordKey}-${fieldKey}`);
+    }
+    if (seenRecordIds.has(record.recordId)) {
+      fail(`${recordKey}-record-id-duplicate`);
+    }
+    seenRecordIds.add(record.recordId);
+
+    if (
+      record.timestamps === null ||
+      typeof record.timestamps !== "object" ||
+      Array.isArray(record.timestamps)
+    ) {
+      fail(`${recordKey}-timestamps-must-be-object`);
+    }
+    for (const [field, fieldKey] of [
+      ["startedAt", "started-at"],
+      ["completedAt", "completed-at"],
+      ["cleanedUpAt", "cleaned-up-at"],
+    ]) {
+      if (!Object.hasOwn(record.timestamps, field)) {
+        fail(`${recordKey}-${fieldKey}-field-required`);
+      }
+      requireTimestamp(
+        record.timestamps[field],
+        `${recordKey}-${fieldKey}`,
+      );
+    }
+    const startedAt = Date.parse(record.timestamps.startedAt);
+    const completedAt = Date.parse(record.timestamps.completedAt);
+    const cleanedUpAt = Date.parse(record.timestamps.cleanedUpAt);
+    if (completedAt < startedAt || cleanedUpAt < completedAt) {
+      fail(`${recordKey}-timestamps-order-invalid`);
+    }
+
     requireSha(record.revision, `${recordKey}-revision`);
     if (
       !Array.isArray(record.providerVersions) ||

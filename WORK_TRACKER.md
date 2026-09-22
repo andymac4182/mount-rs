@@ -4188,16 +4188,18 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   remain open.
   The hosted workflow also validates the machine-readable
   `docs/W07-production-evidence.json` packet with
-  `scripts/verify-w07-production-evidence.mjs` and runs twelve credential-free
+  `scripts/verify-w07-production-evidence.mjs` and runs sixteen credential-free
   packet cases through `scripts/test-w07-production-evidence.mjs`. The packet
   has one row for each W07.7 production gate and requires explicit remaining
   actions while **NO-GO**; any future **GO** packet must carry a concrete
-  source revision, accountable owner, target environment, terminal run,
-  provider versions, cleanup/rollback outcome and evidence reference for every
-  closed gate. The workflow retains this packet beside the qualification log
-  and summary in the run artifact, so the seven-gate NO-GO state travels with
-  each bounded qualification result. This is admission/tracking integrity
-  only and cannot authenticate production evidence or release approval.
+  source revision, unique record ID, accountable owner, target environment,
+  terminal run, provider versions, configuration and authority references,
+  people, ordered ISO-8601 lifecycle timestamps, measured result,
+  cleanup/rollback outcome and evidence reference for every closed gate. The
+  workflow retains this packet beside the qualification log and summary in the
+  run artifact, so the seven-gate NO-GO state travels with each bounded
+  qualification result. This is admission/tracking integrity only and cannot
+  authenticate production evidence or release approval.
   - [ ] **Identity and least privilege:** document and deploy one
     write-capable authority identity per authority prefix, read-only consumer
     identities, secret injection/rotation and no shared credentials. Prove
