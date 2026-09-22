@@ -86,11 +86,14 @@ the namespace because the core driver does not expose those semantics.
 
 The native session still returns `ENOSYS` for the other codec-covered
 operations, including `SETXATTR`, `GETXATTR`, `LISTXATTR`, `REMOVEXATTR`,
-`GETLK`, `SETLK`, `SETLKW`, `INTERRUPT`, `BMAP`, `POLL`,
-`FALLOCATE`, `LSEEK`, and `COPY_FILE_RANGE`. The N-API `./fuse` codec/session
-boundary is covered by the Rust-backed facade; hosted native device/mount,
-callback, crash/restart, and durability qualification remain outside this
-scoped slice.
+`BMAP`, `POLL`, `FALLOCATE`, `LSEEK`, and `COPY_FILE_RANGE`. `GETLK` and
+`SETLK` use the session-scoped range-lock table; `SETLKW` is deliberately
+non-blocking and returns `EAGAIN` because the serialized mount-free session
+cannot safely wait for another owner. The Linux native request pump handles
+`INTERRUPT` for registered positional-read workers and returns `EAGAIN` for
+unknown targets. The N-API `./fuse` codec/session boundary is covered by the
+Rust-backed facade; hosted native device/mount, callback, crash/restart, and
+durability qualification remain outside this scoped slice.
 
 ## Native mount-object scope
 
