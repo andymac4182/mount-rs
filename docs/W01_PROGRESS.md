@@ -1414,6 +1414,8 @@ spent waiting for a hosted job or credential approval.
 
 | 2026-09-22 | W01-NFS | A real-TCP cross-version regression proves shared handle identity and lifetime in both directions: v3 MOUNT/CREATE handles work through v4.1 PUTFH/LOOKUP/GETFH, v4.1 REMOVE stales the old v3 handle, and v4.1 OPEN/CREATE matches v3 LOOKUP. Full locked NFS passes 42 unit and all applicable integrations including 21 v4 wire; pinned parity passes 266 with 18 explicit skips; strict NFS Clippy, formatting, and diff checks pass. The opt-in macOS kernel NFSv3 round trip passed on refreshed base `4376c07d` | — | 75% W01.4 planning view | Same-server userspace handle behavior is not cross-process handle persistence, native-client ordering, crash/power-loss durability, exact-tip hosted acceptance, or production readiness; W01 remains NO-GO |
 
+| 2026-09-22 | W01-NFS | Extended the bidirectional v3/v4.1 wire case through an open-unlink boundary: v4.1 OPEN/WRITE, v3 REMOVE/LOOKUP `NFS3ERR_NOENT`, then exact v4.1 held-stateid READ and CLOSE. Focused wire, full locked NFS (42 unit plus 21 v4 wire), strict NFS Clippy, pinned upstream parity (266 pass/18 explicit skips), and opt-in native macOS NFSv3 mount pass locally | — | 75% W01.4 planning view | Live one-server state retention is not cross-process open recovery, native-client ordering, durable v4 lease/replay/handle state, power-loss durability, exact-tip hosted acceptance, or production readiness; W01 stays NO-GO |
+
 ## Definition of W01 complete
 
 W01 can move to complete only when each of these is true:

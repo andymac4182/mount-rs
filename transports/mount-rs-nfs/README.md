@@ -87,6 +87,11 @@ REMOVE makes the old v3 file handle stale, and v4.1 OPEN/CREATE produces the
 same handle that v3 LOOKUP returns. This is one-server userspace evidence,
 not cross-process handle persistence or native-client ordering.
 
+The same wire test now opens and writes a v4.1 file, removes its namespace
+entry through v3, confirms v3 LOOKUP returns `NFS3ERR_NOENT`, then reads the
+exact bytes through the held v4.1 stateid and closes it. This is live
+open-unlink state retention, not recovery of the open across server restart.
+
 NFSv4.1 channel and state ceilings are available through
 `NfsSessionOptions.nfs4` and the nested N-API `nfs4`/`Nfs4StateKnobs` option:
 `idmap`, `leaseSeconds`, `maxSessions`, `maxForeSlots`, `maxOperations`,

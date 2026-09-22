@@ -2417,6 +2417,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFSv3 round trip passed on refreshed base `4376c07d`. Cross-process handle
   persistence, native-client ordering, crash/power-loss durability, exact-tip
   hosted acceptance, and W01-NFS production readiness remain open.
+- [x] W01-NFS cross-version open-unlink state now has real-wire coverage:
+  v4.1 OPEN/WRITE followed by v3 REMOVE makes v3 LOOKUP return
+  `NFS3ERR_NOENT`, while the original v4.1 stateid still reads the exact
+  payload and then closes. Full locked NFS (42 unit and 21 v4 wire), strict
+  Clippy, pinned 266-pass/18-skip upstream parity, and opt-in native macOS
+  NFSv3 mount pass locally. This does not establish cross-process open-state
+  recovery, native-client ordering, power-loss durability, exact-tip hosted
+  acceptance, or W01-NFS production readiness.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
