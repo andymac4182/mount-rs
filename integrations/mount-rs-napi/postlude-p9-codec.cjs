@@ -254,6 +254,22 @@ function installP9Codec(binding) {
     if (typeof Writer.prototype[writeName] === "function") binding[writeName] = typedWriter(binding, name)
   }
 
+  // The upstream blob-bearing readers accept a caller-supplied maximum in
+  // addition to the protocol-wide default.  Keep those bounds at the public
+  // JavaScript reader boundary rather than silently dropping the argument in
+  // the fixed-shape native methods.
+  binding.readRread = (reader, max = binding.P9_MAX_ITEM) => ({
+    data: invoke(reader.blob, reader, [max, "read data"]),
+  })
+  binding.readTwrite = (reader, max = binding.P9_MAX_ITEM) => ({
+    fid: invoke(reader.u32, reader, ["fid"]),
+    offset: invoke(reader.u64, reader, ["offset"]),
+    data: invoke(reader.blob, reader, [max, "write data"]),
+  })
+  binding.readRreaddir = (reader, max = binding.P9_MAX_ITEM) => ({
+    data: invoke(reader.blob, reader, [max, "readdir data"]),
+  })
+
   // These are aliases in the upstream module and intentionally stay aliases
   // here too; the Rust codec has one implementation for each identical body.
   for (const name of ["Tclunk", "Tremove", "Tstatfs", "Treadlink"]) {
