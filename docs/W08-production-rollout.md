@@ -403,6 +403,17 @@ in this range. No provider credentials, production deployment, candidate tag,
 canary, rollback or owner approval exists. P01–P09 remain open and the
 decision remains NO-GO.
 
+The W08 ledger was published in `2d46d704`; its exact hosted policy run
+`35695597625` cancelled before job creation with `jobs=[]`. Public docs-only
+reconciliation then advanced through `640ddf9c` to current tip
+`7cfdafbca77ab1597a17c7a134011bf8677a70c3`; run `35695648791` for
+`640ddf9c` also cancelled with `jobs=[]`, while current run `35695725156` is
+pending. These are hosted scheduling boundaries, not evidence. The current
+tree is source-equivalent to the targeted-clean `25757706` tree; no new Rust,
+provider or native result is claimed. No provider credentials, production
+deployment, candidate tag, canary, rollback or owner approval exists. P01–P09
+remain open and the decision remains NO-GO.
+
 After origin/main advanced with the 9P EOF/backpressure server fix `1179d9e3`,
 N-API test expansion and site component updates, exact merged source
 `d725248534eb897de4d49e916c47425e6266c05d` was freshly requalified. The full
