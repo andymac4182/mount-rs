@@ -4165,9 +4165,12 @@ by the chunked, soak, N-API, restart, `FOUNDATIONDB_TEST_PASS`,
   fails closed if a **NO-GO** ledger loses its open W07.7 checkbox, nested
   production gates or external-drill boundary. This is an internal tracking
   invariant, not production acceptance.
-  `scripts/test-w07-rollout-ledger.mjs` runs six regression cases for the
-  current NO-GO, premature-GO, missing-gate, missing-drill and synthetic
-  complete-GO states; these cases validate the tracking control only.
+  `scripts/test-w07-rollout-ledger.mjs` runs eight regression cases for the
+  current NO-GO, premature-GO, missing-gate, missing-drill, incomplete
+  P0–P14 ledger and synthetic complete-GO states; these cases validate the
+  tracking control only. The verifier also requires exactly one row for every
+  P0–P14 gate, rejects a terminal gate status while the decision is **NO-GO**,
+  and requires every gate to be terminally accepted before a **GO** decision.
   The hosted workflow runs `scripts/test-w07-qualification-log.mjs` with
   eight credential-free verifier cases. The qualification log verifier
   requires the exact accepted configuration shape, both expected negative

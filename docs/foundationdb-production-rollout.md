@@ -469,12 +469,16 @@ The same workflow also runs
 `scripts/verify-w07-rollout-ledger.mjs`. Its
 `W07_ROLLOUT_LEDGER_POLICY_PASS` marker is an internal consistency guard: while
 the rollout is **NO-GO**, it requires W07.7 and all seven nested production
-gates to remain open, and it requires the runbook's external-drill boundary.
-It does not check any production environment and cannot close a gate by itself.
-The adjacent `scripts/test-w07-rollout-ledger.mjs` step exercises the current
-NO-GO ledger plus premature-GO, missing-nested-gate and missing-drill-boundary
-cases, including a synthetic complete-GO document set. These are regression
-tests for the tracking control only; they do not create production evidence.
+gates to remain open, requires the runbook's external-drill boundary and
+requires exactly one row for every P0–P14 production gate. It rejects a
+terminal gate status while the decision is **NO-GO** and requires every P0–P14
+row to be terminally accepted before a **GO** decision. It does not check any
+production environment and cannot close a gate by itself. The adjacent
+`scripts/test-w07-rollout-ledger.mjs` step exercises eight credential-free
+regression cases covering the current NO-GO ledger, incomplete P0–P14 rows,
+premature-GO, missing-nested-gate, missing-drill-boundary and a synthetic
+complete-GO document set. These are regression tests for the tracking control
+only; they do not create production evidence.
 
 The workflow also validates the machine-readable
 `docs/W07-production-evidence.json` packet with

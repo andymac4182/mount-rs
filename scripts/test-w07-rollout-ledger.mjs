@@ -68,6 +68,27 @@ const cases = [
     },
   },
   {
+    name: "missing-production-gate-row",
+    expectedStatus: 1,
+    expectedOutput: "reason=production-gate-ledger-must-have-fifteen-rows",
+    documents: {
+      ...source,
+      rollout: source.rollout.replace(/^\| P4 —[^\n]*\n/mu, ""),
+    },
+  },
+  {
+    name: "no-go-terminal-production-gate",
+    expectedStatus: 1,
+    expectedOutput: "reason=no-go-requires-open-p8",
+    documents: {
+      ...source,
+      rollout: source.rollout.replace(
+        /^(\| P8 — [^|]+\| )[^|]+( \|)/mu,
+        "$1Complete$2",
+      ),
+    },
+  },
+  {
     name: "premature-go",
     expectedStatus: 1,
     expectedOutput: "reason=go-requires-complete-w07.7",
@@ -105,19 +126,25 @@ const cases = [
         }
         return tracker;
       })(),
-      rollout: source.rollout
-        .replace(
-          "| Production rollout | **NO-GO** |",
-          "| Production rollout | **GO** |",
-        )
-        .replace(
-          "No P0–P14 gate is currently terminally accepted.",
-          "P0–P14 gate ledger accepted by release owner.",
-        )
-        .replace(
-          "| P14 — final launch audit and go/no-go | Not started |",
-          "| P14 — final launch audit and go/no-go | Complete |",
-        ),
+      rollout: (() => {
+        let rollout = source.rollout
+          .replace(
+            "| Production rollout | **NO-GO** |",
+            "| Production rollout | **GO** |",
+          )
+          .replace(
+            "No P0–P14 gate is currently terminally accepted.",
+            "P0–P14 gate ledger accepted by release owner.",
+          );
+        for (let index = 0; index < 15; index += 1) {
+          const gateId = `P${index}`;
+          rollout = rollout.replace(
+            new RegExp(`^(\\| ${gateId} — [^|]+\\| )[^|]+( \\|)`, "mu"),
+            "$1Complete$2",
+          );
+        }
+        return rollout;
+      })(),
       runbook: source.runbook.replace(
         "current rollout decision remains **NO-GO**",
         "current rollout decision remains **GO**",
