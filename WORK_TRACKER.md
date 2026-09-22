@@ -19,7 +19,9 @@ conflict fallback and fail-closed behavior are unchanged.
 Local evidence is complete for this chunk: cargo fmt --all -- --check,
 git diff --check, ./scripts/cargo-shared test -p mount-rs-chunked --lib
 --locked (21 passed, 0 failed), and strict chunked Clippy with -D warnings
-all pass. Security scan
+all pass. The full locked workspace all-target test matrix and full
+workspace strict Clippy with -D warnings also exited 0; explicitly opt-in
+native/live provider cases remain separate external gates. Security scan
 8f4fb7da-a251-4b3b-8843-1ee87d25724c has complete changed-file coverage
 and zero reportable findings. The detailed evidence, artifact digests,
 provisional estimates and session log are in
