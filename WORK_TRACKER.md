@@ -1047,7 +1047,7 @@ complete.
 | W02 | Metadata/block split and chunking | Verifying; persisted chunker metadata and partial-write/reopen gates landed | Main |
 | W03 | Memory and SQLite stores | Landed; extending | Main |
 | W04 | PGlite | W04.2 closed; production rollout NO-GO pending external gates | Main |
-| W05 | Cloudflare R2 | Functional slice and exact local Rust/Node SDK+CLI/N-API/PGlite/oracle packet are green; candidate CI `35702348089` is terminal-failed on an actionable Rust 9P test race, Node 9P timeout, Windows Node timeout, a TiDB prepared-statement failure-injector gap, and hard Ozone IOPS below 1000. The first Rust repair is published at `be98aca9`; TiDB prepared-statement tracking and Node 9P cleanup repairs are compile-/focused-check green locally, while the replacement candidate and hosted rerun remain open | Main |
+| W05 | Cloudflare R2 | Exact pushed `515bdc00` is locally green through Rust workspace/Clippy, macOS N-API package loading, Node SDK/CLI/N-API, PGlite, provider-matrix, and CLI paths; the one-line standalone provider lock refresh is now rebased onto current `origin/main` `e86c9ccb` as local `505cbdcf`. The prior candidate CI `35702348089` remains terminal-failed on the classified Rust/Node/TiDB/Ozone/native-FUSE gates. A new immutable candidate and terminal same-SHA hosted/provider/native/package/provenance packet remain required; production is NO-GO | Main |
 | W06 | RustFS integration service | Landed; extending | Lagrange (complete slice) / Main |
 | W07 | FoundationDB | Provider/composition and hosted durable RustFS acceptance passed; the latest exact-tip terminal cross-platform qualification packet is green at [run `35709640688`](https://github.com/andymacclenaghan/mount-rs/actions/runs/35709640688) / exact source `8b4cbc3860bcb5c0fdfbb1a63cbe3b04f27a5b04`, Linux job `106686845348`, macOS job `106686845149`, aggregate job `106690432291`; the RustFS lockfile refresh removed the hosted `--locked` metadata blocker; all rollout-ledger, production-evidence, workload-artifact and configuration preflights passed, as did Linux durable FoundationDB/RustFS, Node/N-API, Linux CLI/FUSE, service restart, authority republish, fresh-client reopen, RustFS integration, 30-second/120-second heartbeat, reconciled stats and ten-round soak; macOS emitted `W07_MACOS_FOUNDATIONDB_COMPILE_PASS` plus run-bound provenance on its distinct platform runner; the repaired aggregate verifier emitted `W07_PLATFORM_QUALIFICATION_PASS` with `provenance=bound`; base composition was p50 3,075µs, p95/p99 317,846µs and 39.06 ops/s, ten-round soak p95/p99 was 15,203–576,001µs at 7.51–254.49 ops/s, and the corrected 400-lifecycle/64-concurrency/4KiB workload measured 338.55 lifecycle IOPS with all 1,200 operations successful and zero timeouts/cleanup failures; Linux artifact ID `10686686017`, macOS artifact ID `10685929115` and aggregate artifact ID `10686210962` were retained and independently revalidated. The seven-gate packet remains NO-GO with zero production evidence records. This is exact-tip hosted qualification only, not live macOS service/cluster/mount, clean-install, signing/package, production capacity, identity/ACL, backup/restore, failover, observability or owner evidence; W07.3, W07.5 and W07.7 remain open. | Maxwell (complete slice) / Main |
 | W08 | TiDB | Functional hosted acceptance complete for the defined scope: durable 3PD/3TiKV restart, provider fencing/ambiguous commit, live TiDB/RustFS Node/CLI/FUSE, ARM and macOS/Ubuntu native rows passed; production rollout remains NO-GO with P01–P09 open | Mill (functional checkpoint) / Main; production ownership TBD |
@@ -2670,6 +2670,18 @@ Evidence landed without closing the remaining W01 acceptance gates:
   validations, and clean-consumer smoke. W04.2 remains closed and current-tip
   confirmed. The same run's provider/W26 failures are separate production
   blockers; rollout remains **NO-GO**.
+- [x] W04.2 current-tip diagnostic boundary: fresh run
+  [35708551380](https://github.com/andymac4182/mount-rs/actions/runs/35708551380)
+  at pre-refresh source `b95fd6ad` does not supersede the historical W04.2
+  closure. ARM, macOS-15-intel, Ubuntu, and macOS-latest Node all reached the
+  exact PGlite/restart step and passed rollback, N-API, and mounted-PGlite
+  markers, then failed only when the standalone provider-matrix lockfile was
+  updated under `--locked`; shared `origin/main` now includes refresh
+  `6797a2d8`. The same run retains W26/provider-capacity failures, native-FUSE
+  rootless-operation failure without a retrievable direct log, and Ubuntu Rust
+  timeout/test boundaries. Dispatch a fresh run from current `origin/main`
+  after this ledger chunk; W04.2 remains historically closed, current-tip
+  acceptance is pending, and production rollout remains **NO-GO**.
 - Production rollout packet refreshed in
   [`docs/W04-production-rollout.md`](docs/W04-production-rollout.md): exact
   candidate `d870f900`, run `35692153251`, aggregate-native package/consumer
@@ -3188,21 +3200,23 @@ Evidence landed without closing the remaining W01 acceptance gates:
   package/provenance, scope, and final-audit gates remain explicit blockers;
   no credential value was read or stored and no Keychain access was attempted.
 - [ ] W05.10 Close the production release path on one settled revision.
-  Shared `origin/main` is now `f94b53d8`, which contains the TiDB
-  publication-ack failure-injection repair and the W26 staged N-API build that
-  preserves a clean source checkout. The prior immutable candidate
+  Shared `origin/main` advanced to `e86c9ccb` during the W05.51 qualification;
+  the local lock successor `505cbdcf` refreshes the standalone provider matrix
+  for the current `md-5` dependency. Exact pushed `515bdc00` is locally green
+  through the Rust workspace/Clippy, dyld-safe macOS N-API build and load,
+  complete Node SDK/CLI/N-API suite, real PGlite lifecycle, Rust/Node/CLI
+  provider matrix, and package checks. The prior immutable candidate
   `25e275ab` has terminal CI `failure`: TiDB/TiDB-RustFS stale harness
-  assertions, Ozone/TiDB and Ozone/FoundationDB hard-I/Ops misses, W26 dirty
+  assertions, Ozone/TiDB and Ozone/FoundationDB hard-IOPS misses, W26 dirty
   provenance, and cancelled native FUSE; the exact evidence and estimates are
-  in `docs/w05-progress-ledger.md`. Local Rust/Node/SDK/CLI/PGlite/package
-  evidence remains green where exercised, but no production release is
-  authorized. Remaining actions are to create a new settled candidate, run the
-  complete same-SHA CI/fault/W04/W07/W08/Native 9P/attestation packet, close
-  Ozone capacity and native-FUSE or record explicit scope exclusions, obtain
-  AWS protected inputs and OIDC trust through security, rotate R2 credentials
-  after the UTC-month reset, close package/provenance/provider/scope gates, and
-  run W20.6 for a written GO/NO-GO decision. No credential value was read,
-  stored, printed, or placed in Keychain.
+  in `docs/w05-progress-ledger.md`. No production release is authorized.
+  Remaining actions are to create a new settled candidate, rerun the complete
+  same-SHA CI/Fault/W04/W07/W08/Native 9P/attestation packet, close Ozone
+  capacity and native-FUSE or record approved scope exclusions, obtain AWS
+  protected inputs and OIDC trust through security, rotate R2 credentials
+  after the UTC-month reset, close package/provenance/provider/scope gates,
+  and run W20.6 for a written GO/NO-GO decision. No credential value was
+  read, stored, printed, or placed in Keychain.
 
 ## W06 — RustFS integration service
 
@@ -7408,6 +7422,8 @@ cross-drive isolation.
 
 | Commit | Scope | Evidence boundary |
 | --- | --- | --- |
+| 2026-09-22 WebDAV manual hosted native qualification | The non-canceling manual CI run `35711153805` at exact SHA `232443e133abf7c8f20f6ffec5a2a22a747270e0` passed native WebDAV on macOS and Ubuntu (jobs `106691801834` and `106691802073`); no WebDAV files changed through current `c87adf7bf79aa974480bf6397d1873b4300d291d` | Hosted native mounted-I/O is closed for this slice only; the aggregate run is nonterminal on unrelated jobs, and live-provider, power-loss/crash durability, durable-lock, and stronger same-resource-ordering gates remain open |
+| 2026-09-22 WebDAV current mainline workspace baseline | Current mainline has no WebDAV changes after the tested `515bdc00792a62403b0ee7b94e904434d067f43b` base; `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-workspace-515 ./scripts/cargo-shared test --workspace --all-targets --locked` completed successfully, including WebDAV 41/41 with the privileged native mount target explicitly ignored | Fresh local workspace evidence only; it does not promote local tests to hosted, live-provider, power-loss, durable-lock, crash/restart, or stronger same-resource-ordering acceptance |
 | 2026-09-22 WebDAV conditional ETag whitespace compatibility | Preserve the pinned entity-tag grammar at the `If-Match`/`If-None-Match` boundary: trim list-member OWS, but do not trim after `W/`, preventing malformed `W/ "etag"` from becoming a weak match | Final exact-head focused 1/1 and full 41/41 tests plus workspace warning-denied Clippy used `CARGO_TARGET_DIR=/private/tmp/mount-rs-w01-webdav-final-40c79a5b` through `./scripts/cargo-shared`; formatting, diff checks, and the pinned 40-case HTTP differential also pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV HTTP-date leap-second compatibility | Accept RFC 9110 `:60` seconds by normalizing only the valid seconds field to `:59`, matching the pinned oracle while preserving rejection of invalid minutes and malformed dates | Focused date-form regression and full WebDAV target 40/40, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
 | 2026-09-22 WebDAV If-parser UTF-8 boundary safety | Probe the public `Not` grammar with UTF-8-safe access so malformed non-ASCII input such as `(éé)` returns `None` instead of panicking at a code-point boundary | Focused regression reproduced the pre-fix panic and now passes; full WebDAV target 39/39, warning-denied workspace Clippy, formatting, diff checks, and the pinned 40-case S3+WebDAV differential pass; hosted/provider, power-loss, durable-lock, crash/restart and same-resource ordering remain open |
