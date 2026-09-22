@@ -1436,6 +1436,7 @@ Until then, the percentage is a progress aid only and the W01 status remains
 
 | 2026-09-22 | W01-FUSE | Lima Ubuntu 26.04 arm64 VM at published `467da6a7` passed native Rust FUSE `3/3`, automatic facade `2/2`, CLI lifecycle `3/3`, Node N-API/structural/SDK native FUSE, SQLite restart `2/2`, and Python fault injection; backend persistence/reopen passed `3/4`, with PGlite skipped because `PGLITE_DATABASE_URL` was unset | Local Linux `/dev/fuse` qualification is green, but hosted exact-tip acceptance, PGlite environment qualification, and the wider W01 release/provider gates remain open; W01 stays NO-GO |
 | 2026-09-22 | W01-FUSE | Lima ran the repository's in-process PGlite native-FUSE scope successfully: mounted PGlite connection reopen and PGlite-backed SQLite compositions both passed without external credentials | Local PGlite qualification is now green; hosted exact-tip native-FUSE acceptance and wider W01 release/provider gates remain open; W01 stays NO-GO |
+| 2026-09-22 | W01-FUSE | Hosted native-FUSE queue blocker: manual CI run [35715585800](https://github.com/andymac4182/mount-rs/actions/runs/35715585800) at `e175f80a3134e9ab8c02a19944ca036be09f111f` left native-FUSE job `106706185799` queued with no runner, completion time, conclusion, or step output; `origin/main` has since advanced to `e984c2321317e9d93b8db1ec98dc428662b17d34` | No hosted `/dev/fuse` result is claimable; exact-current-tip terminal native-FUSE evidence remains required and W01 stays NO-GO |
 
 ## Production-readiness decision
 
