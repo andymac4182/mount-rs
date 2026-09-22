@@ -2665,6 +2665,14 @@ Evidence landed without closing the remaining W01 acceptance gates:
   NFSv3 passed. Native v4.1 ordering, external/cross-process changes,
   crash/power-loss durability, exact-tip hosted acceptance, and production
   readiness remain open.
+- [x] W01-NFS native mount workload now covers held-open rename replacement
+  and same-inode hard-link rename/alias removal through actual kernel I/O.
+  The expanded macOS native NFSv3 test passed once plus five reruns with no
+  leaked mountpoints; full locked NFS (44 unit, 27 v4 wire), strict NFS
+  Clippy, and formatting passed. The Linux native v4.1 case includes these
+  checks but has not run at this patch. Hosted/native v4.1 acceptance,
+  cross-process recovery, crash/power-loss durability, and production
+  readiness remain open.
 - [x] The 9P session view now exposes direct `handleCall` for raw complete
   frames. The N-API loopback integration verified a direct Rversion reply on a
   live connection session; the full Rust 9P integration target, pinned 44-case
