@@ -2042,6 +2042,25 @@ Evidence landed without closing the remaining W01 acceptance gates:
   wire), with strict Clippy green. Independent-slot overlap, canceled-operation
   reply recovery, crash-durable replay, native-client ordering, power-loss
   durability, and exact-tip hosted acceptance remain open; W01-NFS is NO-GO.
+- [x] A same-session, two-slot real-TCP v4.1 regression now proves slot 1
+  completes while slot 0 remains blocked in backend `stat`. The initial
+  non-escalated shared-target attempt could not open Cargo's `.cargo-lock`;
+  the elevated pre-fix run compiled and timed out at the global per-request
+  lease-sweep write lock. After the fix, the independent slot completes;
+  v4 now takes that exclusive lock only when an expired client actually needs
+  cleanup. An injected-clock race test confirms that an expired slot-1 request
+  waits behind a blocked slot-0 call, then receives `NFS4ERR_BADSESSION` after
+  the sweep. The prior expired-session wire test also passes. The overlap test
+  passes both in the shared target and in an isolated `/private/tmp` target
+  with loopback socket permission; the first non-escalated isolated run failed
+  at bind with `EPERM`, not a code failure.
+  The exact 283 MB disposable target was removed and verified absent. The
+  complete locked NFS target passes (41 unit, 1 mountpoint claim with 1 native
+  mount ignored, 2 restart, 1 rootless wire, 3 concurrency, 4 errors, 5
+  lifecycle, 1 v4 barrier, 11 v4 wire), with strict Clippy and formatting
+  green. This is bounded same-process overlap, not canceled-operation
+  recovery, crash-durable replay/lease/handles, native-client ordering,
+  power-loss durability, or exact-tip hosted acceptance; W01-NFS is NO-GO.
 - [x] The manual hosted NFS run `35670927787` at `fb9caec8` passed its macOS
   native job, while Ubuntu passed native v4.1 and then failed before its v3
   mount because parallel tests collided on a timestamp-only mountpoint.

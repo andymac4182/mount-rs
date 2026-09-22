@@ -185,10 +185,13 @@ without re-executing the operation. A same-slot retry that reaches the server
 while the original is blocked now gets prompt `NFS4ERR_DELAY` before the
 per-RPC lease-sweep lock; a premature next sequence is rejected with
 `NFS4ERR_SEQ_MISORDERED`. Once the original completes, its reply is cached.
-Ordinary v4.1 calls still pass through the global lease-sweep write lock, so
-overlapping independent-slot execution is not qualified. `NfsConnection`
-close/wait state does not provide automatic reconnect, lease recovery, or
-crash-durable session/reply state;
+The exclusive lease-sweep lock is now taken only when a client has expired;
+otherwise independent slots of the same live session can overlap on separate
+TCP connections. A controlled rootless test proves this for two `GETATTR`
+COMPOUNDs while one backend call is blocked. An injected-clock wire test also
+checks that an expired lease waits for the blocked call before sweeping and
+rejecting the next slot. `NfsConnection` close/wait state does not provide
+automatic reconnect, lease recovery, or crash-durable session/reply state;
 the restart-boundary test therefore classifies v4 session/lease/replay state as
 process-local. A host-backed forced-process-restart test now proves that one
 NFSv4.1 `FILE_SYNC4` write can be reopened and read through a fresh session

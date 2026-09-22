@@ -1741,6 +1741,16 @@ impl Nfs4Session {
         now.saturating_duration_since(renewed) >= self.lease_duration()
     }
 
+    fn has_expired_clients(&self) -> bool {
+        let now = self.now();
+        self.state
+            .lock()
+            .expect("NFSv4 state lock")
+            .clients
+            .values()
+            .any(|client| self.expired(client.renewed, now))
+    }
+
     /// Remove clients whose leases have expired, including their sessions,
     /// locks, open states, and pinned backend handles.
     async fn expire_expired_clients(&self) -> usize {
@@ -1945,10 +1955,18 @@ impl Nfs4Session {
             ));
         }
         let credentials = credentials_of(&call.cred);
-        let expiry_guard = self.path_lock.write().await;
-        self.expire_expired_clients().await;
-        drop(expiry_guard);
-        let _guard = self.path_lock.read().await;
+        let _guard = loop {
+            // Keep ordinary compounds on the shared read path. Only an actual
+            // expired lease needs the exclusive path-map gate for cleanup.
+            let guard = self.path_lock.read().await;
+            if !self.has_expired_clients() {
+                break guard;
+            }
+            drop(guard);
+            let expiry_guard = self.path_lock.write().await;
+            self.expire_expired_clients().await;
+            drop(expiry_guard);
+        };
         match self
             .dispatch_compound(&mut args, &credentials, peer, call.xid)
             .await

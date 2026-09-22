@@ -1553,6 +1553,196 @@ fn nfs_v4_busy_slot_delays_retry_and_rejects_next_sequence() {
 }
 
 #[test]
+fn nfs_v4_independent_slots_overlap_while_one_backend_call_is_blocked() {
+    std::thread::Builder::new()
+        .name("nfs-v4-independent-slots-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 independent-slots test runtime")
+                .block_on(async {
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateStatDriver {
+                            inner: MemoryFs::empty(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        NfsServerOptions::default(),
+                    );
+                    let address = server.listen().await.expect("listen two-slot NFS server");
+                    let (mut first, slot_zero) =
+                        connect_v4_client(address, 721, b"two-slot-client").await;
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect second two-slot transport");
+                    let mut slot_one = slot_zero.clone();
+                    slot_one.slot = 1;
+                    slot_one.sequence = 1;
+                    let getattr = |client: &Client| {
+                        compound(
+                            "two-slot-getattr",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| writer.u32(0)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let first_args = getattr(&slot_zero);
+                    let first_task = tokio::spawn(async move {
+                        let mut reply = rpc(&mut first, 724, first_args).await;
+                        reply.rest()
+                    });
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("slot zero reaches blocked backend");
+
+                    let mut independent = timeout(
+                        Duration::from_millis(250),
+                        rpc(&mut second, 725, getattr(&slot_one)),
+                    )
+                    .await
+                    .expect("independent slot completes while slot zero is blocked");
+                    parse_compound_header(&mut independent, 3);
+                    assert!(
+                        !first_task.is_finished(),
+                        "slot zero remains blocked when slot one completes"
+                    );
+                    release.notify_one();
+                    let first_body = timeout(Duration::from_secs(2), first_task)
+                        .await
+                        .expect("blocked slot zero completes")
+                        .expect("slot zero task succeeds");
+                    parse_compound_header(&mut XdrReader::new(&first_body), 3);
+                    second.shutdown().await.expect("close two-slot transport");
+                    server.close().await.expect("close two-slot NFS server");
+                });
+        })
+        .expect("spawn v4 independent-slots test thread")
+        .join()
+        .expect("v4 independent-slots test thread panicked");
+}
+
+#[test]
+fn nfs_v4_expired_lease_waits_for_blocked_slot_before_sweeping() {
+    std::thread::Builder::new()
+        .name("nfs-v4-expired-busy-slot-test".into())
+        .stack_size(8 * 1024 * 1024)
+        .spawn(|| {
+            Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(8 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build v4 expired busy-slot test runtime")
+                .block_on(async {
+                    let ticks = Arc::new(AtomicU64::new(0));
+                    let base = Instant::now();
+                    let clock_ticks = Arc::clone(&ticks);
+                    let mut options = NfsServerOptions::default();
+                    options.session.nfs4.lease_seconds = 1;
+                    options.session.nfs4.clock = Nfs4Clock::from_fn(move || {
+                        base + Duration::from_secs(clock_ticks.load(Ordering::Acquire))
+                    });
+                    let block_once = Arc::new(AtomicBool::new(false));
+                    let entered = Arc::new(Notify::new());
+                    let release = Arc::new(Notify::new());
+                    let server = NfsServer::new(
+                        GateStatDriver {
+                            inner: MemoryFs::empty(),
+                            block_once: Arc::clone(&block_once),
+                            entered: Arc::clone(&entered),
+                            release: Arc::clone(&release),
+                        },
+                        options,
+                    );
+                    let address = server
+                        .listen()
+                        .await
+                        .expect("listen expired-slot NFS server");
+                    let (mut first, slot_zero) =
+                        connect_v4_client(address, 731, b"expired-slot-client").await;
+                    let mut second = TcpStream::connect(address)
+                        .await
+                        .expect("connect second expired-slot transport");
+                    let mut slot_one = slot_zero.clone();
+                    slot_one.slot = 1;
+                    slot_one.sequence = 1;
+                    let getattr = |client: &Client| {
+                        compound(
+                            "expired-slot-getattr",
+                            &[
+                                sequence(client),
+                                op(OP_PUTROOTFH, |_| {}),
+                                op(OP_GETATTR, |writer| writer.u32(0)),
+                            ],
+                        )
+                    };
+                    block_once.store(true, Ordering::Release);
+                    let first_args = getattr(&slot_zero);
+                    let first_task = tokio::spawn(async move {
+                        let mut reply = rpc(&mut first, 734, first_args).await;
+                        reply.rest()
+                    });
+                    timeout(Duration::from_secs(2), entered.notified())
+                        .await
+                        .expect("slot zero reaches blocked backend before lease expiry");
+                    ticks.store(1, Ordering::Release);
+
+                    let requests_before_second = server.v4_session().stats().requests;
+                    let second_args = getattr(&slot_one);
+                    let mut second_task = tokio::spawn(async move {
+                        let reply = rpc(&mut second, 735, second_args).await;
+                        (second, reply)
+                    });
+                    timeout(Duration::from_secs(2), async {
+                        while server.v4_session().stats().requests == requests_before_second {
+                            tokio::task::yield_now().await;
+                        }
+                    })
+                    .await
+                    .expect("expired slot-one request reaches the server");
+                    assert!(
+                        timeout(Duration::from_millis(25), &mut second_task)
+                            .await
+                            .is_err(),
+                        "lease sweep must wait for the blocked slot"
+                    );
+                    release.notify_one();
+                    let first_body = timeout(Duration::from_secs(2), first_task)
+                        .await
+                        .expect("blocked slot zero completes")
+                        .expect("slot zero task succeeds");
+                    parse_compound_header(&mut XdrReader::new(&first_body), 3);
+                    let (mut second, mut expired) = timeout(Duration::from_secs(2), second_task)
+                        .await
+                        .expect("expired slot one receives a response")
+                        .expect("slot one task succeeds");
+                    assert_eq!(parse_compound_status(&mut expired, 0), NFS4ERR_BADSESSION);
+                    expired.end("expired slot-one response").unwrap();
+                    assert_eq!(server.v4_session().sweep_expired().await, 0);
+                    second
+                        .shutdown()
+                        .await
+                        .expect("close expired-slot transport");
+                    server.close().await.expect("close expired-slot NFS server");
+                });
+        })
+        .expect("spawn v4 expired busy-slot test thread")
+        .join()
+        .expect("v4 expired busy-slot test thread panicked");
+}
+
+#[test]
 fn nfs_v4_session_state_is_process_local_after_server_restart() {
     std::thread::Builder::new()
         .name("nfs-v4-restart-boundary-test".into())
