@@ -266,26 +266,33 @@ async function writeUntilEarlyResponse(request) {
       resolve(state);
     };
 
+    const recordExpectedShutdown = (error) => {
+      if (settled || !expectedShutdownError(error)) return false;
+      // A peer can reset the request before the response data event is
+      // delivered on macOS. Stop producing body chunks, but keep the socket
+      // parser alive so the response (or the bounded timeout) still decides
+      // whether this was a valid early rejection.
+      state.requestError = error;
+      state.stopped = true;
+      return true;
+    };
+
     const handleUncaughtException = (error) => {
-      if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
-        state.requestError = error;
-        return;
-      }
+      if (recordExpectedShutdown(error)) return;
       fail(error);
     };
 
     const handleSocketError = (error) => {
-      if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
-        state.requestError = error;
-        return;
-      }
+      if (recordExpectedShutdown(error)) return;
       fail(error);
     };
 
     // Node 24 can surface an EPIPE from a queued socket write as an
     // uncaughtException instead of emitting it on the socket. This test
     // intentionally races a peer response with fragmented writes, so handle
-    // only the expected shutdown family after the response has started.
+    // only the expected shutdown family while this request is active. The
+    // response parser or timeout still validates that the early rejection was
+    // actually received.
     process.on("uncaughtException", handleUncaughtException);
 
     const appendResponseBody = (chunk) => {
@@ -471,10 +478,7 @@ async function writeUntilEarlyResponse(request) {
           try {
             await writeChunk(request.body.subarray(offset, end));
           } catch (error) {
-            if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
-              state.requestError = error;
-              break;
-            }
+            if (recordExpectedShutdown(error)) break;
             throw error;
           }
           offset = end;
@@ -483,10 +487,7 @@ async function writeUntilEarlyResponse(request) {
         }
         if (!state.stopped) socket.end();
       } catch (error) {
-        if (state.responseStarted && state.stopped && expectedShutdownError(error)) {
-          state.requestError = error;
-          return;
-        }
+        if (recordExpectedShutdown(error)) return;
         fail(error);
       }
     };
