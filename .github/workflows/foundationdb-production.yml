@@ -263,8 +263,8 @@ jobs:
           test '${{ needs.foundationdb-rustfs.result }}' = success
           test '${{ needs.foundationdb-macos-platform.result }}' = success
           node scripts/verify-w07-platform-evidence.mjs \
-            evidence/linux/foundationdb-production-qualification.log \
-            evidence/linux/foundationdb-production-qualification-summary.json \
+            evidence/linux/artifacts/foundationdb-production-qualification.log \
+            evidence/linux/artifacts/foundationdb-production-qualification-summary.json \
             evidence/macos/w07-macos-foundationdb-compile.log
 
       - name: Preserve W07 cross-platform qualification packet
